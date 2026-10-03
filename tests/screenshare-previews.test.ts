@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { serializeCapturerSources } from "../src/discord/screenshareSources.ts";
+import {
+    installDisplayMediaPatch,
+    restoreDisplayMediaPatch,
+} from "../src/shelter/screenshare/components/displayMediaPatch.ts";
+
+function makeMediaDevices(original: MediaDevices["getDisplayMedia"]): MediaDevices {
+    return { getDisplayMedia: original } as unknown as MediaDevices;
+}
+
+function passthrough(
+    original: MediaDevices["getDisplayMedia"],
+    thisArg: MediaDevices,
+    options: DisplayMediaStreamOptions,
+) {
+    return original.call(thisArg, options);
+}
 
 function fakeImage(dataUrl: string) {
     return {
@@ -73,5 +89,105 @@ describe("serializeCapturerSources", () => {
         for (const source of result) {
             assert.ok(source.thumbnail.startsWith("data:image/"));
         }
+    });
+});
+
+describe("getDisplayMedia patch lifecycle", () => {
+    it("installs one interception layer across repeated installs and restores the original", async () => {
+        const stream = {} as MediaStream;
+        let originalCalls = 0;
+        let originalThis: unknown;
+        let originalOptions: DisplayMediaStreamOptions | undefined;
+        const original: MediaDevices["getDisplayMedia"] = function (options = {}) {
+            originalCalls++;
+            originalThis = this;
+            originalOptions = options;
+            return Promise.resolve(stream);
+        };
+        const mediaDevices = makeMediaDevices(original);
+        const options: DisplayMediaStreamOptions = { video: true };
+        let interceptionCalls = 0;
+
+        for (let i = 0; i < 5; i++) {
+            installDisplayMediaPatch(mediaDevices, (method, thisArg, constraints) => {
+                interceptionCalls++;
+                return method.call(thisArg, constraints);
+            });
+        }
+
+        const wrapper = mediaDevices.getDisplayMedia;
+        assert.notEqual(wrapper, original);
+        assert.equal(await mediaDevices.getDisplayMedia(options), stream);
+        assert.equal(mediaDevices.getDisplayMedia, wrapper);
+        assert.equal(interceptionCalls, 1);
+        assert.equal(originalCalls, 1);
+        assert.equal(originalThis, mediaDevices);
+        assert.equal(originalOptions, options);
+
+        restoreDisplayMediaPatch(mediaDevices);
+        assert.equal(mediaDevices.getDisplayMedia, original);
+    });
+
+    it("supports reinstall after cleanup and a fresh mediaDevices object after navigation", async () => {
+        const original: MediaDevices["getDisplayMedia"] = () => Promise.resolve({} as MediaStream);
+        const firstDocument = makeMediaDevices(original);
+        let interceptionCalls = 0;
+        const interceptor = (
+            method: MediaDevices["getDisplayMedia"],
+            thisArg: MediaDevices,
+            options: DisplayMediaStreamOptions,
+        ) => {
+            interceptionCalls++;
+            return method.call(thisArg, options);
+        };
+
+        installDisplayMediaPatch(firstDocument, interceptor);
+        const firstWrapper = firstDocument.getDisplayMedia;
+        restoreDisplayMediaPatch(firstDocument);
+        installDisplayMediaPatch(firstDocument, interceptor);
+        assert.notEqual(firstDocument.getDisplayMedia, original);
+        assert.notEqual(firstDocument.getDisplayMedia, firstWrapper);
+        await firstDocument.getDisplayMedia();
+        assert.equal(interceptionCalls, 1);
+        restoreDisplayMediaPatch(firstDocument);
+
+        const reloadedDocument = makeMediaDevices(original);
+        interceptionCalls = 0;
+        installDisplayMediaPatch(reloadedDocument, interceptor);
+        assert.notEqual(reloadedDocument.getDisplayMedia, original);
+        await reloadedDocument.getDisplayMedia();
+        assert.equal(interceptionCalls, 1);
+        restoreDisplayMediaPatch(reloadedDocument);
+        assert.equal(reloadedDocument.getDisplayMedia, original);
+    });
+
+    it("does not overwrite a newer implementation during cleanup", async () => {
+        const original: MediaDevices["getDisplayMedia"] = () => Promise.resolve({} as MediaStream);
+        const replacement: MediaDevices["getDisplayMedia"] = () => Promise.resolve({} as MediaStream);
+        const mediaDevices = makeMediaDevices(original);
+        let interceptions = 0;
+
+        installDisplayMediaPatch(mediaDevices, (method, thisArg, options) => {
+            interceptions++;
+            return method.call(thisArg, options);
+        });
+        const staleWrapper = mediaDevices.getDisplayMedia;
+        mediaDevices.getDisplayMedia = replacement;
+        restoreDisplayMediaPatch(mediaDevices);
+
+        assert.equal(mediaDevices.getDisplayMedia, replacement);
+        await staleWrapper();
+        assert.equal(interceptions, 0);
+    });
+
+    it("restores the exact original on cleanup and forwards rejection unchanged", async () => {
+        const failure = new Error("capture failed");
+        const original: MediaDevices["getDisplayMedia"] = () => Promise.reject(failure);
+        const mediaDevices = makeMediaDevices(original);
+        installDisplayMediaPatch(mediaDevices, passthrough);
+
+        await assert.rejects(mediaDevices.getDisplayMedia(), failure);
+        restoreDisplayMediaPatch(mediaDevices);
+        assert.equal(mediaDevices.getDisplayMedia, original);
     });
 });

@@ -2,6 +2,7 @@ import type { Node } from "@vencord/venmic";
 import { createSignal, For, onCleanup, Show } from "solid-js";
 import { Dropdown } from "../../settings/components/Dropdown.jsx";
 import { SegmentedControl } from "../../settings/components/SegmentedControl.jsx";
+import { type DisplayMediaInterceptor, installDisplayMediaPatch } from "./displayMediaPatch.js";
 import classes from "./ScreensharePicker.module.css";
 import { type IPCSources, SourceCard } from "./SourceCard.jsx";
 
@@ -31,11 +32,10 @@ async function getVirtmic() {
     }
 }
 
-const original = navigator.mediaDevices.getDisplayMedia;
-export async function patchNavigator(requestAudio = false) {
-    navigator.mediaDevices.getDisplayMedia = async function (opts = {}) {
+function createDisplayMediaInterceptor(requestAudio: boolean): DisplayMediaInterceptor {
+    return async (original, thisArg, opts) => {
         if (requestAudio) opts.audio = true;
-        const stream = await original.call(this, opts);
+        const stream = await original.call(thisArg, opts);
         const video = stream.getVideoTracks()[0];
 
         const width = Math.round(store.resolution * (16 / 9));
@@ -108,6 +108,10 @@ export async function patchNavigator(requestAudio = false) {
 
         return stream;
     };
+}
+
+export function patchNavigator(requestAudio = false) {
+    installDisplayMediaPatch(navigator.mediaDevices, createDisplayMediaInterceptor(requestAudio));
 }
 
 export const ScreensharePicker = (props: {

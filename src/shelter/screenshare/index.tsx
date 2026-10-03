@@ -1,4 +1,5 @@
 import type { Node } from "@vencord/venmic";
+import { restoreDisplayMediaPatch } from "./components/displayMediaPatch.js";
 import { patchNavigator, ScreensharePicker } from "./components/ScreensharePicker.jsx";
 import type { IPCSources } from "./components/SourceCard.jsx";
 
@@ -341,6 +342,7 @@ export function onLoad() {
 }
 
 export function onUnload() {
+    restoreDisplayMediaPatch(navigator.mediaDevices);
     clearReapplyTimers();
     dispatcher.unsubscribe("MEDIA_ENGINE_VIDEO_SOURCE_QUALITY_CHANGED", onStreamQualityChange);
     dispatcher.unsubscribe("STREAM_DELETE", onStreamEnd);
