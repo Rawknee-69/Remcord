@@ -403,12 +403,6 @@ function doAfterDefiningTheWindow(passedWindow: BrowserWindow): void {
         void passedWindow.webContents.executeJavaScript(`document.body.setAttribute("unFocused", "");`);
     });
 
-    passedWindow.on("maximize", () => {
-        void passedWindow.webContents.executeJavaScript(`document.body.setAttribute("isMaximized", "");`);
-    });
-    passedWindow.on("unmaximize", () => {
-        void passedWindow.webContents.executeJavaScript(`document.body.removeAttribute("isMaximized");`);
-    });
     if (getConfig("inviteWebsocket") && mainWindows.length === 1) {
         startRPC(passedWindow);
     }
@@ -417,7 +411,8 @@ function doAfterDefiningTheWindow(passedWindow: BrowserWindow): void {
     }
 
     registerGlobalKeybinds();
-    // Persist bounds on move/resize with debounce to avoid frequent writes
+    // Persist window state after bounds, visibility, or display changes. The debounce
+    // coalesces event bursts during a drag without continuously polling the window.
     let _saveTimer: NodeJS.Timeout | null = null;
     const queueSave = () => {
         if (_saveTimer) clearTimeout(_saveTimer);
@@ -432,33 +427,38 @@ function doAfterDefiningTheWindow(passedWindow: BrowserWindow): void {
     };
     passedWindow.on("move", queueSave);
     passedWindow.on("resize", queueSave);
+    passedWindow.on("restore", queueSave);
+    passedWindow.on("show", queueSave);
+    passedWindow.on("hide", queueSave);
 
-    // Fallback: periodic poll to detect bounds changes.
-    // Compare raw getNormalBounds() values to detect movement;
-    // saveWindowState normalizes to DIP where needed.
-    let lastPolledBounds: { x: number; y: number; width: number; height: number } | null = null;
-    const pollInterval = setInterval(() => {
-        try {
-            if (passedWindow.isDestroyed()) {
-                clearInterval(pollInterval);
-                return;
-            }
-            const { x, y, width, height } = passedWindow.getNormalBounds();
-            if (
-                !lastPolledBounds ||
-                lastPolledBounds.x !== x ||
-                lastPolledBounds.y !== y ||
-                lastPolledBounds.width !== width ||
-                lastPolledBounds.height !== height
-            ) {
-                lastPolledBounds = { x, y, width, height };
-                saveWindowState(passedWindow);
-            }
-        } catch (_e) {
-            // ignore transient errors
-        }
-    }, 1000);
-    passedWindow.on("closed", () => clearInterval(pollInterval));
+    const queueSaveForDisplayChange = () => queueSave();
+    screen.on("display-added", queueSaveForDisplayChange);
+    screen.on("display-removed", queueSaveForDisplayChange);
+    screen.on("display-metrics-changed", queueSaveForDisplayChange);
+
+    const handleMaximize = () => {
+        void passedWindow.webContents.executeJavaScript(`document.body.setAttribute("isMaximized", "");`);
+        queueSave();
+    };
+    const handleUnmaximize = () => {
+        void passedWindow.webContents.executeJavaScript(`document.body.removeAttribute("isMaximized");`);
+        queueSave();
+    };
+    passedWindow.on("maximize", handleMaximize);
+    passedWindow.on("unmaximize", handleUnmaximize);
+    passedWindow.once("closed", () => {
+        if (_saveTimer) clearTimeout(_saveTimer);
+        passedWindow.removeListener("move", queueSave);
+        passedWindow.removeListener("resize", queueSave);
+        passedWindow.removeListener("maximize", handleMaximize);
+        passedWindow.removeListener("unmaximize", handleUnmaximize);
+        passedWindow.removeListener("restore", queueSave);
+        passedWindow.removeListener("show", queueSave);
+        passedWindow.removeListener("hide", queueSave);
+        screen.removeListener("display-added", queueSaveForDisplayChange);
+        screen.removeListener("display-removed", queueSaveForDisplayChange);
+        screen.removeListener("display-metrics-changed", queueSaveForDisplayChange);
+    });
     switch (getConfig("channel")) {
         case "stable":
             void passedWindow.loadURL("https://discord.com/app");
