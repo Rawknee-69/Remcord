@@ -1,4 +1,5 @@
 /// <reference path="../../../node_modules/@uwu/shelter-defs/dist/shelter-defs/rootdefs.d.ts" />
+import { type Component, createComponent, onCleanup, onMount } from "solid-js";
 import {
     GamesSidebarIcon,
     KeybindsSidebarIcon,
@@ -12,7 +13,13 @@ import { RegisteredGamesPage } from "./pages/RegisteredGamesPage.jsx";
 import { SettingsPage } from "./pages/SettingsPage.jsx";
 import { ThemesPage } from "./pages/ThemesPage.jsx";
 
-import { isRestartRequired, refreshSettings, refreshThemes } from "./settings.js";
+import {
+    disposeSettingsScrollRestoration,
+    isRestartRequired,
+    mountSettingsScrollRestoration,
+    refreshSettings,
+    refreshThemes,
+} from "./settings.js";
 
 const {
     plugin: { store },
@@ -24,17 +31,40 @@ const {
 
 let settingsCleanups: (() => void)[] = [];
 
+function withScrollRestoration(Page: Component): Component {
+    return () => {
+        let unmount: (() => void) | undefined;
+        onMount(() => {
+            unmount = mountSettingsScrollRestoration();
+        });
+        onCleanup(() => unmount?.());
+        return createComponent(Page, {});
+    };
+}
+
 function registerSections(): (() => void)[] {
     const array = [
         registerSection("divider"),
         registerSection("header", "Legcord"),
-        registerSection("section", "legcord-settings", "Settings", SettingsPage, { icon: SettingsSidebarIcon }),
-        registerSection("section", "legcord-themes", "Themes", ThemesPage, { icon: ThemesSidebarIcon }),
-        registerSection("section", "legcord-keybinds", "Keybinds", KeybindsPage, { icon: KeybindsSidebarIcon }),
-        registerSection("section", "legcord-games", "Games", RegisteredGamesPage, { icon: GamesSidebarIcon }),
+        registerSection("section", "legcord-settings", "Settings", withScrollRestoration(SettingsPage), {
+            icon: SettingsSidebarIcon,
+        }),
+        registerSection("section", "legcord-themes", "Themes", withScrollRestoration(ThemesPage), {
+            icon: ThemesSidebarIcon,
+        }),
+        registerSection("section", "legcord-keybinds", "Keybinds", withScrollRestoration(KeybindsPage), {
+            icon: KeybindsSidebarIcon,
+        }),
+        registerSection("section", "legcord-games", "Games", withScrollRestoration(RegisteredGamesPage), {
+            icon: GamesSidebarIcon,
+        }),
     ];
     if (window.legcord.settings.getConfig().showExperimentalPluginMenu) {
-        array.push(registerSection("section", "legcord-plugins", "Plugins", PluginsPage, { icon: PluginsSidebarIcon }));
+        array.push(
+            registerSection("section", "legcord-plugins", "Plugins", withScrollRestoration(PluginsPage), {
+                icon: PluginsSidebarIcon,
+            }),
+        );
     }
     return array;
 }
@@ -72,4 +102,5 @@ export function onUnload() {
         e();
     });
     dispatcher.unsubscribe("TRACK", restartRequired);
+    disposeSettingsScrollRestoration();
 }

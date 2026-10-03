@@ -1,4 +1,5 @@
 import type { Settings, ValidMods } from "../../@types/settings.js";
+import { createSettingsScrollRestoration } from "./settingsScrollRestoration.js";
 
 const {
     plugin: { store },
@@ -46,35 +47,72 @@ function findSettingsScroller(): HTMLElement | null {
     return null;
 }
 
+function findSettingsContentScroller(): HTMLElement | null {
+    for (const root of document.querySelectorAll("shltr-rroot")) {
+        if (!root.textContent?.trim()) continue;
+        const found = findScrollableAncestor(root.parentElement);
+        if (found) return found;
+    }
+    return findSettingsScroller();
+}
+
+function findNestedSettingsScroller(start: Element | null | undefined, outer: HTMLElement): HTMLElement | null {
+    let el = start instanceof HTMLElement ? start : (start?.parentElement ?? null);
+    while (el && el !== outer) {
+        const { overflowY } = getComputedStyle(el);
+        if (
+            (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
+            el.scrollHeight > el.clientHeight + 1
+        ) {
+            return el;
+        }
+        el = el.parentElement;
+    }
+    return null;
+}
+
+const scrollRestoration = createSettingsScrollRestoration<HTMLElement, HTMLElement>({
+    findScroller: findSettingsContentScroller,
+    resolveScroller(cached) {
+        if (cached?.isConnected) {
+            const active = document.activeElement;
+            if (active instanceof Element && cached.contains(active)) {
+                return findNestedSettingsScroller(active, cached) ?? cached;
+            }
+            if (active instanceof Element) return findSettingsContentScroller();
+            return cached;
+        }
+        return findSettingsScroller();
+    },
+    getScrollTop: (scroller) => scroller.scrollTop,
+    setScrollTop: (scroller, top) => {
+        scroller.scrollTop = top;
+    },
+    getActiveElement: () => (document.activeElement instanceof HTMLElement ? document.activeElement : null),
+    contains: (element) => document.contains(element),
+    isActive: (element) => document.activeElement === element,
+    focus: (element) => element.focus({ preventScroll: true }),
+    requestFrame: (callback) => requestAnimationFrame(callback),
+    cancelFrame: (id) => cancelAnimationFrame(id),
+});
+
+export function mountSettingsScrollRestoration(): () => void {
+    const unmount = scrollRestoration.mount();
+    const onResize = () => scrollRestoration.invalidate();
+    window.addEventListener("resize", onResize);
+    return () => {
+        window.removeEventListener("resize", onResize);
+        unmount();
+    };
+}
+
+export function disposeSettingsScrollRestoration() {
+    scrollRestoration.dispose();
+}
+
 /** Keep Discord's settings scroller put across store/DOM updates. */
 export function withPreservedSettingsScroll<T>(run: () => T): T {
-    const scroller = findSettingsScroller();
-    const top = scroller?.scrollTop ?? 0;
-    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const result = run();
-    if (!scroller) return result;
-
-    const restore = () => {
-        if (scroller.scrollTop !== top) scroller.scrollTop = top;
-        // Re-focus without scrolling — Discord/React remounts can move focus to the top.
-        if (active && document.contains(active) && document.activeElement !== active) {
-            try {
-                active.focus({ preventScroll: true });
-            } catch {
-                /* ignore */
-            }
-        }
-    };
-    restore();
-    queueMicrotask(restore);
-    requestAnimationFrame(() => {
-        restore();
-        requestAnimationFrame(restore);
-    });
-    // Late layout passes (Switch remounts, panel height changes).
-    setTimeout(restore, 0);
-    setTimeout(restore, 50);
-    return result;
+    return scrollRestoration.preserve(run);
 }
 
 export function setConfig<K extends keyof Settings>(key: K, value: Settings[K], shouldRestart?: boolean) {
