@@ -29,6 +29,8 @@ function getAllGuilds() {
     return array;
 }
 
+let guildImportTimeout: ReturnType<typeof setTimeout> | undefined;
+
 export function onLoad() {
     if (window.legcord.platform === "darwin") {
         log("Legcord Touchbar Integration");
@@ -36,11 +38,19 @@ export function onLoad() {
         dispatcher.subscribe("TRACK", track);
         dispatcher.subscribe("AUDIO_TOGGLE_SELF_MUTE", updateVoiceState);
         dispatcher.subscribe("AUDIO_TOGGLE_SELF_DEAF", updateVoiceState);
-        setTimeout(() => window.legcord.touchbar.importGuilds(getAllGuilds()), 5000);
+        guildImportTimeout = setTimeout(() => {
+            guildImportTimeout = undefined;
+            window.legcord.touchbar.importGuilds(getAllGuilds());
+        }, 5000);
     }
 }
 
 export function onUnload() {
+    dispatcher.unsubscribe("TRACK", track);
     dispatcher.unsubscribe("AUDIO_TOGGLE_SELF_MUTE", updateVoiceState);
     dispatcher.unsubscribe("AUDIO_TOGGLE_SELF_DEAF", updateVoiceState);
+    if (guildImportTimeout !== undefined) {
+        clearTimeout(guildImportTimeout);
+        guildImportTimeout = undefined;
+    }
 }

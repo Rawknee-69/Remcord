@@ -4,6 +4,7 @@ import { app, nativeImage, TouchBar } from "electron";
 import { navigateTo } from "../common/dom.js";
 import { deafenToggle, leaveCall, muteToggle } from "../common/keybindActions.js";
 import { getLang } from "../common/lang.js";
+import { replaceGuildItems } from "./touchbarGuildItems.js";
 import { mainWindows } from "./window.js";
 
 const { TouchBarButton, TouchBarSpacer, TouchBarPopover, TouchBarScrubber } = TouchBar;
@@ -60,14 +61,16 @@ export function importGuilds(array: Array<string>) {
 function refreshGuilds() {
     const guildsPath = join(tempPath, "/legcordGuilds/");
     const guildFiles = readdirSync(guildsPath);
-    guildFiles.forEach((file) => {
-        guildItems.push(
-            new TouchBarButton({
-                icon: nativeImage.createFromPath(join(guildsPath, `/${file}`)).resize({ height: 32 }),
-                accessibilityLabel: file.replace(".png", ""), // click event doesn't work so we use to passthrough the guild ID
-            }),
-        );
-    });
+    replaceGuildItems(
+        guildItems,
+        guildFiles.map(
+            (file) =>
+                new TouchBarButton({
+                    icon: nativeImage.createFromPath(join(guildsPath, `/${file}`)).resize({ height: 32 }),
+                    accessibilityLabel: file.replace(".png", ""), // click event doesn't work so we use to passthrough the guild ID
+                }),
+        ),
+    );
 }
 
 const mute = new TouchBarButton({

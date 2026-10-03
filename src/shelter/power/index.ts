@@ -17,3 +17,7 @@ export function onLoad() {
     log("Legcord Power Integration");
     dispatcher.subscribe("TRACK", track);
 }
+
+export function onUnload() {
+    dispatcher.unsubscribe("TRACK", track);
+}
