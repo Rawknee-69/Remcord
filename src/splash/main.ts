@@ -1,0 +1,35 @@
+import path from "node:path";
+import { BrowserWindow, ipcMain } from "electron";
+import isDev from "electron-is-dev";
+import { getConfig, isBackgroundStart } from "../common/config.js";
+import { getLang } from "../common/lang.js";
+
+export let splashWindow: BrowserWindow;
+export async function createSplashWindow(): Promise<void> {
+    if (isBackgroundStart()) return;
+    splashWindow = new BrowserWindow({
+        width: 300,
+        height: 350,
+        title: getLang("splash-title"),
+        show: true,
+        darkTheme: true,
+        icon: getConfig("customIcon") ?? path.join(import.meta.dirname, "../", "/assets/desktop.png"),
+        frame: false,
+        backgroundColor: "#202225",
+        autoHideMenuBar: true,
+        webPreferences: {
+            sandbox: false,
+            preload: path.join(import.meta.dirname, "splash", "preload.mjs"),
+        },
+    });
+    ipcMain.on("splash-isDev", (event) => {
+        event.returnValue = isDev;
+    });
+    ipcMain.on("splash-isMicrosoftStore", (event) => {
+        event.returnValue = process.windowsStore;
+    });
+    ipcMain.on("splash-clientmod", (event) => {
+        event.returnValue = getConfig("mods");
+    });
+    await splashWindow.loadURL("legcord://html/splash.html");
+}
