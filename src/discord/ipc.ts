@@ -302,11 +302,15 @@ export function registerIpc(passedWindow: BrowserWindow): void {
     });
     ipcMain.on("blacklistGame", (event, name: string, id: number) => {
         blacklistGameAdd(name, id);
-        event.returnValue = undefined;
+        const blacklist = getBlacklist();
+        event.returnValue = blacklist;
+        passedWindow.webContents.send("rpcBlacklistUpdated", blacklist);
     });
     ipcMain.on("unblacklistGame", (event, id: number) => {
         blacklistGameRemove(id);
-        event.returnValue = undefined;
+        const blacklist = getBlacklist();
+        event.returnValue = blacklist;
+        passedWindow.webContents.send("rpcBlacklistUpdated", blacklist);
     });
     ipcMain.on("addKeybind", (_event, keybind: Keybind) => {
         const keybinds = getConfig("keybinds");

@@ -7,6 +7,7 @@ import type { Settings } from "../../@types/settings.js";
 import type { ThemeManifest } from "../../@types/themeManifest.js";
 import type { AppliedFlagsOutput } from "../../main.js";
 import type { venmicListObject } from "../venmic.js";
+import { createRpcBlacklistCache, type RpcBlacklistEntry } from "./rpcBlacklistCache.js";
 
 interface IPCSources {
     id: string;
@@ -28,6 +29,19 @@ interface LegcordPluginInfo {
     hasPreload: boolean;
     hasRenderer: boolean;
 }
+
+const rpcBlacklistCache = createRpcBlacklistCache(
+    () => ipcRenderer.sendSync("getRpcBlacklist") as RpcBlacklistEntry[],
+    (onUpdate) => {
+        const listener = (_event: Electron.IpcRendererEvent, entries: RpcBlacklistEntry[]) => onUpdate(entries);
+        ipcRenderer.on("rpcBlacklistUpdated", listener);
+        return () => ipcRenderer.removeListener("rpcBlacklistUpdated", listener);
+    },
+);
+
+window.addEventListener("pagehide", (event) => {
+    if (!event.persisted) rpcBlacklistCache.dispose();
+});
 
 contextBridge.exposeInMainWorld("legcord", {
     window: {
@@ -120,9 +134,13 @@ contextBridge.exposeInMainWorld("legcord", {
         addDetectable: (detectable: Game) => ipcRenderer.send("addDetectable", detectable),
         removeDetectable: (id: string) => ipcRenderer.send("removeDetectable", id),
         getDetectables: () => ipcRenderer.sendSync("getDetectables") as Game[],
-        getBlacklist: () => ipcRenderer.sendSync("getRpcBlacklist") as { name: string; id: number }[],
-        blacklistGame: (name: string, id: number) => ipcRenderer.sendSync("blacklistGame", name, id),
-        unblacklistGame: (id: number) => ipcRenderer.sendSync("unblacklistGame", id),
+        getBlacklist: () => rpcBlacklistCache.get(),
+        blacklistGame: (name: string, id: number) => {
+            rpcBlacklistCache.update(ipcRenderer.sendSync("blacklistGame", name, id) as RpcBlacklistEntry[]);
+        },
+        unblacklistGame: (id: number) => {
+            rpcBlacklistCache.update(ipcRenderer.sendSync("unblacklistGame", id) as RpcBlacklistEntry[]);
+        },
     },
     backup: {
         save: (data: string) =>
