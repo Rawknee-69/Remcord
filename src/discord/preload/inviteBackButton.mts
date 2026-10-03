@@ -67,8 +67,6 @@ document.addEventListener("DOMContentLoaded", () => {
     window.addEventListener("hashchange", sync);
 
     sync();
-    // Fallback for Discord navigations that do not go through history hooks.
-    setInterval(sync, 1000);
 })();
 `);
     })();
