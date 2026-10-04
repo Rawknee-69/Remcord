@@ -11,3 +11,6 @@ serde_json = "1.0.151"
 ureq = "2.12.1"
 tao = "0.37.1"
 wry = "0.57.0"
+
+[build-dependencies]
+serde_json = "1.0.151"

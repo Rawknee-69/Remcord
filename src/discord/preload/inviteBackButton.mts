@@ -2,11 +2,29 @@ import { addScript, addStyle } from "../../common/dom.js";
 
 const { ipcRenderer } = require("electron");
 
+/** True when running under the native WebView2 shell (Phase C-2+). */
+function isNativeWebView(): boolean {
+    return (window as unknown as { legcord?: { boot?: { runtime?: unknown } } })?.legcord?.boot?.runtime === "webview2";
+}
+
+/**
+ * Invite button label lookup. Electron uses the raw async `getLang` invoke
+ * (unchanged); native WebView uses the typed async `localization.get_lang`
+ * capability at the same public location. Either way a missing key resolves
+ * to `""` and the caller falls back to English below.
+ */
+async function getBackLabel(): Promise<string> {
+    if (isNativeWebView()) {
+        return await (window as unknown as { legcord: { getLang: (key: string) => Promise<string> } }).legcord.getLang(
+            "invite-goBackToApp",
+        );
+    }
+    return (await ipcRenderer.invoke("getLang", "invite-goBackToApp")) as string;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     void (async () => {
-        const label =
-            ((await ipcRenderer.invoke("getLang", "invite-goBackToApp")) as string | undefined) ||
-            "Go back to the Discord app";
+        const label = (await getBackLabel()) || "Go back to the Discord app";
 
         addStyle("legcord://assets/css/inviteBack.css");
 

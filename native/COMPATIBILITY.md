@@ -43,12 +43,14 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request | `{"version":1,"request_id":"legcord-<document-time>-<sequence>","command":{"type":"ping","payload":{"nonce":"..."}}}` |
 | Renderer request (Vencord capability) | `{"version":1,"request_id":"...","command":{"type":"mod_vencord_get_bundle","payload":{}}}` |
 | Renderer request (settings capability) | `{"version":1,"request_id":"...","command":{"type":"settings_get_config","payload":{}}}` |
+| Renderer request (localization capability) | `{"version":1,"request_id":"...","command":{"type":"localization_get_lang","payload":{"key":"invite-goBackToApp"}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Vencord response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"vencord_bundle","payload":{"bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
+| Localization response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"localization_string","payload":{"value":"Go back to the Discord app","lang":"en-US"}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_vencord_get_bundle`, and `settings_get_config`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe` diagnostic (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` probe, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_vencord_get_bundle`, `settings_get_config`, and `localization_get_lang`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -97,6 +99,18 @@ Renderer `window.legcord.settings.getConfig()` → parameter-free `settings_get_
 
 The facade resolves the snapshot object directly (same shape as Electron's return), never blocks document startup, and uses the shared pending map: correlation by request ID, timeout rejection, and `pagehide` disposal. The Shelter power plugin branches on `window.legcord.boot.runtime === "webview2"`: native uses `await getConfig()` (subscription installed after resolve), Electron keeps the direct synchronous call.
 
+## Localization capability (Phase C-2)
+
+The second mod-facing `window.legcord` capability migrates the already-async `getLang(key)` contract to the typed bridge. Exactly one caller is migrated: the invite back-button preload's `invite-goBackToApp` label lookup (`src/discord/preload/inviteBackButton.mts`). No language mutation, no new format, no duplicated database.
+
+### Electron chain (unchanged)
+
+`bridge.ts` exposes `getLang: async (toGet) => await ipcRenderer.invoke("getLang", toGet)`; `ipc.ts` handles `getLang` with `getLang(toGet)` from `src/common/lang.ts`: in-memory cached catalog for the `<userData>/storage/lang.json` selection (default `en-US`, two-letter codes normalized to `xx-XX`), selected catalog with `en-US` fallback merge, and `data[key] ?? ""` — a missing key returns `""`, never rejects. The invite caller itself uses the raw invoke plus `|| "Go back to the Discord app"`; history patching and the JANK-02 interval removal are untouched.
+
+### Native chain
+
+Renderer `window.legcord.getLang(key)` → `requireCapability("localization.get_lang")` → key-only `localization_get_lang` request (empty/oversized/non-string keys rejected client-side and host-side) → Rust `localization::lookup` over the compile-time-embedded `assets/lang/*.json` catalogs (via `native/build.rs`) with the identical selection/fallback/empty-string rules, selection re-read per request from `<DEV profile>/storage/lang.json` → validated `localization_string { value, lang }` → resolved string. The invite caller branches on `boot.runtime === "webview2"`; Electron keeps the raw invoke byte-for-byte.
+
 ### Required dependency categories
 
 - **Needed to execute Vencord:** one standalone Vencord browser JS bundle, the matching browser CSS bundle, the page-world execution mechanism, and fixed CSS insertion after the JS. The native bridge transports only a typed request/result, not bundle data.
@@ -108,20 +122,21 @@ Limits: a bridge message is at most 8 KiB; a ping nonce is non-empty and at most
 
 ### Implemented `window.legcord`
 
-The exact facade is `window.legcord = Object.freeze({ boot, native, settings })`, installed in the document-start script only when `location.origin === "https://discord.com"`.
+The exact facade is `window.legcord = Object.freeze({ boot, native, settings, getLang })`, installed in the document-start script only when `location.origin === "https://discord.com"`.
 
 | Property | Kind | Behavior |
 | --- | --- | --- |
 | `window.legcord.boot.runtime` | immutable boot snapshot | `"webview2"` |
 | `window.legcord.boot.platform` | immutable boot snapshot | `"win32"`; the native prototype is Windows-only |
 | `window.legcord.boot.protocol_version` | immutable boot snapshot | `1` |
-| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.vencord.get_bundle", "settings.get_config"]` |
+| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.vencord.get_bundle", "settings.get_config", "localization.get_lang"]` |
 | `window.legcord.native.ping(nonce)` | async native request | Returns `{ nonce, message: "pong" }`; rejects malformed input, transport errors, native errors, timeout, or document disposal |
 | `window.legcord.native.getVencordBundle()` | explicit Vencord-only async request | Requests the fixed native operation; resolves typed size/version/timing/marker metadata only after the host executes the bundle and applies CSS |
 | `window.legcord.native.supports(name)` | renderer-local | Boolean membership test against the frozen boot capability list |
 | `window.legcord.native.requireCapability(name)` | renderer-local | Returns `true` when present; otherwise throws with `code === "UNSUPPORTED_CAPABILITY"` |
 | `window.legcord.native.reportCss(value)` | typed one-way diagnostic event | Sends the native prototype's CSS injection probe result; not a general CSS API |
 | `window.legcord.settings.getConfig()` | explicit settings-only async request (Phase C) | Requires the `settings.get_config` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the parameter-free `settings_get_config` command and resolves the validated `Settings` snapshot object (Electron-compatible keys). Rejects malformed snapshots, `SETTINGS_UNAVAILABLE` host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
+| `window.legcord.getLang(key)` | explicit localization-only async request (Phase C-2) | Requires the `localization.get_lang` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one bounded key (`localization_get_lang`, non-empty, at most 128 UTF-8 bytes; client- and host-validated) and resolves the localized string — `""` for a missing key, exactly like Electron. Rejects malformed responses, host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
 
 No other existing Electron-facing `window.legcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Legcord config, Legcord version, OS release, translations, or Electron version.
 
@@ -141,7 +156,7 @@ The table lists the exposed `LegcordWindow` groups from `src/@types/legcordWindo
 | `touchbar.setVoiceTouchbar(state)`, `setVoiceState(mute,deafen)`, `importGuilds(guilds)` — Shelter touchbar | Fire-and-forget; boolean(s) / string array; `void` | Mutates Touch Bar or voice state / imports guilds | Deferred; Touch Bar is platform-specific |
 | `power.setPowerSaving(state)`, `isPowerSavingEnabled()` — Shelter power | Fire-and-forget boolean / synchronous boolean read | Mutates/reads native power-saving behavior | Deferred; mutable/dynamic read becomes async or cached event |
 | `electron`, `version`, `platform`, `osRelease`, `translations` — preload and Shelter | Synchronous properties; respectively Electron version, Legcord version, OS platform/release, raw translation JSON | Snapshot-like values; platform/version/translation are read at preload boot | Only true native runtime metadata is in this prototype snapshot. Electron and Legcord version, OS release, and translations are not substituted with invented values |
-| `getLang(key)` — invite-back preload and UI | Async; translation key string; `Promise<string>` | Reads one localized string; not boot-critical | Async typed request if localization is ported |
+| `getLang(key)` — invite-back preload and UI | Async; translation key string; `Promise<string>` | Reads one localized string; not boot-critical | Phase C-2 ports exactly one key path (`invite-goBackToApp` via `localization.get_lang`, empty-string missing-key parity, embedded catalogs). No language mutation; other callers deferred |
 | `screenshare.getSources(callback)`, `start(source,name,audio)`, `venmicStart(include)`, `venmicSystemStart(exclude)`, `venmicList()`, `venmicStop()` — Shelter screenshare | Event subscription callback / fire-and-forget / async promises; source IDs, names, booleans, venmic node arrays; returns callback event, void, or `Promise` values | Capture source selection, native media and audio routing | Deferred; no source IDs, paths, or media authority exposed in this milestone |
 | `themes.install(url)`, `uninstall(id)`, `edit(id)`, `getThemes()`, `refresh()`, `openImportPicker()`, `set(id,state)`, `folder(id)`, `openQuickCss()`, `importQuickCss(css)`, `enableQuickCss()`, `disableQuickCss()` | Mixed; install is declared void but implementation returns an async invoke; theme list/refresh are sync arrays; others fire-and-forget | Reads/updates theme files, opens dialogs, edits CSS; not bare-boot-critical | Snapshot only for a proven initial immutable listing; mutations/import are async and host-owned; full theme handling deferred |
 | `rpc.refreshProcessList()`, `getProcessList()`, `addDetectable(game)`, `removeDetectable(id)`, `getDetectables()`, `getBlacklist()`, `blacklistGame(name,id)`, `unblacklistGame(id)` — Shelter registered games/RPC | Mixed fire-and-forget, synchronous process/list/cache reads, synchronous blacklist mutation | Reads process list, edits detectable/blacklist state, emits `rpcBlacklistUpdated`; not boot-critical | Process/detectable reads become async or locally cached; blacklist state uses typed events and async mutations |

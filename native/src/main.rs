@@ -1,3 +1,4 @@
+mod localization;
 mod mod_substrate;
 mod protocol;
 mod settings;
@@ -17,10 +18,12 @@ use mod_substrate::{
     PendingModBootstrap,
 };
 
+use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use protocol::{
     parse_bridge_message, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage,
-    BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload, PingResponse,
-    RequestTracker, SettingsConfigResponse, VencordBundleResponse, PROTOCOL_VERSION,
+    BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
+    LocalizationStringResponse, PingResponse, RequestTracker, SettingsConfigResponse,
+    VencordBundleResponse, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use settings::load_settings;
@@ -75,6 +78,7 @@ fn lookup_mod_descriptor(mod_id: &str) -> Option<ModDescriptor> {
 const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD];
 const DISABLE_VENCORD_ADAPTER_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_NO_VENCORD";
 const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
+const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
@@ -85,6 +89,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "bridge.ping",
         "mod.vencord.get_bundle",
         "settings.get_config",
+        "localization.get_lang",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -263,6 +268,48 @@ const INTERACTION_PROBE_SCRIPT: &str = r#"
     }
   };
   setTimeout(inspectPage, 2000);
+})();
+"#;
+
+/// DEV-only localization smoke probe (`LEGCORD_NATIVE_GETLANG_SMOKE=1`).
+/// Exercises the exact lookup the invite back-button caller performs:
+/// `window.legcord.getLang("invite-goBackToApp")`, plus a missing key to
+/// verify Electron's empty-string behavior. Reported as one typed
+/// `get_lang_probe` event per document.
+const GETLANG_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "get_lang_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, lang: "", value: "", missing_is_empty: false,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const getLang = window.legcord?.getLang;
+    if (typeof getLang !== "function") {
+      fail("localization facade missing");
+      return;
+    }
+    const valid = getLang.call(window.legcord, "invite-goBackToApp");
+    const missing = getLang.call(window.legcord, "legcord-native-missing-key-probe");
+    if (!(valid instanceof Promise) || !(missing instanceof Promise)) {
+      fail("localization facade is not asynchronous");
+      return;
+    }
+    Promise.all([valid, missing]).then(
+      ([value, missingValue]) => probe({
+        ok: true,
+        lang: "unknown",
+        value: String(value).slice(0, 256),
+        missing_is_empty: missingValue === "",
+        error: null,
+      }),
+      fail,
+    );
+  } catch (error) {
+    fail(error);
+  }
 })();
 "#;
 
@@ -454,6 +501,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_settings_smoke {
         println!("[Settings][Smoke] settings capability smoke probe enabled");
     }
+    let diagnostic_getlang_smoke = std::env::var(GETLANG_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_getlang_smoke {
+        println!("[Localization][Smoke] localization capability smoke probe enabled");
+    }
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
@@ -603,6 +654,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 eprintln!("[Settings][Smoke] probe failed: {error}");
                             }
                         }
+                        if diagnostic_getlang_smoke {
+                            if let Err(error) = webview.evaluate_script(GETLANG_SMOKE_SCRIPT) {
+                                eprintln!("[Localization][Smoke] probe failed: {error}");
+                            }
+                        }
                     }
                 }
             }
@@ -685,6 +741,57 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     response_count += 1;
                                 }
                             }
+                        }
+                        BridgeCommand::LocalizationGetLang(payload) => {
+                            // The key shape was validated by the protocol
+                            // parser; re-check defensively before lookup.
+                            let request_id = request.request_id;
+                            if let Err(error) = validate_lang_key(&payload.key) {
+                                eprintln!("[Localization][invalid_key] {error}");
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: request_id.clone(),
+                                    ok: false,
+                                    payload: None,
+                                    error: Some(BridgeError {
+                                        code: "INVALID_LANG_KEY",
+                                        message: error,
+                                    }),
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
+                                return;
+                            }
+                            let found = lookup_lang_string(&profile_path, &payload.key);
+                            let payload_bytes = found.value.len();
+                            let response = BridgeResponse {
+                                version: PROTOCOL_VERSION,
+                                request_id: request_id.clone(),
+                                ok: true,
+                                payload: Some(BridgeResponsePayload::LocalizationString(
+                                    LocalizationStringResponse {
+                                        value: found.value,
+                                        lang: found.lang.clone(),
+                                    },
+                                )),
+                                error: None,
+                            };
+                            send_bridge_response(&webview, &response);
+                            if let Err(error) = request_tracker.complete(&request_id) {
+                                eprintln!("[Bridge] correlation failure after response: {error}");
+                            }
+                            response_count += 1;
+                            println!(
+                                "[Localization][Metrics] lang={} fallback={} key_len={} payload_bytes={} request_latency_ms={:.3}",
+                                found.lang,
+                                found.from_fallback,
+                                payload.key.len(),
+                                payload_bytes,
+                                received_at.elapsed().as_secs_f64() * 1000.0
+                            );
                         }
                         BridgeCommand::ModVencordGetBundle(_) => {
                             let descriptor = VENCORD_MOD;
@@ -1091,6 +1198,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     }
+                    BridgeEvent::GetLangProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Localization][Smoke] ok=true lang={} value={:?} missing_is_empty={}",
+                                payload.lang, payload.value, payload.missing_is_empty
+                            );
+                        } else {
+                            eprintln!(
+                                "[Localization][Smoke] ok=false lang={} error={}",
+                                payload.lang,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
                 }
             }
             _ => {
@@ -1295,6 +1416,42 @@ mod tests {
         assert!(script.contains("settings.get_config"));
         assert!(script.contains("getConfig"));
         // The facade must be asynchronous: no synchronous IPC emulation.
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn localization_requests_require_the_stable_discord_origin() {
+        // The origin gate runs before command dispatch, so a localization
+        // request from any other origin never reaches the catalog lookup.
+        assert!(is_trusted_bridge_origin(
+            &"https://discord.com/app".parse().unwrap()
+        ));
+        assert!(!is_trusted_bridge_origin(
+            &"https://discord.com.attacker.invalid/app".parse().unwrap()
+        ));
+        assert!(!is_trusted_bridge_origin(
+            &"https://example.com/app".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_exactly_the_localization_capability() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"localization.get_lang"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"localization.set_lang"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"getLang"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_async_get_lang_facade() {
+        let script = initialization_script(true).unwrap();
+        assert!(script.contains("localization_get_lang"));
+        assert!(script.contains("localization_string"));
+        assert!(script.contains("localization.get_lang"));
+        assert!(script.contains("getLang"));
         assert!(!script.contains("sendSync"));
     }
 }

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::localization::MAX_LANG_KEY_BYTES;
 use crate::settings::SettingsSnapshot;
 
 pub const PROTOCOL_VERSION: u8 = 1;
@@ -29,6 +30,7 @@ pub enum BridgeCommand {
     Ping(PingRequest),
     ModVencordGetBundle(VencordBundleRequest),
     SettingsGetConfig(SettingsGetConfigRequest),
+    LocalizationGetLang(LocalizationGetLangRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +49,14 @@ pub struct VencordBundleRequest {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsGetConfigRequest {}
+
+/// The single allowed `localization.get_lang` parameter: one catalog key.
+/// No locale, file, path, URL, or object may be supplied.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalizationGetLangRequest {
+    pub key: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +85,9 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the settings smoke probe
     /// (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`). Never sent by shipped adapters.
     SettingsProbe(SettingsProbe),
+    /// DEV-only diagnostic posted by the localization smoke probe
+    /// (`LEGCORD_NATIVE_GETLANG_SMOKE=1`). Never sent by shipped adapters.
+    GetLangProbe(GetLangProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +164,16 @@ pub struct SettingsProbe {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetLangProbe {
+    pub ok: bool,
+    pub lang: String,
+    pub value: String,
+    pub missing_is_empty: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
     Request(BridgeRequest),
@@ -172,6 +195,7 @@ pub enum BridgeResponsePayload {
     Ping(PingResponse),
     VencordBundle(VencordBundleResponse),
     SettingsConfig(Box<SettingsConfigResponse>),
+    LocalizationString(LocalizationStringResponse),
 }
 
 #[derive(Serialize)]
@@ -213,6 +237,14 @@ pub struct SettingsConfigResponse {
     pub settings: SettingsSnapshot,
     pub source: &'static str,
     pub payload_bytes: usize,
+}
+
+/// Single localized string response. `value` is `""` for a missing key
+/// (Electron parity); `lang` is the resolved language selection.
+#[derive(Serialize)]
+pub struct LocalizationStringResponse {
+    pub value: String,
+    pub lang: String,
 }
 
 fn valid_request_id(request_id: &str) -> bool {
@@ -273,6 +305,11 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 }
                 BridgeCommand::ModVencordGetBundle(_) => {}
                 BridgeCommand::SettingsGetConfig(_) => {}
+                BridgeCommand::LocalizationGetLang(payload) => {
+                    if payload.key.is_empty() || payload.key.len() > MAX_LANG_KEY_BYTES {
+                        return Err("invalid localization key".to_owned());
+                    }
+                }
             }
         }
         BridgeMessage::Event(event) => {
@@ -386,6 +423,18 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || payload.ok == payload.error.is_some()
                     {
                         return Err("invalid settings probe result".to_owned());
+                    }
+                }
+                BridgeEvent::GetLangProbe(payload) => {
+                    if payload.lang.len() > crate::localization::MAX_LANG_CODE_BYTES
+                        || payload.value.len() > crate::localization::MAX_LANG_VALUE_BYTES
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid localization probe result".to_owned());
                     }
                 }
             }
@@ -600,6 +649,84 @@ mod tests {
         assert!(parse_bridge_message(ok).is_ok());
         assert!(parse_bridge_message(failed).is_ok());
         assert!(parse_bridge_message(bad_source).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn accepts_a_valid_get_lang_request() {
+        let message = r#"{"version":1,"request_id":"lang-1","command":{"type":"localization_get_lang","payload":{"key":"invite-goBackToApp"}}}"#;
+        assert!(matches!(
+            parse_bridge_message(message),
+            Ok(BridgeMessage::Request(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_and_oversized_localization_keys() {
+        let empty = r#"{"version":1,"request_id":"lang-1","command":{"type":"localization_get_lang","payload":{"key":""}}}"#;
+        let oversized = format!(
+            r#"{{"version":1,"request_id":"lang-2","command":{{"type":"localization_get_lang","payload":{{"key":"{}"}}}}}}"#,
+            "k".repeat(129)
+        );
+        assert!(parse_bridge_message(empty).is_err());
+        assert!(parse_bridge_message(&oversized).is_err());
+    }
+
+    #[test]
+    fn rejects_non_key_localization_parameters() {
+        let numeric = r#"{"version":1,"request_id":"lang-1","command":{"type":"localization_get_lang","payload":{"key":42}}}"#;
+        let with_path = r#"{"version":1,"request_id":"lang-2","command":{"type":"localization_get_lang","payload":{"key":"a","path":"C:\\secret"}}}"#;
+        let with_locale = r#"{"version":1,"request_id":"lang-3","command":{"type":"localization_get_lang","payload":{"key":"a","locale":"en-US"}}}"#;
+        assert!(parse_bridge_message(numeric).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_locale).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_localization_response() {
+        use super::LocalizationStringResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "lang-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::LocalizationString(
+                LocalizationStringResponse {
+                    value: "Go back to the Discord app".to_owned(),
+                    lang: "en-US".to_owned(),
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "localization_string");
+        assert_eq!(
+            value["payload"]["payload"]["value"],
+            "Go back to the Discord app"
+        );
+        assert_eq!(value["payload"]["payload"]["lang"], "en-US");
+    }
+
+    #[test]
+    fn localization_request_ids_reset_with_the_document() {
+        let mut tracker = RequestTracker::default();
+        assert!(tracker.begin("lang-1").is_ok());
+        tracker.clear();
+        assert!(tracker.begin("lang-1").is_ok());
+        assert!(tracker.complete("lang-1").is_ok());
+    }
+
+    #[test]
+    fn validates_localization_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"get_lang_probe","payload":{"ok":true,"lang":"en-US","value":"Go back to the Discord app","missing_is_empty":true,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"get_lang_probe","payload":{"ok":false,"lang":"en-US","value":"","missing_is_empty":false,"error":"timeout"}}}"#;
+        let oversized = format!(
+            r#"{{"version":1,"event":{{"type":"get_lang_probe","payload":{{"ok":true,"lang":"en-US","value":"{}","missing_is_empty":true,"error":null}}}}}}"#,
+            "v".repeat(5000)
+        );
+        let inconsistent = r#"{"version":1,"event":{"type":"get_lang_probe","payload":{"ok":true,"lang":"en-US","value":"x","missing_is_empty":true,"error":"extra"}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(&oversized).is_err());
         assert!(parse_bridge_message(inconsistent).is_err());
     }
 }

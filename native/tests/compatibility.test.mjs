@@ -556,6 +556,129 @@ test("the synthetic adapter loads once and rejects a wrong execution marker", as
     );
 });
 
+function createLangRuntime(capabilities = ["bridge.ping", "localization.get_lang"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondLang(window, request, value = "Go back to the Discord app", lang = "en-US") {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "localization_string", payload: { value, lang } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes getLang at the declared window.legcord location", () => {
+    const { window } = createLangRuntime();
+    assert.equal(typeof window.legcord.getLang, "function");
+    assert.equal(window.legcord.native.supports("localization.get_lang"), true);
+});
+
+test("getLang sends one typed key-only request and resolves the string", async () => {
+    const { window } = createLangRuntime();
+    const pending = window.legcord.getLang("invite-goBackToApp");
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "localization_get_lang",
+        payload: { key: "invite-goBackToApp" },
+    });
+    respondLang(window, message);
+    assert.equal(await pending, "Go back to the Discord app");
+});
+
+test("getLang resolves missing keys to an empty string like Electron", async () => {
+    const { window } = createLangRuntime();
+    const pending = window.legcord.getLang("legcord-native-no-such-key");
+    const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
+    respondLang(window, message, "");
+    assert.equal(await pending, "");
+});
+
+test("getLang throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createLangRuntime(["bridge.ping"]);
+    assert.throws(
+        () => window.legcord.getLang("invite-goBackToApp"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "localization_get_lang"),
+        false,
+    );
+});
+
+test("getLang rejects empty, non-string, and oversized keys without sending", async () => {
+    const { window } = createLangRuntime();
+    await assert.rejects(window.legcord.getLang(""), /non-empty string/);
+    await assert.rejects(window.legcord.getLang(42), /non-empty string/);
+    await assert.rejects(window.legcord.getLang("k".repeat(129)), /128 UTF-8 bytes/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "localization_get_lang"),
+        false,
+    );
+});
+
+test("getLang rejects malformed localization responses", async () => {
+    const { window } = createLangRuntime();
+    const pending = window.legcord.getLang("invite-goBackToApp");
+    const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
+    respondLang(window, message, 42);
+    await assert.rejects(pending, /localization response schema is invalid/);
+});
+
+test("getLang rejects host failures with the typed error", async () => {
+    const { window } = createLangRuntime();
+    const pending = window.legcord.getLang("invite-goBackToApp");
+    const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "INVALID_LANG_KEY", message: "localization key must not be empty" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /must not be empty/);
+});
+
+test("getLang rejects after its timeout", async () => {
+    const { window } = createLangRuntime();
+    await assert.rejects(window.legcord.getLang("invite-goBackToApp", 50), /timed out/);
+});
+
+test("getLang rejects pending requests when the document is disposed", async () => {
+    const { window } = createLangRuntime();
+    const pending = window.legcord.getLang("invite-goBackToApp");
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh getLang facade with no stale promises", async () => {
+    const firstDocument = createLangRuntime();
+    const stale = firstDocument.window.legcord.getLang("invite-goBackToApp");
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createLangRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.getLang("invite-goBackToApp");
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "localization_get_lang");
+    respondLang(nextDocument.window, message);
+    assert.equal(await pending, "Go back to the Discord app");
+});
+
 test("the synthetic adapter reports a failed bootstrap verdict without crashing", async () => {
     const { window, host } = createSyntheticModRuntime();
     window.dispatchEvent(

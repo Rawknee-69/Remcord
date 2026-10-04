@@ -131,6 +131,17 @@
         return request({ type: "settings_get_config", payload: {} }, timeoutMs).then((payload) => payload.settings);
     }
 
+    function getLang(key, timeoutMs = 5000) {
+        requireCapability("localization.get_lang");
+        if (typeof key !== "string" || key.length === 0 || textEncoder.encode(key).length > 128) {
+            return Promise.reject(new TypeError("key must be a non-empty string of at most 128 UTF-8 bytes"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "localization_get_lang", payload: { key } }, timeoutMs).then((payload) => payload.value);
+    }
+
     function requireCapability(capability) {
         if (typeof capability !== "string" || !capabilities.has(capability)) {
             const error = new Error(`Native capability is not available: ${String(capability)}`);
@@ -192,6 +203,20 @@
                 !Number.isSafeInteger(payload.payload_bytes)
             ) {
                 request.reject(new Error("Native settings response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "localization_string") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.value !== "string" ||
+                textEncoder.encode(payload.value).length > 4096 ||
+                typeof payload.lang !== "string" ||
+                payload.lang.length === 0 ||
+                textEncoder.encode(payload.lang).length > 32
+            ) {
+                request.reject(new Error("Native localization response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -258,7 +283,7 @@
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
-        value: Object.freeze({ boot: snapshot, native, settings }),
+        value: Object.freeze({ boot: snapshot, native, settings, getLang }),
     });
 
     try {

@@ -1,7 +1,7 @@
-// Regression guard for Phase C: the Electron synchronous settings path must
-// remain byte-for-byte synchronous. The native WebView2 capability is an
-// additional async path (Shelter power plugin `isNativeWebView()` branch) and
-// must never rewrite these Electron contracts.
+// Regression guard for Phase C/C-2: the Electron settings and localization
+// paths must remain unchanged. Native WebView2 capabilities are additional
+// async paths (deliberate `isNativeWebView()` branches) and must never
+// rewrite these Electron contracts.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -10,6 +10,7 @@ const bridge = readFileSync(new URL("../../src/discord/preload/bridge.ts", impor
 const ipc = readFileSync(new URL("../../src/discord/ipc.ts", import.meta.url), "utf8");
 const power = readFileSync(new URL("../../src/shelter/power/index.ts", import.meta.url), "utf8");
 const types = readFileSync(new URL("../../src/@types/legcordWindow.d.ts", import.meta.url), "utf8");
+const invite = readFileSync(new URL("../../src/discord/preload/inviteBackButton.mts", import.meta.url), "utf8");
 
 test("preload keeps the synchronous getEntireConfig bridge", () => {
     assert.match(bridge, /getConfig:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getEntireConfig"\)/);
@@ -38,4 +39,32 @@ test("the native WebView2 branch is a deliberate separate path", () => {
     assert.match(power, /await getConfig\(\)/);
     // The native branch must not use Electron synchronous IPC.
     assert.doesNotMatch(power, /sendSync/);
+});
+
+test("preload keeps the async getLang bridge", () => {
+    assert.match(bridge, /getLang:\s*async\s*\(toGet:\s*string\)/);
+    assert.match(bridge, /await ipcRenderer\.invoke\("getLang", toGet\)/);
+});
+
+test("main keeps the getLang handler returning the catalog string", () => {
+    assert.match(ipc, /ipcMain\.handle\("getLang"/);
+    assert.match(ipc, /return getLang\(toGet\)/);
+});
+
+test("declared window.legcord getLang contract stays async", () => {
+    assert.match(types, /getLang:\s*\(toGet:\s*string\)\s*=>\s*Promise<string>/);
+});
+
+test("the invite back-button Electron path keeps its raw async lookup", () => {
+    // Electron behavior: direct invoke plus the English fallback.
+    assert.match(invite, /ipcRenderer\.invoke\("getLang", "invite-goBackToApp"\)/);
+    assert.match(invite, /"Go back to the Discord app"/);
+    // JANK-02: no polling interval may be reintroduced.
+    assert.doesNotMatch(invite, /setInterval/);
+});
+
+test("the invite back-button native path is a deliberate separate branch", () => {
+    assert.match(invite, /isNativeWebView/);
+    assert.match(invite, /\.getLang\(\s*"invite-goBackToApp"\s*,?\s*\)/);
+    assert.doesNotMatch(invite, /sendSync/);
 });
