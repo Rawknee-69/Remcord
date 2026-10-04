@@ -16,7 +16,13 @@ import { SettingsPanel } from "../components/SettingsPanel.jsx";
 import { matchesSettingsQuery, SearchableSetting, SettingsSearchProvider } from "../components/SettingsSearch.jsx";
 import { SupportBanner } from "../components/SupportBanner.jsx";
 import { TextBoxItem } from "../components/TextBoxItem.jsx";
-import { isMinWindowsVersion, setConfig, toggleMod } from "../settings.js";
+import {
+    isMinWindowsVersion,
+    isNativeWebView,
+    setBlockPowerSavingInVoiceChat,
+    setConfig,
+    toggleMod,
+} from "../settings.js";
 import classes from "./SettingsPage.module.css";
 
 const {
@@ -575,7 +581,15 @@ export function SettingsPage() {
                     <SwitchItem
                         note={t["settings-blockPowerSavingInVoiceChat-desc"]}
                         value={settings.blockPowerSavingInVoiceChat}
-                        onChange={(e: boolean) => setConfig("blockPowerSavingInVoiceChat", e, true)}
+                        onChange={(e: boolean) => {
+                            // Native WebView2 uses the allowlisted async mutation;
+                            // Electron keeps the original synchronous setConfig.
+                            if (isNativeWebView()) {
+                                void setBlockPowerSavingInVoiceChat(e);
+                            } else {
+                                setConfig("blockPowerSavingInVoiceChat", e, true);
+                            }
+                        }}
                     >
                         {t["settings-blockPowerSavingInVoiceChat"]}
                     </SwitchItem>

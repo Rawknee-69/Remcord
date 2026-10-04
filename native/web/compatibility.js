@@ -142,6 +142,19 @@
         return request({ type: "localization_get_lang", payload: { key } }, timeoutMs).then((payload) => payload.value);
     }
 
+    function setBlockPowerSavingInVoiceChat(value, timeoutMs = 5000) {
+        requireCapability("settings.set_block_power_saving_in_voice_chat");
+        if (typeof value !== "boolean") {
+            return Promise.reject(new TypeError("value must be a boolean"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "settings_set_block_power_saving", payload: { value } }, timeoutMs).then(
+            (payload) => payload.block_power_saving_in_voice_chat,
+        );
+    }
+
     function requireCapability(capability) {
         if (typeof capability !== "string" || !capabilities.has(capability)) {
             const error = new Error(`Native capability is not available: ${String(capability)}`);
@@ -203,6 +216,18 @@
                 !Number.isSafeInteger(payload.payload_bytes)
             ) {
                 request.reject(new Error("Native settings response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "settings_mutation") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.block_power_saving_in_voice_chat !== "boolean" ||
+                payload.source !== "file" ||
+                !Number.isSafeInteger(payload.payload_bytes)
+            ) {
+                request.reject(new Error("Native settings mutation response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -278,7 +303,7 @@
         },
         requireCapability,
     });
-    const settings = Object.freeze({ getConfig });
+    const settings = Object.freeze({ getConfig, setBlockPowerSavingInVoiceChat });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,

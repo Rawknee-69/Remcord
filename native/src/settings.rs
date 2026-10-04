@@ -291,6 +291,98 @@ pub struct SettingsLoad {
     pub payload_bytes: usize,
 }
 
+/// Result of the single allowlisted native settings mutation
+/// (`blockPowerSavingInVoiceChat`, see [`apply_block_power_saving`]).
+/// `source` is always [`SettingsSource::File`]: a successful mutation has
+/// just persisted the file. `payload_bytes` is the serialized file size so
+/// the renderer can sanity-check the write without re-reading the snapshot.
+#[derive(Debug)]
+pub struct SettingsMutation {
+    pub block_power_saving_in_voice_chat: bool,
+    pub source: SettingsSource,
+    pub payload_bytes: usize,
+}
+
+/// Apply the ONE allowlisted native settings mutation.
+///
+/// This is the write half of the read-only [`load_settings`] capability and
+/// deliberately NOT a generic `setConfig(key, value)`:
+/// - The field is fixed at compile time (`blockPowerSavingInVoiceChat`).
+///   There is no key, path, JSON-patch, or object parameter anywhere.
+/// - The value is a plain `bool`, already type-checked by the protocol
+///   parser before this function runs.
+/// - The current settings are loaded authoritatively first: a missing file
+///   starts from compiled-in defaults, while a corrupt file (bad JSON or
+///   wrong field types) is an error and is NEVER overwritten with defaults.
+/// - Unknown future keys are preserved: the write merges the single field
+///   into the existing JSON document instead of re-serializing the snapshot.
+/// - Persistence is atomic: the new document is written to a sibling
+///   temporary file in the same directory and then renamed over
+///   `settings.json`, so a crash cannot leave a truncated file.
+///
+/// Returns [`SettingsMutation`] carrying the applied value for the renderer
+/// to update its local state (Electron's synchronous setter returns
+/// `undefined` after persisting; the async native caller needs the applied
+/// value back to avoid holding stale state).
+pub fn apply_block_power_saving(
+    profile_dir: &Path,
+    value: bool,
+) -> Result<SettingsMutation, String> {
+    // Authoritative load: validates JSON shape and every known field type.
+    let load = load_settings(profile_dir)?;
+    let path = settings_file_path(profile_dir);
+
+    let document = match load.source {
+        SettingsSource::Defaults => {
+            let mut snapshot = load.snapshot;
+            snapshot.block_power_saving_in_voice_chat = value;
+            serde_json::to_value(&snapshot)
+                .map_err(|error| format!("settings snapshot cannot be serialized: {error}"))?
+        }
+        SettingsSource::File => {
+            let raw = std::fs::read(&path)
+                .map_err(|error| format!("settings file is unreadable: {error}"))?;
+            let mut document: serde_json::Value = serde_json::from_slice(&raw)
+                .map_err(|error| format!("settings file is invalid: {error}"))?;
+            let object = document.as_object_mut().ok_or_else(|| {
+                "settings file is invalid: top-level JSON must be an object".to_owned()
+            })?;
+            // ONLY the allowlisted field is touched; every other key
+            // (including unknown future keys) is preserved byte-for-value.
+            object.insert(
+                "blockPowerSavingInVoiceChat".to_owned(),
+                serde_json::Value::Bool(value),
+            );
+            document
+        }
+    };
+
+    let serialized = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("settings snapshot cannot be serialized: {error}"))?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("settings file cannot be written: {error}"))?;
+    }
+    // Same-directory temp file + rename: the rename is atomic on one
+    // filesystem, so readers never observe a truncated `settings.json`.
+    let temp_path = path.with_extension("json.tmp");
+    if let Err(error) = std::fs::write(&temp_path, serialized.as_bytes()) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("settings file cannot be written: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("settings file cannot be written: {error}"));
+    }
+
+    Ok(SettingsMutation {
+        block_power_saving_in_voice_chat: value,
+        source: SettingsSource::File,
+        payload_bytes: serialized.len(),
+    })
+}
+
 /// Host-constructed settings path. The renderer cannot influence this: the
 /// profile directory is fixed and the remaining segments are constants.
 pub fn settings_file_path(profile_dir: &Path) -> std::path::PathBuf {
@@ -335,7 +427,7 @@ pub fn load_settings(profile_dir: &Path) -> Result<SettingsLoad, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_settings, SettingsSnapshot, SettingsSource};
+    use super::{apply_block_power_saving, load_settings, SettingsSnapshot, SettingsSource};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_profile_dir(tag: &str) -> std::path::PathBuf {
@@ -446,5 +538,109 @@ mod tests {
         let reread = load_settings(&profile).expect("reread after reload must succeed");
         assert_eq!(reread.source, SettingsSource::File);
         assert!(reread.snapshot.block_power_saving_in_voice_chat);
+    }
+
+    #[test]
+    fn mutation_applies_the_allowlisted_field_and_persists() {
+        let profile = unique_profile_dir("mutate-valid");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"windowStyle":"overlay","blockPowerSavingInVoiceChat":false}"#,
+        )
+        .unwrap();
+        let mutation =
+            apply_block_power_saving(&profile, true).expect("a valid mutation must persist");
+        assert!(mutation.block_power_saving_in_voice_chat);
+        assert_eq!(mutation.source, SettingsSource::File);
+        assert!(mutation.payload_bytes > 0);
+        // No temp file may be left behind and the file must parse.
+        assert!(!profile.join("storage").join("settings.json.tmp").exists());
+        let reread = load_settings(&profile).expect("the mutated file must load");
+        assert!(reread.snapshot.block_power_saving_in_voice_chat);
+        assert_eq!(reread.snapshot.window_style, "overlay");
+    }
+
+    #[test]
+    fn mutation_on_a_missing_file_starts_from_defaults() {
+        let profile = unique_profile_dir("mutate-missing");
+        let mutation = apply_block_power_saving(&profile, true)
+            .expect("a missing file must start from defaults");
+        assert!(mutation.block_power_saving_in_voice_chat);
+        // A second read reflects the mutation: the file now exists.
+        let reread = load_settings(&profile).expect("the created file must load");
+        assert_eq!(reread.source, SettingsSource::File);
+        assert!(reread.snapshot.block_power_saving_in_voice_chat);
+        assert_eq!(reread.snapshot.window_style, "overlay");
+    }
+
+    #[test]
+    fn mutation_rejects_a_corrupt_file_without_overwriting_it() {
+        let profile = unique_profile_dir("mutate-corrupt");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        let error = apply_block_power_saving(&profile, true).expect_err("a corrupt file must fail");
+        assert!(error.contains("invalid"));
+        // The corrupt bytes are untouched: no reset-to-defaults after failure.
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn mutation_rejects_wrong_field_types_without_overwriting() {
+        let profile = unique_profile_dir("mutate-wrongtype");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        let before = r#"{"blockPowerSavingInVoiceChat":"yes"}"#;
+        std::fs::write(&path, before).unwrap();
+        assert!(apply_block_power_saving(&profile, true).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn mutation_preserves_unknown_future_keys() {
+        let profile = unique_profile_dir("mutate-unknown");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"blockPowerSavingInVoiceChat":false,"someFutureElectronKey":{"nested":1}}"#,
+        )
+        .unwrap();
+        apply_block_power_saving(&profile, true).expect("unknown keys must survive a mutation");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["blockPowerSavingInVoiceChat"], true);
+        assert_eq!(document["someFutureElectronKey"]["nested"], 1);
+    }
+
+    #[test]
+    fn rapid_sequential_mutations_leave_deterministic_valid_state() {
+        // The host dispatches bridge requests on one event-loop thread, so
+        // native mutations serialize; this test proves repeated writes never
+        // corrupt the document and the last write wins deterministically.
+        let profile = unique_profile_dir("mutate-rapid");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        std::fs::write(
+            profile.join("storage").join("settings.json"),
+            r#"{"blockPowerSavingInVoiceChat":false}"#,
+        )
+        .unwrap();
+        for value in [true, false, true, false, true] {
+            let mutation =
+                apply_block_power_saving(&profile, value).expect("sequential writes must succeed");
+            assert_eq!(mutation.block_power_saving_in_voice_chat, value);
+        }
+        let raw = std::fs::read_to_string(profile.join("storage").join("settings.json")).unwrap();
+        let document: serde_json::Value =
+            serde_json::from_str(&raw).expect("rapid writes must stay valid JSON");
+        assert_eq!(document["blockPowerSavingInVoiceChat"], true);
+        assert!(
+            load_settings(&profile)
+                .unwrap()
+                .snapshot
+                .block_power_saving_in_voice_chat
+        );
     }
 }

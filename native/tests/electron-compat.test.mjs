@@ -9,6 +9,11 @@ import test from "node:test";
 const bridge = readFileSync(new URL("../../src/discord/preload/bridge.ts", import.meta.url), "utf8");
 const ipc = readFileSync(new URL("../../src/discord/ipc.ts", import.meta.url), "utf8");
 const power = readFileSync(new URL("../../src/shelter/power/index.ts", import.meta.url), "utf8");
+const shelterSettings = readFileSync(new URL("../../src/shelter/settings/settings.ts", import.meta.url), "utf8");
+const settingsPage = readFileSync(
+    new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
+    "utf8",
+);
 const types = readFileSync(new URL("../../src/@types/legcordWindow.d.ts", import.meta.url), "utf8");
 const invite = readFileSync(new URL("../../src/discord/preload/inviteBackButton.mts", import.meta.url), "utf8");
 
@@ -67,4 +72,40 @@ test("the invite back-button native path is a deliberate separate branch", () =>
     assert.match(invite, /isNativeWebView/);
     assert.match(invite, /\.getLang\(\s*"invite-goBackToApp"\s*,?\s*\)/);
     assert.doesNotMatch(invite, /sendSync/);
+});
+
+test("preload keeps the synchronous setConfig bridge", () => {
+    assert.match(
+        bridge,
+        /setConfig:\s*\(key:\s*string,\s*value:\s*unknown\)\s*=>\s*ipcRenderer\.sendSync\("setConfig", key, value\)/,
+    );
+    assert.doesNotMatch(bridge, /invoke\("setConfig"/);
+});
+
+test("main keeps the synchronous setConfig handler returning undefined", () => {
+    assert.match(ipc, /ipcMain\.on\("setConfig"/);
+    assert.match(ipc, /setConfig\(key, value\)/);
+    assert.match(ipc, /event\.returnValue = undefined/);
+});
+
+test("declared window.legcord setConfig contract stays synchronous", () => {
+    assert.match(types, /setConfig:\s*<K extends keyof Settings>\(object:\s*K,\s*toSet:\s*Settings\[K\]\)\s*=>\s*void/);
+});
+
+test("the Shelter settings Electron mutation path stays synchronous", () => {
+    // The shared helper must still persist via the sync bridge call.
+    assert.match(shelterSettings, /window\.legcord\.settings\.setConfig\(key, value\)/);
+    // The power-panel switch keeps the original Electron call byte-identical.
+    assert.match(settingsPage, /setConfig\("blockPowerSavingInVoiceChat", e, true\)/);
+});
+
+test("the block-power-saving native mutation is a deliberate separate path", () => {
+    assert.match(shelterSettings, /isNativeWebView/);
+    assert.match(shelterSettings, /setBlockPowerSavingInVoiceChat/);
+    assert.match(shelterSettings, /await nativeSet\(value\)/);
+    assert.match(settingsPage, /void setBlockPowerSavingInVoiceChat\(e\)/);
+    // The native path must not use Electron synchronous IPC or a generic key.
+    assert.doesNotMatch(shelterSettings, /sendSync/);
+    assert.doesNotMatch(settingsPage, /sendSync/);
+    assert.doesNotMatch(shelterSettings, /setBlockPowerSavingInVoiceChat\([^)]*key/);
 });

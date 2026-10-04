@@ -43,14 +43,16 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request | `{"version":1,"request_id":"legcord-<document-time>-<sequence>","command":{"type":"ping","payload":{"nonce":"..."}}}` |
 | Renderer request (Vencord capability) | `{"version":1,"request_id":"...","command":{"type":"mod_vencord_get_bundle","payload":{}}}` |
 | Renderer request (settings capability) | `{"version":1,"request_id":"...","command":{"type":"settings_get_config","payload":{}}}` |
+| Renderer request (settings mutation capability) | `{"version":1,"request_id":"...","command":{"type":"settings_set_block_power_saving","payload":{"value":true}}}` |
 | Renderer request (localization capability) | `{"version":1,"request_id":"...","command":{"type":"localization_get_lang","payload":{"key":"invite-goBackToApp"}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Vencord response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"vencord_bundle","payload":{"bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
+| Settings mutation response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_mutation","payload":{"block_power_saving_in_voice_chat":true,"source":"file","payload_bytes":2048}},"error":null}` |
 | Localization response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"localization_string","payload":{"value":"Go back to the Discord app","lang":"en-US"}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_vencord_get_bundle`, `settings_get_config`, and `localization_get_lang`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_vencord_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, and `localization_get_lang`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -99,6 +101,25 @@ Renderer `window.legcord.settings.getConfig()` → parameter-free `settings_get_
 
 The facade resolves the snapshot object directly (same shape as Electron's return), never blocks document startup, and uses the shared pending map: correlation by request ID, timeout rejection, and `pagehide` disposal. The Shelter power plugin branches on `window.legcord.boot.runtime === "webview2"`: native uses `await getConfig()` (subscription installed after resolve), Electron keeps the direct synchronous call.
 
+## Settings mutation capability (Phase C-3)
+
+The write half of the settings capability migrates ONE real mutation — `blockPowerSavingInVoiceChat` — from synchronous Electron IPC to a typed async WebView2 capability. Exactly one real caller is migrated: the Shelter power-panel switch (`src/shelter/settings/pages/SettingsPage.tsx` via `setBlockPowerSavingInVoiceChat` in `src/shelter/settings/settings.ts`). There is deliberately NO generic `setConfig(key, value)` on the native bridge.
+
+### Why this setting
+
+- It is the same key the already-migrated Shelter power read path consumes (`src/shelter/power/index.ts` reads only `blockPowerSavingInVoiceChat`), so read + write now cover one coherent capability pair.
+- Boolean type → strictest possible value validation; no enum/string parsing risk.
+- Real Shelter UI caller exists (power-panel `SwitchItem`); the Electron branch of that caller is preserved byte-for-byte.
+- No window-chrome/restart-critical side effects in the native shell (Electron marks restart-required; the native path persists and updates local store without recreating any window).
+
+### Electron chain (unchanged)
+
+`bridge.ts` exposes `setConfig: (key, value) => ipcRenderer.sendSync("setConfig", key, value)`; `ipc.ts` answers `setConfig` with `setConfig(key, value)` (in-memory cache update + full-file `writeFileSync` of `<userData>/storage/settings.json`) and returns `undefined` synchronously. No validation, no return value, no change events, no re-read; callers (notably Shelter `settings.ts`, which updates `store.settings` locally first) fire-and-forget. None of these files are modified by Phase C-3; `native/tests/electron-compat.test.mjs` asserts the synchronous contract.
+
+### Native chain
+
+Renderer `await window.legcord.settings.setBlockPowerSavingInVoiceChat(value)` → `requireCapability("settings.set_block_power_saving_in_voice_chat")` → bool-only `settings_set_block_power_saving` request (non-boolean values rejected client-side; key/path/object members rejected host-side by `deny_unknown_fields`) → Rust `settings::apply_block_power_saving` loads the authoritative settings (missing file → defaults; corrupt file → typed `SETTINGS_UNAVAILABLE`, never overwritten), applies ONLY the allowlisted field (unknown future keys preserved via JSON-document merge), persists atomically (sibling temp file + same-directory rename), and returns the validated `settings_mutation { block_power_saving_in_voice_chat, source: "file", payload_bytes }` response → renderer schema check → resolved boolean. The migrated Shelter caller assigns the host-confirmed value into `store.settings` (scroll-preserving, in place); a rejected mutation leaves local state untouched. Host dispatches bridge requests on one event-loop thread, so mutations serialize with no locks; rapid sequential writes were tested to leave deterministic valid state with last-write-wins.
+
 ## Localization capability (Phase C-2)
 
 The second mod-facing `window.legcord` capability migrates the already-async `getLang(key)` contract to the typed bridge. Exactly one caller is migrated: the invite back-button preload's `invite-goBackToApp` label lookup (`src/discord/preload/inviteBackButton.mts`). No language mutation, no new format, no duplicated database.
@@ -129,13 +150,14 @@ The exact facade is `window.legcord = Object.freeze({ boot, native, settings, ge
 | `window.legcord.boot.runtime` | immutable boot snapshot | `"webview2"` |
 | `window.legcord.boot.platform` | immutable boot snapshot | `"win32"`; the native prototype is Windows-only |
 | `window.legcord.boot.protocol_version` | immutable boot snapshot | `1` |
-| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.vencord.get_bundle", "settings.get_config", "localization.get_lang"]` |
+| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.vencord.get_bundle", "settings.get_config", "settings.set_block_power_saving_in_voice_chat", "localization.get_lang"]` |
 | `window.legcord.native.ping(nonce)` | async native request | Returns `{ nonce, message: "pong" }`; rejects malformed input, transport errors, native errors, timeout, or document disposal |
 | `window.legcord.native.getVencordBundle()` | explicit Vencord-only async request | Requests the fixed native operation; resolves typed size/version/timing/marker metadata only after the host executes the bundle and applies CSS |
 | `window.legcord.native.supports(name)` | renderer-local | Boolean membership test against the frozen boot capability list |
 | `window.legcord.native.requireCapability(name)` | renderer-local | Returns `true` when present; otherwise throws with `code === "UNSUPPORTED_CAPABILITY"` |
 | `window.legcord.native.reportCss(value)` | typed one-way diagnostic event | Sends the native prototype's CSS injection probe result; not a general CSS API |
 | `window.legcord.settings.getConfig()` | explicit settings-only async request (Phase C) | Requires the `settings.get_config` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the parameter-free `settings_get_config` command and resolves the validated `Settings` snapshot object (Electron-compatible keys). Rejects malformed snapshots, `SETTINGS_UNAVAILABLE` host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
+| `window.legcord.settings.setBlockPowerSavingInVoiceChat(value)` | explicit allowlisted settings-mutation async request (Phase C-3) | Requires the `settings.set_block_power_saving_in_voice_chat` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one boolean (`settings_set_block_power_saving`, non-boolean client-rejected) and resolves the host-confirmed applied value from the validated `settings_mutation` response (`source` must be `"file"`). Rejects malformed responses, `SETTINGS_UNAVAILABLE` host failures (missing/unreadable/corrupt file, write failure), timeout (default 5 s), or document disposal. No generic `setConfig` exists on the native facade |
 | `window.legcord.getLang(key)` | explicit localization-only async request (Phase C-2) | Requires the `localization.get_lang` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one bounded key (`localization_get_lang`, non-empty, at most 128 UTF-8 bytes; client- and host-validated) and resolves the localized string — `""` for a missing key, exactly like Electron. Rejects malformed responses, host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
 
 No other existing Electron-facing `window.legcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Legcord config, Legcord version, OS release, translations, or Electron version.
@@ -148,7 +170,7 @@ The table lists the exposed `LegcordWindow` groups from `src/@types/legcordWindo
 | --- | --- | --- | --- |
 | `window` — preload titlebar and Shelter titlebar | `show/hide/minimize/maximize/unmaximize/quit(): void`; `maximized()/isNormal(): boolean`; no arguments | Native window lifecycle; custom titlebar is not needed to open Discord | Deferred native commands; dynamic state is asynchronous or event-cached, never sync IPC |
 | `settings.getConfig()` — Shelter settings/power/titlebar | Synchronous; no arguments; full `Settings` object | Reads mutable app settings; not needed for bare Discord, but current UI assumes synchronous state | Populate an initial documented config snapshot only if native settings support is added; migrate updates to async |
-| `settings.setConfig(key,value)` — Shelter settings | Synchronous; key/value; handler returns `undefined` after persisting | Mutates config; not boot-critical | Async validated native request; migrate return type/callers |
+| `settings.setConfig(key,value)` — Shelter settings | Synchronous; key/value; handler returns `undefined` after persisting | Mutates config; not boot-critical | Phase C-3 ports exactly one mutation (`blockPowerSavingInVoiceChat` via the bool-only `settings_set_block_power_saving` command and `settings.set_block_power_saving_in_voice_chat` capability, atomic host-controlled persist, host-confirmed value back). All other keys keep the sync Electron implementation; no generic native writer exists |
 | `settings.addKeybind(keybind)`, `toggleKeybind(id)`, `removeKeybind(id)` | Fire-and-forget; typed keybind or ID; `void` | Mutate settings and refresh global keybinds | Deferred |
 | `settings.openStorageFolder/openThemesFolder/openCustomIconDialog/copyDebugInfo/copyGPUInfo/openWebRTCInternals/openGPUInfo` | Fire-and-forget; no args; `void` | Opens filesystem locations/dialogs/internal pages or writes clipboard | Deferred; host-owned dialogs/paths only |
 | `settings.setLang(lang)` | Fire-and-forget; language string; `void` (type declaration says `() => void`, implementation sends without returning) | Changes app language | Deferred async request |

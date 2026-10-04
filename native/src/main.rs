@@ -23,10 +23,10 @@ use protocol::{
     parse_bridge_message, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage,
     BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
     LocalizationStringResponse, PingResponse, RequestTracker, SettingsConfigResponse,
-    VencordBundleResponse, PROTOCOL_VERSION,
+    SettingsMutationResponse, VencordBundleResponse, PROTOCOL_VERSION,
 };
 use serde::Serialize;
-use settings::load_settings;
+use settings::{apply_block_power_saving, load_settings};
 use tao::{
     dpi::{LogicalSize, Size},
     event::{Event, WindowEvent},
@@ -78,6 +78,7 @@ fn lookup_mod_descriptor(mod_id: &str) -> Option<ModDescriptor> {
 const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD];
 const DISABLE_VENCORD_ADAPTER_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_NO_VENCORD";
 const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
+const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
@@ -89,6 +90,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "bridge.ping",
         "mod.vencord.get_bundle",
         "settings.get_config",
+        "settings.set_block_power_saving_in_voice_chat",
         "localization.get_lang",
     ],
 };
@@ -98,7 +100,6 @@ const VENCORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/vencord/adapter.j
 
 const STORAGE_START_DIAGNOSTIC_SCRIPT: &str =
     include_str!("../web/mod-substrate/storage-preservation.js");
-
 const CSS_INJECTION_SCRIPT: &str = r#"
 (() => {
   const id = "legcord-native-prototype-css";
@@ -364,6 +365,110 @@ const SETTINGS_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
+/// DEV-only settings mutation smoke probe
+/// (`LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1`). Exercises the exact
+/// write the migrated Shelter settings caller performs: read the current
+/// `blockPowerSavingInVoiceChat` via `getConfig`, flip it via the
+/// allowlisted `setBlockPowerSavingInVoiceChat`, then re-read via
+/// `getConfig` and verify. Reports one typed `settings_mutation_probe`
+/// event with `stage: "mutated"`. The host then reloads the document so the
+/// restore stage can verify the mutation survived the reload.
+const SETTINGS_MUTATION_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "settings_mutation_probe", payload } })
+  );
+  const fail = (before, error) => probe({
+    ok: false, stage: "mutated", before, value: before, reread_matches: false,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const settings = window.legcord?.settings;
+    if (typeof settings?.getConfig !== "function" || typeof settings?.setBlockPowerSavingInVoiceChat !== "function") {
+      fail(false, "settings mutation facade missing");
+      return;
+    }
+    settings.getConfig().then(
+      (snapshot) => {
+        const before = snapshot.blockPowerSavingInVoiceChat === true;
+        const pending = settings.setBlockPowerSavingInVoiceChat(!before);
+        if (!(pending instanceof Promise)) {
+          fail(before, "settings mutation facade is not asynchronous");
+          return;
+        }
+        pending.then(
+          (applied) => {
+            settings.getConfig().then(
+              (reread) => probe({
+                ok: reread.blockPowerSavingInVoiceChat === applied && applied === !before,
+                stage: "mutated",
+                before,
+                value: applied,
+                reread_matches: reread.blockPowerSavingInVoiceChat === applied,
+                error: null,
+              }),
+              (error) => fail(before, error),
+            );
+          },
+          (error) => fail(before, error),
+        );
+      },
+      (error) => fail(false, error),
+    );
+  } catch (error) {
+    fail(false, error);
+  }
+})();
+"#;
+
+/// DEV-only restore stage of the mutation smoke probe. The host formats
+/// `__LEGCORD_MUTATION_RESTORE_VALUE__` with the pre-mutation value before
+/// evaluating: read the post-reload value (proving the mutation survived),
+/// write the original back, re-read, and report `stage: "restored"`.
+const SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE: &str = r#"
+(() => {
+  const RESTORE_TO = __LEGCORD_MUTATION_RESTORE_VALUE__;
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "settings_mutation_probe", payload } })
+  );
+  const fail = (before, error) => probe({
+    ok: false, stage: "restored", before, value: before, reread_matches: false,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const settings = window.legcord?.settings;
+    if (typeof settings?.getConfig !== "function" || typeof settings?.setBlockPowerSavingInVoiceChat !== "function") {
+      fail(false, "settings mutation facade missing");
+      return;
+    }
+    settings.getConfig().then(
+      (snapshot) => {
+        const before = snapshot.blockPowerSavingInVoiceChat === true;
+        settings.setBlockPowerSavingInVoiceChat(RESTORE_TO).then(
+          (applied) => {
+            settings.getConfig().then(
+              (reread) => probe({
+                ok: applied === RESTORE_TO && reread.blockPowerSavingInVoiceChat === RESTORE_TO,
+                stage: "restored",
+                before,
+                value: applied,
+                reread_matches: reread.blockPowerSavingInVoiceChat === applied,
+                error: null,
+              }),
+              (error) => fail(before, error),
+            );
+          },
+          (error) => fail(before, error),
+        );
+      },
+      (error) => fail(false, error),
+    );
+  } catch (error) {
+    fail(false, error);
+  }
+})();
+"#;
+
 enum NativeEvent {
     PageLoadStarted,
     PageLoadFinished(String),
@@ -501,6 +606,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_settings_smoke {
         println!("[Settings][Smoke] settings capability smoke probe enabled");
     }
+    let diagnostic_settings_mutation_smoke =
+        std::env::var(SETTINGS_MUTATION_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_settings_mutation_smoke {
+        println!("[Settings][MutationSmoke] settings mutation smoke probe enabled");
+    }
     let diagnostic_getlang_smoke = std::env::var(GETLANG_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_getlang_smoke {
         println!("[Localization][Smoke] localization capability smoke probe enabled");
@@ -579,6 +689,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut document_lifecycle = DocumentModLifecycle::default();
     let mut pending_mods = HashMap::<String, PendingModBootstrap>::new();
     let mut mod_metrics = ModHostMetrics::default();
+    // Mutation smoke stages: 0 = mutate on the first trusted document,
+    // 1 = mutated, reload requested, restore pending on the next document,
+    // 2 = restored (sequence complete, DEV value back to original).
+    let mut mutation_smoke_stage = 0_u8;
+    let mut mutation_smoke_before = false;
+    let mut mutation_smoke_value = false;
     let mut page_load_started_at = None;
     let mut incoming_messages = 0_u64;
     let mut request_count = 0_u64;
@@ -654,6 +770,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 eprintln!("[Settings][Smoke] probe failed: {error}");
                             }
                         }
+                        if diagnostic_settings_mutation_smoke {
+                            if mutation_smoke_stage == 0 {
+                                if let Err(error) =
+                                    webview.evaluate_script(SETTINGS_MUTATION_SMOKE_SCRIPT)
+                                {
+                                    eprintln!("[Settings][MutationSmoke] probe failed: {error}");
+                                }
+                            } else if mutation_smoke_stage == 1 {
+                                let restore = SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE.replace(
+                                    "__LEGCORD_MUTATION_RESTORE_VALUE__",
+                                    if mutation_smoke_before { "true" } else { "false" },
+                                );
+                                if let Err(error) = webview.evaluate_script(&restore) {
+                                    eprintln!("[Settings][MutationSmoke] restore failed: {error}");
+                                }
+                            }
+                        }
                         if diagnostic_getlang_smoke {
                             if let Err(error) = webview.evaluate_script(GETLANG_SMOKE_SCRIPT) {
                                 eprintln!("[Localization][Smoke] probe failed: {error}");
@@ -719,6 +852,59 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         "[Settings][Metrics] source={} payload_bytes={} request_latency_ms={:.3}",
                                         load.source.as_str(),
                                         load.payload_bytes,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("[Settings][settings_unavailable] {error}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "SETTINGS_UNAVAILABLE",
+                                            message: error,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::SettingsSetBlockPowerSaving(payload) => {
+                            // Allowlisted mutation: the field is fixed at
+                            // compile time and the value is a plain bool
+                            // validated by the protocol parser. The settings
+                            // path is built from the fixed host profile only.
+                            let request_id = request.request_id;
+                            match apply_block_power_saving(&profile_path, payload.value) {
+                                Ok(mutation) => {
+                                    let payload_bytes = mutation.payload_bytes;
+                                    let applied = mutation.block_power_saving_in_voice_chat;
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::SettingsMutation(
+                                            SettingsMutationResponse {
+                                                block_power_saving_in_voice_chat: applied,
+                                                source: mutation.source.as_str(),
+                                                payload_bytes,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Settings][Mutation] value={applied} source=file payload_bytes={payload_bytes} request_latency_ms={:.3}",
                                         received_at.elapsed().as_secs_f64() * 1000.0
                                     );
                                 }
@@ -1198,6 +1384,61 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     }
+                    BridgeEvent::SettingsMutationProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Settings][MutationSmoke] ok=true stage={} before={} value={} reread_matches={}",
+                                payload.stage,
+                                payload.before,
+                                payload.value,
+                                payload.reread_matches
+                            );
+                        } else {
+                            eprintln!(
+                                "[Settings][MutationSmoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                        if !diagnostic_settings_mutation_smoke {
+                            return;
+                        }
+                        if payload.stage == "mutated" && mutation_smoke_stage == 0 {
+                            if payload.ok && payload.reread_matches {
+                                mutation_smoke_before = payload.before;
+                                mutation_smoke_value = payload.value;
+                                mutation_smoke_stage = 1;
+                                println!(
+                                    "[Settings][MutationSmoke] mutation persisted; reloading to verify reload survival"
+                                );
+                                if let Err(error) =
+                                    webview.evaluate_script("window.location.reload();")
+                                {
+                                    eprintln!(
+                                        "[Settings][MutationSmoke] verification reload failed: {error}"
+                                    );
+                                }
+                            } else {
+                                eprintln!(
+                                    "[Settings][MutationSmoke] mutate stage failed; not reloading"
+                                );
+                            }
+                        } else if payload.stage == "restored" && mutation_smoke_stage == 1 {
+                            if payload.ok
+                                && payload.reread_matches
+                                && payload.before == mutation_smoke_value
+                            {
+                                mutation_smoke_stage = 2;
+                                println!(
+                                    "[Settings][MutationSmoke] reload survival verified and original value restored"
+                                );
+                            } else {
+                                eprintln!(
+                                    "[Settings][MutationSmoke] restore verification failed (post-reload read did not match the mutated value or restore did not persist)"
+                                );
+                            }
+                        }
+                    }
                     BridgeEvent::GetLangProbe(payload) => {
                         if payload.ok {
                             println!(
@@ -1453,5 +1694,48 @@ mod tests {
         assert!(script.contains("localization.get_lang"));
         assert!(script.contains("getLang"));
         assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_exactly_the_mutation_capability() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.set_block_power_saving_in_voice_chat"));
+        // No generic mutation surface may exist alongside the allowlist.
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.set_config"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.setConfig"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.write"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_async_mutation_facade() {
+        let script = initialization_script(true).unwrap();
+        assert!(script.contains("settings_set_block_power_saving"));
+        assert!(script.contains("settings_mutation"));
+        assert!(script.contains("settings.set_block_power_saving_in_voice_chat"));
+        assert!(script.contains("setBlockPowerSavingInVoiceChat"));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn mutation_smoke_template_restores_only_the_allowlisted_value() {
+        // The restore script carries exactly one host-formatted boolean;
+        // it cannot name a key, path, or second field.
+        assert!(super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE
+            .contains("__LEGCORD_MUTATION_RESTORE_VALUE__"));
+        assert!(super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE
+            .contains("setBlockPowerSavingInVoiceChat(RESTORE_TO)"));
+        assert!(!super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE.contains("setConfig("));
+        let rendered = super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE
+            .replace("__LEGCORD_MUTATION_RESTORE_VALUE__", "false");
+        assert!(!rendered.contains("__LEGCORD_MUTATION_RESTORE_VALUE__"));
+        assert!(rendered.contains("const RESTORE_TO = false;"));
     }
 }

@@ -30,6 +30,7 @@ pub enum BridgeCommand {
     Ping(PingRequest),
     ModVencordGetBundle(VencordBundleRequest),
     SettingsGetConfig(SettingsGetConfigRequest),
+    SettingsSetBlockPowerSaving(SettingsSetBlockPowerSavingRequest),
     LocalizationGetLang(LocalizationGetLangRequest),
 }
 
@@ -49,6 +50,16 @@ pub struct VencordBundleRequest {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsGetConfigRequest {}
+
+/// The single allowlisted `settings.set_block_power_saving_in_voice_chat`
+/// mutation parameter: the new boolean value. There is deliberately NO key,
+/// field name, path, JSON patch, or object: the mutated setting is fixed at
+/// compile time, so arbitrary renderer input can never select another field.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsSetBlockPowerSavingRequest {
+    pub value: bool,
+}
 
 /// The single allowed `localization.get_lang` parameter: one catalog key.
 /// No locale, file, path, URL, or object may be supplied.
@@ -85,6 +96,10 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the settings smoke probe
     /// (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`). Never sent by shipped adapters.
     SettingsProbe(SettingsProbe),
+    /// DEV-only diagnostic posted by the settings mutation smoke probe
+    /// (`LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1`). Never sent by shipped
+    /// adapters.
+    SettingsMutationProbe(SettingsMutationProbe),
     /// DEV-only diagnostic posted by the localization smoke probe
     /// (`LEGCORD_NATIVE_GETLANG_SMOKE=1`). Never sent by shipped adapters.
     GetLangProbe(GetLangProbe),
@@ -163,6 +178,22 @@ pub struct SettingsProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for one stage of the settings mutation smoke sequence:
+/// `stage` is `"mutated"` (write flipped value, re-read, verify) or
+/// `"restored"` (write the original value back, re-read, verify). `before`
+/// is the value read before the stage's write, `value` the applied value,
+/// and `reread_matches` whether a fresh `getConfig` confirmed it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsMutationProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub before: bool,
+    pub value: bool,
+    pub reread_matches: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GetLangProbe {
@@ -195,6 +226,7 @@ pub enum BridgeResponsePayload {
     Ping(PingResponse),
     VencordBundle(VencordBundleResponse),
     SettingsConfig(Box<SettingsConfigResponse>),
+    SettingsMutation(SettingsMutationResponse),
     LocalizationString(LocalizationStringResponse),
 }
 
@@ -235,6 +267,20 @@ pub struct VencordBundleResponse {
 #[derive(Serialize)]
 pub struct SettingsConfigResponse {
     pub settings: SettingsSnapshot,
+    pub source: &'static str,
+    pub payload_bytes: usize,
+}
+
+/// Validated response for the allowlisted `blockPowerSavingInVoiceChat`
+/// mutation. Carries the applied value (so the renderer can update local
+/// state instead of holding stale data), the persistence source (always
+/// `"file"` after a successful write), and the persisted file size.
+/// Electron's synchronous setter returns `undefined`; the async native
+/// caller needs the applied value back, hence this minimal shape instead of
+/// a full snapshot.
+#[derive(Serialize)]
+pub struct SettingsMutationResponse {
+    pub block_power_saving_in_voice_chat: bool,
     pub source: &'static str,
     pub payload_bytes: usize,
 }
@@ -305,6 +351,10 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 }
                 BridgeCommand::ModVencordGetBundle(_) => {}
                 BridgeCommand::SettingsGetConfig(_) => {}
+                // The mutation value is a plain bool: serde already rejected
+                // non-boolean, missing, or extra payload members via
+                // `deny_unknown_fields`, so no further shape check is needed.
+                BridgeCommand::SettingsSetBlockPowerSaving(_) => {}
                 BridgeCommand::LocalizationGetLang(payload) => {
                     if payload.key.is_empty() || payload.key.len() > MAX_LANG_KEY_BYTES {
                         return Err("invalid localization key".to_owned());
@@ -423,6 +473,17 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || payload.ok == payload.error.is_some()
                     {
                         return Err("invalid settings probe result".to_owned());
+                    }
+                }
+                BridgeEvent::SettingsMutationProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "mutated" | "restored")
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid settings mutation probe result".to_owned());
                     }
                 }
                 BridgeEvent::GetLangProbe(payload) => {
@@ -601,6 +662,91 @@ mod tests {
         assert!(parse_bridge_message(invoke).is_err());
     }
 
+    #[test]
+    fn accepts_only_the_allowlisted_block_power_saving_mutation() {
+        let valid = r#"{"version":1,"request_id":"settings-1","command":{"type":"settings_set_block_power_saving","payload":{"value":true}}}"#;
+        assert!(matches!(
+            parse_bridge_message(valid),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // Wrong value types are rejected before dispatch.
+        let string_value = r#"{"version":1,"request_id":"settings-2","command":{"type":"settings_set_block_power_saving","payload":{"value":"yes"}}}"#;
+        let null_value = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set_block_power_saving","payload":{"value":null}}}"#;
+        let int_value = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set_block_power_saving","payload":{"value":1}}}"#;
+        let missing_value = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set_block_power_saving","payload":{}}}"#;
+        assert!(parse_bridge_message(string_value).is_err());
+        assert!(parse_bridge_message(null_value).is_err());
+        assert!(parse_bridge_message(int_value).is_err());
+        assert!(parse_bridge_message(missing_value).is_err());
+    }
+
+    #[test]
+    fn rejects_unauthorized_mutation_shapes() {
+        // No key, field name, path, JSON patch, or object may select a
+        // different setting: the mutated field is fixed at compile time.
+        let with_key = r#"{"version":1,"request_id":"settings-1","command":{"type":"settings_set_block_power_saving","payload":{"value":true,"key":"minimizeToTray"}}}"#;
+        let with_field = r#"{"version":1,"request_id":"settings-2","command":{"type":"settings_set_block_power_saving","payload":{"value":true,"field":"tray"}}}"#;
+        let with_path = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set_block_power_saving","payload":{"value":true,"path":"C:\\secret"}}}"#;
+        let with_object = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set_block_power_saving","payload":{"settings":{"tray":"disabled"}}}}}"#;
+        assert!(parse_bridge_message(with_key).is_err());
+        assert!(parse_bridge_message(with_field).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_object).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_settings_mutation_response() {
+        use super::SettingsMutationResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "settings-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::SettingsMutation(
+                SettingsMutationResponse {
+                    block_power_saving_in_voice_chat: true,
+                    source: "file",
+                    payload_bytes: 2048,
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "settings_mutation");
+        assert_eq!(
+            value["payload"]["payload"]["block_power_saving_in_voice_chat"],
+            true
+        );
+        assert_eq!(value["payload"]["payload"]["source"], "file");
+        // The response carries only the applied field, never a key/path.
+        assert!(value["payload"]["payload"].get("key").is_none());
+        assert!(value["payload"]["payload"].get("path").is_none());
+    }
+
+    #[test]
+    fn validates_settings_mutation_probe_diagnostics() {
+        let mutated = r#"{"version":1,"event":{"type":"settings_mutation_probe","payload":{"ok":true,"stage":"mutated","before":false,"value":true,"reread_matches":true,"error":null}}}"#;
+        let restored = r#"{"version":1,"event":{"type":"settings_mutation_probe","payload":{"ok":true,"stage":"restored","before":true,"value":false,"reread_matches":true,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"settings_mutation_probe","payload":{"ok":false,"stage":"mutated","before":false,"value":false,"reread_matches":false,"error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"settings_mutation_probe","payload":{"ok":true,"stage":"deleted","before":false,"value":true,"reread_matches":true,"error":null}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"settings_mutation_probe","payload":{"ok":true,"stage":"mutated","before":false,"value":true,"reread_matches":true,"error":"extra"}}}"#;
+        assert!(parse_bridge_message(mutated).is_ok());
+        assert!(parse_bridge_message(restored).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn mutation_request_ids_reset_with_the_document() {
+        let mut tracker = RequestTracker::default();
+        assert!(tracker.begin("settings-mutate-1").is_ok());
+        // A duplicate within one document is rejected (stale/double-submit).
+        assert!(tracker.begin("settings-mutate-1").is_err());
+        tracker.clear();
+        assert!(tracker.begin("settings-mutate-1").is_ok());
+        assert!(tracker.complete("settings-mutate-1").is_ok());
+    }
     #[test]
     fn serializes_a_typed_settings_snapshot_response() {
         use super::SettingsConfigResponse;

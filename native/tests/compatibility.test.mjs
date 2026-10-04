@@ -297,6 +297,172 @@ test("a reloaded document gets a fresh settings facade with no stale promises", 
     assert.equal((await pending).blockPowerSavingInVoiceChat, false);
 });
 
+function createMutationRuntime(
+    capabilities = ["bridge.ping", "settings.get_config", "settings.set_block_power_saving_in_voice_chat"],
+) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondMutation(window, request, value = true, extra = {}) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "settings_mutation",
+                    payload: {
+                        block_power_saving_in_voice_chat: value,
+                        source: "file",
+                        payload_bytes: 2048,
+                        ...extra,
+                    },
+                },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes an asynchronous block-power-saving setter and no generic writer", () => {
+    const { window } = createMutationRuntime();
+    assert.equal(typeof window.legcord.settings.setBlockPowerSavingInVoiceChat, "function");
+    assert.equal(Object.isFrozen(window.legcord.settings), true);
+    assert.equal(window.legcord.native.supports("settings.set_block_power_saving_in_voice_chat"), true);
+    // No generic key/value RPC may exist.
+    assert.equal(window.legcord.settings.setConfig, undefined);
+});
+
+test("the mutation setter sends a bool-only typed request and resolves the applied value", async () => {
+    const { window } = createMutationRuntime();
+    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "settings_set_block_power_saving", payload: { value: true } });
+
+    respondMutation(window, message, true);
+    assert.equal(await pending, true);
+});
+
+test("the mutation setter throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createMutationRuntime(["bridge.ping", "settings.get_config"]);
+    assert.equal(window.legcord.native.supports("settings.set_block_power_saving_in_voice_chat"), false);
+    assert.throws(
+        () => window.legcord.settings.setBlockPowerSavingInVoiceChat(true),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "settings_set_block_power_saving"),
+        false,
+    );
+});
+
+test("the mutation setter rejects non-boolean values without sending", async () => {
+    const { window } = createMutationRuntime();
+    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat("yes"), /must be a boolean/);
+    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat(1), /must be a boolean/);
+    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat(undefined), /must be a boolean/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "settings_set_block_power_saving"),
+        false,
+    );
+});
+
+test("the mutation setter rejects malformed mutation responses", async () => {
+    const { window } = createMutationRuntime();
+    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
+    respondMutation(window, message, "yes");
+    await assert.rejects(pending, /mutation response schema is invalid/);
+
+    const second = createMutationRuntime();
+    const pending2 = second.window.legcord.settings.setBlockPowerSavingInVoiceChat(false);
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
+    respondMutation(second.window, message2, false, { source: "defaults" });
+    await assert.rejects(pending2, /mutation response schema is invalid/);
+});
+
+test("the mutation setter rejects host failures without applying state", async () => {
+    const { window } = createMutationRuntime();
+    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "SETTINGS_UNAVAILABLE", message: "settings file is invalid" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /settings file is invalid/);
+});
+
+test("the mutation setter rejects after its timeout", async () => {
+    const { window } = createMutationRuntime();
+    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat(true, 50), /timed out/);
+});
+
+test("the mutation setter rejects pending requests when the document is disposed", async () => {
+    const { window } = createMutationRuntime();
+    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh mutation facade with no stale promises", async () => {
+    const firstDocument = createMutationRuntime();
+    const stale = firstDocument.window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createMutationRuntime();
+    const pending = nextDocument.window.legcord.settings.setBlockPowerSavingInVoiceChat(false);
+    const message = nextDocument.window.messages.find(
+        (entry) => entry.command?.type === "settings_set_block_power_saving",
+    );
+    respondMutation(nextDocument.window, message, false);
+    assert.equal(await pending, false);
+});
+
+test("the migrated caller updates local state only from the host-confirmed value", async () => {
+    const { window } = createMutationRuntime();
+    // Mirrors src/shelter/settings/settings.ts: local store first holds the
+    // old value and is assigned only after the capability resolves.
+    const store = { blockPowerSavingInVoiceChat: false };
+    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
+    assert.equal(store.blockPowerSavingInVoiceChat, false);
+    respondMutation(window, message, true);
+    store.blockPowerSavingInVoiceChat = await pending;
+    assert.equal(store.blockPowerSavingInVoiceChat, true);
+
+    const failing = createMutationRuntime();
+    const rejected = failing.window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const failedMessage = failing.window.messages.find(
+        (entry) => entry.command?.type === "settings_set_block_power_saving",
+    );
+    failing.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: failedMessage.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "SETTINGS_UNAVAILABLE", message: "settings file is invalid" },
+            },
+        }),
+    );
+    await assert.rejects(rejected, /settings file is invalid/);
+    assert.equal(store.blockPowerSavingInVoiceChat, true);
+});
+
 test("initializes a frozen compatibility facade with the boot snapshot", () => {
     const { window } = createRuntime();
     assert.ok(window.legcord);

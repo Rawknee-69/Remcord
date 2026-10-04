@@ -127,6 +127,37 @@ export function setConfig<K extends keyof Settings>(key: K, value: Settings[K], 
     });
 }
 
+/** True when running under the native WebView2 shell (Phase C-3+). */
+export function isNativeWebView(): boolean {
+    return (window.legcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2";
+}
+
+/** Minimal native settings mutation shape for this caller. */
+interface NativeBlockPowerSavingSettings {
+    setBlockPowerSavingInVoiceChat: (value: boolean) => Promise<boolean>;
+}
+
+/**
+ * Native WebView2 path for the ONE allowlisted `blockPowerSavingInVoiceChat`
+ * mutation (Phase C-3). Awaits the typed async
+ * `settings.set_block_power_saving_in_voice_chat` capability and only then
+ * updates local store state from the host-confirmed value, so the renderer
+ * never holds stale state. A rejected mutation leaves local state untouched.
+ * The Electron path stays in `setConfig` above, unchanged.
+ */
+export async function setBlockPowerSavingInVoiceChat(value: boolean): Promise<boolean> {
+    const nativeSet = (window.legcord as unknown as { settings: NativeBlockPowerSavingSettings }).settings
+        .setBlockPowerSavingInVoiceChat;
+    const applied = await nativeSet(value);
+    withPreservedSettingsScroll(() => {
+        // Mutate in place — do NOT replace store.settings (that remounts the page and jumps scroll).
+        store.settings.blockPowerSavingInVoiceChat = applied;
+        console.log("blockPowerSavingInVoiceChat", ":", store.settings.blockPowerSavingInVoiceChat);
+        isRestartRequired = true;
+    });
+    return applied;
+}
+
 function removeMod(array: ValidMods[], filter: ValidMods) {
     return array.filter((i) => i !== filter);
 }
