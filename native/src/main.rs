@@ -48,6 +48,20 @@ use tao::{
     window::WindowBuilder,
 };
 use themes::{load_enabled_themes, LoadedTheme};
+#[cfg(target_os = "windows")]
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
+    ICoreWebView2_2, COREWEBVIEW2_WEB_RESOURCE_CONTEXT,
+};
+#[cfg(target_os = "windows")]
+use webview2_com::WebResourceRequestedEventHandler;
+#[cfg(target_os = "windows")]
+use windows::{
+    core::{Interface, BOOL, HSTRING, PWSTR},
+    Win32::System::Com::IStream,
+};
+#[cfg(target_os = "windows")]
+use wry::WebViewExtWindows;
 use wry::{
     http::{Request, Uri},
     NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder,
@@ -1516,6 +1530,268 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("[Native] WebView2 prototype started");
     println!("[Native] Persistent DEV profile: {WEBVIEW_PROFILE}");
     println!("[Native] Initial navigation: {DISCORD_URL}");
+
+    // Register WebResourceRequested handler to modify CSP header for Discord main document
+    // This reproduces Electron's setupNoCSP() behavior by intercepting the main document response
+    // and adding badges.vencord.dev to the connect-src directive.
+    #[cfg(target_os = "windows")]
+    {
+        let core_webview2: ICoreWebView2 = webview.webview();
+        // Add filter for main frame document resources on discord.com
+        let filter = HSTRING::from("https://discord.com/*");
+        if let Ok(webview2) = core_webview2.cast::<ICoreWebView2_2>() {
+            unsafe {
+                webview2
+                    .AddWebResourceRequestedFilter(
+                        &filter,
+                        COREWEBVIEW2_WEB_RESOURCE_CONTEXT(1), // DOCUMENT
+                    )
+                    .ok();
+            }
+        }
+        // Get environment for creating WebResourceResponse
+        let env: ICoreWebView2Environment = if let Ok(wv2) = core_webview2.cast::<ICoreWebView2_2>()
+        {
+            unsafe { wv2.Environment().unwrap() }
+        } else {
+            eprintln!("[CSP] Failed to get ICoreWebView2_2 for environment");
+            return Ok(()); // Early return from main
+        };
+        // Register WebResourceRequested handler
+        let handler = WebResourceRequestedEventHandler::create(Box::new(
+            move |_sender: Option<ICoreWebView2>,
+                  args: Option<ICoreWebView2WebResourceRequestedEventArgs>| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let request = match unsafe { args.Request() } {
+                    Ok(r) => r,
+                    Err(_) => return Ok(()),
+                };
+                let uri = {
+                    let mut uri = PWSTR::null();
+                    if unsafe { request.Uri(&mut uri) }.is_err() {
+                        return Ok(());
+                    }
+                    unsafe { uri.to_string().unwrap_or_default() }
+                };
+                // Only process main document navigation to /app
+                if !uri.starts_with("https://discord.com/app") {
+                    return Ok(());
+                }
+                // Get deferral to handle asynchronously
+                let deferral = match unsafe { args.GetDeferral() } {
+                    Ok(d) => d,
+                    Err(_) => return Ok(()),
+                };
+                // Extract all request data in the main thread (COM interfaces are not Send)
+                let method = {
+                    let mut m = PWSTR::null();
+                    if unsafe { request.Method(&mut m) }.is_err() {
+                        let _ = unsafe { deferral.Complete() };
+                        return Ok(());
+                    }
+                    unsafe { m.to_string().unwrap_or_else(|_| "GET".to_string()) }
+                };
+                let headers = match unsafe { request.Headers() } {
+                    Ok(h) => h,
+                    Err(_) => {
+                        let _ = unsafe { deferral.Complete() };
+                        return Ok(());
+                    }
+                };
+                let mut request_headers = Vec::new();
+                let iter = match unsafe { headers.GetIterator() } {
+                    Ok(i) => i,
+                    Err(_) => {
+                        let _ = unsafe { deferral.Complete() };
+                        return Ok(());
+                    }
+                };
+                let mut has_current = BOOL::default();
+                if unsafe { iter.HasCurrentHeader(&mut has_current) }.is_err() {
+                    let _ = unsafe { deferral.Complete() };
+                    return Ok(());
+                }
+                while has_current.as_bool() {
+                    let mut key = PWSTR::null();
+                    let mut value = PWSTR::null();
+                    if unsafe { iter.GetCurrentHeader(&mut key, &mut value) }.is_err() {
+                        break;
+                    }
+                    let key_str = unsafe { key.to_string().unwrap_or_default() };
+                    let val_str = unsafe { value.to_string().unwrap_or_default() };
+                    // Skip headers that WebView2 will set automatically
+                    if !matches!(
+                        key_str.to_lowercase().as_str(),
+                        "host" | "connection" | "accept-encoding"
+                    ) {
+                        request_headers.push((key_str, val_str));
+                    }
+                    if unsafe { iter.MoveNext(&mut has_current) }.is_err() {
+                        break;
+                    }
+                }
+                // Get request body if present
+                let body = match unsafe { request.Content() } {
+                    Ok(content) => {
+                        let mut body_bytes = Vec::new();
+                        if let Ok(stream) = content.cast::<IStream>() {
+                            let mut buffer = [0u8; 8192];
+                            loop {
+                                let mut read = 0u32;
+                                unsafe {
+                                    if stream
+                                        .Read(
+                                            buffer.as_mut_ptr() as *mut _,
+                                            buffer.len() as u32,
+                                            Some(&mut read),
+                                        )
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                if read == 0 {
+                                    break;
+                                }
+                                body_bytes.extend_from_slice(&buffer[..read as usize]);
+                            }
+                        }
+                        if body_bytes.is_empty() {
+                            None
+                        } else {
+                            Some(body_bytes)
+                        }
+                    }
+                    Err(_) => None,
+                };
+                // Forward the request using ureq (synchronously in handler)
+                let mut req = ureq::request(&method, &uri);
+                // Copy request headers (pre-extracted)
+                for (key_str, val_str) in request_headers {
+                    req = req.set(&key_str, &val_str);
+                }
+                let response = if let Some(body) = body {
+                    req.send_bytes(&body)
+                } else {
+                    req.call()
+                };
+                let response = match response {
+                    Ok(r) => r,
+                    Err(_) => {
+                        let _ = unsafe { deferral.Complete() };
+                        return Ok(());
+                    }
+                };
+                // Build response headers, modifying CSP
+                let mut headers_map = String::new();
+                let mut csp_modified = false;
+                // ureq Response uses header() method, not headers()
+                let mut header_names = Vec::new();
+                // Collect known header names from the response
+                for name in [
+                    "content-security-policy",
+                    "content-type",
+                    "cache-control",
+                    "expires",
+                    "etag",
+                    "last-modified",
+                    "server",
+                    "date",
+                    "vary",
+                    "x-content-type-options",
+                    "x-frame-options",
+                    "strict-transport-security",
+                    "referrer-policy",
+                    "permissions-policy",
+                    "cross-origin-opener-policy",
+                    "cross-origin-resource-policy",
+                    "cross-origin-embedder-policy",
+                ] {
+                    if let Some(val) = response.header(name) {
+                        header_names.push((name.to_string(), val.to_string()));
+                    }
+                }
+                for (name_str, val_str) in header_names {
+                    if name_str.to_lowercase() == "content-security-policy" {
+                        let mut csp = val_str.to_string();
+                        if !csp.contains("badges.vencord.dev") {
+                            csp = if let Some(pos) = csp.to_lowercase().find("connect-src") {
+                                let after = &csp[pos..];
+                                let end = after.find(';').unwrap_or(after.len());
+                                let directive = &after[..end].trim();
+                                if !directive.contains("badges.vencord.dev") {
+                                    csp.replacen(
+                                        directive,
+                                        &format!("{} https://badges.vencord.dev", directive),
+                                        1,
+                                    )
+                                } else {
+                                    csp
+                                }
+                            } else {
+                                format!("{}; connect-src https://badges.vencord.dev", csp)
+                            };
+                            csp_modified = true;
+                        }
+                        headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));
+                    } else {
+                        headers_map.push_str(&format!("{}: {}\r\n", name_str, val_str));
+                    }
+                }
+                // If no CSP header existed, add one
+                if !csp_modified {
+                    headers_map.push_str(
+                        "content-security-policy: connect-src https://badges.vencord.dev\r\n",
+                    );
+                }
+                let status = response.status();
+                // ureq 2.x: read body as string then convert to bytes
+                let text = response.into_string().unwrap_or_default();
+                let body_bytes = text.into_bytes();
+                // Create WebResourceResponse
+                let status_hstring = HSTRING::from(
+                    http::StatusCode::from_u16(status)
+                        .unwrap()
+                        .canonical_reason()
+                        .unwrap_or("OK"),
+                );
+                let headers_hstring = HSTRING::from(headers_map);
+                let stream = if !body_bytes.is_empty() {
+                    // Create IStream from bytes using SHCreateMemStream
+                    let mut stream: Option<IStream> = None;
+                    unsafe {
+                        if let Some(s) =
+                            windows::Win32::UI::Shell::SHCreateMemStream(Some(&body_bytes))
+                        {
+                            stream = Some(s);
+                        }
+                    }
+                    stream
+                } else {
+                    None
+                };
+                if let Ok(web_response) = unsafe {
+                    env.CreateWebResourceResponse(
+                        stream.as_ref(),
+                        status as i32,
+                        &status_hstring,
+                        &headers_hstring,
+                    )
+                } {
+                    let _ = unsafe { args.SetResponse(&web_response) };
+                }
+                let _ = unsafe { deferral.Complete() };
+                Ok(())
+            },
+        ));
+        let mut token = 0i64;
+        unsafe {
+            let _ = core_webview2.add_WebResourceRequested(&handler, &mut token);
+        }
+        println!("[CSP] WebResourceRequested handler registered for Discord main document (CSP modification)");
+    }
     let mut smoke_reloads_remaining: u32 = std::env::var("LEGCORD_NATIVE_SMOKE_RELOAD")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -1655,42 +1931,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         if let Err(error) = webview.evaluate_script(BRIDGE_PROBE_SCRIPT) {
                             eprintln!("[Injection] Bridge probe failed: {error}");
-                        }
-                        // CSP adjustment for Vencord badges: Electron's setupNoCSP() removes the
-                        // CSP header entirely; native WebView2 preserves it. Discord's vanilla CSP
-                        // connect-src does not include badges.vencord.dev. We add it explicitly.
-                        // This is the narrowest safe adjustment: only one origin, one directive.
-                        const CSP_BADGES_SCRIPT: &str = r#"
-                            (() => {
-                                const cspMeta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
-                                if (!cspMeta) {
-                                    console.log("[Legcord] CSP meta tag not found; CSP may be header-only");
-                                    return;
-                                }
-                                const csp = cspMeta.getAttribute("content");
-                                if (!csp) {
-                                    console.log("[Legcord] CSP content attribute missing");
-                                    return;
-                                }
-                                // Match connect-src and add badges.vencord.dev if not present
-                                const connectSrcMatch = /connect-src\s+([^;]+)/i.exec(csp);
-                                if (!connectSrcMatch) {
-                                    console.log("[Legcord] connect-src directive not found in CSP");
-                                    return;
-                                }
-                                const connectSrc = connectSrcMatch[1].trim();
-                                if (connectSrc.includes("badges.vencord.dev")) {
-                                    console.log("[Legcord] badges.vencord.dev already in connect-src");
-                                    return;
-                                }
-                                const newConnectSrc = connectSrc + " https://badges.vencord.dev";
-                                const newCsp = csp.replace(connectSrc, newConnectSrc);
-                                cspMeta.setAttribute("content", newCsp);
-                                console.log("[Legcord] CSP connect-src updated to allow badges.vencord.dev");
-                            })();
-                        "#;
-                        if let Err(error) = webview.evaluate_script(CSP_BADGES_SCRIPT) {
-                            eprintln!("[CSP] Badges script failed: {error}");
                         }
                         // Host-pushed Quick CSS injection (Phase D): the renderer
                         // never requests Quick CSS, so there is no bridge
