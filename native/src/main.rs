@@ -3,6 +3,7 @@ mod localization;
 mod mod_substrate;
 mod plugin_storage;
 mod protocol;
+mod quick_css;
 mod settings;
 mod themes;
 
@@ -31,6 +32,7 @@ use protocol::{
     PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
     VencordBundleResponse, PROTOCOL_VERSION,
 };
+use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
 use settings::{apply_block_power_saving, load_settings};
 use tao::{
@@ -90,6 +92,7 @@ const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
+const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
@@ -429,22 +432,32 @@ const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only theme smoke observation (`LEGCORD_NATIVE_THEMES_SMOKE=1`).
-/// Theme injection is a host push: the renderer never requests theme CSS, so
-/// this probe only observes the managed `<style>` nodes the host injected at
-/// document load. It returns JSON through the evaluate callback (like the
-/// renderer health probe), never through the typed bridge.
+/// DEV-only managed-styles observation (`LEGCORD_NATIVE_THEMES_SMOKE=1` or
+/// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
+/// pushes: the renderer never requests their CSS, so this probe only observes
+/// the managed `<style>` nodes the host injected at document load. It returns
+/// JSON through the evaluate callback (like the renderer health probe), never
+/// through the typed bridge. `order_probe` reports the computed value of the
+/// harmless `--legcord-native-order-probe` custom property the DEV fixtures
+/// set in both Quick CSS and themes, proving cascade order (later stylesheets
+/// win on equal specificity).
 const THEMES_SMOKE_SCRIPT: &str = r#"
 (() => {
   const head = document.head;
   const headOrder = head ? [...head.querySelectorAll("style")].map((node) => node.id) : [];
   const nodes = [...document.querySelectorAll('style[id^="legcord-native-theme-"]')]
     .map((node) => ({ id: node.id, bytes: (node.textContent || "").length }));
+  const quickCssNode = document.getElementById("legcord-quick-css");
   return JSON.stringify({
     count: nodes.length,
     themes: nodes,
     head_style_order: headOrder,
     vencord_present: headOrder.includes("legcord-native-vencord-css"),
+    quickcss_present: Boolean(quickCssNode),
+    quickcss_bytes: quickCssNode ? (quickCssNode.textContent || "").length : 0,
+    order_probe: getComputedStyle(document.documentElement)
+      .getPropertyValue("--legcord-native-order-probe")
+      .trim(),
   });
 })()
 "#;
@@ -769,6 +782,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_themes_smoke {
         println!("[Themes][Smoke] native theme injection smoke observation enabled");
     }
+    let diagnostic_quickcss_smoke =
+        std::env::var(QUICKCSS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_quickcss_smoke {
+        println!("[QuickCss][Smoke] native Quick CSS smoke observation enabled");
+    }
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
@@ -842,6 +860,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut request_tracker = RequestTracker::default();
     let mut document_lifecycle = DocumentModLifecycle::default();
     let mut pending_mods = HashMap::<String, PendingModBootstrap>::new();
+    // Whether the Quick CSS managed style was injected into the latest
+    // trusted document, so the next document reset can remove it when the
+    // flag flips to disabled. The DOM itself is fresh per document; this
+    // only names what to clean on a state change.
+    let mut last_quickcss_injected = false;
     // Managed theme style ids injected into the latest trusted document, so
     // the next document reset can remove styles for themes that are no
     // longer enabled. The DOM itself is fresh per document; this list only
@@ -919,6 +942,59 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if let Err(error) = webview.evaluate_script(BRIDGE_PROBE_SCRIPT) {
                             eprintln!("[Injection] Bridge probe failed: {error}");
                         }
+                        // Host-pushed Quick CSS injection (Phase D): the renderer
+                        // never requests Quick CSS, so there is no bridge
+                        // round trip here. The host reads its own fixed
+                        // quickCss.css when the authoritative settings flag
+                        // is enabled and pushes it through the shared
+                        // managed-CSS lifecycle BEFORE themes, preserving
+                        // Electron's Vencord -> Quick CSS -> themes cascade.
+                        let quickcss_report = load_quick_css(&profile_path);
+                        let mut quickcss_injected = false;
+                        match &quickcss_report.css {
+                            Some(css) => {
+                                match managed_css_script(QUICK_CSS_STYLE_ID, css) {
+                                    Ok(script) => {
+                                        if let Err(error) = webview.evaluate_script(&script) {
+                                            eprintln!("[QuickCss][css_injection] {error}");
+                                        } else {
+                                            quickcss_injected = true;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        eprintln!("[QuickCss][css_injection] {error}");
+                                    }
+                                }
+                            }
+                            None => {
+                                // Disabled (or unreadable) after a previous
+                                // injection: remove the managed style so no
+                                // stale Quick CSS survives the reset. On a
+                                // fresh document this is a cheap no-op.
+                                if last_quickcss_injected {
+                                    match managed_css_remove_script(QUICK_CSS_STYLE_ID) {
+                                        Ok(script) => {
+                                            if let Err(error) = webview.evaluate_script(&script)
+                                            {
+                                                eprintln!("[QuickCss][css_removal] {error}");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            eprintln!("[QuickCss][css_removal] {error}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        last_quickcss_injected = quickcss_injected;
+                        println!(
+                            "[QuickCss][Metrics] enabled={} state={} injected={} css_bytes={} read_ms={:.3}",
+                            quickcss_report.enabled,
+                            quickcss_report.state,
+                            quickcss_injected,
+                            quickcss_report.css_bytes,
+                            quickcss_report.read_ms,
+                        );
                         // Host-pushed theme injection (Phase D): the renderer
                         // never requests theme CSS, so there is no bridge
                         // round trip here. The host loads enabled themes from
@@ -988,10 +1064,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 );
                             }
                         }
-                        if diagnostic_themes_smoke {
+                        if diagnostic_themes_smoke || diagnostic_quickcss_smoke {
+                            // Copied for the 'static observation callback.
+                            let themes_smoke = diagnostic_themes_smoke;
+                            let quickcss_smoke = diagnostic_quickcss_smoke;
                             if let Err(error) = webview.evaluate_script_with_callback(
                                 THEMES_SMOKE_SCRIPT,
-                                |result| println!("[Themes][Smoke] managed_styles={result}"),
+                                move |result| {
+                                    if themes_smoke {
+                                        println!("[Themes][Smoke] managed_styles={result}");
+                                    }
+                                    if quickcss_smoke {
+                                        println!("[QuickCss][Smoke] managed_styles={result}");
+                                    }
+                                },
                             ) {
                                 eprintln!("[Themes][Smoke] observation failed: {error}");
                             }
@@ -2260,6 +2346,8 @@ mod tests {
         assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-native-theme-"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("querySelectorAll"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-native-vencord-css"));
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-quick-css"));
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("order-probe"));
         // Null-safe in a headless early document: a missing head yields an
         // empty order instead of throwing.
         assert!(super::THEMES_SMOKE_SCRIPT.contains("document.head"));
@@ -2267,6 +2355,29 @@ mod tests {
         assert!(!super::THEMES_SMOKE_SCRIPT.contains("postMessage"));
         assert!(!super::THEMES_SMOKE_SCRIPT.contains("getCSS"));
         assert!(!super::THEMES_SMOKE_SCRIPT.contains("eval("));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_no_quickcss_capability() {
+        // Quick CSS is a host push like themes: the renderer never requests
+        // it, so no Quick CSS capability may exist anywhere near the bridge.
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert!(!capability.contains("quickcss"));
+            assert!(!capability.contains("quick_css"));
+            assert!(!capability.contains("quickCss"));
+        }
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_no_quickcss_pull_surface() {
+        // The renderer pull stays rejected: no quickCss.get() shape may be
+        // introduced alongside the host push.
+        let script = initialization_script(true).unwrap();
+        assert!(!script.contains("quickCss"));
+        assert!(!script.contains("quickcss"));
+        assert!(!script.contains("quick_css"));
     }
 
     #[test]

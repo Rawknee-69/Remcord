@@ -1366,3 +1366,115 @@ test("the theme smoke observation sees exactly the managed theme styles", () => 
     assert.deepEqual(headOrder, ["legcord-native-vencord-css", "legcord-native-theme-alpha"]);
     assert.ok(headOrder.includes("legcord-native-vencord-css"));
 });
+
+// Managed Quick CSS lifecycle contract (Phase D Quick CSS host-push).
+//
+// The host push reuses the same managed-CSS builders as themes
+// (`managed_css_script`/`managed_css_remove_script`, structurally asserted in
+// Rust), so these tests pin the Quick CSS specifics on the shared contract:
+// Electron's verbatim `legcord-quick-css` identity, injection BEFORE themes
+// (Electron's `initQuickCss`-before-theme-loop order), empty-CSS push parity,
+// and clean disabled/reload/reset behavior. Cascade note: for equal
+// specificity, later stylesheets win, so append order IS the cascade order.
+test("Quick CSS injects under Electron's verbatim style identity", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    assert.equal(headChildren.length, 1);
+    assert.equal(headChildren[0].id, "legcord-quick-css");
+    assert.equal(headChildren[0].textContent, ":root{--q:1;}");
+});
+
+test("Quick CSS injection reuses its style instead of duplicating", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:2;}");
+    assert.equal(headChildren.length, 1);
+    assert.equal(document.getElementById("legcord-quick-css").textContent, ":root{--q:2;}");
+});
+
+test("empty Quick CSS is pushed as an empty managed style like Electron", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", "");
+    assert.equal(headChildren.length, 1);
+    assert.equal(document.getElementById("legcord-quick-css").textContent, "");
+});
+
+test("Quick CSS injects before themes in the document head", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    // The host emits Quick CSS before the sorted theme set, matching
+    // Electron's initQuickCss-before-theme-loop order.
+    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--probe:theme;}");
+    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--probe:theme;}");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+    );
+});
+
+test("disabled Quick CSS leaves no style while themes still inject", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    // Disabled means the host never pushes: no node is created at all.
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    assert.equal(document.getElementById("legcord-quick-css"), null);
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-native-theme-alpha"],
+    );
+    // Disabling after an injection removes exactly the Quick CSS style.
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeRemove(document, "legcord-quick-css");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-native-theme-alpha"],
+    );
+});
+
+test("a reloaded document resets Quick CSS alongside themes", () => {
+    const first = createFakeThemeDocument();
+    managedThemeInject(first.document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    assert.equal(first.headChildren.length, 2);
+
+    const next = createFakeThemeDocument();
+    assert.equal(next.headChildren.length, 0);
+    managedThemeRemove(next.document, "legcord-quick-css");
+    managedThemeInject(next.document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(next.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    assert.deepEqual(
+        next.headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha"],
+    );
+});
+
+test("Quick CSS coexists with Vencord and themes in cascade order", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--probe:theme;}");
+    // Re-injecting everything (as a reload would) duplicates nothing.
+    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--probe:theme;}");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-native-vencord-css", "legcord-quick-css", "legcord-native-theme-alpha"],
+    );
+});
+
+test("the smoke observation reports Quick CSS presence and bytes", () => {
+    const { document } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    const quickCssNode = document.getElementById("legcord-quick-css");
+    const observed = {
+        quickcss_present: Boolean(quickCssNode),
+        quickcss_bytes: quickCssNode ? (quickCssNode.textContent || "").length : 0,
+    };
+    assert.deepEqual(observed, { quickcss_present: true, quickcss_bytes: ":root{--q:1;}".length });
+
+    const empty = createFakeThemeDocument();
+    const missing = empty.document.getElementById("legcord-quick-css");
+    assert.deepEqual(
+        { quickcss_present: Boolean(missing), quickcss_bytes: missing ? missing.textContent.length : 0 },
+        { quickcss_present: false, quickcss_bytes: 0 },
+    );
+});

@@ -222,3 +222,53 @@ test("no src caller is migrated to a native theme path in this milestone", () =>
     assert.doesNotMatch(heroUpdater, /legcord-native-theme/);
     assert.doesNotMatch(invite, /legcord-native-theme/);
 });
+
+test("Electron keeps the Quick CSS host-push lifecycle", () => {
+    // Missing file is created empty, content (even empty) is always pushed
+    // as legcord-quick-css BEFORE themes, with a 300 ms-debounced watcher
+    // for live updates and removeTheme on disable.
+    assert.match(themesMain, /const quickCssPath = path\.join\(userDataPath, "\/quickCss\.css"\)/);
+    assert.match(themesMain, /if \(!fs\.existsSync\(quickCssPath\)\)/);
+    assert.match(themesMain, /fs\.writeFileSync\(quickCssPath, ""\)/);
+    assert.match(themesMain, /webContents\.send\("addTheme", "legcord-quick-css"/);
+    assert.match(themesMain, /webContents\.send\(\s*"removeTheme", "legcord-quick-css"\)/);
+    assert.match(themesMain, /}, 300\)/);
+});
+
+test("Electron keeps the Quick CSS enablement contract", () => {
+    // Enabled flag is settings.quickCss (default true); startup guards on
+    // it inside injectThemesMain, the Themes page toggles via enable/disable
+    // IPC plus setConfig.
+    assert.match(themesMain, /if \(getConfig\("quickCss"\)\) initQuickCss\(browserWindow\)/);
+    assert.match(ipc, /ipcMain\.on\("enableQuickCss"/);
+    assert.match(ipc, /ipcMain\.on\("disableQuickCss"/);
+    const config = readFileSync(new URL("../../src/common/config.ts", import.meta.url), "utf8");
+    assert.match(config, /quickCss: true,/);
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(themesPage, /window\.legcord\.themes\.enableQuickCss\(\)/);
+    assert.match(themesPage, /window\.legcord\.themes\.disableQuickCss\(\)/);
+    assert.match(themesPage, /setConfig\("quickCss", e\)/);
+});
+
+test("no renderer Quick CSS pull exists in Electron or native", () => {
+    // Quick CSS is a host -> renderer push with no pull-style reader: the
+    // bridge exposes only push-side members (open/import/enable/disable via
+    // fire-and-forget send), never a CSS-returning read. No quickCss.get()
+    // shape may be introduced on either side.
+    assert.doesNotMatch(bridge, /getQuickCss|readQuickCss|invoke\("getQuickCss"/);
+    assert.doesNotMatch(types, /getQuickCss|readQuickCss/);
+    assert.doesNotMatch(themesMain, /getQuickCss|quickCss\.get|getCSS/);
+    assert.doesNotMatch(nativeFacade, /quickCss/i);
+    assert.doesNotMatch(nativeFacade, /legcord-quick-css/);
+});
+
+test("no src caller is migrated to a native Quick CSS path in this milestone", () => {
+    // Static startup injection is host-driven: no renderer caller changes.
+    assert.doesNotMatch(power, /legcord-quick-css/);
+    assert.doesNotMatch(shelterSettings, /legcord-quick-css/);
+    assert.doesNotMatch(heroUpdater, /legcord-quick-css/);
+    assert.doesNotMatch(invite, /legcord-quick-css/);
+});
