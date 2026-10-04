@@ -175,3 +175,50 @@ test("no src caller is migrated to a native plugin-storage path in this mileston
     assert.doesNotMatch(heroUpdater, /pluginStorage/);
     assert.doesNotMatch(invite, /pluginStorage/);
 });
+
+const themesMain = readFileSync(new URL("../../src/common/themes.ts", import.meta.url), "utf8");
+const themesPreload = readFileSync(new URL("../../src/discord/preload/themes.ts", import.meta.url), "utf8");
+const nativeFacade = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+
+test("Electron keeps the host-push theme injection pipeline", () => {
+    // Startup: discover manifests, resolve manifest.theme, cache CSS, push on
+    // did-finish-load with Quick CSS first. No renderer pull exists.
+    assert.match(themesMain, /export function injectThemesMain/);
+    assert.match(themesMain, /buildThemeCssCache\(\)/);
+    assert.match(themesMain, /did-finish-load/);
+    assert.match(themesMain, /webContents\.send\("addTheme", id, css\)/);
+    assert.match(themesMain, /if \(getConfig\("quickCss"\)\) initQuickCss\(browserWindow\)/);
+    assert.match(themesPreload, /ipcRenderer\.on\("addTheme"/);
+    assert.match(themesPreload, /ipcRenderer\.on\("removeTheme"/);
+});
+
+test("Electron keeps the sync theme-list and enable/disable contracts", () => {
+    assert.match(bridge, /getThemes:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getThemes"\)/);
+    assert.match(
+        bridge,
+        /set:\s*\(id:\s*string, state:\s*boolean\)\s*=>\s*ipcRenderer\.send\("setThemeEnabled", id, state\)/,
+    );
+    assert.match(ipc, /ipcMain\.on\("getThemes"/);
+    assert.match(ipc, /ipcMain\.on\("setThemeEnabled"/);
+});
+
+test("no renderer theme CSS pull exists in Electron or native", () => {
+    // The investigation result this milestone preserves: themes are
+    // host -> renderer pushes with no pull-style reader, so no
+    // themes.getCSS() bridge may be introduced on either side.
+    assert.doesNotMatch(bridge, /getCSS/);
+    assert.doesNotMatch(types, /getCSS/);
+    assert.doesNotMatch(themesMain, /getCSS/);
+    assert.doesNotMatch(nativeFacade, /getCSS/);
+    assert.doesNotMatch(nativeFacade, /addTheme/);
+    assert.doesNotMatch(nativeFacade, /removeTheme/);
+    assert.doesNotMatch(nativeFacade, /legcord-native-theme/);
+});
+
+test("no src caller is migrated to a native theme path in this milestone", () => {
+    // Static startup injection is host-driven: no renderer caller changes.
+    assert.doesNotMatch(power, /legcord-native-theme/);
+    assert.doesNotMatch(shelterSettings, /legcord-native-theme/);
+    assert.doesNotMatch(heroUpdater, /legcord-native-theme/);
+    assert.doesNotMatch(invite, /legcord-native-theme/);
+});

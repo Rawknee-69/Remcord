@@ -1199,3 +1199,170 @@ test("a reloaded document gets a fresh pluginStorage facade with no stale promis
     respondPluginRead(nextDocument.window, message, "persisted");
     assert.equal(await pending, "persisted");
 });
+
+// Managed theme-CSS lifecycle contract (Phase D theme injection).
+//
+// The host injection template itself is owned by Rust
+// (`managed_css_script`/`managed_css_remove_script` in
+// `native/src/mod_substrate.rs`, structurally asserted there). These tests
+// pin the DOM semantics that template relies on: one stable `<style>` per
+// host style id, reuse instead of duplication, append-order cascade,
+// idempotent removal, and clean reset on document reload. The helpers below
+// implement exactly the documented contract step-for-step.
+function createFakeThemeDocument() {
+    const byId = new Map();
+    const headChildren = [];
+    const listeners = new Map();
+    const document = {
+        head: {
+            children: headChildren,
+            appendChild(child) {
+                if (!headChildren.includes(child)) headChildren.push(child);
+                if (child.id) byId.set(child.id, child);
+            },
+            querySelectorAll(selector) {
+                if (selector !== "style") return [];
+                return headChildren.filter((node) => node.tagName === "style" && !node.removed);
+            },
+        },
+        getElementById(id) {
+            const node = byId.get(id);
+            return node && !node.removed ? node : null;
+        },
+        createElement(tag) {
+            const node = {
+                tagName: tag,
+                id: "",
+                textContent: "",
+                removed: false,
+                remove() {
+                    this.removed = true;
+                    byId.delete(this.id);
+                    const index = headChildren.indexOf(this);
+                    if (index >= 0) headChildren.splice(index, 1);
+                },
+            };
+            return node;
+        },
+        addEventListener(type, listener) {
+            const entries = listeners.get(type) ?? [];
+            entries.push(listener);
+            listeners.set(type, entries);
+        },
+        querySelectorAll(selector) {
+            const match = /^style\[id\^="([^"]+)"\]$/.exec(selector);
+            if (!match) return [];
+            return headChildren.filter(
+                (node) => node.tagName === "style" && !node.removed && node.id.startsWith(match[1]),
+            );
+        },
+    };
+    return { document, headChildren, listeners };
+}
+
+function managedThemeInject(document, styleId, css) {
+    const inject = () => {
+        const root = document.head;
+        if (!root) return false;
+        let style = document.getElementById(styleId);
+        if (!style) {
+            style = document.createElement("style");
+            style.id = styleId;
+        }
+        style.textContent = css;
+        root.appendChild(style);
+        return true;
+    };
+    if (!inject()) document.addEventListener("DOMContentLoaded", inject, { once: true });
+}
+
+function managedThemeRemove(document, styleId) {
+    const style = document.getElementById(styleId);
+    if (style) style.remove();
+}
+
+test("theme injection creates one managed style with the host identity", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    assert.equal(headChildren.length, 1);
+    assert.equal(headChildren[0].id, "legcord-native-theme-alpha");
+    assert.equal(headChildren[0].textContent, ":root{--a:1;}");
+});
+
+test("theme injection reuses its style instead of duplicating", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    assert.equal(headChildren.length, 1);
+    assert.equal(document.getElementById("legcord-native-theme-alpha").textContent, ":root{--a:2;}");
+});
+
+test("themes keep host emission order in the document head", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    // The host emits sorted by theme id; append order is the cascade order.
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+    );
+});
+
+test("theme removal is idempotent and removes only its own style", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    managedThemeRemove(document, "legcord-native-theme-alpha");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-native-theme-zulu"],
+    );
+    assert.equal(document.getElementById("legcord-native-theme-alpha"), null);
+    // Removing a missing style (disabled theme, fresh document) is a no-op.
+    managedThemeRemove(document, "legcord-native-theme-alpha");
+    managedThemeRemove(document, "legcord-native-theme-never-enabled");
+    assert.equal(headChildren.length, 1);
+});
+
+test("a reloaded document starts with no theme styles and re-injects cleanly", () => {
+    const first = createFakeThemeDocument();
+    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    assert.equal(first.headChildren.length, 1);
+
+    // Reload: a fresh document has no carried-over nodes.
+    const next = createFakeThemeDocument();
+    assert.equal(next.headChildren.length, 0);
+    managedThemeRemove(next.document, "legcord-native-theme-alpha");
+    managedThemeInject(next.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(next.document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    assert.deepEqual(
+        next.headChildren.map((node) => node.id),
+        ["legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+    );
+});
+
+test("theme styles coexist with the Vencord managed style", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
+    const ids = headChildren.map((node) => node.id);
+    assert.ok(ids.includes("legcord-native-vencord-css"));
+    assert.ok(ids.includes("legcord-native-theme-alpha"));
+    assert.equal(ids.filter((id) => id === "legcord-native-vencord-css").length, 1);
+    assert.equal(ids.filter((id) => id === "legcord-native-theme-alpha").length, 1);
+});
+
+test("the theme smoke observation sees exactly the managed theme styles", () => {
+    const { document } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    const observed = document
+        .querySelectorAll('style[id^="legcord-native-theme-"]')
+        .map((node) => ({ id: node.id, bytes: (node.textContent || "").length }));
+    assert.deepEqual(observed, [{ id: "legcord-native-theme-alpha", bytes: ":root{--a:1;}".length }]);
+    // The smoke observation also records head order and Vencord coexistence.
+    const headOrder = document.head.querySelectorAll("style").map((node) => node.id);
+    assert.deepEqual(headOrder, ["legcord-native-vencord-css", "legcord-native-theme-alpha"]);
+    assert.ok(headOrder.includes("legcord-native-vencord-css"));
+});

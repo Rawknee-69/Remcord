@@ -510,6 +510,71 @@ pub fn mod_marker_script(
     ))
 }
 
+/// Builds a managed-CSS insertion script for CSS-only consumers (themes).
+///
+/// Unlike [`mod_css_script`], this entry point is not tied to a
+/// [`ModDescriptor`] and carries no request correlation or typed result
+/// event: theme injection is a host push (the renderer never requests theme
+/// CSS), so there is no capability round trip to correlate. The script
+/// creates or reuses exactly one `<style>` element with the host-supplied id,
+/// sets its text, and appends it to `<head>` (falling back to
+/// `DOMContentLoaded` when the head is not yet present). Both arguments are
+/// host-controlled and JSON-escaped; the script never evaluates renderer
+/// input and exposes no eval surface.
+pub fn managed_css_script(style_id: &str, css: &str) -> Result<String, serde_json::Error> {
+    if style_id.is_empty() || style_id.len() > 256 {
+        return Err(serde::de::Error::custom(
+            "managed style id must be a non-empty string of at most 256 bytes",
+        ));
+    }
+    let style_id = serde_json::to_string(style_id)?;
+    let css = serde_json::to_string(css)?;
+    Ok(format!(
+        r#"(() => {{
+  const inject = () => {{
+  try {{
+    const root = document.head;
+    if (!root) return false;
+    let style = document.getElementById({style_id});
+    if (!style) {{
+      style = document.createElement("style");
+      style.id = {style_id};
+    }}
+    style.textContent = {css};
+    root.appendChild(style);
+    return true;
+  }} catch (error) {{
+    console.error("[Legcord native][themes] managed CSS injection failed", error);
+    return true;
+  }}
+  }};
+  if (!inject()) document.addEventListener("DOMContentLoaded", inject, {{ once: true }});
+}})();"#
+    ))
+}
+
+/// Builds the removal script for one managed `<style>` element. A missing
+/// element is not an error: removal is idempotent so disable/reset paths can
+/// run unconditionally.
+pub fn managed_css_remove_script(style_id: &str) -> Result<String, serde_json::Error> {
+    if style_id.is_empty() || style_id.len() > 256 {
+        return Err(serde::de::Error::custom(
+            "managed style id must be a non-empty string of at most 256 bytes",
+        ));
+    }
+    let style_id = serde_json::to_string(style_id)?;
+    Ok(format!(
+        r#"(() => {{
+  try {{
+    const style = document.getElementById({style_id});
+    if (style) style.remove();
+  }} catch (error) {{
+    console.error("[Legcord native][themes] managed CSS removal failed", error);
+  }}
+}})();"#
+    ))
+}
+
 /// Timing and identity state for one in-flight mod bootstrap.
 pub struct PendingModBootstrap {
     pub mod_id: &'static str,
@@ -527,9 +592,9 @@ pub struct PendingModBootstrap {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
-        mod_marker_script, validate_mod_bundle, DocumentModLifecycle, ModCache, ModDescriptor,
-        ModHostMetrics,
+        is_allowed_mod_download_url, managed_css_remove_script, managed_css_script, mod_css_script,
+        mod_execution_context_script, mod_marker_script, validate_mod_bundle, DocumentModLifecycle,
+        ModCache, ModDescriptor, ModHostMetrics,
     };
 
     /// Synthetic adapter contract proving the substrate is not Vencord-specific.
@@ -674,6 +739,35 @@ mod tests {
         assert!(!marker.contains("new Function"));
         assert!(!css.contains("eval("));
         assert!(!css.contains("new Function"));
+    }
+
+    #[test]
+    fn managed_css_scripts_use_a_stable_identity_without_an_eval_surface() {
+        let inject =
+            managed_css_script("legcord-native-theme-demo", r#"body::after{content:"ok"}"#)
+                .unwrap();
+        assert!(inject.contains("legcord-native-theme-demo"));
+        assert!(inject.contains(r#"body::after{content:\"ok\"}"#));
+        assert!(inject.contains("getElementById"));
+        // One stable element reused, never duplicated: exactly one creation
+        // site plus the reuse lookup.
+        assert_eq!(inject.matches("createElement(\"style\")").count(), 1);
+        assert_eq!(inject.matches("getElementById").count(), 1);
+        assert!(inject.contains("DOMContentLoaded"));
+        assert!(!inject.contains("eval("));
+        assert!(!inject.contains("new Function"));
+        // No request correlation: a host push has no renderer request id.
+        assert!(!inject.contains("requestId"));
+
+        let remove = managed_css_remove_script("legcord-native-theme-demo").unwrap();
+        assert!(remove.contains("legcord-native-theme-demo"));
+        assert!(remove.contains(".remove()"));
+        assert!(!remove.contains("createElement"));
+        assert!(!remove.contains("eval("));
+
+        assert!(managed_css_script("", "body{}").is_err());
+        assert!(managed_css_remove_script("",).is_err());
+        assert!(managed_css_script(&"x".repeat(257), "body{}").is_err());
     }
 
     #[test]

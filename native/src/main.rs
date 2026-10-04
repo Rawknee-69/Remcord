@@ -4,6 +4,7 @@ mod mod_substrate;
 mod plugin_storage;
 mod protocol;
 mod settings;
+mod themes;
 
 use std::{
     collections::HashMap,
@@ -15,9 +16,9 @@ use std::{
 };
 
 use mod_substrate::{
-    load_mod_bundle, mod_css_script, mod_execution_context_script, mod_marker_script,
-    stage as mod_stage, DocumentModLifecycle, ModCache, ModDescriptor, ModHostMetrics,
-    PendingModBootstrap,
+    load_mod_bundle, managed_css_remove_script, managed_css_script, mod_css_script,
+    mod_execution_context_script, mod_marker_script, stage as mod_stage, DocumentModLifecycle,
+    ModCache, ModDescriptor, ModHostMetrics, PendingModBootstrap,
 };
 
 use app::{current_app_version, validate_version};
@@ -38,6 +39,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
+use themes::load_enabled_themes;
 use wry::{
     http::{Request, Uri},
     NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder,
@@ -87,6 +89,7 @@ const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOK
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
+const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
@@ -426,6 +429,26 @@ const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
+/// DEV-only theme smoke observation (`LEGCORD_NATIVE_THEMES_SMOKE=1`).
+/// Theme injection is a host push: the renderer never requests theme CSS, so
+/// this probe only observes the managed `<style>` nodes the host injected at
+/// document load. It returns JSON through the evaluate callback (like the
+/// renderer health probe), never through the typed bridge.
+const THEMES_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const head = document.head;
+  const headOrder = head ? [...head.querySelectorAll("style")].map((node) => node.id) : [];
+  const nodes = [...document.querySelectorAll('style[id^="legcord-native-theme-"]')]
+    .map((node) => ({ id: node.id, bytes: (node.textContent || "").length }));
+  return JSON.stringify({
+    count: nodes.length,
+    themes: nodes,
+    head_style_order: headOrder,
+    vencord_present: headOrder.includes("legcord-native-vencord-css"),
+  });
+})()
+"#;
+
 #[derive(Serialize)]
 struct BootSnapshot {
     runtime: &'static str,
@@ -742,6 +765,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_plugin_storage_smoke {
         println!("[PluginStorage][Smoke] plugin storage capability smoke probe enabled");
     }
+    let diagnostic_themes_smoke = std::env::var(THEMES_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_themes_smoke {
+        println!("[Themes][Smoke] native theme injection smoke observation enabled");
+    }
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
@@ -815,6 +842,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut request_tracker = RequestTracker::default();
     let mut document_lifecycle = DocumentModLifecycle::default();
     let mut pending_mods = HashMap::<String, PendingModBootstrap>::new();
+    // Managed theme style ids injected into the latest trusted document, so
+    // the next document reset can remove styles for themes that are no
+    // longer enabled. The DOM itself is fresh per document; this list only
+    // names what to clean when the enabled set shrinks.
+    let mut last_theme_style_ids: Vec<String> = Vec::new();
     let mut mod_metrics = ModHostMetrics::default();
     // Mutation smoke stages: 0 = mutate on the first trusted document,
     // 1 = mutated, reload requested, restore pending on the next document,
@@ -886,6 +918,83 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         if let Err(error) = webview.evaluate_script(BRIDGE_PROBE_SCRIPT) {
                             eprintln!("[Injection] Bridge probe failed: {error}");
+                        }
+                        // Host-pushed theme injection (Phase D): the renderer
+                        // never requests theme CSS, so there is no bridge
+                        // round trip here. The host loads enabled themes from
+                        // its own root and pushes each through the shared
+                        // managed-CSS lifecycle in sorted-id order.
+                        let theme_report = load_enabled_themes(&profile_path);
+                        // Reset semantics: drop managed styles for themes that
+                        // were injected before but are no longer enabled, so
+                        // no stale CSS survives a document reset. On a fresh
+                        // document this is a cheap no-op (the nodes do not
+                        // exist yet); the removal script is idempotent.
+                        let current_theme_ids: Vec<String> = theme_report
+                            .injected
+                            .iter()
+                            .map(|theme| theme.style_id.clone())
+                            .collect();
+                        for stale_id in last_theme_style_ids
+                            .iter()
+                            .filter(|id| !current_theme_ids.contains(id))
+                        {
+                            match managed_css_remove_script(stale_id) {
+                                Ok(script) => {
+                                    if let Err(error) = webview.evaluate_script(&script) {
+                                        eprintln!(
+                                            "[Themes][css_removal] {stale_id}: {error}"
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("[Themes][css_removal] {stale_id}: {error}");
+                                }
+                            }
+                        }
+                        last_theme_style_ids = current_theme_ids;
+                        let mut theme_injected = 0_usize;
+                        for theme in &theme_report.injected {
+                            match managed_css_script(&theme.style_id, &theme.css) {
+                                Ok(script) => {
+                                    if let Err(error) = webview.evaluate_script(&script) {
+                                        eprintln!(
+                                            "[Themes][css_injection] {}: {error}",
+                                            theme.id
+                                        );
+                                    } else {
+                                        theme_injected += 1;
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("[Themes][css_injection] {}: {error}", theme.id);
+                                }
+                            }
+                        }
+                        if theme_report.discovered > 0 || diagnostic_themes_smoke {
+                            println!(
+                                "[Themes][Metrics] discovered={} enabled={} injected={} skipped={} css_bytes={} read_ms={:.3}",
+                                theme_report.discovered,
+                                theme_report.enabled,
+                                theme_injected,
+                                theme_report.skipped.len(),
+                                theme_report.css_bytes,
+                                theme_report.read_ms,
+                            );
+                            for skipped in &theme_report.skipped {
+                                println!(
+                                    "[Themes][Skip] id={} reason={}",
+                                    skipped.id, skipped.reason
+                                );
+                            }
+                        }
+                        if diagnostic_themes_smoke {
+                            if let Err(error) = webview.evaluate_script_with_callback(
+                                THEMES_SMOKE_SCRIPT,
+                                |result| println!("[Themes][Smoke] managed_styles={result}"),
+                            ) {
+                                eprintln!("[Themes][Smoke] observation failed: {error}");
+                            }
                         }
                         if diagnostic_interaction {
                             if let Err(error) = webview.evaluate_script(INTERACTION_PROBE_SCRIPT) {
@@ -2117,6 +2226,47 @@ mod tests {
         assert!(!script.contains("window.legcord.fs"));
         assert!(!script.contains("legcord.fs"));
         assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_no_theme_capability() {
+        // Theme injection is a host push: the renderer never requests theme
+        // CSS, so no theme capability may exist alongside the scoped pair.
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert!(!capability.starts_with("themes."));
+            assert!(!capability.contains("theme"));
+        }
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_no_theme_pull_surface() {
+        // The earlier theme READ investigation was intentionally rejected:
+        // current themes are host -> renderer pushes with no native renderer
+        // caller for a pull-style read. The facade must not grow one here.
+        let script = initialization_script(true).unwrap();
+        assert!(!script.contains("getCSS"));
+        assert!(!script.contains("getCss"));
+        assert!(!script.contains("addTheme"));
+        assert!(!script.contains("removeTheme"));
+        assert!(!script.contains("quickCss"));
+        assert!(!script.contains("legcord-native-theme"));
+        assert!(!script.contains("themes"));
+    }
+
+    #[test]
+    fn themes_smoke_observation_only_reads_managed_dom_nodes() {
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-native-theme-"));
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("querySelectorAll"));
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-native-vencord-css"));
+        // Null-safe in a headless early document: a missing head yields an
+        // empty order instead of throwing.
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("document.head"));
+        // Observation only: no bridge request, no event post, no eval.
+        assert!(!super::THEMES_SMOKE_SCRIPT.contains("postMessage"));
+        assert!(!super::THEMES_SMOKE_SCRIPT.contains("getCSS"));
+        assert!(!super::THEMES_SMOKE_SCRIPT.contains("eval("));
     }
 
     #[test]
