@@ -25,8 +25,8 @@
     // source, URLs, cache paths, execution, CSS, and lifecycle all remain
     // host-controlled through the shared substrate and the typed capability.
     substrate.createModAdapter({
-        capability: "mod.vencord.get_bundle",
-        requestBundle: (native) => native.getVencordBundle(),
+        capability: "mod.get_bundle",
+        requestBundle: (native) => native.getModBundle("vencord"),
         requestTimeoutMs: 120_000,
         adapterFlag: "__legcordNativeVencordAdapter",
         stateName: "__legcordNativeVencord",
@@ -37,6 +37,13 @@
         errorEvent: "vencord_adapter_error",
         logTag: "[Vencord native]",
         validateResponse: (result) => {
+            // The shared `mod.get_bundle` response is mod-agnostic, so this
+            // adapter must confirm BOTH the echoed registry id and its own
+            // execution marker: a host answering for another registered mod
+            // can never pass as Vencord.
+            if (result.mod_id !== "vencord") {
+                throw new Error("Native mod bundle response is not for Vencord");
+            }
             if (result.marker !== "vencord-bootstrap-executed") {
                 throw new Error("Native Vencord bootstrap marker is invalid");
             }
@@ -51,6 +58,7 @@
             settings_state: state.settingsState ?? "storage_unavailable",
         }),
         responseExtra: (result) => ({
+            modId: result.mod_id,
             bundleVersion: result.bundle_version,
             bundleBytes: result.bundle_bytes,
             cssBytes: result.css_bytes,

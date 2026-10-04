@@ -13,8 +13,8 @@ This document records the existing Electron renderer/preload contract and the in
 | `contextBridge` | [`src/discord/preload/bridge.ts`](../src/discord/preload/bridge.ts) exposes `window.legcord` | No direct equivalent; a document-start facade over `WebMessageReceived` | High: current facade is broad and synchronous APIs must be redesigned | No for bare Discord | Broad Legcord bridge can defer; this prototype exposes the snapshot, ping, and one typed Vencord operation |
 | `webFrame` | `window.ts` frame-created YouTube injection; `preload/plugins.mts`; `preload/mods/{custom,equicord,shelter,vencord}.mts` | Frame-aware WebView2 scripting / `CoreWebView2Frame` | High: frame lifetime and cross-origin behavior differ | No | Yes, except where an enabled mod specifically needs frame injection |
 | `insertCSS` | `preload/mods/vencord.mts` injects `browser.css` after bundle execution; `preload/themes.ts` and [`src/common/themes.ts`](../src/common/themes.ts) manage unrelated themes | Native host runs a fixed style-element insertion script with stable identity, in the same document and after Vencord JS | Medium: CSP, style order, removal/reapplication must be qualified | No | Only Vencord CSS is implemented; full themes and other mod CSS defer |
-| `ipcMain` | [`src/discord/ipc.ts`](../src/discord/ipc.ts) registers `getVencordBundle` plus bundle/config/theme/plugin/RPC/backup handlers; `screenshare.ts`, Venmic and other main modules register IPC | `WebMessageReceived` with a versioned, explicitly dispatched Rust command enum | Very high: hundreds of exposed calls and sync IPC need contract-by-contract migration | No for bare Discord; yes for existing mod feature parity | Native supports `ping` and the fixed `mod_vencord_get_bundle` operation plus typed lifecycle/error events; other handlers defer |
-| `ipcRenderer` | Vencord preload uses only `invoke("getVencordBundle")`; `bridge.ts`, `preload/plugins.mts`, and other mod preloads use separate APIs | `window.ipc.postMessage` / `WebMessageReceived` with one exact Vencord request contract | Very high: subscriptions, events, invokes, and synchronous calls need async typed equivalents | No for bare Discord | Only Vencord bundle startup is bridged; all other IPC surfaces defer |
+| `ipcMain` | [`src/discord/ipc.ts`](../src/discord/ipc.ts) registers `getShelterBundle`, `getVencordBundle`, `getEquicordBundle`, `getCustomBundle` plus bundle/config/theme/plugin/RPC/backup handlers; `screenshare.ts`, Venmic and other main modules register IPC | `WebMessageReceived` with a versioned, explicitly dispatched Rust command enum | Very high: hundreds of exposed calls and sync IPC need contract-by-contract migration | No for bare Discord; yes for existing mod feature parity | Native supports `ping` and the registry-scoped `mod_get_bundle` operation plus typed lifecycle/error events; other handlers defer |
+| `ipcRenderer` | Vencord preload uses only `invoke("getVencordBundle")`; `bridge.ts`, `preload/plugins.mts`, and other mod preloads use separate APIs | `window.ipc.postMessage` / `WebMessageReceived` with one exact mod-bundle request contract | Very high: subscriptions, events, invokes, and synchronous calls need async typed equivalents | No for bare Discord | Vencord bundle startup is bridged through the shared registry-scoped capability; all other IPC surfaces defer |
 | `session.webRequest` | `window.ts` blocks telemetry/local WebSockets, rewrites YouTube Referer; `main.ts` applies proxy; CSP extension mutates policy | `WebResourceRequested`, filters, response replacement, WebView2 proxy configuration | High: request coverage and response/CSP manipulation require backend-specific validation | No | Yes; not part of first boot |
 | Permissions | [`src/main.ts`](../src/main.ts) `setPermissionRequestHandler`; `screenshare.ts` display-media handler | `PermissionRequested`, media-capture and OS permission APIs | High: microphone/camera/display capture and consent must be tested separately | No for login; yes for voice/video | Yes |
 | Downloads | Repository search found no custom `will-download`/download-item handler in the active source. Existing behavior is therefore the Electron/Chromium default unless another integration registers one at runtime. | `DownloadStarting` plus explicit destination/consent/completion handling | Medium-high: first characterize default behavior before choosing save/overwrite policy | No | Yes |
@@ -41,7 +41,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Direction | Exact message |
 | --- | --- |
 | Renderer request | `{"version":1,"request_id":"legcord-<document-time>-<sequence>","command":{"type":"ping","payload":{"nonce":"..."}}}` |
-| Renderer request (Vencord capability) | `{"version":1,"request_id":"...","command":{"type":"mod_vencord_get_bundle","payload":{}}}` |
+| Renderer request (mod bundle capability) | `{"version":1,"request_id":"...","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord"}}}` |
 | Renderer request (settings capability) | `{"version":1,"request_id":"...","command":{"type":"settings_get_config","payload":{}}}` |
 | Renderer request (settings mutation capability) | `{"version":1,"request_id":"...","command":{"type":"settings_set_block_power_saving","payload":{"value":true}}}` |
 | Renderer request (localization capability) | `{"version":1,"request_id":"...","command":{"type":"localization_get_lang","payload":{"key":"invite-goBackToApp"}}}` |
@@ -49,7 +49,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request (plugin storage read) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_read","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt"}}}` |
 | Renderer request (plugin storage write) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_write","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt","data":"..."}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
-| Vencord response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"vencord_bundle","payload":{"bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
+| Mod bundle response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"mod_bundle","payload":{"mod_id":"vencord","bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
 | Settings mutation response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_mutation","payload":{"block_power_saving_in_voice_chat":true,"source":"file","payload_bytes":2048}},"error":null}` |
 | Localization response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"localization_string","payload":{"value":"Go back to the Discord app","lang":"en-US"}},"error":null}` |
@@ -58,7 +58,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Plugin storage write response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"plugin_storage_write","payload":{"payload_bytes":38}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_vencord_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, and `plugin_storage_write`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, and `plugin_storage_write`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -75,7 +75,72 @@ The Vencord integration's exact required Electron surface is therefore the modul
 
 ### Native capability and adapter
 
-The document-start Vencord adapter in `native/web/mods/vencord/adapter.js` is a thin consumer of the shared factory in `native/web/mod-substrate/mod-bootstrap.js`. It declares only Vencord's identity and typed wire vocabulary (capability name, expected marker, result/ack/error event names, state property names) and auto-requests one explicit `native.getVencordBundle()` call per Discord document. It can only send `mod_vencord_get_bundle` with an empty object payload. Rust resolves the `VENCORD_MOD` descriptor from `KNOWN_MODS` and runs the generic substrate pipeline: schema, exact stable Discord origin, request ID, per-document duplicate guard, and fixed bundle release sources. The substrate downloads only the descriptor's fixed JS/CSS release assets, allows only that descriptor's HTTPS redirect hosts, enforces byte limits, and caches only the fixed file names under `E:\Legcord.webview-dev-user-data` plus an in-memory `ModCache`. Renderer input cannot select a URL, path, filename, channel, command, or executable source.
+The document-start Vencord adapter in `native/web/mods/vencord/adapter.js` is a thin consumer of the shared factory in `native/web/mod-substrate/mod-bootstrap.js`. It declares only Vencord's identity and typed wire vocabulary (capability name, expected marker, result/ack/error event names, state property names) and auto-requests one explicit `native.getModBundle("vencord")` call per Discord document. It can only send `mod_get_bundle` with the single logical id `"vencord"`. Rust validates the id shape, resolves the `VENCORD_MOD` descriptor from `KNOWN_MODS` by exact match, and runs the generic substrate pipeline: schema, exact stable Discord origin, request ID, per-document duplicate guard, and fixed bundle release sources. The substrate downloads only the descriptor's fixed JS/CSS release assets, allows only that descriptor's HTTPS redirect hosts, enforces byte limits, and caches only the fixed file names under `E:\Legcord.webview-dev-user-data` plus an in-memory `ModCache`. Renderer input cannot select a URL, path, filename, channel, command, or executable source.
+
+## Scoped mod bundle capability (Phase D)
+
+One shared, typed, registry-backed capability now serves every client mod: `mod_get_bundle` / capability `mod.get_bundle` / facade `native.getModBundle(modId)`. It replaces the previous mod-specific `mod_vencord_get_bundle` command (byte-for-byte identical Vencord behavior, no Vencord behavior changed).
+
+### Electron bundle contracts (traced, unchanged)
+
+`src/discord/ipc.ts` registers four handlers that read ONLY fixed `<userData>` file names through `ifExistsRead` (`existsSync` + `readFileSync(path, "utf-8")`, returning `undefined` when absent, no size limit):
+
+| Handler | Files read | Returned shape | CSS separate | Executable JS | Caller |
+| --- | --- | --- | --- | --- | --- |
+| `getVencordBundle` | `vencord.js`, `vencord.css` | `{ js, css, enabled }` | yes (`insertCSS`) | yes (`executeJavaScript`) | `src/discord/preload/mods/vencord.mts` |
+| `getShelterBundle` | `shelter.js` | `{ js, enabled: true }` | no (wraps source in an injector IIFE with a fixed `SHELTER_INJECTOR_PLUGINS` map) | yes | `src/discord/preload/mods/shelter.mts` |
+| `getEquicordBundle` | `equicord.js`, `equicord.css` | `{ js, css, enabled }` | yes | yes | `src/discord/preload/mods/equicord.mts` |
+| `getCustomBundle` | `custom.js`, `custom.css` (only when enabled) | `{ js, css, enabled }` | optional | yes | `src/discord/preload/mods/custom.mts` |
+
+`enabled` comes from `getConfig("mods").includes(<mod>)` (Shelter hardcodes `true`). `src/discord/extensions/modloader.ts` (`fetchMods` → `cacheCheck`/`downloadMod`, sources in `src/common/consts.ts`) downloads the release assets into the same fixed names. Runtime plugin source (`plugins.mts` → `plugins:get-runtime-entries`/`get-runtime-script`) is a SEPARATE logical resource: per-plugin `manifest.json` + entry scripts executed with `new Function`, gated by plugin manifests. It is NOT part of this capability.
+
+### Logical bundle registry (host-controlled)
+
+| Logical id | JS source | CSS source | JS/CSS cache names | Size limits | Header check | Redirect hosts | State |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `vencord` | `github.com/Vendicated/Vencord` devbuild `browser.js` | same release `browser.css` | `vencord.js` / `vencord.css` | 32 MiB / 8 MiB | first line starts `// Vencord `, ≤64 chars | `github.com`, `release-assets.githubusercontent.com` | **validated end-to-end (this milestone)** |
+| `shelter` | `raw.githubusercontent.com/uwu/shelter-builds/main/shelter.js` | none | `shelter.js` | TBD | TBD | TBD | deferred (no native descriptor, capability denial asserted) |
+| `equicord` | `github.com/Equicord/Equicord` latest `browser.js` | same release `browser.css` | `equicord.js` / `equicord.css` | TBD | TBD | TBD | deferred |
+| `custom` | user-provided build artifact | optional | `custom.js` / `custom.css` | — | — | — | deferred (no authoritative host-controlled source; never registerable as-is) |
+
+Every descriptor value lives in the Rust `ModDescriptor` registry (`KNOWN_MODS` in `main.rs`); `mod_substrate.rs` stays mod-free. Adding Shelter or Equicord means appending one descriptor plus a thin renderer adapter — no change to the protocol, facade, or substrate.
+
+### Protocol and validation
+
+```text
+renderer native.getModBundle("vencord")
+  → requireCapability("mod.get_bundle") or sync UNSUPPORTED_CAPABILITY throw
+  → client charset/bound check [A-Za-z0-9._-]{1,64} (TypeError before dispatch)
+  → {"type":"mod_get_bundle","payload":{"mod_id":"vencord"}}
+     (no path/url/file/source/channel/method member: deny_unknown_fields)
+  → host: validate_mod_bundle_id (same charset + 64 B cap)
+  → host: exact KNOWN_MODS lookup, else UNKNOWN_MOD
+  → per-document one-start guard, else DUPLICATE_BOOTSTRAP
+  → substrate: fixed release retrieval + validation + caches
+  → typed mod_bundle response (metadata only)
+```
+
+Rejected explicitly (tests assert each): `../…`, `..\…`, `C:\…`, `//server/share/…`, `https://…`, `javascript:…`, empty, whitespace, and >64 B ids; any extra payload member including `url`, `path`, `file`, `source`, `channel`, `method`; unknown command names (`invoke`, `mod_vencord_get_bundle`). Charset-valid but unregistered ids (`shelter`, `equicord`, `custom`, `vencord.js`, `Vencord`) parse and are refused by the host with `UNKNOWN_MOD` — no file is read and no source is substituted. Bundle artifacts are rejected for empty/oversized bytes, non-UTF-8, and a missing/over-long/foreign build header, so another mod's artifact can never be served as this one.
+
+### Response shape
+
+`mod_bundle` carries exactly ten bounded fields: `mod_id`, `bundle_version`, `bundle_bytes`, `css_bytes`, `request_latency_ms`, `retrieval_ms`, `execution_ms`, `css_injection_ms`, `marker`, `document_execution_count`. No bundle source, URL, path, filename, cache layout, or profile directory ever crosses the bridge (asserted in Rust tests). `mod_id` is the registry echo, so a mod-agnostic response cannot be mistaken for another mod's bundle — each adapter validates both `mod_id` and its own marker.
+
+### Cache behavior
+
+Existing two-tier substrate cache, reused unchanged (no second cache): durable disk cache at fixed names under `E:\Legcord.webview-dev-user-data` (`vencord.js`, `vencord.css`), plus an in-memory `ModCache` keyed by mod id that avoids re-reading/validating across document generations of one run. Retrieval runs on a worker thread (`legcord-<id>-bundle`) and returns to the event loop through the typed `ModBundleReady` event with a document generation stamp; a result from a superseded generation is discarded. Cache hit reports `retrieval_ms=0.000`.
+
+### Vencord integration
+
+`native/web/mods/vencord/adapter.js` now requests `native.getModBundle("vencord")` through the shared capability instead of a Vencord-specific call, and its `validateResponse` additionally requires `mod_id === "vencord"`. Execution, CSS injection, markers, storage-context snapshot, duplicate protection, and page-world semantics are untouched and remain entirely inside the substrate.
+
+### Remaining Shelter/Equicord work
+
+1. Register one `ModDescriptor` per mod with its authoritative fixed release URL, cache names, byte limits, header prefix, allowed redirect hosts, page global, marker, and log tag (no new protocol or facade work required).
+2. Add a thin renderer adapter per mod declaring only identity + typed wire vocabulary.
+3. Decide CSS presence per mod: Shelter has no CSS (its Electron preload wraps the source in an injector IIFE with a fixed plugin map — that wrapper is host-controlled and must be built in Rust, never renderer-supplied).
+4. Custom mods stay blocked until a host-controlled authoritative source exists; there is deliberately no renderer-supplied path/URL for it.
+5. Runtime plugin loading (`plugins.mts`, `new Function`, per-plugin manifests) is a different logical resource and remains deferred.
 
 To avoid transferring a multi-megabyte script back through the renderer and to preserve page-world execution despite Discord's script CSP, the capability returns a typed metadata result only after Rust retrieves and invokes that fixed source via Wry/WebView2 `ExecuteScriptAsync` in the main document. The existing Vencord source is run as a direct classic script, not wrapped in an IIFE or `eval`; no generic script-execution method is exposed. After execution, a descriptor-parameterized verifier checks for the `globalThis.Vencord` object. Only then does the adapter's non-enumerable `window.__legcordNativeVencord` marker become `executed`.
 
@@ -172,9 +237,10 @@ The exact facade is `window.legcord = Object.freeze({ boot, native, settings, ge
 | `window.legcord.boot.runtime` | immutable boot snapshot | `"webview2"` |
 | `window.legcord.boot.platform` | immutable boot snapshot | `"win32"`; the native prototype is Windows-only |
 | `window.legcord.boot.protocol_version` | immutable boot snapshot | `1` |
-| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.vencord.get_bundle", "settings.get_config", "settings.set_block_power_saving_in_voice_chat", "localization.get_lang", "app.get_version", "plugin_storage.read", "plugin_storage.write"]` |
+| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.get_bundle", "settings.get_config", "settings.set_block_power_saving_in_voice_chat", "localization.get_lang", "app.get_version", "plugin_storage.read", "plugin_storage.write"]` |
 | `window.legcord.native.ping(nonce)` | async native request | Returns `{ nonce, message: "pong" }`; rejects malformed input, transport errors, native errors, timeout, or document disposal |
-| `window.legcord.native.getVencordBundle()` | explicit Vencord-only async request | Requests the fixed native operation; resolves typed size/version/timing/marker metadata only after the host executes the bundle and applies CSS |
+| `window.legcord.native.getModBundle(modId)` | registry-scoped async request (one logical id) | Resolves the registered mod's bundle operation; typed size/version/timing/marker metadata only after the host executes the bundle and applies CSS. Rejects unregistered ids with `UNKNOWN_MOD` |
+| `window.legcord.native.getVencordBundle()` | thin Vencord convenience wrapper over `getModBundle("vencord")` | Same response, fixed id |
 | `window.legcord.native.supports(name)` | renderer-local | Boolean membership test against the frozen boot capability list |
 | `window.legcord.native.requireCapability(name)` | renderer-local | Returns `true` when present; otherwise throws with `code === "UNSUPPORTED_CAPABILITY"` |
 | `window.legcord.native.reportCss(value)` | typed one-way diagnostic event | Sends the native prototype's CSS injection probe result; not a general CSS API |
@@ -224,7 +290,7 @@ These are separate from `window.legcord`. Only the exact Vencord integration ope
 | --- | --- | --- |
 | `preload/bridge.ts` | `require("electron")`, `contextBridge.exposeInMainWorld`, `ipcRenderer.send/sendSync/invoke/on/removeListener`; defines the broad Electron facade and RPC blacklist cache. Also reads `process.versions.electron` | Only the narrow native boot facade exists; broad `contextBridge`, `process`, and IPC behaviors remain deferred |
 | `preload/plugins.mts` | `ipcRenderer.invoke` for preload/renderer runtime plugin entries and source; `webFrame.executeJavaScript`; dynamic `new Function` plugin evaluation | Entire loader deferred; script sources must not be introduced as generic host RPC |
-| `preload/mods/vencord.mts` | `require("electron")`; `ipcRenderer.invoke("getVencordBundle")`; `webFrame.executeJavaScript(bundle.js)` in page world, then `webFrame.insertCSS(bundle.css)`. No `contextBridge`, `process`, or direct filesystem API in this module | Replaced by the fixed `mod_vencord_get_bundle` command and native one-purpose bundle/CSS injection; nothing is polyfilled |
+| `preload/mods/vencord.mts` | `require("electron")`; `ipcRenderer.invoke("getVencordBundle")`; `webFrame.executeJavaScript(bundle.js)` in page world, then `webFrame.insertCSS(bundle.css)`. No `contextBridge`, `process`, or direct filesystem API in this module | Replaced by the registry-scoped `mod_get_bundle` command and native one-purpose bundle/CSS injection; nothing is polyfilled |
 | `preload/mods/{shelter,equicord,custom}.mts` | `ipcRenderer.invoke` for local bundle reads; `webFrame.executeJavaScript/insertCSS`; Shelter additionally uses `process.platform` | Deferred; no corresponding native adapter |
 | `preload/themes.ts` | `ipcRenderer.on("addTheme"/"removeTheme")`; inserts/removes DOM styles | Deferred typed theme events and style lifecycle |
 | `preload/titlebar.mts` | `ipcRenderer.sendSync` for OS/config/window state and `send` for window actions | Deferred titlebar; config boot values would need a native snapshot and dynamic state async |
@@ -270,7 +336,7 @@ There are 35 call sites in the current repository search, grouped below by the c
 | `bridge.ts` RPC changes: `refreshProcessList`, `addDetectable(game)`, `removeDetectable(id)` | Game/ID or no args; `void` | Process scanning / game config mutations; deferred |
 | `bridge.ts` plugin folder: `openRuntimePluginsFolder` | No args; `void` | Opens a native path selected by host; deferred |
 | `bridge.ts` async channels: `getLang`, `installBDTheme`, `backupSave`, `backupRestore`, `plugins:list`, `plugins:set-enabled`, `plugins:reload`, `pluginWriteFile`, `pluginReadFile` | Strings/IDs/booleans/serialized data; promise result. Backup and plugin-storage results are structured; theme install resolves `undefined` in its handler despite a preload cast of `Promise<null>` | Async but not safe to expose wholesale: dialogs, arbitrary third-party plugin code, and scoped filesystem access. Deferred per typed capability |
-| mod preloads: `getShelterBundle`, `getVencordBundle`, `getEquicordBundle`, `getCustomBundle`; plugins runtime entries/scripts | No args or plugin target/ID; promises yield bundle text/flags or runtime entries/source | Vencord has the one typed native replacement described above; Shelter, Equicord, custom bundles, and runtime plugin entries remain deferred |
+| mod preloads: `getShelterBundle`, `getVencordBundle`, `getEquicordBundle`, `getCustomBundle`; plugins runtime entries/scripts | No args or plugin target/ID; promises yield bundle text/flags or runtime entries/source | Vencord routes through the shared `mod.get_bundle` capability described above; Shelter, Equicord, custom bundles (no host-controlled source), and runtime plugin entries remain deferred |
 | `themes.ts`: `addTheme(name,css)`, `removeTheme(name)`; bridge RPC blacklist update | Event payloads are name/CSS or entry arrays; listener returns unsubscribe for blacklist only | Updates renderer styles/cache; future bridge must use narrow typed subscriptions with lifecycle cleanup |
 | `inviteBackButton.mts`: `getLang(key)` | Translation key; promise resolves string or undefined | Async localized text read; deferred typed locale request |
 

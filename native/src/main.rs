@@ -31,11 +31,11 @@ use css_watch::{
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
-    parse_bridge_message, AppVersionResponse, BridgeCommand, BridgeError, BridgeEvent,
-    BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
-    LocalizationStringResponse, PingResponse, PluginStorageReadResponse,
-    PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
-    VencordBundleResponse, PROTOCOL_VERSION,
+    parse_bridge_message, validate_mod_bundle_id, AppVersionResponse, BridgeCommand, BridgeError,
+    BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
+    BridgeResponsePayload, LocalizationStringResponse, ModBundleResponse, PingResponse,
+    PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse,
+    SettingsMutationResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -60,7 +60,7 @@ const WEBVIEW_PROFILE: &str = r"E:\Legcord.webview-dev-user-data";
 /// means adding a second descriptor plus a thin renderer adapter.
 const VENCORD_MOD: ModDescriptor = ModDescriptor {
     id: "vencord",
-    capability: "mod.vencord.get_bundle",
+    capability: "mod.get_bundle",
     js_url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js",
     css_url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.css",
     js_file: "vencord.js",
@@ -106,7 +106,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
     protocol_version: PROTOCOL_VERSION,
     capabilities: &[
         "bridge.ping",
-        "mod.vencord.get_bundle",
+        "mod.get_bundle",
         "settings.get_config",
         "settings.set_block_power_saving_in_voice_chat",
         "localization.get_lang",
@@ -1849,10 +1849,54 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
-                        BridgeCommand::ModVencordGetBundle(_) => {
-                            let descriptor = VENCORD_MOD;
-                            mod_metrics.record_request(descriptor.id);
+                        BridgeCommand::ModGetBundle(payload) => {
                             let request_id = request.request_id;
+                            if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {
+                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: request_id.clone(),
+                                    ok: false,
+                                    payload: None,
+                                    error: Some(BridgeError {
+                                        code: "INVALID_MOD_ID",
+                                        message: error,
+                                    }),
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
+                                return;
+                            }
+                            let Some(descriptor) = lookup_mod_descriptor(&payload.mod_id) else {
+                                eprintln!(
+                                    "[Mod:Registry][unknown_mod] mod id '{}' is not registered in the native host",
+                                    payload.mod_id
+                                );
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: request_id.clone(),
+                                    ok: false,
+                                    payload: None,
+                                    error: Some(BridgeError {
+                                        code: "UNKNOWN_MOD",
+                                        message: format!(
+                                            "mod '{}' is not registered in the native host",
+                                            payload.mod_id
+                                        ),
+                                    }),
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
+                                return;
+                            };
+
+                            mod_metrics.record_request(descriptor.id);
                             if !document_lifecycle.begin_mod(descriptor.id) {
                                 mod_metrics.record_duplicate(descriptor.id);
                                 send_mod_failure(
@@ -1861,8 +1905,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     &mut request_tracker,
                                     request_id.clone(),
                                     mod_stage::DUPLICATE_BOOTSTRAP,
-                                    "Vencord bootstrap was already requested for this document"
-                                        .to_owned(),
+                                    format!(
+                                        "{} bootstrap was already requested for this document",
+                                        descriptor.id
+                                    ),
                                 );
                                 response_count += 1;
                                 return;
@@ -1895,7 +1941,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 let cache_ref = Arc::clone(&bundle_cache);
                                 let worker_request_id = request_id.clone();
                                 if let Err(error) = thread::Builder::new()
-                                    .name("legcord-vencord-bundle".to_owned())
+                                    .name(format!("legcord-{}-bundle", descriptor.id))
                                     .spawn(move || {
                                         let retrieval_started_at = Instant::now();
                                         let result = load_mod_bundle(&descriptor, profile);
@@ -1925,7 +1971,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         &mut request_tracker,
                                         request_id,
                                         mod_stage::BUNDLE_RETRIEVAL,
-                                        format!("Could not start Vencord bundle retrieval: {error}"),
+                                        format!("Could not start {} bundle retrieval: {error}", descriptor.id),
                                     );
                                     response_count += 1;
                                 } else {
@@ -2192,20 +2238,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                             version: PROTOCOL_VERSION,
                             request_id: payload.request_id.clone(),
                             ok: true,
-                            payload: Some(BridgeResponsePayload::VencordBundle(
-                                VencordBundleResponse {
-                                    bundle_version: pending.bundle_version,
-                                    bundle_bytes: pending.bundle_bytes,
-                                    css_bytes: pending.css_bytes,
-                                    request_latency_ms,
-                                    retrieval_ms: pending.retrieval_ms,
-                                    execution_ms: pending.execution_ms,
-                                    css_injection_ms: pending.css_injection_ms,
-                                    marker: descriptor.success_marker,
-                                    document_execution_count:
-                                        document_lifecycle.mod_execution_count(descriptor.id),
-                                },
-                            )),
+                            payload: Some(BridgeResponsePayload::ModBundle(ModBundleResponse {
+                                mod_id: descriptor.id,
+                                bundle_version: pending.bundle_version,
+                                bundle_bytes: pending.bundle_bytes,
+                                css_bytes: pending.css_bytes,
+                                request_latency_ms,
+                                retrieval_ms: pending.retrieval_ms,
+                                execution_ms: pending.execution_ms,
+                                css_injection_ms: pending.css_injection_ms,
+                                marker: descriptor.success_marker,
+                                document_execution_count: document_lifecycle
+                                    .mod_execution_count(descriptor.id),
+                            })),
                             error: None,
                         };
                         send_bridge_response(&webview, &response);
@@ -2379,9 +2424,10 @@ mod tests {
     fn diagnostic_keeps_facade_and_substrate_but_can_omit_the_vencord_adapter() {
         let with_adapter = initialization_script(true).unwrap();
         let without_adapter = initialization_script(false).unwrap();
-        assert!(with_adapter.contains("native.getVencordBundle"));
+        assert!(with_adapter.contains("native.getModBundle"));
         assert!(with_adapter.contains("__legcordNativeVencordAdapter"));
         assert!(with_adapter.contains("__legcordNativeModSubstrate"));
+        assert!(without_adapter.contains("        getModBundle,"));
         assert!(without_adapter.contains("        getVencordBundle,"));
         assert!(without_adapter.contains("__legcordNativeModSubstrate"));
         assert!(!without_adapter.contains("__legcordNativeVencordAdapter"));
@@ -2400,7 +2446,7 @@ mod tests {
         assert_eq!(KNOWN_MODS.len(), 1);
         let descriptor = lookup_mod_descriptor("vencord").unwrap();
         assert_eq!(descriptor.id, VENCORD_MOD.id);
-        assert_eq!(descriptor.capability, "mod.vencord.get_bundle");
+        assert_eq!(descriptor.capability, "mod.get_bundle");
         assert_eq!(
             descriptor.js_url,
             "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js"
@@ -2412,7 +2458,69 @@ mod tests {
         assert_eq!(descriptor.success_marker, "vencord-bootstrap-executed");
         assert_eq!(descriptor.settings_key, "VencordSettings");
         assert!(lookup_mod_descriptor("shelter").is_none());
+        assert!(lookup_mod_descriptor("equicord").is_none());
+        assert!(lookup_mod_descriptor("custom").is_none());
         assert!(lookup_mod_descriptor("arbitrary").is_none());
+        // The registry resolves EXACT ids only: no prefix, case, or path
+        // shape can select a descriptor.
+        assert!(lookup_mod_descriptor("Vencord").is_none());
+        assert!(lookup_mod_descriptor("vencord.js").is_none());
+        assert!(lookup_mod_descriptor("../vencord").is_none());
+        assert!(lookup_mod_descriptor("ven ").is_none());
+    }
+
+    #[test]
+    fn the_bundle_capability_is_shared_and_registry_backed() {
+        // ONE capability serves every registered mod; the renderer only ever
+        // supplies a logical id. No filesystem, URL, or source capability is
+        // granted alongside it.
+        let descriptor = lookup_mod_descriptor("vencord").unwrap();
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&descriptor.capability));
+        assert_eq!(
+            super::BOOT_SNAPSHOT
+                .capabilities
+                .iter()
+                .filter(|capability| **capability == "mod.get_bundle")
+                .count(),
+            1
+        );
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert!(!capability.contains("filesystem"));
+            assert!(!capability.contains("bundle_file"));
+            assert!(!capability.contains("eval"));
+        }
+        for capability in [
+            "filesystem",
+            "invoke",
+            "read_file",
+            "load_script",
+            "execute",
+        ] {
+            assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&capability));
+        }
+        // Every registered mod must declare the shared capability and pass
+        // id validation, so a request id can never be silently mismatched
+        // against a descriptor.
+        for descriptor in KNOWN_MODS {
+            assert_eq!(descriptor.capability, "mod.get_bundle");
+            assert!(crate::protocol::validate_mod_bundle_id(descriptor.id).is_ok());
+            assert_eq!(
+                lookup_mod_descriptor(descriptor.id).map(|found| found.id),
+                Some(descriptor.id)
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_mod_binds_the_shared_bundle_capability_at_startup() {
+        // Fail-fast parity with the existing startup descriptor check: a
+        // descriptor without the shared capability must abort startup rather
+        // than silently serve no bundle.
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&VENCORD_MOD.capability));
     }
 
     #[test]

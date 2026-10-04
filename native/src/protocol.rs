@@ -13,6 +13,9 @@ pub const MAX_IPC_MESSAGE_BYTES: usize = 8 * 1024;
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_ERROR_BYTES: usize = 2 * 1024;
 pub const MAX_TRACKED_REQUEST_IDS: usize = 4096;
+/// Maximum logical mod bundle id length in UTF-8 bytes. Registry ids are
+/// short lowercase names (`"vencord"`); the bound mirrors the theme id cap.
+pub const MAX_MOD_BUNDLE_ID_BYTES: usize = 64;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +34,7 @@ pub struct BridgeRequest {
 )]
 pub enum BridgeCommand {
     Ping(PingRequest),
-    ModVencordGetBundle(VencordBundleRequest),
+    ModGetBundle(ModGetBundleRequest),
     SettingsGetConfig(SettingsGetConfigRequest),
     SettingsSetBlockPowerSaving(SettingsSetBlockPowerSavingRequest),
     LocalizationGetLang(LocalizationGetLangRequest),
@@ -46,9 +49,37 @@ pub struct PingRequest {
     pub nonce: String,
 }
 
+/// Scoped client-mod bundle request: exactly one logical bundle id. There
+/// is deliberately NO URL, path, filename, channel, or executable source:
+/// the host resolves the id by exact match against its compile-time known
+/// mod registry (`KNOWN_MODS`) and rejects everything else. Any extra
+/// payload member is rejected by `deny_unknown_fields`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct VencordBundleRequest {}
+pub struct ModGetBundleRequest {
+    pub mod_id: String,
+}
+
+fn is_mod_bundle_id_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+}
+
+/// Shape validation for a logical bundle id: non-empty, bounded, and
+/// confined to `[A-Za-z0-9._-]`. This rejects path separators, drive/UNC
+/// syntax, URLs, and `javascript:` shapes at parse time; registry
+/// membership (exact match) is enforced at dispatch.
+pub fn validate_mod_bundle_id(mod_id: &str) -> Result<(), String> {
+    if mod_id.is_empty() {
+        return Err("mod bundle id must not be empty".to_owned());
+    }
+    if mod_id.len() > MAX_MOD_BUNDLE_ID_BYTES {
+        return Err("mod bundle id exceeds the size limit".to_owned());
+    }
+    if !mod_id.bytes().all(is_mod_bundle_id_char) {
+        return Err("mod bundle id uses characters outside [A-Za-z0-9._-]".to_owned());
+    }
+    Ok(())
+}
 
 /// Empty request for the read-only `settings.get_config` capability. There
 /// are no renderer-supplied parameters by design: no config key, no file
@@ -291,7 +322,7 @@ pub struct BridgeResponse {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum BridgeResponsePayload {
     Ping(PingResponse),
-    VencordBundle(VencordBundleResponse),
+    ModBundle(ModBundleResponse),
     SettingsConfig(Box<SettingsConfigResponse>),
     SettingsMutation(SettingsMutationResponse),
     LocalizationString(LocalizationStringResponse),
@@ -318,8 +349,17 @@ pub struct RequestTracker {
     in_flight: HashSet<String>,
 }
 
+/// Validated bundle metadata response for the scoped `mod.get_bundle`
+/// capability. Carries ONLY what the substrate pipeline needs: the registry
+/// id echo (so the adapter can confirm identity), the validated build
+/// version, byte sizes, timing measurements, the descriptor's success
+/// marker, and the per-document execution count. There is deliberately NO
+/// bundle source, URL, path, filename, cache layout, or executable content:
+/// the multi-hundred-kilobyte sources travel host-side only (disk cache +
+/// page-world execution) and never cross the bridge.
 #[derive(Serialize)]
-pub struct VencordBundleResponse {
+pub struct ModBundleResponse {
+    pub mod_id: &'static str,
     pub bundle_version: String,
     pub bundle_bytes: usize,
     pub css_bytes: usize,
@@ -442,7 +482,14 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid nonce".to_owned());
                     }
                 }
-                BridgeCommand::ModVencordGetBundle(_) => {}
+                BridgeCommand::ModGetBundle(payload) => {
+                    // Shape check only (presence + byte cap + charset);
+                    // registry membership (exact match against KNOWN_MODS)
+                    // is enforced at dispatch.
+                    if validate_mod_bundle_id(&payload.mod_id).is_err() {
+                        return Err("invalid mod bundle id".to_owned());
+                    }
+                }
                 BridgeCommand::SettingsGetConfig(_) => {}
                 // The mutation value is a plain bool: serde already rejected
                 // non-boolean, missing, or extra payload members via
@@ -652,8 +699,9 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_bridge_message, BridgeEvent, BridgeMessage, BridgeResponse, BridgeResponsePayload,
-        RequestTracker, VencordBundleResponse, PROTOCOL_VERSION,
+        parse_bridge_message, validate_mod_bundle_id, BridgeCommand, BridgeEvent, BridgeMessage,
+        BridgeRequest, BridgeResponse, BridgeResponsePayload, ModBundleResponse, RequestTracker,
+        MAX_MOD_BUNDLE_ID_BYTES, PROTOCOL_VERSION,
     };
 
     #[test]
@@ -682,17 +730,83 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_vencord_bundle_capability_without_renderer_parameters() {
-        let request = r#"{"version":1,"request_id":"vencord-1","command":{"type":"mod_vencord_get_bundle","payload":{}}}"#;
+    fn accepts_a_scoped_bundle_id_and_rejects_renderer_source_parameters() {
+        let request = r#"{"version":1,"request_id":"vencord-1","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord"}}}"#;
         assert!(matches!(
             parse_bridge_message(request),
-            Ok(BridgeMessage::Request(_))
+            Ok(BridgeMessage::Request(BridgeRequest {
+                command: BridgeCommand::ModGetBundle(_),
+                ..
+            }))
         ));
 
-        let arbitrary_url = r#"{"version":1,"request_id":"vencord-2","command":{"type":"mod_vencord_get_bundle","payload":{"url":"https://attacker.invalid/bundle.js"}}}"#;
-        let arbitrary_path = r#"{"version":1,"request_id":"vencord-3","command":{"type":"mod_vencord_get_bundle","payload":{"path":"C:\\secret"}}}"#;
-        assert!(parse_bridge_message(arbitrary_url).is_err());
-        assert!(parse_bridge_message(arbitrary_path).is_err());
+        // A URL, path, filename, or executable-source member is never a
+        // valid member of this command: it cannot select what the host reads.
+        let url = r#"{"version":1,"request_id":"vencord-2","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord","url":"https://attacker.invalid/bundle.js"}}}"#;
+        let path = r#"{"version":1,"request_id":"vencord-3","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord","path":"C:\\secret"}}}"#;
+        let file = r#"{"version":1,"request_id":"vencord-4","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord","file":"vencord.js"}}}"#;
+        let source = r#"{"version":1,"request_id":"vencord-5","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord","source":"globalThis.x=1"}}}"#;
+        let channel = r#"{"version":1,"request_id":"vencord-6","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord","channel":"getVencordBundle"}}}"#;
+        let generic = r#"{"version":1,"request_id":"vencord-7","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord","method":"readFile"}}}"#;
+        for message in [url, path, file, source, channel, generic] {
+            assert!(
+                parse_bridge_message(message).is_err(),
+                "must reject {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_bundle_ids_that_could_escape_the_registry() {
+        // Path, URL, and scheme shapes are rejected at parse time by the
+        // charset bound, so no id can become a filesystem or URL selector.
+        for hostile in [
+            r#"{"version":1,"request_id":"m-1","command":{"type":"mod_get_bundle","payload":{"mod_id":"../vencord"}}}"#,
+            r#"{"version":1,"request_id":"m-2","command":{"type":"mod_get_bundle","payload":{"mod_id":"..\\vencord"}}}"#,
+            r#"{"version":1,"request_id":"m-3","command":{"type":"mod_get_bundle","payload":{"mod_id":"C:\\vencord.js"}}}"#,
+            r#"{"version":1,"request_id":"m-4","command":{"type":"mod_get_bundle","payload":{"mod_id":"//server/share/vencord.js"}}}"#,
+            r#"{"version":1,"request_id":"m-5","command":{"type":"mod_get_bundle","payload":{"mod_id":"https://attacker.invalid/vencord.js"}}}"#,
+            r#"{"version":1,"request_id":"m-6","command":{"type":"mod_get_bundle","payload":{"mod_id":"javascript:alert(1)"}}}"#,
+            r#"{"version":1,"request_id":"m-7","command":{"type":"mod_get_bundle","payload":{"mod_id":""}}}"#,
+            r#"{"version":1,"request_id":"m-9","command":{"type":"mod_get_bundle","payload":{"mod_id":"ven cord"}}}"#,
+        ] {
+            assert!(
+                parse_bridge_message(hostile).is_err(),
+                "must reject {hostile}"
+            );
+        }
+        // Charset-valid but UNREGISTERED ids parse here and are rejected at
+        // dispatch with UNKNOWN_MOD: exact registry match only, so a file
+        // name or an unregistered mod can never become a source selector.
+        for unregistered in ["shelter", "vencord.js", "equicord", "custom", "Vencord"] {
+            let message = format!(
+                r#"{{"version":1,"request_id":"m-x","command":{{"type":"mod_get_bundle","payload":{{"mod_id":"{unregistered}"}}}}}}"#
+            );
+            assert!(
+                matches!(
+                    parse_bridge_message(&message),
+                    Ok(BridgeMessage::Request(BridgeRequest {
+                        command: BridgeCommand::ModGetBundle(_),
+                        ..
+                    }))
+                ),
+                "{unregistered} must parse and be rejected by the host registry"
+            );
+            assert!(validate_mod_bundle_id(unregistered).is_ok());
+        }
+    }
+
+    #[test]
+    fn validates_bundle_id_bounds_and_charset() {
+        assert!(validate_mod_bundle_id("vencord").is_ok());
+        assert!(validate_mod_bundle_id("my.mod_2").is_ok());
+        assert!(validate_mod_bundle_id("").is_err());
+        assert!(validate_mod_bundle_id(&"a".repeat(MAX_MOD_BUNDLE_ID_BYTES + 1)).is_err());
+        assert!(validate_mod_bundle_id("../x").is_err());
+        assert!(validate_mod_bundle_id("x/y").is_err());
+        assert!(validate_mod_bundle_id("x\\y").is_err());
+        assert!(validate_mod_bundle_id("https://a.invalid/x").is_err());
+        assert!(validate_mod_bundle_id("javascript:alert(1)").is_err());
     }
 
     #[test]
@@ -742,35 +856,48 @@ mod tests {
     }
 
     #[test]
-    fn serializes_a_typed_vencord_response_without_bundle_source() {
+    fn serializes_a_typed_bundle_response_without_bundle_source() {
         let response = BridgeResponse {
             version: PROTOCOL_VERSION,
             request_id: "vencord-1".to_owned(),
             ok: true,
-            payload: Some(BridgeResponsePayload::VencordBundle(
-                VencordBundleResponse {
-                    bundle_version: "test-build".to_owned(),
-                    bundle_bytes: 1024,
-                    css_bytes: 256,
-                    request_latency_ms: 20.0,
-                    retrieval_ms: 10.0,
-                    execution_ms: 5.0,
-                    css_injection_ms: 2.0,
-                    marker: "vencord-bootstrap-executed",
-                    document_execution_count: 1,
-                },
-            )),
+            payload: Some(BridgeResponsePayload::ModBundle(ModBundleResponse {
+                mod_id: "vencord",
+                bundle_version: "test-build".to_owned(),
+                bundle_bytes: 1024,
+                css_bytes: 256,
+                request_latency_ms: 20.0,
+                retrieval_ms: 10.0,
+                execution_ms: 5.0,
+                css_injection_ms: 2.0,
+                marker: "vencord-bootstrap-executed",
+                document_execution_count: 1,
+            })),
             error: None,
         };
         let value = serde_json::to_value(response).unwrap();
-        assert_eq!(value["payload"]["type"], "vencord_bundle");
+        assert_eq!(value["payload"]["type"], "mod_bundle");
+        assert_eq!(value["payload"]["payload"]["mod_id"], "vencord");
         assert_eq!(
             value["payload"]["payload"]["marker"],
             "vencord-bootstrap-executed"
         );
         assert_eq!(value["payload"]["payload"]["document_execution_count"], 1);
+        // Metadata only: no source, no URL, no cache path, no layout.
         assert!(value["payload"]["payload"].get("js").is_none());
         assert!(value["payload"]["payload"].get("css").is_none());
+        assert!(value["payload"]["payload"].get("url").is_none());
+        assert!(value["payload"]["payload"].get("path").is_none());
+        assert!(value["payload"]["payload"].get("js_url").is_none());
+        assert!(value["payload"]["payload"].get("js_file").is_none());
+        assert!(value["payload"]["payload"].get("source").is_none());
+        assert!(value["payload"]["payload"].get("profile").is_none());
+        assert_eq!(
+            value["payload"]["payload"]
+                .as_object()
+                .map(|object| object.len()),
+            Some(10)
+        );
     }
 
     #[test]

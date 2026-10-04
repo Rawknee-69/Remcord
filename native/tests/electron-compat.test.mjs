@@ -273,6 +273,57 @@ test("no src caller is migrated to a native Quick CSS path in this milestone", (
     assert.doesNotMatch(invite, /legcord-quick-css/);
 });
 
+test("Electron keeps the four fixed-name bundle handlers byte-identical", () => {
+    // Every client-mod bundle handler still reads only fixed userData file
+    // names and returns `{ js, css?, enabled }`. The native milestone
+    // replaces none of these; it adds a host-controlled registry beside them.
+    assert.match(ipc, /ipcMain\.handle\("getShelterBundle"/);
+    assert.match(ipc, /ipcMain\.handle\("getVencordBundle"/);
+    assert.match(ipc, /ipcMain\.handle\("getEquicordBundle"/);
+    assert.match(ipc, /ipcMain\.handle\("getCustomBundle"/);
+    assert.match(ipc, /ifExistsRead\(path\.join\(app\.getPath\("userData"\), "shelter\.js"\)\)/);
+    assert.match(ipc, /ifExistsRead\(path\.join\(app\.getPath\("userData"\), "vencord\.js"\)\)/);
+    assert.match(ipc, /ifExistsRead\(path\.join\(app\.getPath\("userData"\), "vencord\.css"\)\)/);
+    assert.match(ipc, /ifExistsRead\(path\.join\(app\.getPath\("userData"\), "equicord\.js"\)\)/);
+    assert.match(ipc, /ifExistsRead\(path\.join\(app\.getPath\("userData"\), "custom\.js"\)\)/);
+    assert.match(ipc, /enabled: getConfig\("mods"\)\.includes\("vencord"\)/);
+    assert.match(ipc, /function ifExistsRead\(path: string\): string \| undefined/);
+    // Preload consumers are unchanged: each invokes its own channel with no
+    // arguments and executes whatever source the handler returned.
+    const vencordPreload = readFileSync(new URL("../../src/discord/preload/mods/vencord.mts", import.meta.url), "utf8");
+    assert.match(vencordPreload, /ipcRenderer\.invoke\("getVencordBundle"\)/);
+    assert.match(vencordPreload, /webFrame\.executeJavaScript\(bundle\.js\)/);
+    assert.match(vencordPreload, /webFrame\.insertCSS\(bundle\.css!\)/);
+    const modBundleTypes = readFileSync(new URL("../../src/@types/ModBundle.d.ts", import.meta.url), "utf8");
+    assert.match(modBundleTypes, /interface ModBundle/);
+    assert.match(modBundleTypes, /js: string/);
+    assert.match(modBundleTypes, /css\?: string/);
+    assert.match(modBundleTypes, /enabled: boolean/);
+    // The declared renderer contract stays a raw-source bundle: the native
+    // path deliberately does NOT grow a typed read for it.
+    assert.doesNotMatch(types, /ModBundle/);
+});
+
+test("native bundle retrieval adds no renderer filesystem or exec surface", () => {
+    // The bundle facade member is a scoped logical-id request only: no path,
+    // URL, filename, source, generic read, or generic invocation. (The
+    // plugin-storage `readFile` member is the already-validated Phase D
+    // capability and is unrelated to bundles.)
+    const bundleFacade = nativeFacade.slice(
+        nativeFacade.indexOf("function getModBundle"),
+        nativeFacade.indexOf("function isSettingsSnapshot"),
+    );
+    assert.ok(bundleFacade.length > 0);
+    assert.doesNotMatch(bundleFacade, /readFile|loadScript|executeSource|eval\(|new Function/);
+    assert.doesNotMatch(bundleFacade, /\bpath\b|\burl\b|\bfile\b|\bsource\b/);
+    assert.match(bundleFacade, /requireCapability\("mod\.get_bundle"\)/);
+    assert.match(bundleFacade, /mod_id: modId/);
+    // The facade exposes exactly one bundle entry point plus the thin
+    // Vencord convenience wrapper; there is no generic bundle reader.
+    assert.equal((nativeFacade.match(/function get\w*Bundle\(/g) ?? []).length, 2);
+    assert.doesNotMatch(nativeFacade, /function readBundle\(/);
+});
+
 test("Electron keeps the Quick CSS live file-watcher contract", () => {
     // initQuickCss watches the single file, reacts only to change events,
     // debounces 300 ms, then re-reads and pushes removeTheme + addTheme.

@@ -695,6 +695,68 @@ mod tests {
     }
 
     #[test]
+    fn bundle_validation_rejects_missing_oversized_and_non_utf8_artifacts() {
+        let descriptor = test_descriptor();
+        let good_js = b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec();
+        let good_css = b"/* test CSS */".to_vec();
+
+        // Missing/empty artifact: both halves are required (Electron's
+        // ModBundle declares `js: string`, and the substrate refuses to
+        // execute a bundle it cannot fully validate).
+        assert!(validate_mod_bundle(&descriptor, Vec::new(), good_css.clone()).is_err());
+        assert!(validate_mod_bundle(&descriptor, good_js.clone(), Vec::new()).is_err());
+
+        // Oversized artifacts are rejected before allocation of any source
+        // string, on the descriptor's own limits.
+        let big_js = vec![b'a'; descriptor.max_js_bytes + 1];
+        assert!(validate_mod_bundle(&descriptor, big_js, good_css.clone()).is_err());
+        let big_css = vec![b'a'; descriptor.max_css_bytes + 1];
+        assert!(validate_mod_bundle(&descriptor, good_js.clone(), big_css).is_err());
+
+        // Invalid UTF-8 in either half is a typed failure, never a lossy
+        // conversion.
+        let bad_js = vec![0x66, 0xFF, 0x66];
+        assert!(validate_mod_bundle(&descriptor, bad_js, good_css.clone()).is_err());
+        let bad_css = vec![0x66, 0xFF, 0x66];
+        assert!(validate_mod_bundle(&descriptor, good_js.clone(), bad_css).is_err());
+
+        // A missing build header is a different failure from a malformed one:
+        // an artifact from a DIFFERENT mod must never be served as this one.
+        let foreign = validate_mod_bundle(
+            &descriptor,
+            b"// Vencord b52ed36\nvar Vencord = {};\n".to_vec(),
+            good_css,
+        );
+        let foreign = foreign.unwrap_err();
+        assert!(foreign.contains("build header"), "{foreign}");
+
+        // An over-long or empty version header is refused as well.
+        let long_version = format!("// TestMod {}\n", "a".repeat(65));
+        assert!(
+            validate_mod_bundle(&descriptor, long_version.into_bytes(), b"/*c*/".to_vec()).is_err()
+        );
+        assert!(validate_mod_bundle(
+            &descriptor,
+            b"// TestMod \nvar TestMod = {};\n".to_vec(),
+            b"/*c*/".to_vec()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_absent_disk_cache_is_a_miss_not_a_failure() {
+        // Retrieval downloads the fixed release asset when no cached file
+        // exists; the disk-cache read path is only taken for present files,
+        // so an absent artifact cannot masquerade as a validated bundle.
+        let profile = std::env::temp_dir().join("legcord-native-substrate-absent-cache");
+        let _ = std::fs::remove_dir_all(&profile);
+        std::fs::create_dir_all(&profile).expect("temp profile");
+        assert!(!profile.join("testmod.js").exists());
+        assert!(!profile.join("testmod.css").exists());
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[test]
     fn bundle_cache_records_a_miss_then_a_hit() {
         let descriptor = test_descriptor();
         let mut cache = ModCache::default();

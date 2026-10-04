@@ -103,9 +103,19 @@
         return request({ type: "ping", payload: { nonce } });
     }
 
+    function getModBundle(modId, timeoutMs = 120_000) {
+        requireCapability("mod.get_bundle");
+        if (typeof modId !== "string" || modId.length === 0 || !/^[A-Za-z0-9._-]{1,64}$/.test(modId)) {
+            return Promise.reject(new TypeError("modId must match [A-Za-z0-9._-]{1,64}"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "mod_get_bundle", payload: { mod_id: modId } }, timeoutMs);
+    }
+
     function getVencordBundle() {
-        requireCapability("mod.vencord.get_bundle");
-        return request({ type: "mod_vencord_get_bundle", payload: {} }, 120_000);
+        return getModBundle("vencord", 120_000);
     }
 
     function isSettingsSnapshot(value) {
@@ -246,10 +256,12 @@
             } catch (error) {
                 reportRendererError("bridge_event", error);
             }
-        } else if (response.ok === true && response.payload?.type === "vencord_bundle") {
+        } else if (response.ok === true && response.payload?.type === "mod_bundle") {
             const payload = response.payload.payload;
             if (
                 !payload ||
+                typeof payload.mod_id !== "string" ||
+                payload.mod_id.length === 0 ||
                 typeof payload.bundle_version !== "string" ||
                 !Number.isSafeInteger(payload.bundle_bytes) ||
                 !Number.isSafeInteger(payload.css_bytes) ||
@@ -257,10 +269,11 @@
                 !Number.isFinite(payload.retrieval_ms) ||
                 !Number.isFinite(payload.execution_ms) ||
                 !Number.isFinite(payload.css_injection_ms) ||
-                payload.marker !== "vencord-bootstrap-executed" ||
+                typeof payload.marker !== "string" ||
+                payload.marker.length === 0 ||
                 payload.document_execution_count !== 1
             ) {
-                request.reject(new Error("Native Vencord response schema is invalid"));
+                request.reject(new Error("Native mod bundle response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -385,6 +398,7 @@
     const capabilities = new Set(snapshot.capabilities);
     const native = Object.freeze({
         ping,
+        getModBundle,
         getVencordBundle,
         getVersion,
         reportCss(value) {

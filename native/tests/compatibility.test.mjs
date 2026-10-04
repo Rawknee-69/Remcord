@@ -58,7 +58,7 @@ class FakeWindow {
     }
 }
 
-function createRuntime(origin = "https://discord.com", capabilities = ["bridge.ping", "mod.vencord.get_bundle"]) {
+function createRuntime(origin = "https://discord.com", capabilities = ["bridge.ping", "mod.get_bundle"]) {
     const window = new FakeWindow(origin);
     const context = vm.createContext({
         window,
@@ -155,8 +155,9 @@ function respondVencord(window, request, payload = {}) {
                 request_id: request.request_id,
                 ok: true,
                 payload: {
-                    type: "vencord_bundle",
+                    type: "mod_bundle",
                     payload: {
+                        mod_id: "vencord",
                         bundle_version: "b52ed36",
                         bundle_bytes: 1000,
                         css_bytes: 250,
@@ -470,7 +471,7 @@ test("initializes a frozen compatibility facade with the boot snapshot", () => {
     assert.equal(window.legcord.boot.platform, "win32");
     assert.equal(Object.isFrozen(window.legcord), true);
     assert.equal(Object.isFrozen(window.legcord.boot), true);
-    assert.equal(window.legcord.native.supports("mod.vencord.get_bundle"), true);
+    assert.equal(window.legcord.native.supports("mod.get_bundle"), true);
     assert.equal(
         window.messages.some((message) => message.event?.type === "bootstrap_metrics"),
         true,
@@ -552,30 +553,150 @@ test("reports renderer exception stacks and source locations to the native log",
     assert.match(reports[1].event.payload.message, /settings access failed/);
 });
 
-test("requests only the typed Vencord capability and validates its response schema", async () => {
+test("requests only the shared bundle capability with the registered mod id", async () => {
     const { window } = createRuntime();
     const request = window.legcord.native.getVencordBundle();
-    const message = window.messages.find((entry) => entry.command?.type === "mod_vencord_get_bundle");
+    const message = window.messages.find((entry) => entry.command?.type === "mod_get_bundle");
     assert.ok(message);
-    assert.deepEqual(message.command, { type: "mod_vencord_get_bundle", payload: {} });
+    // Exactly one logical id. No path, URL, filename, or source member.
+    assert.deepEqual(message.command, { type: "mod_get_bundle", payload: { mod_id: "vencord" } });
+    assert.equal(Object.keys(message.command.payload).length, 1);
     assert.equal(request.requestId, message.request_id);
 
     respondVencord(window, message);
-    assert.equal((await request).marker, "vencord-bootstrap-executed");
+    const result = await request;
+    assert.equal(result.marker, "vencord-bootstrap-executed");
+    assert.equal(result.mod_id, "vencord");
 });
 
-test("rejects malformed Vencord responses", async () => {
+test("the shared bundle request carries a logical id and nothing else", async () => {
     const { window } = createRuntime();
-    const request = window.legcord.native.getVencordBundle();
-    const message = window.messages.find((entry) => entry.command?.type === "mod_vencord_get_bundle");
-    respondVencord(window, message, { document_execution_count: 2 });
-    await assert.rejects(request, /response schema is invalid/);
+    const request = window.legcord.native.getModBundle("vencord");
+    const message = window.messages.find((entry) => entry.command?.type === "mod_get_bundle");
+    assert.deepEqual(message.command.payload, { mod_id: "vencord" });
+    for (const forbidden of ["path", "url", "file", "source", "js_url", "channel", "method"]) {
+        assert.equal(forbidden in message.command.payload, false);
+    }
+    respondVencord(window, message);
+    assert.equal((await request).bundle_version, "b52ed36");
+});
+
+test("rejects bundle ids that could select a path, URL, or source", async () => {
+    const { window } = createRuntime();
+    for (const hostile of [
+        "../vencord",
+        "..\\vencord",
+        "C:\\vencord.js",
+        "//server/share/vencord.js",
+        "https://attacker.invalid/vencord.js",
+        "javascript:alert(1)",
+        "",
+        "ven cord",
+        "a".repeat(65),
+        123,
+        null,
+        { modId: "vencord" },
+    ]) {
+        await assert.rejects(
+            () => window.legcord.native.getModBundle(hostile),
+            TypeError,
+            `must reject ${JSON.stringify(hostile)}`,
+        );
+    }
+    // Client-side rejection means nothing reached the wire.
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "mod_get_bundle"),
+        false,
+    );
+});
+
+test("an unregistered but well-formed id is refused by the host registry", async () => {
+    // The charset bound cannot know the registry, so a plausible-looking id
+    // (including a file name) is dispatched and must come back as a typed
+    // UNKNOWN_MOD failure. Nothing is read, and no source is substituted.
+    const { window } = createRuntime();
+    for (const unregistered of ["vencord.js", "shelter", "equicord", "custom", "Vencord"]) {
+        const request = window.legcord.native.getModBundle(unregistered);
+        const message = window.messages.filter((entry) => entry.command?.type === "mod_get_bundle").pop();
+        assert.deepEqual(message.command.payload, { mod_id: unregistered });
+        window.dispatchEvent(
+            new FakeCustomEvent("legcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: false,
+                    payload: null,
+                    error: {
+                        code: "UNKNOWN_MOD",
+                        message: `mod '${unregistered}' is not registered in the native host`,
+                    },
+                },
+            }),
+        );
+        await assert.rejects(
+            request,
+            (error) => {
+                assert.equal(error.code, "UNKNOWN_MOD");
+                return true;
+            },
+            unregistered,
+        );
+    }
+});
+
+test("denies the shared bundle capability when the boot snapshot does not grant it", () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping"]);
+    assert.throws(
+        () => window.legcord.native.getModBundle("vencord"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.legcord.native.getVencordBundle(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "mod_get_bundle"),
+        false,
+    );
+});
+
+test("rejects malformed bundle responses", async () => {
+    const { window } = createRuntime();
+    for (const malformed of [
+        { document_execution_count: 2 },
+        { mod_id: "" },
+        { mod_id: 7 },
+        { bundle_version: 42 },
+        { bundle_bytes: 1.5 },
+        { marker: "" },
+        { marker: 1 },
+        { request_latency_ms: "fast" },
+        { mod_id: undefined },
+    ]) {
+        const request = window.legcord.native.getModBundle("vencord");
+        const message = window.messages.filter((entry) => entry.command?.type === "mod_get_bundle").pop();
+        respondVencord(window, message, malformed);
+        await assert.rejects(request, /response schema is invalid/, JSON.stringify(malformed));
+    }
+});
+
+test("times out a bundle request that never resolves", async () => {
+    const { window } = createRuntime();
+    // A short explicit timeout keeps the test fast without touching the
+    // documented 120 s bundle default.
+    await assert.rejects(
+        () => window.legcord.native.getModBundle("vencord", 5),
+        (error) => {
+            assert.equal(error.code, "REQUEST_TIMEOUT");
+            return true;
+        },
+    );
 });
 
 test("propagates a typed bundle failure without reclassifying it as adapter initialization", async () => {
     const { window, context } = createRuntime();
     vm.runInContext(vencordAdapter, context);
-    const request = window.messages.find((message) => message.command?.type === "mod_vencord_get_bundle");
+    const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
     window.dispatchEvent(
         new FakeCustomEvent("legcord-native:response", {
             detail: {
@@ -600,7 +721,7 @@ test("denies Vencord startup when the boot snapshot does not grant the capabilit
     const { window, context } = createRuntime("https://discord.com", ["bridge.ping"]);
     vm.runInContext(vencordAdapter, context);
     assert.equal(
-        window.messages.some((message) => message.command?.type === "mod_vencord_get_bundle"),
+        window.messages.some((message) => message.command?.type === "mod_get_bundle"),
         false,
     );
     assert.equal(
@@ -614,9 +735,9 @@ test("Vencord adapter executes once and marks only the bootstrap result", async 
     const { window, context } = createRuntime();
     vm.runInContext(vencordAdapter, context);
     vm.runInContext(vencordAdapter, context);
-    const request = window.messages.find((message) => message.command?.type === "mod_vencord_get_bundle");
+    const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
     assert.ok(request);
-    assert.equal(window.messages.filter((message) => message.command?.type === "mod_vencord_get_bundle").length, 1);
+    assert.equal(window.messages.filter((message) => message.command?.type === "mod_get_bundle").length, 1);
     assert.equal(window.__legcordNativeVencord.status, "pending");
 
     window.dispatchEvent(
@@ -654,10 +775,63 @@ test("a fresh document gets independent Vencord bootstrap state", () => {
     assert.notEqual(firstDocument.window.__legcordNativeVencord, secondDocument.window.__legcordNativeVencord);
     assert.equal(secondDocument.window.__legcordNativeVencord.status, "pending");
     assert.equal(
-        secondDocument.window.messages.filter((message) => message.command?.type === "mod_vencord_get_bundle").length,
+        secondDocument.window.messages.filter((message) => message.command?.type === "mod_get_bundle").length,
         1,
     );
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    secondDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+});
+
+test("a reloaded document re-requests the known bundle through the shared capability", async () => {
+    const firstDocument = createRuntime();
+    vm.runInContext(vencordAdapter, firstDocument.context);
+    const firstRequest = firstDocument.window.messages.find((message) => message.command?.type === "mod_get_bundle");
+    respondVencord(firstDocument.window, firstRequest);
+    assert.ok(firstRequest.request_id.length > 0);
+
+    // Reload: a fresh document starts from clean per-document state and the
+    // adapter asks for the SAME registry id again — never a path or URL.
+    const secondDocument = createRuntime();
+    vm.runInContext(vencordAdapter, secondDocument.context);
+    const secondRequest = secondDocument.window.messages.find((message) => message.command?.type === "mod_get_bundle");
+    assert.deepEqual(secondRequest.command.payload, { mod_id: "vencord" });
+    assert.notEqual(firstDocument.window.legcord, secondDocument.window.legcord);
+
+    // Disposing the previous document clears its pending bundle request, so
+    // a late host answer can no longer resolve anything.
+    const lateRequest = firstDocument.window.legcord.native.getModBundle("vencord");
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await assert.rejects(lateRequest, /document was disposed/);
+    assert.equal(secondDocument.window.__legcordNativeVencord.status, "pending");
+    respondVencord(secondDocument.window, secondRequest, { mod_id: "equicord" });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The adapter's own identity check rejects a response whose echoed
+    // registry id is not Vencord: a cross-mod bundle can never be
+    // acknowledged as a Vencord bootstrap even with a perfect marker.
+    secondDocument.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:vencord-bootstrap", {
+            detail: {
+                request_id: secondRequest.request_id,
+                ok: true,
+                marker: "vencord-bootstrap-executed",
+                execution_ms: 3,
+                local_storage_api: "available",
+                settings_state: "valid_json",
+            },
+        }),
+    );
+    assert.equal(secondDocument.window.__legcordNativeVencord.status, "executed");
+    respondVencord(secondDocument.window, secondRequest, { mod_id: "equicord" });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.match(secondDocument.window.__legcordNativeVencord.error, /not for Vencord/);
+    assert.equal(
+        secondDocument.window.messages.some((message) => message.event?.type === "vencord_response_ack"),
+        false,
+    );
     secondDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
 });
 
