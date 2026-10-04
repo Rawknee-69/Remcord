@@ -258,17 +258,28 @@
             }
         } else if (response.ok === true && response.payload?.type === "mod_bundle") {
             const payload = response.payload.payload;
+            // A mod that ships no stylesheet reports BOTH css fields as null.
+            // Requiring the pair to agree keeps "ships no CSS" distinguishable
+            // from "shipped a stylesheet" without inventing an empty-stylesheet
+            // state, and rejects a half-populated response either way.
+            const shipsNoCss = payload?.css_bytes === null && payload?.css_injection_ms === null;
+            const shipsCss =
+                Number.isSafeInteger(payload?.css_bytes) &&
+                payload.css_bytes >= 0 &&
+                Number.isFinite(payload?.css_injection_ms) &&
+                payload.css_injection_ms >= 0;
             if (
                 !payload ||
                 typeof payload.mod_id !== "string" ||
                 payload.mod_id.length === 0 ||
                 typeof payload.bundle_version !== "string" ||
+                payload.bundle_version.length === 0 ||
                 !Number.isSafeInteger(payload.bundle_bytes) ||
-                !Number.isSafeInteger(payload.css_bytes) ||
+                payload.bundle_bytes < 0 ||
+                (!shipsNoCss && !shipsCss) ||
                 !Number.isFinite(payload.request_latency_ms) ||
                 !Number.isFinite(payload.retrieval_ms) ||
                 !Number.isFinite(payload.execution_ms) ||
-                !Number.isFinite(payload.css_injection_ms) ||
                 typeof payload.marker !== "string" ||
                 payload.marker.length === 0 ||
                 payload.document_execution_count !== 1

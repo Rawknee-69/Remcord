@@ -152,6 +152,16 @@ pub enum BridgeEvent {
     CssProbe(CssProbe),
     RendererError(RendererError),
     BootstrapMetrics(BootstrapMetrics),
+    /// Mod-consumer events. Unlike the historically Vencord-named variants
+    /// below, every variant here is mod-agnostic and carries an explicit
+    /// `mod_id`, so one event family serves every registered mod and adding a
+    /// new consumer requires no protocol change. The host resolves the id
+    /// against its registry AND cross-checks it against the mod that owns the
+    /// correlated request, so a renderer cannot report another mod's verdict.
+    ModCssResult(ModCssResult),
+    ModBootstrapResult(ModBootstrapResult),
+    ModAdapterError(ModAdapterError),
+    ModResponseAck(ModResponseAck),
     VencordCssResult(VencordCssResult),
     VencordBootstrapResult(VencordBootstrapResult),
     VencordAdapterError(VencordAdapterError),
@@ -199,6 +209,49 @@ pub struct RendererError {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapMetrics {
     pub execution_ms: f64,
+}
+
+/// CSS injection result for a registered mod that declares a stylesheet.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModCssResult {
+    pub mod_id: String,
+    pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// Page-world execution verdict for a registered mod. `marker` must equal the
+/// descriptor's own `success_marker`; the host rejects any other value, and
+/// the adapter independently re-checks it before acknowledging.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModBootstrapResult {
+    pub mod_id: String,
+    pub request_id: String,
+    pub ok: bool,
+    pub marker: String,
+    pub execution_ms: f64,
+    pub local_storage_api: String,
+    pub settings_state: String,
+    pub error: Option<String>,
+}
+
+/// Adapter-level failure for a registered mod. Never carries a source, path,
+/// URL, or filename — only a bounded message.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModAdapterError {
+    pub mod_id: String,
+    pub message: String,
+}
+
+/// Renderer acknowledgement that the host response was accepted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModResponseAck {
+    pub mod_id: String,
+    pub request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,11 +415,14 @@ pub struct ModBundleResponse {
     pub mod_id: &'static str,
     pub bundle_version: String,
     pub bundle_bytes: usize,
-    pub css_bytes: usize,
+    /// `None` for a mod whose descriptor declares no stylesheet, so "ships no
+    /// CSS" is distinguishable from "ships an empty stylesheet".
+    pub css_bytes: Option<usize>,
     pub request_latency_ms: f64,
     pub retrieval_ms: f64,
     pub execution_ms: f64,
-    pub css_injection_ms: f64,
+    /// `None` when no CSS stage ran; otherwise the measured injection time.
+    pub css_injection_ms: Option<f64>,
     pub marker: &'static str,
     pub document_execution_count: u8,
 }
@@ -556,6 +612,69 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || !(0.0..=60_000.0).contains(&payload.execution_ms)
                     {
                         return Err("invalid bootstrap execution time".to_owned());
+                    }
+                }
+                BridgeEvent::ModCssResult(payload) => {
+                    if validate_mod_bundle_id(&payload.mod_id).is_err() {
+                        return Err("invalid mod id in mod CSS result".to_owned());
+                    }
+                    if !valid_request_id(&payload.request_id)
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid mod CSS result".to_owned());
+                    }
+                }
+                BridgeEvent::ModBootstrapResult(payload) => {
+                    if validate_mod_bundle_id(&payload.mod_id).is_err() {
+                        return Err("invalid mod id in mod bootstrap result".to_owned());
+                    }
+                    if !valid_request_id(&payload.request_id)
+                        || payload.marker.len() > 64
+                        || !payload.execution_ms.is_finite()
+                        || !(0.0..=60_000.0).contains(&payload.execution_ms)
+                        || !matches!(
+                            payload.local_storage_api.as_str(),
+                            "available" | "missing" | "blocked"
+                        )
+                        // "not_applicable" is the honest state for a mod that
+                        // keeps its settings outside localStorage: no invented
+                        // key is read, and no key lookup is claimed.
+                        || !matches!(
+                            payload.settings_state.as_str(),
+                            "missing"
+                                | "valid_json"
+                                | "invalid_json"
+                                | "read_error"
+                                | "storage_unavailable"
+                                | "not_applicable"
+                        )
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid mod bootstrap result".to_owned());
+                    }
+                }
+                BridgeEvent::ModAdapterError(payload) => {
+                    if validate_mod_bundle_id(&payload.mod_id).is_err() {
+                        return Err("invalid mod id in mod adapter error".to_owned());
+                    }
+                    if payload.message.is_empty() || payload.message.len() > MAX_ERROR_BYTES {
+                        return Err("invalid mod adapter error".to_owned());
+                    }
+                }
+                BridgeEvent::ModResponseAck(payload) => {
+                    if validate_mod_bundle_id(&payload.mod_id).is_err() {
+                        return Err("invalid mod id in mod response acknowledgement".to_owned());
+                    }
+                    if !valid_request_id(&payload.request_id) {
+                        return Err("invalid mod response acknowledgement".to_owned());
                     }
                 }
                 BridgeEvent::VencordCssResult(payload) => {
@@ -865,11 +984,11 @@ mod tests {
                 mod_id: "vencord",
                 bundle_version: "test-build".to_owned(),
                 bundle_bytes: 1024,
-                css_bytes: 256,
+                css_bytes: Some(256),
                 request_latency_ms: 20.0,
                 retrieval_ms: 10.0,
                 execution_ms: 5.0,
-                css_injection_ms: 2.0,
+                css_injection_ms: Some(2.0),
                 marker: "vencord-bootstrap-executed",
                 document_execution_count: 1,
             })),
@@ -898,6 +1017,43 @@ mod tests {
                 .map(|object| object.len()),
             Some(10)
         );
+    }
+
+    #[test]
+    fn a_mod_without_css_serializes_both_css_fields_as_null() {
+        // "Ships no stylesheet" is a first-class state, distinct from "shipped
+        // an empty stylesheet": both CSS fields are null together, so the
+        // renderer-side schema check can require them to agree.
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "shelter-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::ModBundle(ModBundleResponse {
+                mod_id: "shelter",
+                bundle_version: "sha256-ba858e9cfb83503f".to_owned(),
+                bundle_bytes: 235_850,
+                css_bytes: None,
+                request_latency_ms: 40.0,
+                retrieval_ms: 30.0,
+                execution_ms: 9.0,
+                css_injection_ms: None,
+                marker: "shelter-bootstrap-executed",
+                document_execution_count: 1,
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        let payload = &value["payload"]["payload"];
+        assert!(payload["css_bytes"].is_null());
+        assert!(payload["css_injection_ms"].is_null());
+        assert_eq!(payload["mod_id"], "shelter");
+        assert_eq!(
+            payload.as_object().map(|object| object.len()),
+            Some(10),
+            "the bounded metadata shape is unchanged for a CSS-less mod"
+        );
+        assert!(payload.get("css").is_none());
+        assert!(payload.get("source").is_none());
     }
 
     #[test]

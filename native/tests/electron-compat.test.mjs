@@ -304,6 +304,89 @@ test("Electron keeps the four fixed-name bundle handlers byte-identical", () => 
     assert.doesNotMatch(types, /ModBundle/);
 });
 
+const shelterPreload = readFileSync(new URL("../../src/discord/preload/mods/shelter.mts", import.meta.url), "utf8");
+const equicordPreload = readFileSync(new URL("../../src/discord/preload/mods/equicord.mts", import.meta.url), "utf8");
+const consts = readFileSync(new URL("../../src/common/consts.ts", import.meta.url), "utf8");
+
+test("Electron keeps the Shelter preload wrapper and its injector plugin map", () => {
+    // Shelter's Electron path wraps the bundle in a host-built IIFE that
+    // declares SHELTER_INJECTOR_PLUGINS and adds a macOS-only Touch Bar entry.
+    // The native milestone deliberately does not reproduce this wrapper: the
+    // legcord:// protocol and preload plugin loader are unimplemented natively,
+    // and Shelter skips the injector entirely when the global is absent. The
+    // Electron file must therefore stay byte-identical.
+    assert.match(
+        shelterPreload,
+        /const requiredPlugins: Record<string, \[string, \{ isVisible: boolean; allowedActions: Record<string, true> \}\]> = \{/,
+    );
+    assert.match(shelterPreload, /"legcord-arrpc": \["legcord:\/\/plugins\/rpc\/"/);
+    assert.match(shelterPreload, /"legcord-settings": \["legcord:\/\/plugins\/settings\/"/);
+    assert.match(shelterPreload, /"legcord-power": \["legcord:\/\/plugins\/power\/"/);
+    assert.match(shelterPreload, /"legcord-screenshare": \["legcord:\/\/plugins\/screenshare\/"/);
+    assert.match(shelterPreload, /"legcord-titlebar": \["legcord:\/\/plugins\/titlebar\/"/);
+    // Platform-specific behavior: Touch Bar is Darwin-only.
+    assert.match(shelterPreload, /if \(process\.platform === "darwin"\)/);
+    assert.match(shelterPreload, /"legcord-touchbar"/);
+    // The wrapper itself, and the fact that Shelter gets NO CSS.
+    assert.match(shelterPreload, /webFrame\.executeJavaScript\(`\(\(\)=>\{/);
+    assert.match(shelterPreload, /const SHELTER_INJECTOR_PLUGINS = \$\{JSON\.stringify\(requiredPlugins\)\};/);
+    assert.doesNotMatch(shelterPreload, /insertCSS/);
+    // Enabled is hardcoded true at the handler, so Shelter is NOT gated on
+    // settings.mods.
+    assert.match(
+        ipc,
+        /ipcMain\.handle\("getShelterBundle", \(\) => \{\s*return \{\s*js: ifExistsRead\(path\.join\(app\.getPath\("userData"\), "shelter\.js"\)\),\s*enabled: true,/,
+    );
+});
+
+test("Electron keeps the Equicord preload CSS requirement", () => {
+    // Equicord explicitly requires CSS; Vencord has the same note. Both must
+    // stay byte-identical so the native CSS stage keeps its parity target.
+    assert.match(equicordPreload, /ipcRenderer\.invoke\("getEquicordBundle"\)/);
+    assert.match(equicordPreload, /webFrame\.executeJavaScript\(bundle\.js\)/);
+    assert.match(equicordPreload, /webFrame\.insertCSS\(bundle\.css!\); \/\/NOTE - Equicord requires CSS\./);
+    assert.match(ipc, /enabled: getConfig\("mods"\)\.includes\("equicord"\)/);
+    // Both mods still download from the same fixed upstream URLs.
+    assert.match(consts, /js: "https:\/\/github\.com\/Vendicated\/Vencord\/releases\/download\/devbuild\/browser\.js"/);
+    assert.match(consts, /js: "https:\/\/github\.com\/Equicord\/Equicord\/releases\/download\/latest\/browser\.js"/);
+    assert.match(consts, /css: "https:\/\/github\.com\/Equicord\/Equicord\/releases\/download\/latest\/browser\.css"/);
+    assert.match(consts, /js: "https:\/\/raw\.githubusercontent\.com\/uwu\/shelter-builds\/main\/shelter\.js"/);
+    // Shelter has no CSS entry upstream at all: a native descriptor must not
+    // invent one.
+    assert.doesNotMatch(consts, /shelter: \{[\s\S]{0,400}?css:/);
+});
+
+test("the native registry serves Shelter and Equicord from those exact fixed sources", () => {
+    const main = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    // Fixed upstream sources: the same values as src/common/consts.ts.
+    assert.match(main, /js_url: "https:\/\/raw\.githubusercontent\.com\/uwu\/shelter-builds\/main\/shelter\.js"/);
+    assert.match(main, /js_url: "https:\/\/github\.com\/Equicord\/Equicord\/releases\/download\/latest\/browser\.js"/);
+    assert.match(main, /url: "https:\/\/github\.com\/Equicord\/Equicord\/releases\/download\/latest\/browser\.css"/);
+    // Fixed cache names under the DEV profile, and fixed host allowlists.
+    assert.match(main, /js_file: "shelter\.js"/);
+    assert.match(main, /file: "equicord\.css"/);
+    assert.match(main, /allowed_hosts: &\["raw\.githubusercontent\.com"\]/);
+});
+
+test("native Shelter and Equicord adapters add no Electron or Node surface", () => {
+    const strip = (source) =>
+        source
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^\s*\/\/.*$/gm, "")
+            .replace(/biome-ignore[^\n]*\n/g, "");
+    for (const name of ["shelter", "equicord"]) {
+        const adapter = strip(readFileSync(new URL(`../web/mods/${name}/adapter.js`, import.meta.url), "utf8"));
+        // Neither adapter reaches for an Electron/Node global.
+        assert.doesNotMatch(adapter, /require\(|process\.|webFrame|ipcRenderer|contextBridge/, name);
+        // The only host call is the shared logical-id bundle request.
+        assert.match(adapter, /native\.getModBundle\("[a-z]+"\)/, name);
+        assert.doesNotMatch(adapter, /readFile|writeFile|loadScript|executeSource|executeScript/, name);
+        assert.doesNotMatch(adapter, /eval\(|new Function/, name);
+        // And it names no URL beyond the exact origin gate.
+        assert.deepEqual(adapter.match(/https?:\/\/[^\s"'`)]+/g) ?? [], ["https://discord.com"], name);
+    }
+});
+
 test("native bundle retrieval adds no renderer filesystem or exec surface", () => {
     // The bundle facade member is a scoped logical-id request only: no path,
     // URL, filename, source, generic read, or generic invocation. (The

@@ -20,7 +20,8 @@ use std::{
 use mod_substrate::{
     load_mod_bundle, managed_css_order_script, managed_css_remove_script, managed_css_script,
     mod_css_script, mod_execution_context_script, mod_marker_script, stage as mod_stage,
-    DocumentModLifecycle, ModCache, ModDescriptor, ModHostMetrics, PendingModBootstrap,
+    validate_descriptor, DocumentModLifecycle, ModArtifactIdentity, ModCache, ModCssSource,
+    ModDescriptor, ModEnabling, ModHostMetrics, PageGlobalReadiness, PendingModBootstrap,
 };
 
 use app::{current_app_version, validate_version};
@@ -62,21 +63,127 @@ const VENCORD_MOD: ModDescriptor = ModDescriptor {
     id: "vencord",
     capability: "mod.get_bundle",
     js_url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js",
-    css_url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.css",
     js_file: "vencord.js",
-    css_file: "vencord.css",
+    css: Some(ModCssSource {
+        url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.css",
+        file: "vencord.css",
+        max_bytes: 8 * 1024 * 1024,
+        style_element_id: "legcord-native-vencord-css",
+        result_event: "vencord_css_result",
+    }),
     allowed_hosts: &["github.com", "release-assets.githubusercontent.com"],
     max_js_bytes: 32 * 1024 * 1024,
-    max_css_bytes: 8 * 1024 * 1024,
-    version_header_prefix: "// Vencord ",
-    style_element_id: "legcord-native-vencord-css",
+    identity: ModArtifactIdentity::BuildHeader {
+        prefix: "// Vencord ",
+    },
     page_global: "Vencord",
+    page_global_requires: None,
+    page_global_readiness: PageGlobalReadiness::Synchronous,
+    enabling: ModEnabling::SettingsMods,
     success_marker: "vencord-bootstrap-executed",
-    settings_key: "VencordSettings",
-    css_result_event: "vencord_css_result",
+    settings_key: Some("VencordSettings"),
     bootstrap_dom_event: "legcord-native:vencord-bootstrap",
     storage_context_global: "__legcordNativeVencordStorageAtExecution",
     log_tag: "Mod:Vencord",
+};
+
+/// Shelter as the second consumer of the shared mod substrate. Traced from
+/// `src/discord/preload/mods/shelter.mts` and `ipc.ts:109`, not inferred:
+///
+/// - Source: the fixed `uwu/shelter-builds` `shelter.js` in `src/common/consts.ts`.
+/// - Retrieval: `getShelterBundle` returns ONLY `js`; there is no `shelter.css`
+///   anywhere in the repo, so the descriptor declares no stylesheet.
+/// - Identity: the published build carries NO banner (the file begins directly
+///   with its IIFE), so identity is proven with upstream's own unique
+///   initialization sentinels plus a host-computed content digest.
+/// - Execution: `webFrame.executeJavaScript` from the preload -> page world,
+///   document start, same as every other client mod. Electron additionally
+///   wraps the source in an IIFE that declares `SHELTER_INJECTOR_PLUGINS`;
+///   natively that wrapper is deliberately NOT reproduced because the
+///   `legcord://` protocol and the preload plugin loader are both unimplemented,
+///   and Shelter skips the injector entirely when the global is absent.
+/// - Initialization: Shelter publishes `window.shelter` from an inner async
+///   IIFE only after Discord's `#app-mount` exists and has children, so the
+///   readiness is asynchronous rather than synchronous.
+/// - Settings: Shelter keeps settings in IndexedDB, never `localStorage`, so no
+///   settings key is invented for the storage diagnostic.
+/// - Enablement: Electron hardcodes `enabled: true`, so Shelter is not gated on
+///   `settings.mods`.
+const SHELTER_MOD: ModDescriptor = ModDescriptor {
+    id: "shelter",
+    capability: "mod.get_bundle",
+    js_url: "https://raw.githubusercontent.com/uwu/shelter-builds/main/shelter.js",
+    js_file: "shelter.js",
+    css: None,
+    allowed_hosts: &["raw.githubusercontent.com"],
+    max_js_bytes: 32 * 1024 * 1024,
+    identity: ModArtifactIdentity::SourceSentinels {
+        // Verbatim upstream literals; none appears in Vencord's or Equicord's
+        // bundle, so another mod's artifact can never pass as Shelter's.
+        sentinels: &[
+            "shelter is initializing...",
+            "shelter is initialized. took: ",
+        ],
+    },
+    page_global: "shelter",
+    page_global_requires: Some("plugins"),
+    page_global_readiness: PageGlobalReadiness::Awaited {
+        ready_global: "__legcordNativeShelterPageReady",
+        // Shelter waits for `#app-mount` to render, so the global appears well
+        // after bundle evaluation. The pre-bundle trap resolves the normal case
+        // with no polling; the 250 ms poll is only a bounded fallback.
+        timeout_ms: 120_000,
+        poll_ms: 250,
+    },
+    enabling: ModEnabling::AlwaysEnabled,
+    success_marker: "shelter-bootstrap-executed",
+    settings_key: None,
+    bootstrap_dom_event: "legcord-native:shelter-bootstrap",
+    storage_context_global: "__legcordNativeShelterStorageAtExecution",
+    log_tag: "Mod:Shelter",
+};
+
+/// Equicord as the third consumer of the same substrate. Traced from
+/// `src/discord/preload/mods/equicord.mts` and `ipc.ts:122`:
+///
+/// - Source: the fixed Equicord `latest` release `browser.js`/`browser.css`.
+/// - CSS: required — the Electron preload calls `webFrame.insertCSS(bundle.css!)`
+///   with an explicit "Equicord requires CSS" note, so the descriptor declares
+///   a full stylesheet contract.
+/// - Identity: the artifact opens with `// Equicord <sha>`, so a build banner
+///   proves identity.
+/// - Execution: page world, document start. Equicord is a Vencord fork and
+///   publishes the `Vencord` global, which is exactly what its own bundle does.
+/// - Enablement: gated on `settings.mods`, matching
+///   `getConfig("mods").includes("equicord")`.
+const EQUICORD_MOD: ModDescriptor = ModDescriptor {
+    id: "equicord",
+    capability: "mod.get_bundle",
+    js_url: "https://github.com/Equicord/Equicord/releases/download/latest/browser.js",
+    js_file: "equicord.js",
+    css: Some(ModCssSource {
+        url: "https://github.com/Equicord/Equicord/releases/download/latest/browser.css",
+        file: "equicord.css",
+        max_bytes: 8 * 1024 * 1024,
+        style_element_id: "legcord-native-equicord-css",
+        // The mod-agnostic CSS result event, with the host-supplied mod id
+        // echoed back so the host can refuse a result claimed for another mod.
+        result_event: "mod_css_result",
+    }),
+    allowed_hosts: &["github.com", "release-assets.githubusercontent.com"],
+    max_js_bytes: 32 * 1024 * 1024,
+    identity: ModArtifactIdentity::BuildHeader {
+        prefix: "// Equicord ",
+    },
+    page_global: "Vencord",
+    page_global_requires: None,
+    page_global_readiness: PageGlobalReadiness::Synchronous,
+    enabling: ModEnabling::SettingsMods,
+    success_marker: "equicord-bootstrap-executed",
+    settings_key: Some("EquicordSettings"),
+    bootstrap_dom_event: "legcord-native:equicord-bootstrap",
+    storage_context_global: "__legcordNativeEquicordStorageAtExecution",
+    log_tag: "Mod:Equicord",
 };
 
 fn lookup_mod_descriptor(mod_id: &str) -> Option<ModDescriptor> {
@@ -86,11 +193,22 @@ fn lookup_mod_descriptor(mod_id: &str) -> Option<ModDescriptor> {
         .copied()
 }
 
-/// Every mod the native host serves. Adding Shelter or Equicord means
-/// appending a descriptor here plus a thin renderer adapter; the substrate
-/// mechanics do not change.
-const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD];
-const DISABLE_VENCORD_ADAPTER_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_NO_VENCORD";
+/// Borrowed registry lookup, for callers that need a reference to the
+/// descriptor itself rather than a copy.
+fn find_mod_descriptor(mod_id: &str) -> Option<&'static ModDescriptor> {
+    KNOWN_MODS.iter().find(|descriptor| descriptor.id == mod_id)
+}
+
+/// Every mod the native host serves. Each entry is a thin typed descriptor plus
+/// a thin renderer adapter under `native/web/mods/<id>/`; the substrate
+/// mechanics in `mod_substrate.rs` are identical for all of them.
+const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD, SHELTER_MOD, EQUICORD_MOD];
+
+/// DEV diagnostic: force a mod's adapter OFF regardless of `settings.mods`, so
+/// a "native without <mod>" control run needs no profile edit.
+const MOD_ADAPTER_OVERRIDE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_MODS";
+/// DEV-only: enable the post-load mod runtime observation.
+const MOD_SMOKE_ENV: &str = "LEGCORD_NATIVE_MOD_SMOKE";
 const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
 const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
@@ -118,6 +236,76 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
 const MOD_SUBSTRATE_SCRIPT: &str = include_str!("../web/mod-substrate/mod-bootstrap.js");
 const VENCORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/vencord/adapter.js");
+const SHELTER_ADAPTER_SCRIPT: &str = include_str!("../web/mods/shelter/adapter.js");
+const EQUICORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/equicord/adapter.js");
+
+/// The renderer adapter for one registered mod, or `None` for a descriptor
+/// with no adapter file (a registry entry must always carry one).
+fn mod_adapter_script(descriptor: &ModDescriptor) -> Option<&'static str> {
+    match descriptor.id {
+        "vencord" => Some(VENCORD_ADAPTER_SCRIPT),
+        "shelter" => Some(SHELTER_ADAPTER_SCRIPT),
+        "equicord" => Some(EQUICORD_ADAPTER_SCRIPT),
+        _ => None,
+    }
+}
+
+/// The `stateName` a mod's adapter publishes, used by the DEV mod observation
+/// to read the same per-mod state the host already reports.
+///
+/// The value is read out of the adapter's own configuration at compile time,
+/// so the observation can never drift from what the adapter actually sets. It
+/// adds no capability and no renderer surface.
+fn adapter_state_name(descriptor: &ModDescriptor) -> Option<&'static str> {
+    const STATE_NAMES: &[(&str, &str)] = &[
+        ("vencord", "__legcordNativeVencord"),
+        ("shelter", "__legcordNativeShelter"),
+        ("equicord", "__legcordNativeEquicord"),
+    ];
+    STATE_NAMES
+        .iter()
+        .find(|(id, _)| *id == descriptor.id)
+        .map(|(_, name)| *name)
+        .filter(|_| mod_adapter_script(descriptor).is_some())
+}
+
+/// Resolves which registered mods get their renderer adapter injected.
+///
+/// Two host-controlled inputs decide this, and the renderer supplies neither:
+/// 1. Each descriptor's own [`ModEnabling`] policy. `SettingsMods` reproduces
+///    Electron's `getConfig("mods").includes(<id>)` gate exactly; the authoritative
+///    settings snapshot is read from the same place the settings capability
+///    reads it, so corrupt settings fail closed to "no extra mods".
+/// 2. An optional DEV diagnostic allowlist (`LEGCORD_NATIVE_DIAGNOSTIC_MODS`),
+///    used to run "native with X" against "native without X" control runs
+///    without editing the DEV profile.
+fn resolve_active_mods(
+    settings_mods: &[String],
+    override_list: Option<&str>,
+) -> Vec<&'static ModDescriptor> {
+    let allowed: Option<Vec<&str>> = override_list.map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect()
+    });
+    KNOWN_MODS
+        .iter()
+        .filter(|descriptor| {
+            if let Some(allowed) = &allowed {
+                if !allowed.contains(&descriptor.id) {
+                    return false;
+                }
+            }
+            match descriptor.enabling {
+                ModEnabling::AlwaysEnabled => true,
+                ModEnabling::SettingsMods => {
+                    settings_mods.iter().any(|entry| entry == descriptor.id)
+                }
+            }
+        })
+        .collect()
+}
 
 const STORAGE_START_DIAGNOSTIC_SCRIPT: &str =
     include_str!("../web/mod-substrate/storage-preservation.js");
@@ -172,6 +360,82 @@ const BRIDGE_PROBE_SCRIPT: &str = r#"
     .catch((error) => console.error("[Legcord native DEV] bridge round-trip failed", error));
 })();
 "#;
+
+/// Renders the DEV-only mod runtime observation.
+///
+/// The observation reads only host-managed state (each descriptor's own
+/// page-world global, managed style id, and adapter state property) and reports
+/// what it found. It never requests, installs, or executes anything, so it
+/// cannot be mistaken for part of the mod path.
+///
+/// `specs` is embedded as a JSON **string literal** whose contents are the spec
+/// JSON: the script parses it at runtime, so no host value can ever be spliced
+/// into the observation as code. The whole body is wrapped in a try/catch that
+/// always returns a JSON string, so a settling document reports an error field
+/// instead of failing the callback.
+fn mod_smoke_observation_script(specs: &str) -> Result<String, serde_json::Error> {
+    let encoded = serde_json::to_string(specs)?;
+    Ok(format!(
+        r#"(() => {{
+  try {{
+    const mods = JSON.parse({encoded});
+    const out = {{}};
+    for (const [id, spec] of Object.entries(mods)) {{
+      let pageGlobalPresent = false;
+      let pageGlobalMembers = null;
+      let stylePresent = false;
+      let styleBytes = 0;
+      try {{
+        const value = globalThis[spec.page_global];
+        pageGlobalPresent = Boolean(value) && typeof value === "object";
+        if (pageGlobalPresent && spec.requires) {{
+          pageGlobalMembers = typeof value[spec.requires];
+        }}
+      }} catch (error) {{
+        pageGlobalMembers = "unreadable";
+      }}
+      try {{
+        if (spec.style_id) {{
+          const style = document.getElementById(spec.style_id);
+          if (style) {{
+            stylePresent = true;
+            styleBytes = (style.textContent || "").length;
+          }}
+        }}
+      }} catch (error) {{
+        styleBytes = -1;
+      }}
+      let state = null;
+      try {{
+        state = window[spec.state_name] || null;
+      }} catch (error) {{
+        state = null;
+      }}
+      out[id] = {{
+        pageGlobalPresent,
+        pageGlobalMembers,
+        stylePresent,
+        styleBytes,
+        adapterStatus: state ? state.status : null,
+        marker: state ? state.marker : null,
+        executionCount: state ? state.executionCount : null,
+        bundleVersion: state ? state.bundleVersion : null,
+        bundleBytes: state ? state.bundleBytes : null,
+        cssBytes: state ? state.cssBytes : null,
+        retrievalMs: state ? state.retrievalMs : null,
+        requestLatencyMs: state ? state.requestLatencyMs : null,
+        localStorageApi: state ? state.localStorageApi : null,
+        settingsState: state ? state.settingsState : null,
+        error: state ? state.error : null
+      }};
+    }}
+    return JSON.stringify(out);
+  }} catch (error) {{
+    return JSON.stringify({{ observationError: String((error && error.message) || error) }});
+  }}
+}})()"#
+    ))
+}
 
 const RENDERER_HEALTH_SCRIPT: &str = r#"
 (() => {
@@ -671,18 +935,32 @@ fn is_allowed_navigation(url: &str) -> bool {
     url.parse::<Uri>().is_ok_and(|uri| is_discord_uri(&uri))
 }
 
-fn initialization_script(include_vencord_adapter: bool) -> Result<String, serde_json::Error> {
+/// Builds the document-start script for one run.
+///
+/// The always-present prefix (storage preservation, the frozen facade, the
+/// shared adapter factory) is identical for every combination. Only the
+/// per-mod adapter files are appended, and only for the mods
+/// [`resolve_active_mods`] selected — so "native without <mod>" is a genuinely
+/// absent adapter, not a disabled one.
+fn initialization_script(
+    active_mods: &[&'static ModDescriptor],
+) -> Result<String, serde_json::Error> {
     let snapshot = serde_json::to_string(&BOOT_SNAPSHOT)?;
     let compatibility = COMPATIBILITY_SCRIPT.replace("__LEGCORD_BOOT_SNAPSHOT__", &snapshot);
-    if include_vencord_adapter {
-        Ok(format!(
-            "{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}\n{MOD_SUBSTRATE_SCRIPT}\n{VENCORD_ADAPTER_SCRIPT}"
-        ))
-    } else {
-        Ok(format!(
-            "{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}\n{MOD_SUBSTRATE_SCRIPT}"
-        ))
+    let base =
+        format!("{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}\n{MOD_SUBSTRATE_SCRIPT}");
+    let mut script = base;
+    for descriptor in active_mods {
+        let Some(adapter) = mod_adapter_script(descriptor) else {
+            return Err(serde::de::Error::custom(format!(
+                "registered mod '{}' has no renderer adapter script",
+                descriptor.id
+            )));
+        };
+        script.push('\n');
+        script.push_str(adapter);
     }
+    Ok(script)
 }
 
 fn queue_event<T>(proxy: &EventLoopProxy<T>, event: T)
@@ -793,6 +1071,254 @@ fn send_mod_failure(
     }
 }
 
+/// Shared CSS-result handler. Both the mod-agnostic `mod_css_result` event and
+/// the historically Vencord-named `vencord_css_result` route here, so there is
+/// exactly one implementation of the CSS gate for every registered mod.
+#[allow(clippy::too_many_arguments)]
+fn handle_mod_css_result(
+    descriptor: &ModDescriptor,
+    request_id: String,
+    ok: bool,
+    error: Option<String>,
+    webview: &WebView,
+    pending_mods: &mut HashMap<String, PendingModBootstrap>,
+    document_lifecycle: &mut DocumentModLifecycle,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+) {
+    let Some(pending) = pending_mods.get_mut(&request_id) else {
+        eprintln!(
+            "[{}][css_injection] unmatched CSS result",
+            descriptor.log_tag
+        );
+        return;
+    };
+    // Cross-mod guard: the descriptor handling this event must own the request.
+    if pending.mod_id != descriptor.id {
+        eprintln!(
+            "[{}][css_injection] CSS result claims a different mod than the request",
+            descriptor.log_tag
+        );
+        return;
+    }
+    let Some(css_source) = descriptor.css else {
+        eprintln!(
+            "[{}][css_injection] CSS result for a descriptor that declares no stylesheet",
+            descriptor.log_tag
+        );
+        return;
+    };
+    let _ = css_source;
+    if pending.generation != document_lifecycle.generation() {
+        pending_mods.remove(&request_id);
+        return;
+    }
+    if !ok {
+        let error = error.unwrap_or_else(|| "CSS injection failed without details".to_owned());
+        pending_mods.remove(&request_id);
+        send_mod_failure(
+            descriptor,
+            webview,
+            request_tracker,
+            request_id,
+            mod_stage::CSS_INJECTION,
+            error,
+        );
+        *response_count += 1;
+        return;
+    }
+    let execution_ms = pending.execution_ms;
+    pending.css_injection_ms = Some(pending.css_started_at.elapsed().as_secs_f64() * 1000.0);
+    let marker_script = match mod_marker_script(descriptor, &request_id, execution_ms) {
+        Ok(script) => script,
+        Err(error) => {
+            pending_mods.remove(&request_id);
+            send_mod_failure(
+                descriptor,
+                webview,
+                request_tracker,
+                request_id,
+                mod_stage::ADAPTER_INITIALIZATION,
+                format!(
+                    "Could not prepare the {} execution marker: {error}",
+                    descriptor.id
+                ),
+            );
+            *response_count += 1;
+            return;
+        }
+    };
+    if let Err(error) = webview.evaluate_script(&marker_script) {
+        pending_mods.remove(&request_id);
+        send_mod_failure(
+            descriptor,
+            webview,
+            request_tracker,
+            request_id,
+            mod_stage::ADAPTER_INITIALIZATION,
+            format!(
+                "WebView2 could not verify {} bootstrap execution: {error}",
+                descriptor.id
+            ),
+        );
+        *response_count += 1;
+    }
+}
+
+/// Shared bootstrap-verdict handler for every registered mod.
+#[allow(clippy::too_many_arguments)]
+fn handle_mod_bootstrap_result(
+    descriptor: &ModDescriptor,
+    request_id: String,
+    ok: bool,
+    marker: String,
+    error: Option<String>,
+    local_storage_api: String,
+    settings_state: String,
+    webview: &WebView,
+    pending_mods: &mut HashMap<String, PendingModBootstrap>,
+    document_lifecycle: &mut DocumentModLifecycle,
+    mod_metrics: &mut ModHostMetrics,
+    request_tracker: &mut RequestTracker,
+    smoke_reloads_remaining: &mut u32,
+    smoke_reload_request_id: &mut Option<String>,
+    response_count: &mut u64,
+    observe_after_marker: Option<&str>,
+) {
+    let Some(pending) = pending_mods.remove(&request_id) else {
+        eprintln!(
+            "[{}][script_execution] unmatched bootstrap result",
+            descriptor.log_tag
+        );
+        return;
+    };
+    if pending.mod_id != descriptor.id {
+        eprintln!(
+            "[{}][script_execution] bootstrap result claims a different mod than the request",
+            descriptor.log_tag
+        );
+        return;
+    }
+    if pending.generation != document_lifecycle.generation() {
+        return;
+    }
+    if !ok || marker != descriptor.success_marker {
+        send_mod_failure(
+            descriptor,
+            webview,
+            request_tracker,
+            request_id,
+            mod_stage::SCRIPT_EXECUTION,
+            error.unwrap_or_else(|| format!("{} execution marker did not match", descriptor.id)),
+        );
+        *response_count += 1;
+        return;
+    }
+    if !document_lifecycle.record_mod_execution(descriptor.id) {
+        mod_metrics.record_duplicate(descriptor.id);
+        send_mod_failure(
+            descriptor,
+            webview,
+            request_tracker,
+            request_id,
+            mod_stage::DUPLICATE_BOOTSTRAP,
+            format!("{} executed more than once in one document", descriptor.id),
+        );
+        *response_count += 1;
+        return;
+    }
+
+    mod_metrics.record_bootstrap(descriptor.id);
+    let request_latency_ms = pending.received_at.elapsed().as_secs_f64() * 1000.0;
+    let css_injection_ms = pending
+        .css_injection_ms
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "none".to_owned());
+    println!(
+        "[{}][Metrics] marker={marker} execution_count={} request_latency_ms={request_latency_ms:.3} css_injection_ms={css_injection_ms}",
+        descriptor.log_tag,
+        document_lifecycle.mod_execution_count(descriptor.id),
+    );
+    println!(
+        "[{}][Context] localStorage_getItem_at_execution={local_storage_api} settings_state={settings_state}",
+        descriptor.log_tag,
+    );
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: true,
+        payload: Some(BridgeResponsePayload::ModBundle(ModBundleResponse {
+            mod_id: descriptor.id,
+            bundle_version: pending.bundle_version,
+            bundle_bytes: pending.bundle_bytes,
+            css_bytes: pending.css_bytes,
+            request_latency_ms,
+            retrieval_ms: pending.retrieval_ms,
+            execution_ms: pending.execution_ms,
+            css_injection_ms: pending.css_injection_ms,
+            marker: descriptor.success_marker,
+            document_execution_count: document_lifecycle.mod_execution_count(descriptor.id),
+        })),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    // A mod whose page-world global is published asynchronously (Shelter) can
+    // reach its marker AFTER page load, so the page-load observation may have
+    // run too early to see the global. Re-observe now that the verdict is in,
+    // which is the point at which the global is guaranteed present.
+    if let Some(script) = observe_after_marker {
+        let descriptor_id = descriptor.id;
+        if let Err(error) = webview.evaluate_script_with_callback(script, move |result| {
+            println!("[Mods][Smoke][after-marker] mod='{descriptor_id}' {result}");
+        }) {
+            eprintln!("[Mods][Smoke] post-marker observation failed: {error}");
+        }
+    }
+    if *smoke_reloads_remaining > 0 {
+        *smoke_reload_request_id = Some(request_id.clone());
+    }
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!(
+            "[Bridge] {} response correlation failure: {error}",
+            descriptor.id
+        );
+    }
+    *response_count += 1;
+}
+
+/// Shared acknowledgement handler that drives the DEV reload sequence.
+fn handle_mod_response_ack(
+    descriptor: Option<&'static ModDescriptor>,
+    request_id: String,
+    webview: &WebView,
+    smoke_reloads_remaining: &mut u32,
+    smoke_reload_request_id: &mut Option<String>,
+) {
+    // An acknowledgement claiming an unregistered mod is ignored entirely: it
+    // must not be able to drive the DEV reload sequence.
+    let Some(descriptor) = descriptor else {
+        return;
+    };
+    if smoke_reload_request_id.as_deref() == Some(request_id.as_str()) {
+        println!(
+            "[{}] renderer acknowledged execution marker response (request_id={request_id})",
+            descriptor.log_tag
+        );
+    }
+    if *smoke_reloads_remaining > 0
+        && smoke_reload_request_id.as_deref() == Some(request_id.as_str())
+    {
+        *smoke_reloads_remaining -= 1;
+        *smoke_reload_request_id = None;
+        println!(
+            "[Navigation] requesting mod DEV smoke reload (remaining={smoke_reloads_remaining})"
+        );
+        if let Err(error) = webview.evaluate_script("window.location.reload();") {
+            eprintln!("[Navigation] mod smoke reload failed: {error}");
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoopBuilder::<NativeEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -810,6 +1336,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Err(error) = validate_version(current_app_version()) {
         return Err(format!("embedded app version is invalid: {error}").into());
     }
+    // Fail fast on any descriptor the substrate could not serve safely: a
+    // missing capability, an id the request validator would reject, a duplicate
+    // id, or a value that could not be spliced into a generated script.
+    let mut seen_ids: Vec<&str> = Vec::new();
     for descriptor in KNOWN_MODS {
         if !BOOT_SNAPSHOT.capabilities.contains(&descriptor.capability) {
             return Err(format!(
@@ -818,15 +1348,45 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
+        if validate_mod_bundle_id(descriptor.id).is_err() {
+            return Err(format!("mod id '{}' is not servable", descriptor.id).into());
+        }
+        if seen_ids.contains(&descriptor.id) {
+            return Err(format!("mod id '{}' is registered twice", descriptor.id).into());
+        }
+        if mod_adapter_script(descriptor).is_none() {
+            return Err(format!("mod '{}' has no renderer adapter", descriptor.id).into());
+        }
+        validate_descriptor(descriptor)
+            .map_err(|error| format!("mod descriptor is invalid: {error}"))?;
+        seen_ids.push(descriptor.id);
     }
     let mut web_context = WebContext::new(Some(profile_path.clone()));
     let bundle_cache = Arc::new(Mutex::new(ModCache::default()));
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
-    let include_vencord_adapter =
-        !std::env::var(DISABLE_VENCORD_ADAPTER_ENV).is_ok_and(|value| value == "1");
-    if !include_vencord_adapter {
-        println!("[Mod:Vencord] automatic adapter disabled for DEV diagnostic comparison");
+    // Adapter selection is entirely host-controlled: the authoritative settings
+    // snapshot (the same file the settings capability reads) plus an optional
+    // DEV diagnostic allowlist. The renderer never participates.
+    let settings_mods = match load_settings(&profile_path) {
+        Ok(loaded) => loaded.snapshot.mods,
+        Err(error) => {
+            // Corrupt/unreadable settings fail closed to "no extra mods", the
+            // same parity the Quick CSS enablement already uses.
+            eprintln!(
+                "[Mod:Registry] mod enablement could not be resolved from settings; treating as none ({error})"
+            );
+            Vec::new()
+        }
+    };
+    let mod_override = std::env::var(MOD_ADAPTER_OVERRIDE_ENV).ok();
+    let active_mods = resolve_active_mods(&settings_mods, mod_override.as_deref());
+    for descriptor in KNOWN_MODS {
+        let enabled = active_mods.iter().any(|active| active.id == descriptor.id);
+        println!(
+            "[Mod:Registry] mod='{}' adapter_enabled={} enabling={:?}",
+            descriptor.id, enabled, descriptor.enabling
+        );
     }
     let diagnostic_bare_page = std::env::var(BARE_PAGE_ENV).is_ok_and(|value| value == "1");
     let diagnostic_interaction =
@@ -864,11 +1424,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_quickcss_smoke {
         println!("[QuickCss][Smoke] native Quick CSS smoke observation enabled");
     }
+    let diagnostic_mod_smoke = std::env::var(MOD_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_mod_smoke {
+        println!("[Mods][Smoke] native mod runtime observation enabled");
+    }
+    // The observation spec is built from the SAME descriptors the pipeline
+    // uses, so it can only ever read host-managed identities.
+    let mod_smoke_specs = serde_json::to_string(
+        &active_mods
+            .iter()
+            .filter_map(|descriptor| {
+                let state_name = adapter_state_name(descriptor)?;
+                Some((
+                    descriptor.id.to_owned(),
+                    serde_json::json!({
+                        "page_global": descriptor.page_global,
+                        "requires": descriptor.page_global_requires,
+                        "style_id": descriptor
+                            .css
+                            .map(|source| source.style_element_id)
+                            .unwrap_or(""),
+                        "state_name": state_name,
+                    }),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    )?;
+    let mod_smoke_script = mod_smoke_observation_script(&mod_smoke_specs)?;
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
     } else {
-        initialization_script(include_vencord_adapter)?
+        initialization_script(&active_mods)?
     };
     println!(
         "[Native] Document-start script: {} bytes",
@@ -1220,6 +1807,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 },
                             ) {
                                 eprintln!("[Themes][Smoke] observation failed: {error}");
+                            }
+                        }
+                        // DEV-only read-only observation of every active mod's
+                        // real page-world global, managed style, and adapter
+                        // state. Observation only: no request, no injection.
+                        if diagnostic_mod_smoke {
+                            if let Err(error) = webview.evaluate_script_with_callback(
+                                &mod_smoke_script,
+                                |result| println!("[Mods][Smoke] {result}"),
+                            ) {
+                                eprintln!("[Mods][Smoke] observation failed: {error}");
                             }
                         }
                         if diagnostic_interaction {
@@ -2021,7 +2619,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
                 println!(
                     "[{}][Metrics] bundle_version={} bundle_bytes={} css_bytes={} retrieval_ms={retrieval_ms:.3}",
-                    descriptor.log_tag, bundle.version, bundle.js_bytes, bundle.css_bytes
+                    descriptor.log_tag,
+                    bundle.version,
+                    bundle.js_bytes,
+                    bundle
+                        .css_bytes
+                        .map(|bytes| bytes.to_string())
+                        .unwrap_or_else(|| "none".to_owned())
                 );
 
                 let execution_started_at = Instant::now();
@@ -2034,27 +2638,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         &mut request_tracker,
                         request_id,
                         mod_stage::SCRIPT_EXECUTION,
-                        format!("WebView2 could not execute the Vencord bundle: {error}"),
+                        format!(
+                            "WebView2 could not execute the {} bundle: {error}",
+                            descriptor.id
+                        ),
                     );
                     response_count += 1;
                     return;
                 }
                 let execution_ms = execution_started_at.elapsed().as_secs_f64() * 1000.0;
-                let css_script = match mod_css_script(&descriptor, &request_id, &bundle.css) {
-                    Ok(script) => script,
-                    Err(error) => {
-                        send_mod_failure(
-                            &descriptor,
-                            &webview,
-                            &mut request_tracker,
-                            request_id,
-                            mod_stage::ADAPTER_INITIALIZATION,
-                            format!("Could not prepare the Vencord CSS adapter: {error}"),
-                        );
-                        response_count += 1;
-                        return;
-                    }
-                };
                 pending_mods.insert(
                     request_id.clone(),
                     PendingModBootstrap {
@@ -2067,24 +2659,88 @@ fn main() -> Result<(), Box<dyn Error>> {
                         css_bytes: bundle.css_bytes,
                         execution_ms,
                         css_started_at: Instant::now(),
-                        css_injection_ms: 0.0,
+                        css_injection_ms: None,
                     },
                 );
                 println!(
                     "[{}][Metrics] bundle execution call completed in {execution_ms:.3} ms",
                     descriptor.log_tag
                 );
-                if let Err(error) = webview.evaluate_script(&css_script) {
-                    pending_mods.remove(&request_id);
-                    send_mod_failure(
-                        &descriptor,
-                        &webview,
-                        &mut request_tracker,
-                        request_id,
-                        mod_stage::CSS_INJECTION,
-                        format!("WebView2 could not run Vencord CSS injection: {error}"),
-                    );
-                    response_count += 1;
+
+                // The CSS stage exists only when the descriptor declares a
+                // stylesheet. A mod that ships none (Shelter) never gets an
+                // empty `<style>` and never waits for a CSS result: it goes
+                // straight to the execution marker.
+                match (&descriptor.css, &bundle.css) {
+                    (Some(source), Some(css)) => {
+                        let css_script = match mod_css_script(&descriptor, source, &request_id, css) {
+                            Ok(script) => script,
+                            Err(error) => {
+                                pending_mods.remove(&request_id);
+                                send_mod_failure(
+                                    &descriptor,
+                                    &webview,
+                                    &mut request_tracker,
+                                    request_id,
+                                    mod_stage::ADAPTER_INITIALIZATION,
+                                    format!("Could not prepare the {} CSS adapter: {error}", descriptor.id),
+                                );
+                                response_count += 1;
+                                return;
+                            }
+                        };
+                        if let Err(error) = webview.evaluate_script(&css_script) {
+                            pending_mods.remove(&request_id);
+                            send_mod_failure(
+                                &descriptor,
+                                &webview,
+                                &mut request_tracker,
+                                request_id,
+                                mod_stage::CSS_INJECTION,
+                                format!(
+                                    "WebView2 could not run {} CSS injection: {error}",
+                                    descriptor.id
+                                ),
+                            );
+                            response_count += 1;
+                        }
+                    }
+                    _ => {
+                        let script = match mod_marker_script(&descriptor, &request_id, execution_ms) {
+                            Ok(script) => script,
+                            Err(error) => {
+                                pending_mods.remove(&request_id);
+                                send_mod_failure(
+                                    &descriptor,
+                                    &webview,
+                                    &mut request_tracker,
+                                    request_id,
+                                    mod_stage::ADAPTER_INITIALIZATION,
+                                    format!(
+                                        "Could not prepare the {} execution marker: {error}",
+                                        descriptor.id
+                                    ),
+                                );
+                                response_count += 1;
+                                return;
+                            }
+                        };
+                        if let Err(error) = webview.evaluate_script(&script) {
+                            pending_mods.remove(&request_id);
+                            send_mod_failure(
+                                &descriptor,
+                                &webview,
+                                &mut request_tracker,
+                                request_id,
+                                mod_stage::ADAPTER_INITIALIZATION,
+                                format!(
+                                    "WebView2 could not verify {} bootstrap execution: {error}",
+                                    descriptor.id
+                                ),
+                            );
+                            response_count += 1;
+                        }
+                    }
                 }
             }
             Event::UserEvent(NativeEvent::BridgeEvent(message)) => {
@@ -2109,178 +2765,133 @@ fn main() -> Result<(), Box<dyn Error>> {
                             payload.execution_ms
                         );
                     }
-                    BridgeEvent::VencordAdapterError(payload) => {
-                        eprintln!(
-                            "[Mod:Vencord][adapter_initialization] {}",
-                            payload.message
+                    BridgeEvent::ModCssResult(payload) => {
+                        // The claimed mod id must name a registered mod; the
+                        // handler then cross-checks it against the mod that owns
+                        // the correlated request, so one mod's adapter can never
+                        // satisfy another mod's CSS gate.
+                        if let Some(descriptor) = lookup_mod_descriptor(&payload.mod_id) {
+                            handle_mod_css_result(
+                                &descriptor,
+                                payload.request_id,
+                                payload.ok,
+                                payload.error,
+                                &webview,
+                                &mut pending_mods,
+                                &mut document_lifecycle,
+                                &mut request_tracker,
+                                &mut response_count,
+                            );
+                        } else {
+                            eprintln!(
+                                "[Mod:Registry][unknown_mod] CSS result for unregistered mod '{}'",
+                                payload.mod_id
+                            );
+                        }
+                    }
+                    BridgeEvent::ModBootstrapResult(payload) => {
+                        if let Some(descriptor) = lookup_mod_descriptor(&payload.mod_id) {
+                            handle_mod_bootstrap_result(
+                                &descriptor,
+                                payload.request_id,
+                                payload.ok,
+                                payload.marker,
+                                payload.error,
+                                payload.local_storage_api,
+                                payload.settings_state,
+                                &webview,
+                                &mut pending_mods,
+                                &mut document_lifecycle,
+                                &mut mod_metrics,
+                                &mut request_tracker,
+                                &mut smoke_reloads_remaining,
+                                &mut smoke_reload_request_id,
+                                &mut response_count,
+                                diagnostic_mod_smoke.then_some(mod_smoke_script.as_str()),
+                            );
+                        } else {
+                            eprintln!(
+                                "[Mod:Registry][unknown_mod] bootstrap result for unregistered mod '{}'",
+                                payload.mod_id
+                            );
+                        }
+                    }
+                    BridgeEvent::ModAdapterError(payload) => {
+                        if let Some(descriptor) = lookup_mod_descriptor(&payload.mod_id) {
+                            eprintln!(
+                                "[{}][adapter_initialization] {}",
+                                descriptor.log_tag, payload.message
+                            );
+                        } else {
+                            eprintln!(
+                                "[Mod:Registry][unknown_mod] adapter error for unregistered mod '{}': {}",
+                                payload.mod_id, payload.message
+                            );
+                        }
+                    }
+                    BridgeEvent::ModResponseAck(payload) => {
+                        // The reload driver is host-side DEV instrumentation and
+                        // is mod-agnostic: the first registered mod to finish a
+                        // bootstrap drives the next forced reload, so both a
+                        // single-mod and a multi-mod run work.
+                        handle_mod_response_ack(
+                            find_mod_descriptor(&payload.mod_id),
+                            payload.request_id,
+                            &webview,
+                            &mut smoke_reloads_remaining,
+                            &mut smoke_reload_request_id,
                         );
                     }
+                    // The historically Vencord-named variants remain accepted so
+                    // the already-validated Vencord wire contract is unchanged;
+                    // each is normalized into the same mod-agnostic handlers.
                     BridgeEvent::VencordCssResult(payload) => {
-                        let Some(pending) = pending_mods.get_mut(&payload.request_id) else {
-                            eprintln!("[Mod:Vencord][css_injection] unmatched CSS result");
-                            return;
-                        };
-                        let Some(descriptor) = lookup_mod_descriptor(pending.mod_id) else {
-                            pending_mods.remove(&payload.request_id);
-                            return;
-                        };
-                        if pending.generation != document_lifecycle.generation() {
-                            pending_mods.remove(&payload.request_id);
-                            return;
-                        }
-                        if !payload.ok {
-                            let error = payload
-                                .error
-                                .unwrap_or_else(|| "CSS injection failed without details".to_owned());
-                            pending_mods.remove(&payload.request_id);
-                            send_mod_failure(
-                                &descriptor,
-                                &webview,
-                                &mut request_tracker,
-                                payload.request_id,
-                                mod_stage::CSS_INJECTION,
-                                error,
-                            );
-                            response_count += 1;
-                            return;
-                        }
-                        pending.css_injection_ms =
-                            pending.css_started_at.elapsed().as_secs_f64() * 1000.0;
-                        let marker_script = match mod_marker_script(
-                            &descriptor,
-                            &payload.request_id,
-                            pending.execution_ms,
-                        ) {
-                            Ok(script) => script,
-                            Err(error) => {
-                                pending_mods.remove(&payload.request_id);
-                                send_mod_failure(
-                                    &descriptor,
-                                    &webview,
-                                    &mut request_tracker,
-                                    payload.request_id,
-                                    mod_stage::ADAPTER_INITIALIZATION,
-                                    format!("Could not prepare the Vencord execution marker: {error}"),
-                                );
-                                response_count += 1;
-                                return;
-                            }
-                        };
-                        if let Err(error) = webview.evaluate_script(&marker_script) {
-                            pending_mods.remove(&payload.request_id);
-                            send_mod_failure(
-                                &descriptor,
-                                &webview,
-                                &mut request_tracker,
-                                payload.request_id,
-                                mod_stage::ADAPTER_INITIALIZATION,
-                                format!("Could not verify Vencord bootstrap execution: {error}"),
-                            );
-                            response_count += 1;
-                        }
+                        handle_mod_css_result(
+                            &VENCORD_MOD,
+                            payload.request_id,
+                            payload.ok,
+                            payload.error,
+                            &webview,
+                            &mut pending_mods,
+                            &mut document_lifecycle,
+                            &mut request_tracker,
+                            &mut response_count,
+                        );
                     }
                     BridgeEvent::VencordBootstrapResult(payload) => {
-                        let Some(pending) = pending_mods.remove(&payload.request_id) else {
-                            eprintln!("[Mod:Vencord][script_execution] unmatched bootstrap result");
-                            return;
-                        };
-                        let Some(descriptor) = lookup_mod_descriptor(pending.mod_id) else {
-                            return;
-                        };
-                        if pending.generation != document_lifecycle.generation() {
-                            return;
-                        }
-                        if !payload.ok || payload.marker != descriptor.success_marker {
-                            send_mod_failure(
-                                &descriptor,
-                                &webview,
-                                &mut request_tracker,
-                                payload.request_id,
-                                mod_stage::SCRIPT_EXECUTION,
-                                payload.error.unwrap_or_else(|| {
-                                    "Vencord execution marker did not match".to_owned()
-                                }),
-                            );
-                            response_count += 1;
-                            return;
-                        }
-                        if !document_lifecycle.record_mod_execution(descriptor.id) {
-                            mod_metrics.record_duplicate(descriptor.id);
-                            send_mod_failure(
-                                &descriptor,
-                                &webview,
-                                &mut request_tracker,
-                                payload.request_id,
-                                mod_stage::DUPLICATE_BOOTSTRAP,
-                                "Vencord executed more than once in one document".to_owned(),
-                            );
-                            response_count += 1;
-                            return;
-                        }
-
-                        mod_metrics.record_bootstrap(descriptor.id);
-                        let request_latency_ms =
-                            pending.received_at.elapsed().as_secs_f64() * 1000.0;
-                        println!(
-                            "[{}][Metrics] marker={} execution_count={} request_latency_ms={request_latency_ms:.3} css_injection_ms={css_injection_ms:.3}",
-                            descriptor.log_tag,
+                        handle_mod_bootstrap_result(
+                            &VENCORD_MOD,
+                            payload.request_id,
+                            payload.ok,
                             payload.marker,
-                            document_lifecycle.mod_execution_count(descriptor.id),
-                            css_injection_ms = pending.css_injection_ms
-                        );
-                        println!(
-                            "[{}][Context] localStorage_getItem_at_execution={} VencordSettings={}",
-                            descriptor.log_tag,
+                            payload.error,
                             payload.local_storage_api,
-                            payload.settings_state
+                            payload.settings_state,
+                            &webview,
+                            &mut pending_mods,
+                            &mut document_lifecycle,
+                            &mut mod_metrics,
+                            &mut request_tracker,
+                            &mut smoke_reloads_remaining,
+                            &mut smoke_reload_request_id,
+                            &mut response_count,
+                            None,
                         );
-                        let response = BridgeResponse {
-                            version: PROTOCOL_VERSION,
-                            request_id: payload.request_id.clone(),
-                            ok: true,
-                            payload: Some(BridgeResponsePayload::ModBundle(ModBundleResponse {
-                                mod_id: descriptor.id,
-                                bundle_version: pending.bundle_version,
-                                bundle_bytes: pending.bundle_bytes,
-                                css_bytes: pending.css_bytes,
-                                request_latency_ms,
-                                retrieval_ms: pending.retrieval_ms,
-                                execution_ms: pending.execution_ms,
-                                css_injection_ms: pending.css_injection_ms,
-                                marker: descriptor.success_marker,
-                                document_execution_count: document_lifecycle
-                                    .mod_execution_count(descriptor.id),
-                            })),
-                            error: None,
-                        };
-                        send_bridge_response(&webview, &response);
-                        if smoke_reloads_remaining > 0 {
-                            smoke_reload_request_id = Some(payload.request_id.clone());
-                        }
-                        if let Err(error) = request_tracker.complete(&payload.request_id) {
-                            eprintln!("[Bridge] Vencord response correlation failure: {error}");
-                        }
-                        response_count += 1;
+                    }
+                    BridgeEvent::VencordAdapterError(payload) => {
+                        eprintln!(
+                            "[{}][adapter_initialization] {}",
+                            VENCORD_MOD.log_tag, payload.message
+                        );
                     }
                     BridgeEvent::VencordResponseAck(payload) => {
-                        if smoke_reload_request_id.as_deref() == Some(payload.request_id.as_str()) {
-                            println!(
-                                "[Mod:Vencord] renderer acknowledged execution marker response (request_id={})",
-                                payload.request_id
-                            );
-                        }
-                        if smoke_reloads_remaining > 0
-                            && smoke_reload_request_id.as_deref() == Some(payload.request_id.as_str())
-                        {
-                            smoke_reloads_remaining -= 1;
-                            smoke_reload_request_id = None;
-                            println!(
-                                "[Navigation] requesting Vencord DEV smoke reload (remaining={smoke_reloads_remaining})"
-                            );
-                            if let Err(error) = webview.evaluate_script("window.location.reload();") {
-                                eprintln!("[Navigation] Vencord smoke reload failed: {error}");
-                            }
-                        }
+                        handle_mod_response_ack(
+                            Some(&VENCORD_MOD),
+                            payload.request_id,
+                            &webview,
+                            &mut smoke_reloads_remaining,
+                            &mut smoke_reload_request_id,
+                        );
                     }
                     BridgeEvent::InteractionProbe(payload) => {
                         println!("[Renderer][Interaction] {}", payload.phase);
@@ -2413,17 +3024,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
-        lookup_mod_descriptor, KNOWN_MODS, VENCORD_MOD,
+        lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, EQUICORD_MOD, KNOWN_MODS,
+        SHELTER_MOD, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
-        mod_marker_script, validate_mod_bundle, DocumentModLifecycle,
+        mod_marker_script, validate_descriptor, validate_mod_bundle, DocumentModLifecycle,
+        ModEnabling,
     };
 
+    /// Every registered mod, for tests that must hold for all of them.
+    fn all_mods() -> Vec<&'static crate::mod_substrate::ModDescriptor> {
+        KNOWN_MODS.iter().collect()
+    }
+
+    /// Adapters for an explicit set of mods.
+    fn adapters_for(ids: &[&str]) -> Vec<&'static crate::mod_substrate::ModDescriptor> {
+        all_mods()
+            .into_iter()
+            .filter(|descriptor| ids.contains(&descriptor.id))
+            .collect()
+    }
+
     #[test]
-    fn diagnostic_keeps_facade_and_substrate_but_can_omit_the_vencord_adapter() {
-        let with_adapter = initialization_script(true).unwrap();
-        let without_adapter = initialization_script(false).unwrap();
+    fn diagnostic_keeps_facade_and_substrate_but_omits_unselected_adapters() {
+        let with_adapter = initialization_script(&adapters_for(&["vencord"])).unwrap();
+        let without_adapter = initialization_script(&[]).unwrap();
         assert!(with_adapter.contains("native.getModBundle"));
         assert!(with_adapter.contains("__legcordNativeVencordAdapter"));
         assert!(with_adapter.contains("__legcordNativeModSubstrate"));
@@ -2434,39 +3060,247 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_mod_gets_exactly_its_own_adapter() {
+        // The adapter appended for a mod must be that mod's file and no other:
+        // one mod's identity can never be substituted for another's.
+        let expectations = [
+            ("vencord", "__legcordNativeVencordAdapter"),
+            ("shelter", "__legcordNativeShelterAdapter"),
+            ("equicord", "__legcordNativeEquicordAdapter"),
+        ];
+        for (id, own_flag) in expectations {
+            let script = initialization_script(&adapters_for(&[id])).unwrap();
+            assert!(script.contains(own_flag), "{id} adapter must be injected");
+            for (_, other_flag) in expectations {
+                if other_flag != own_flag {
+                    assert!(
+                        !script.contains(other_flag),
+                        "{id} run must not inject {other_flag}"
+                    );
+                }
+            }
+        }
+        // Every registered descriptor resolves to a real adapter file, and the
+        // script builder refuses a registry entry that has none.
+        for descriptor in all_mods() {
+            assert!(
+                mod_adapter_script(descriptor).is_some(),
+                "{} must have an adapter",
+                descriptor.id
+            );
+            assert!(!initialization_script(&[])
+                .unwrap()
+                .contains("getModBundle(\"shelter\""));
+        }
+    }
+
+    #[test]
     fn initialization_script_preserves_window_prototype_storage() {
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(script.contains("__legcordNativeStorageAtDocumentStart"));
         assert!(script.contains("Window.prototype"));
         assert!(script.contains("defineProperty(Window.prototype, \"localStorage\""));
     }
 
     #[test]
-    fn vencord_descriptor_registers_exactly_one_typed_capability() {
-        assert_eq!(KNOWN_MODS.len(), 1);
-        let descriptor = lookup_mod_descriptor("vencord").unwrap();
-        assert_eq!(descriptor.id, VENCORD_MOD.id);
-        assert_eq!(descriptor.capability, "mod.get_bundle");
+    fn every_registered_descriptor_declares_its_traced_contract() {
+        assert_eq!(KNOWN_MODS.len(), 3);
+        let vencord = lookup_mod_descriptor("vencord").unwrap();
+        assert_eq!(vencord.id, VENCORD_MOD.id);
+        assert_eq!(vencord.capability, "mod.get_bundle");
         assert_eq!(
-            descriptor.js_url,
+            vencord.js_url,
             "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js"
         );
-        assert_eq!(descriptor.js_file, "vencord.js");
-        assert_eq!(descriptor.css_file, "vencord.css");
-        assert_eq!(descriptor.style_element_id, "legcord-native-vencord-css");
-        assert_eq!(descriptor.page_global, "Vencord");
-        assert_eq!(descriptor.success_marker, "vencord-bootstrap-executed");
-        assert_eq!(descriptor.settings_key, "VencordSettings");
-        assert!(lookup_mod_descriptor("shelter").is_none());
-        assert!(lookup_mod_descriptor("equicord").is_none());
-        assert!(lookup_mod_descriptor("custom").is_none());
-        assert!(lookup_mod_descriptor("arbitrary").is_none());
-        // The registry resolves EXACT ids only: no prefix, case, or path
-        // shape can select a descriptor.
-        assert!(lookup_mod_descriptor("Vencord").is_none());
-        assert!(lookup_mod_descriptor("vencord.js").is_none());
-        assert!(lookup_mod_descriptor("../vencord").is_none());
-        assert!(lookup_mod_descriptor("ven ").is_none());
+        assert_eq!(vencord.js_file, "vencord.js");
+        let vencord_css = vencord.css.expect("Vencord ships CSS");
+        assert_eq!(vencord_css.file, "vencord.css");
+        assert_eq!(vencord_css.style_element_id, "legcord-native-vencord-css");
+        assert_eq!(vencord.page_global, "Vencord");
+        assert_eq!(vencord.success_marker, "vencord-bootstrap-executed");
+        assert_eq!(vencord.settings_key, Some("VencordSettings"));
+
+        // Shelter: JS only, fixed raw.githubusercontent source, header-less
+        // identity, asynchronous global, no invented settings key, and
+        // unconditional enablement (Electron hardcodes `enabled: true`).
+        let shelter = lookup_mod_descriptor("shelter").unwrap();
+        assert_eq!(shelter.id, SHELTER_MOD.id);
+        assert_eq!(
+            shelter.js_url,
+            "https://raw.githubusercontent.com/uwu/shelter-builds/main/shelter.js"
+        );
+        assert_eq!(shelter.js_file, "shelter.js");
+        assert!(shelter.css.is_none(), "Shelter ships no stylesheet");
+        assert_eq!(shelter.page_global, "shelter");
+        assert_eq!(shelter.page_global_requires, Some("plugins"));
+        assert_eq!(shelter.settings_key, None);
+        assert_eq!(shelter.enabling, ModEnabling::AlwaysEnabled);
+        assert_eq!(shelter.success_marker, "shelter-bootstrap-executed");
+
+        // Equicord: JS + CSS (its Electron preload requires both), banner
+        // identity, synchronous global, settings key, and a settings gate.
+        let equicord = lookup_mod_descriptor("equicord").unwrap();
+        assert_eq!(equicord.id, EQUICORD_MOD.id);
+        assert_eq!(
+            equicord.js_url,
+            "https://github.com/Equicord/Equicord/releases/download/latest/browser.js"
+        );
+        let equicord_css = equicord.css.expect("Equicord requires CSS");
+        assert_eq!(
+            equicord_css.url,
+            "https://github.com/Equicord/Equicord/releases/download/latest/browser.css"
+        );
+        assert_eq!(equicord_css.file, "equicord.css");
+        assert_eq!(equicord.settings_key, Some("EquicordSettings"));
+        assert_eq!(equicord.enabling, ModEnabling::SettingsMods);
+        assert_eq!(equicord.success_marker, "equicord-bootstrap-executed");
+
+        // Nothing that is not registered resolves, and the registry is
+        // EXACT-match only: no prefix, case, path, or URL shape selects one.
+        for unregistered in [
+            "custom",
+            "arbitrary",
+            "Vencord",
+            "SHELTER",
+            "Equicord",
+            "EQUICORD",
+            "vencord.js",
+            "shelter/../x",
+            "../shelter",
+            "../vencord",
+            "equicord/foo",
+            "https://attacker.invalid/x.js",
+            "C:\\Windows\\x.js",
+            "javascript:alert(1)",
+            "ven ",
+        ] {
+            assert!(
+                lookup_mod_descriptor(unregistered).is_none(),
+                "'{unregistered}' must not resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_enablement_follows_each_mods_traced_electron_policy() {
+        // Electron: `getConfig("mods").includes(<id>)` for Vencord/Equicord and
+        // a hardcoded `enabled: true` for Shelter.
+        let settings = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+
+        // Empty settings: only the unconditionally enabled mod runs.
+        let active = resolve_active_mods(&settings(&[]), None);
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["shelter"]
+        );
+
+        let active = resolve_active_mods(&settings(&["vencord"]), None);
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["vencord", "shelter"]
+        );
+
+        let active = resolve_active_mods(&settings(&["equicord"]), None);
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["shelter", "equicord"]
+        );
+
+        // A host-controlled diagnostic allowlist can force a subset, which is
+        // how the "native without <mod>" control runs are produced. It can only
+        // REMOVE mods, never introduce one that is not registered.
+        let active = resolve_active_mods(&settings(&["vencord", "equicord"]), Some("shelter"));
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["shelter"]
+        );
+        // The allowlist can only REMOVE mods; it never bypasses a settings
+        // gate. With no mods in settings, an allowlist naming Vencord and
+        // Equicord still yields nothing.
+        assert!(resolve_active_mods(&settings(&[]), Some("vencord, equicord")).is_empty());
+        let active = resolve_active_mods(
+            &settings(&["vencord", "equicord"]),
+            Some("vencord, equicord"),
+        );
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["vencord", "equicord"]
+        );
+        // A settings entry for an unregistered name selects nothing.
+        let active = resolve_active_mods(&settings(&["custom", "DoNotChange"]), None);
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["shelter"]
+        );
+        // Whitespace and empty entries in the allowlist are ignored.
+        let active = resolve_active_mods(&settings(&[]), Some(" shelter , "));
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["shelter"]
+        );
+    }
+
+    #[test]
+    fn shelter_identity_does_not_invent_a_build_header() {
+        use crate::mod_substrate::ModArtifactIdentity;
+        // Shelter's published artifact carries NO banner, so the descriptor
+        // must NOT claim a header prefix. Identity is sentinel-based.
+        match SHELTER_MOD.identity {
+            ModArtifactIdentity::SourceSentinels { sentinels } => {
+                assert!(
+                    sentinels.len() >= 2,
+                    "identity needs more than one sentinel"
+                );
+                for sentinel in sentinels {
+                    assert!(!sentinel.is_empty() && sentinel.len() <= 256);
+                    assert!(
+                        sentinel.contains("shelter"),
+                        "sentinels must be Shelter-specific: {sentinel}"
+                    );
+                }
+            }
+            ModArtifactIdentity::BuildHeader { .. } => {
+                panic!("Shelter must not claim a build header it does not publish")
+            }
+        }
+        // Equicord DOES publish a banner, so it uses the header shape.
+        assert!(matches!(
+            EQUICORD_MOD.identity,
+            ModArtifactIdentity::BuildHeader { prefix } if prefix == "// Equicord "
+        ));
+        // A real sentinel-bearing artifact validates; a Vencord artifact (or
+        // anything else without the sentinels) is refused.
+        let shelter_js = b"(()=>{console.error(\"shelter is initializing...\");\
+            (async()=>{window.shelter={plugins:{}}})();\
+            console.error(\"shelter is initialized. took: 4ms\");})();"
+            .to_vec();
+        let bundle = validate_mod_bundle(&SHELTER_MOD, shelter_js.clone(), None).unwrap();
+        assert!(bundle.version.starts_with("sha256-"), "{}", bundle.version);
+        assert_eq!(bundle.css_bytes, None);
+        assert!(validate_mod_bundle(
+            &SHELTER_MOD,
+            b"// Vencord b52ed36\nvar Vencord = {};\n".to_vec(),
+            None
+        )
+        .is_err());
+        assert!(validate_mod_bundle(&SHELTER_MOD, shelter_js, Some(b".x{}".to_vec())).is_err());
+    }
+
+    #[test]
+    fn every_registered_descriptor_passes_substrate_validation() {
+        for descriptor in all_mods() {
+            validate_descriptor(descriptor)
+                .unwrap_or_else(|error| panic!("{}: {error}", descriptor.id));
+            assert_eq!(descriptor.capability, "mod.get_bundle");
+            assert!(crate::protocol::validate_mod_bundle_id(descriptor.id).is_ok());
+            assert!(is_allowed_mod_download_url(descriptor, descriptor.js_url));
+            if let Some(css) = descriptor.css {
+                assert!(is_allowed_mod_download_url(descriptor, css.url));
+            }
+            // Every JS and CSS cache name is a bare host-chosen file name.
+            assert!(!descriptor.js_file.contains('/') && !descriptor.js_file.contains('\\'));
+            assert!(!descriptor.js_file.contains(".."));
+        }
     }
 
     #[test]
@@ -2503,6 +3337,7 @@ mod tests {
         // Every registered mod must declare the shared capability and pass
         // id validation, so a request id can never be silently mismatched
         // against a descriptor.
+        let mut ids: Vec<&str> = Vec::new();
         for descriptor in KNOWN_MODS {
             assert_eq!(descriptor.capability, "mod.get_bundle");
             assert!(crate::protocol::validate_mod_bundle_id(descriptor.id).is_ok());
@@ -2510,6 +3345,8 @@ mod tests {
                 lookup_mod_descriptor(descriptor.id).map(|found| found.id),
                 Some(descriptor.id)
             );
+            assert!(!ids.contains(&descriptor.id), "duplicate registry id");
+            ids.push(descriptor.id);
         }
     }
 
@@ -2518,29 +3355,51 @@ mod tests {
         // Fail-fast parity with the existing startup descriptor check: a
         // descriptor without the shared capability must abort startup rather
         // than silently serve no bundle.
-        assert!(super::BOOT_SNAPSHOT
-            .capabilities
-            .contains(&VENCORD_MOD.capability));
+        for descriptor in KNOWN_MODS {
+            assert!(super::BOOT_SNAPSHOT
+                .capabilities
+                .contains(&descriptor.capability));
+        }
     }
 
     #[test]
     fn native_document_lifecycle_allows_one_bootstrap_and_resets_after_navigation() {
-        let mut lifecycle = DocumentModLifecycle::default();
-        lifecycle.begin_document();
-        assert_eq!(lifecycle.generation(), 1);
-        assert!(lifecycle.begin_mod(VENCORD_MOD.id));
-        assert!(!lifecycle.begin_mod(VENCORD_MOD.id));
-        assert!(lifecycle.record_mod_execution(VENCORD_MOD.id));
-        assert!(!lifecycle.record_mod_execution(VENCORD_MOD.id));
+        // Every registered mod gets exactly the same lifecycle: one start, one
+        // execution, per document, with a clean reset on navigation.
+        for descriptor in all_mods() {
+            let mut lifecycle = DocumentModLifecycle::default();
+            lifecycle.begin_document();
+            assert_eq!(lifecycle.generation(), 1);
+            assert!(lifecycle.begin_mod(descriptor.id));
+            assert!(!lifecycle.begin_mod(descriptor.id), "{}", descriptor.id);
+            assert!(lifecycle.record_mod_execution(descriptor.id));
+            assert!(
+                !lifecycle.record_mod_execution(descriptor.id),
+                "{} must not execute twice",
+                descriptor.id
+            );
 
-        lifecycle.begin_document();
-        assert_eq!(lifecycle.generation(), 2);
-        assert!(lifecycle.begin_mod(VENCORD_MOD.id));
-        assert_eq!(lifecycle.mod_execution_count(VENCORD_MOD.id), 0);
+            lifecycle.begin_document();
+            assert_eq!(lifecycle.generation(), 2);
+            assert!(lifecycle.begin_mod(descriptor.id));
+            assert_eq!(lifecycle.mod_execution_count(descriptor.id), 0);
+        }
+        // Independently: three documents, three bootstraps, no cross-talk.
+        let mut lifecycle = DocumentModLifecycle::default();
+        for generation in 1..=3u64 {
+            lifecycle.begin_document();
+            assert_eq!(lifecycle.generation(), generation);
+            for descriptor in all_mods() {
+                assert!(lifecycle.begin_mod(descriptor.id));
+                assert!(!lifecycle.begin_mod(descriptor.id));
+                assert!(lifecycle.record_mod_execution(descriptor.id));
+                assert_eq!(lifecycle.mod_execution_count(descriptor.id), 1);
+            }
+        }
     }
 
     #[test]
-    fn accepts_only_fixed_github_vencord_asset_hosts() {
+    fn accepts_only_each_mods_fixed_upstream_hosts() {
         assert!(is_allowed_mod_download_url(
             &VENCORD_MOD,
             "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js"
@@ -2549,40 +3408,96 @@ mod tests {
             &VENCORD_MOD,
             "https://release-assets.githubusercontent.com/asset/browser.js"
         ));
-        assert!(!is_allowed_mod_download_url(
-            &VENCORD_MOD,
-            "http://github.com/Vendicated/Vencord/browser.js"
+        // Shelter's fixed source is raw.githubusercontent.com only: the GitHub
+        // release hosts Vencord/Equicord use are NOT approved for Shelter, so a
+        // redirect cannot substitute a different artifact.
+        assert!(is_allowed_mod_download_url(
+            &SHELTER_MOD,
+            "https://raw.githubusercontent.com/uwu/shelter-builds/main/shelter.js"
         ));
         assert!(!is_allowed_mod_download_url(
-            &VENCORD_MOD,
-            "https://github.com.attacker.invalid/browser.js"
+            &SHELTER_MOD,
+            "https://github.com/uwu/shelter-builds/main/shelter.js"
         ));
+        assert!(!is_allowed_mod_download_url(
+            &SHELTER_MOD,
+            "http://raw.githubusercontent.com/uwu/shelter-builds/main/shelter.js"
+        ));
+        assert!(!is_allowed_mod_download_url(
+            &SHELTER_MOD,
+            "https://raw.githubusercontent.com.attacker.invalid/uwu/shelter.js"
+        ));
+        // And Vencord does not inherit Shelter's host.
+        assert!(!is_allowed_mod_download_url(
+            &VENCORD_MOD,
+            "https://raw.githubusercontent.com/uwu/shelter-builds/main/shelter.js"
+        ));
+        for descriptor in all_mods() {
+            assert!(!is_allowed_mod_download_url(
+                descriptor,
+                "http://github.com/x/browser.js"
+            ));
+            assert!(!is_allowed_mod_download_url(
+                descriptor,
+                "https://github.com.attacker.invalid/browser.js"
+            ));
+            assert!(!is_allowed_mod_download_url(
+                descriptor,
+                "https://badges.example.invalid/badges.json"
+            ));
+        }
     }
 
     #[test]
-    fn validates_bundle_header_sizes_and_execution_marker() {
+    fn validates_bundle_sizes_and_execution_markers() {
         let bundle = validate_mod_bundle(
             &VENCORD_MOD,
             b"// Vencord test-build\nvar Vencord = {};\n".to_vec(),
-            b"/* test CSS */".to_vec(),
+            Some(b"/* test CSS */".to_vec()),
         )
         .unwrap();
         assert_eq!(bundle.version, "test-build");
         assert_eq!(bundle.js_bytes, bundle.js.len());
-        assert_eq!(bundle.css_bytes, bundle.css.len());
+        assert_eq!(bundle.css_bytes, Some(bundle.css.as_ref().unwrap().len()));
         assert_eq!(VENCORD_MOD.success_marker, "vencord-bootstrap-executed");
         assert!(validate_mod_bundle(
             &VENCORD_MOD,
             b"var notVencord = {};".to_vec(),
-            b"/*css*/".to_vec()
+            Some(b"/*css*/".to_vec())
         )
         .is_err());
+        // Equicord's banner is its own: a Vencord artifact is refused, and its
+        // 40-character commit hash is a valid version token.
+        let equicord = validate_mod_bundle(
+            &EQUICORD_MOD,
+            b"// Equicord 1489c0e2a4435d854d7343a5cfb0abb894772318\nvar Vencord={};".to_vec(),
+            Some(b".vc{}".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(equicord.version, "1489c0e2a4435d854d7343a5cfb0abb894772318");
+        assert!(validate_mod_bundle(
+            &EQUICORD_MOD,
+            b"// Vencord b52ed36\nvar Vencord = {};\n".to_vec(),
+            Some(b".vc{}".to_vec())
+        )
+        .is_err());
+        // Every registered mod reports a bounded, non-empty version.
+        for descriptor in all_mods() {
+            assert!(descriptor.success_marker.len() <= 64);
+            assert!(!descriptor.success_marker.is_empty());
+        }
     }
 
     #[test]
     fn generates_fixed_css_and_marker_scripts_without_an_eval_surface() {
-        let css =
-            mod_css_script(&VENCORD_MOD, "request-1", r#"body::after{content:"ok"}"#).unwrap();
+        let vencord_css = VENCORD_MOD.css.unwrap();
+        let css = mod_css_script(
+            &VENCORD_MOD,
+            &vencord_css,
+            "request-1",
+            r#"body::after{content:"ok"}"#,
+        )
+        .unwrap();
         assert!(css.contains("document.head"));
         assert!(css.contains("legcord-native-vencord-css"));
         assert!(css.contains("vencord_css_result"));
@@ -2598,6 +3513,32 @@ mod tests {
         assert!(marker.contains(VENCORD_MOD.success_marker));
         assert!(!marker.contains("eval("));
         assert!(!marker.contains("new Function"));
+
+        // Equicord's CSS uses its OWN stable identity and result event, and the
+        // generic managed CSS substrate is reused rather than reimplemented.
+        let equicord_css = EQUICORD_MOD.css.unwrap();
+        let equicord_script =
+            mod_css_script(&EQUICORD_MOD, &equicord_css, "request-1", ".vc{}").unwrap();
+        assert!(equicord_script.contains("legcord-native-equicord-css"));
+        // Equicord reports through the MOD-AGNOSTIC CSS event family and
+        // echoes its own host-supplied id, so the host can refuse a result
+        // claimed for another mod. Vencord's legacy event name is untouched.
+        assert!(equicord_script.contains("mod_css_result"));
+        assert!(equicord_script.contains("mod_id: \"equicord\""));
+        assert!(!equicord_script.contains("legcord-native-vencord-css"));
+        assert!(!equicord_script.contains("vencord_css_result"));
+        // Shelter declares no stylesheet, so no CSS script is ever built for it.
+        assert!(SHELTER_MOD.css.is_none());
+        // No generated script for ANY registered mod exposes an eval surface.
+        for descriptor in all_mods() {
+            let context = mod_execution_context_script(descriptor);
+            let marker = mod_marker_script(descriptor, "request-1", 1.0).unwrap();
+            for script in [context, marker] {
+                assert!(!script.contains("eval("), "{}", descriptor.id);
+                assert!(!script.contains("new Function"), "{}", descriptor.id);
+                assert!(!script.contains("executeScript"), "{}", descriptor.id);
+            }
+        }
     }
 
     #[test]
@@ -2660,7 +3601,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_settings_facade() {
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(script.contains("settings_get_config"));
         assert!(script.contains("settings_config"));
         assert!(script.contains("settings.get_config"));
@@ -2697,7 +3638,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_get_lang_facade() {
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(script.contains("localization_get_lang"));
         assert!(script.contains("localization_string"));
         assert!(script.contains("localization.get_lang"));
@@ -2725,7 +3666,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_mutation_facade() {
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(script.contains("settings_set_block_power_saving"));
         assert!(script.contains("settings_mutation"));
         assert!(script.contains("settings.set_block_power_saving_in_voice_chat"));
@@ -2767,7 +3708,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_app_version_facade() {
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(script.contains("app_get_version"));
         assert!(script.contains("app_version"));
         assert!(script.contains("app.get_version"));
@@ -2810,7 +3751,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_plugin_storage_facade() {
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(script.contains("plugin_storage_read"));
         assert!(script.contains("plugin_storage_write"));
         assert!(script.contains("plugin_storage.read"));
@@ -2840,7 +3781,7 @@ mod tests {
         // The earlier theme READ investigation was intentionally rejected:
         // current themes are host -> renderer pushes with no native renderer
         // caller for a pull-style read. The facade must not grow one here.
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(!script.contains("getCSS"));
         assert!(!script.contains("getCss"));
         assert!(!script.contains("addTheme"));
@@ -2883,7 +3824,7 @@ mod tests {
     fn initialization_script_exposes_no_quickcss_pull_surface() {
         // The renderer pull stays rejected: no quickCss.get() shape may be
         // introduced alongside the host push.
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(!script.contains("quickCss"));
         assert!(!script.contains("quickcss"));
         assert!(!script.contains("quick_css"));
@@ -2899,7 +3840,7 @@ mod tests {
             assert!(!capability.contains("live"));
             assert!(!capability.contains("css"));
         }
-        let script = initialization_script(true).unwrap();
+        let script = initialization_script(&[]).unwrap();
         assert!(!script.contains("watch"));
         assert!(!script.contains("LiveCss"));
         assert!(!script.contains("fs.watch"));

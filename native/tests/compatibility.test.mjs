@@ -10,7 +10,65 @@ const storagePreservation = readFileSync(
     "utf8",
 );
 const vencordAdapter = readFileSync(new URL("../web/mods/vencord/adapter.js", import.meta.url), "utf8");
+const shelterAdapter = readFileSync(new URL("../web/mods/shelter/adapter.js", import.meta.url), "utf8");
+const equicordAdapter = readFileSync(new URL("../web/mods/equicord/adapter.js", import.meta.url), "utf8");
 const testModAdapter = readFileSync(new URL("../web/mods/testmod/adapter.js", import.meta.url), "utf8");
+
+/**
+ * Strips comments from a JS source file so security assertions inspect only
+ * executable/configuration content.
+ *
+ * Adapters legitimately DOCUMENT what they deliberately do not do (e.g.
+ * "Shelter ships no stylesheet"), and a bare regex over the whole file would
+ * flag those comments. Stripping comments keeps the assertion meaningful — it
+ * still fails on any real URL, path, or eval surface in code — without
+ * weakening it.
+ */
+function stripComments(source) {
+    let out = "";
+    let index = 0;
+    let inString = null;
+    while (index < source.length) {
+        const char = source[index];
+        const next = source[index + 1];
+        if (inString) {
+            out += char;
+            if (char === "\\") {
+                out += next ?? "";
+                index += 2;
+                continue;
+            }
+            if (char === inString) inString = null;
+            index += 1;
+            continue;
+        }
+        if (char === '"' || char === "'" || char === "`") {
+            inString = char;
+            out += char;
+            index += 1;
+            continue;
+        }
+        if (char === "/" && next === "/") {
+            while (index < source.length && source[index] !== "\n") index += 1;
+            continue;
+        }
+        if (char === "/" && next === "*") {
+            index += 2;
+            while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) {
+                index += 1;
+            }
+            index += 2;
+            continue;
+        }
+        out += char;
+        index += 1;
+    }
+    return out;
+}
+
+/** Executable/configuration content only, with comments removed. */
+const shelterAdapterCode = stripComments(shelterAdapter);
+const equicordAdapterCode = stripComments(equicordAdapter);
 
 function createBootstrap(capabilities) {
     return bootstrapTemplate.replace(
@@ -171,6 +229,100 @@ function respondVencord(window, request, payload = {}) {
                     },
                 },
                 error: null,
+            },
+        }),
+    );
+}
+
+/** The per-mod wire identity each adapter must use, keyed by logical id. */
+const MOD_WIRE = {
+    vencord: {
+        stateName: "__legcordNativeVencord",
+        adapterFlag: "__legcordNativeVencordAdapter",
+        domEvent: "legcord-native:vencord-bootstrap",
+        marker: "vencord-bootstrap-executed",
+        version: "b52ed36",
+        // Legacy Vencord-named event family (byte-identical to Phase A).
+        resultEvent: "vencord_bootstrap_result",
+        ackEvent: "vencord_response_ack",
+        errorEvent: "vencord_adapter_error",
+        echoesModId: false,
+        cssBytes: 250,
+        cssInjectionMs: 2,
+    },
+    shelter: {
+        stateName: "__legcordNativeShelter",
+        adapterFlag: "__legcordNativeShelterAdapter",
+        domEvent: "legcord-native:shelter-bootstrap",
+        marker: "shelter-bootstrap-executed",
+        // Header-less artifact: the host reports a content digest, not a banner.
+        version: "sha256-ba858e9cfb83503f",
+        resultEvent: "mod_bootstrap_result",
+        ackEvent: "mod_response_ack",
+        errorEvent: "mod_adapter_error",
+        echoesModId: true,
+        // Shelter ships no stylesheet: both CSS fields are null together.
+        cssBytes: null,
+        cssInjectionMs: null,
+    },
+    equicord: {
+        stateName: "__legcordNativeEquicord",
+        adapterFlag: "__legcordNativeEquicordAdapter",
+        domEvent: "legcord-native:equicord-bootstrap",
+        marker: "equicord-bootstrap-executed",
+        version: "1489c0e2a4435d854d7343a5cfb0abb894772318",
+        resultEvent: "mod_bootstrap_result",
+        ackEvent: "mod_response_ack",
+        errorEvent: "mod_adapter_error",
+        echoesModId: true,
+        cssBytes: 217092,
+        cssInjectionMs: 5,
+    },
+};
+
+function respondMod(window, request, modId, payload = {}) {
+    const wire = MOD_WIRE[modId];
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "mod_bundle",
+                    payload: {
+                        mod_id: modId,
+                        bundle_version: wire.version,
+                        bundle_bytes: 1000,
+                        css_bytes: wire.cssBytes,
+                        request_latency_ms: 20,
+                        retrieval_ms: 10,
+                        execution_ms: 3,
+                        css_injection_ms: wire.cssInjectionMs,
+                        marker: wire.marker,
+                        document_execution_count: 1,
+                        ...payload,
+                    },
+                },
+                error: null,
+            },
+        }),
+    );
+}
+
+/** Delivers a host bootstrap verdict on the mod's document-local DOM event. */
+function dispatchBootstrap(window, request, modId, overrides = {}) {
+    const wire = MOD_WIRE[modId];
+    window.dispatchEvent(
+        new FakeCustomEvent(wire.domEvent, {
+            detail: {
+                request_id: request.request_id,
+                ok: true,
+                marker: wire.marker,
+                execution_ms: 3,
+                local_storage_api: "available",
+                settings_state: "missing",
+                ...overrides,
             },
         }),
     );
@@ -843,6 +995,294 @@ test("the substrate factory is idempotent and shared by every adapter", () => {
     assert.equal(Object.isFrozen(factory), true);
     vm.runInContext(modSubstrate, context);
     assert.equal(window.__legcordNativeModSubstrate, factory);
+});
+
+// ---------------------------------------------------------------------------
+// Registered mod consumers (Shelter, Equicord) share this lifecycle verbatim.
+// Every assertion below runs for BOTH mods, which is what makes the shared
+// substrate's generality a tested property rather than a claim.
+// ---------------------------------------------------------------------------
+
+const REGISTERED_ADAPTERS = { shelter: shelterAdapter, equicord: equicordAdapter };
+
+for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
+    const wire = MOD_WIRE[modId];
+
+    test(`${modId} requests only the shared bundle capability with its own registry id`, () => {
+        const { window, context } = createRuntime();
+        vm.runInContext(adapter, context);
+        vm.runInContext(adapter, context);
+        const requests = window.messages.filter((message) => message.command?.type === "mod_get_bundle");
+        assert.equal(requests.length, 1, "one start per document");
+        // Exactly one logical parameter: the id. No URL, path, or source.
+        assert.deepEqual(requests[0].command.payload, { mod_id: modId });
+        assert.equal(requests[0].command.type, "mod_get_bundle");
+        assert.deepEqual(Object.keys(requests[0].command.payload), ["mod_id"]);
+        assert.equal(window[wire.stateName].status, "pending");
+    });
+
+    test(`${modId} executes once, marks the bootstrap, and acknowledges exactly once`, async () => {
+        const { window, context } = createRuntime();
+        vm.runInContext(adapter, context);
+        const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+
+        dispatchBootstrap(window, request, modId);
+        respondMod(window, request, modId);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        assert.equal(window[wire.stateName].status, "executed");
+        assert.equal(window[wire.stateName].marker, wire.marker);
+        assert.equal(window[wire.stateName].executionCount, 1);
+        assert.equal(window[wire.stateName].modId, modId);
+        assert.equal(window[wire.stateName].bundleVersion, wire.version);
+
+        const results = window.messages.filter((message) => message.event?.type === wire.resultEvent);
+        assert.equal(results.length, 1, "one bootstrap result per document");
+        assert.equal(results[0].event.payload.ok, true);
+        assert.equal(results[0].event.payload.marker, wire.marker);
+        assert.equal(results[0].event.payload.request_id, request.request_id);
+        assert.equal(results[0].event.payload.local_storage_api, "available");
+        // The mod-agnostic event family must carry the mod id so the host can
+        // refuse a verdict claimed for another registered mod.
+        if (wire.echoesModId) {
+            assert.equal(results[0].event.payload.mod_id, modId);
+        }
+        // No source, URL, path, or filename ever crosses the bridge.
+        const serialized = JSON.stringify(results[0]);
+        assert.doesNotMatch(serialized, /source|js_url|browser\.js|shelter-builds|githubusercontent/);
+
+        const acks = window.messages.filter((message) => message.event?.type === wire.ackEvent);
+        assert.equal(acks.length, 1);
+        if (wire.echoesModId) {
+            assert.equal(acks[0].event.payload.mod_id, modId);
+        }
+    });
+
+    test(`${modId} rejects a response the host echoed for a different registered mod`, async () => {
+        const { window, context } = createRuntime();
+        vm.runInContext(adapter, context);
+        const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+
+        // A perfect marker for the right mod, but the registry echo says
+        // another mod: a cross-mod bundle can never be acknowledged.
+        dispatchBootstrap(window, request, modId);
+        const other = modId === "shelter" ? "equicord" : "shelter";
+        respondMod(window, request, other);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        assert.equal(window[wire.stateName].status, "failed");
+        assert.match(window[wire.stateName].error, /not for/);
+        assert.equal(
+            window.messages.some((message) => message.event?.type === wire.ackEvent),
+            false,
+        );
+    });
+
+    test(`${modId} rejects a wrong execution marker from the host`, async () => {
+        const { window, context } = createRuntime();
+        vm.runInContext(adapter, context);
+        const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+
+        dispatchBootstrap(window, request, modId, { marker: "some-other-mod-executed" });
+        respondMod(window, request, modId, { marker: "some-other-mod-executed" });
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        assert.equal(window[wire.stateName].status, "failed");
+        assert.equal(window[wire.stateName].marker, null);
+        assert.equal(
+            window.messages.some((message) => message.event?.type === wire.ackEvent),
+            false,
+        );
+    });
+
+    test(`${modId} re-requests its own registry id after a reload with clean state`, async () => {
+        const first = createRuntime();
+        vm.runInContext(adapter, first.context);
+        const firstRequest = first.window.messages.find((message) => message.command?.type === "mod_get_bundle");
+        dispatchBootstrap(first.window, firstRequest, modId);
+        respondMod(first.window, firstRequest, modId);
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(first.window[wire.stateName].status, "executed");
+
+        // Reload: a fresh document starts clean and asks for the SAME id.
+        const second = createRuntime();
+        vm.runInContext(adapter, second.context);
+        const secondRequest = second.window.messages.find((message) => message.command?.type === "mod_get_bundle");
+        assert.deepEqual(secondRequest.command.payload, { mod_id: modId });
+        assert.notEqual(first.window.legcord, second.window.legcord);
+        assert.equal(second.window[wire.stateName].status, "pending");
+        assert.equal(second.window[wire.stateName].executionCount, 0);
+
+        // The previous document's pending request is disposed, so a late host
+        // answer cannot resolve anything in the new document.
+        const late = first.window.legcord.native.getModBundle(modId);
+        first.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+        await assert.rejects(late, /document was disposed/);
+
+        dispatchBootstrap(second.window, secondRequest, modId);
+        respondMod(second.window, secondRequest, modId);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(second.window[wire.stateName].status, "executed");
+        assert.equal(second.window[wire.stateName].executionCount, 1);
+        // Exactly one execution in the new document: no duplicate bootstrap.
+        assert.equal(second.window.messages.filter((message) => message.event?.type === wire.resultEvent).length, 1);
+    });
+
+    test(`${modId} is denied when the boot snapshot does not grant the shared capability`, () => {
+        const { window, context } = createRuntime("https://discord.com", ["bridge.ping"]);
+        vm.runInContext(adapter, context);
+        assert.equal(
+            window.messages.some((message) => message.command?.type === "mod_get_bundle"),
+            false,
+        );
+        assert.equal(
+            window.messages.some((message) => message.event?.type === wire.errorEvent),
+            true,
+        );
+        assert.equal(window[wire.stateName].status, "failed");
+        assert.match(window[wire.stateName].error, /capability is not available/);
+    });
+
+    test(`${modId} reports a typed host failure without reclassifying it`, async () => {
+        const { window, context } = createRuntime();
+        vm.runInContext(adapter, context);
+        const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+        window.dispatchEvent(
+            new FakeCustomEvent("legcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: request.request_id,
+                    ok: false,
+                    payload: null,
+                    error: { code: "bundle_retrieval", message: "[shelter] JS bundle was empty" },
+                },
+            }),
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(window[wire.stateName].status, "failed");
+        assert.match(window[wire.stateName].error, /JS bundle was empty/);
+        // A typed host failure keeps its code instead of being reported as an
+        // adapter-initialization problem.
+        assert.equal(
+            window.messages.some((message) => message.event?.type === wire.errorEvent),
+            false,
+        );
+    });
+
+    test(`${modId} does not expose the facade or request anything off the trusted origin`, () => {
+        for (const origin of [
+            "https://canary.discord.com",
+            "https://example.com",
+            "https://discord.com.attacker.invalid",
+        ]) {
+            const { window, context } = createRuntime(origin);
+            vm.runInContext(adapter, context);
+            assert.equal(window.legcord, undefined, origin);
+            assert.deepEqual(window.messages, [], origin);
+        }
+    });
+
+    test(`${modId} adapter carries no artifact URL, path, source, or eval surface`, () => {
+        // Assertions run on executable/configuration content only: comments
+        // legitimately document what the adapter deliberately omits.
+        const code = stripComments(adapter);
+        // The ONLY URL an adapter may name is the exact trusted Discord origin
+        // it gates on. No bundle source, no upstream host, no cache file.
+        const urls = code.match(/https?:\/\/[^\s"'`)]+/g) ?? [];
+        assert.deepEqual(urls, ["https://discord.com"], `${modId} names only the origin gate`);
+        assert.doesNotMatch(code, /shelter-builds|githubusercontent|github\.com|releases\/download/);
+        assert.doesNotMatch(code, /\.css["'`]/, "an adapter names no cache file");
+        assert.doesNotMatch(code, /readFile|writeFile|loadScript|executeSource|executeScript/);
+        assert.doesNotMatch(code, /eval\(|new Function/);
+        assert.doesNotMatch(code, /process\.|require\(|webFrame|ipcRenderer|window\.legcord\.fs/);
+        // The only request it can make is the shared bundle capability.
+        assert.match(code, /requireCapability|capability: "mod\.get_bundle"/);
+        assert.match(code, new RegExp(`getModBundle\\("${modId}"\\)`));
+    });
+}
+
+test("Shelter's descriptor needs no CSS stage and reports null CSS metadata", () => {
+    const { window, context } = createRuntime();
+    vm.runInContext(shelterAdapter, context);
+    const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+    dispatchBootstrap(window, request, "shelter");
+    respondMod(window, request, "shelter");
+    // The host answers with both CSS fields null, which the facade accepts.
+    const [result] = window.messages.filter((message) => message.event?.type === "mod_bootstrap_result");
+    assert.equal(result.event.payload.ok, true);
+    assert.equal(window.__legcordNativeShelter.status, "executed");
+    // Shelter's own adapter declares no CSS vocabulary at all: there is no
+    // stylesheet to inject and no empty style element to manufacture.
+    assert.doesNotMatch(shelterAdapterCode, /cssResultEvent/);
+    assert.doesNotMatch(shelterAdapterCode, /insertCSS|css_result/);
+    // But it still READS the host's CSS metadata, which is null for this mod.
+    assert.match(shelterAdapterCode, /cssBytes: result\.css_bytes/);
+});
+
+test("Equicord's descriptor carries a real CSS stage and stylesheet size", async () => {
+    const { window, context } = createRuntime();
+    vm.runInContext(equicordAdapter, context);
+    const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+    dispatchBootstrap(window, request, "equicord");
+    respondMod(window, request, "equicord");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const state = window.__legcordNativeEquicord;
+    assert.equal(state.status, "executed");
+    assert.equal(state.cssBytes, 217092);
+    assert.equal(state.cssInjectionMs, 5);
+    assert.notEqual(state.cssBytes, null);
+    // The host owns the CSS result, so the adapter declares no CSS event at
+    // all — Equicord reports only the bootstrap verdict and the ack.
+    assert.doesNotMatch(equicordAdapterCode, /cssResultEvent/);
+    assert.doesNotMatch(equicordAdapterCode, /_css_result/);
+});
+
+test("the mod_bundle response schema distinguishes no-CSS from CSS", async () => {
+    // Both CSS fields null (a CSS-less mod) is accepted.
+    const noCss = createRuntime();
+    const noCssRequest = noCss.window.legcord.native.getModBundle("shelter");
+    respondMod(noCss.window, { request_id: noCssRequest.requestId }, "shelter");
+    assert.equal((await noCssRequest).css_bytes, null);
+
+    // A half-populated pair is rejected: "no CSS" must be unambiguous.
+    for (const payload of [
+        { css_bytes: 100, css_injection_ms: null },
+        { css_bytes: null, css_injection_ms: 3 },
+        { css_bytes: -1, css_injection_ms: 3 },
+        { css_bytes: 1.5, css_injection_ms: 3 },
+        { css_bytes: null, css_injection_ms: -1 },
+    ]) {
+        const runtime = createRuntime();
+        const pending = runtime.window.legcord.native.getModBundle("shelter");
+        respondMod(runtime.window, { request_id: pending.requestId }, "shelter", payload);
+        await assert.rejects(pending, /schema is invalid/, JSON.stringify(payload));
+    }
+});
+
+test("the shared factory serves Shelter and Equicord without Vencord identifiers", () => {
+    for (const code of [shelterAdapterCode, equicordAdapterCode]) {
+        assert.match(code, /__legcordNativeModSubstrate/);
+        assert.match(code, /substrate\.createModAdapter\(/);
+        // Neither adapter reaches into Vencord's identity or state: they use
+        // only the shared factory and their own names.
+        assert.doesNotMatch(code, /__legcordNativeVencord/);
+        assert.doesNotMatch(code, /vencord-bootstrap-executed/);
+        assert.doesNotMatch(code, /getModBundle\("vencord"\)/);
+        assert.doesNotMatch(code, /legcord-native-vencord/);
+        assert.doesNotMatch(code, /vencord_css_result/);
+    }
 });
 
 test("a synthetic second mod runs the full substrate cycle without Vencord", async () => {

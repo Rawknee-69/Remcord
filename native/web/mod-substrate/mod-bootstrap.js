@@ -24,13 +24,23 @@
      *   resultEvent         typed host event for the bootstrap result
      *   ackEvent            typed host event acknowledging the host response
      *   errorEvent          typed host event for adapter-level failures
+     *   cssResultEvent      typed host event for the CSS result (CSS mods only)
      *   logTag              console prefix, e.g. "[Vencord native]"
+     *   modId               logical mod id echoed on every typed host event
      *   validateResponse    (payload) => void, throws on invalid host metadata
      *   resultExtra         (detail) => object merged into the result payload
      *   responseExtra       (payload) => object merged into adapter state
      */
     function createModAdapter(config) {
         let state;
+        // A mod id is only echoed when the adapter declares one. The
+        // mod-agnostic event family requires it so the host can refuse a
+        // verdict claimed for another mod; the legacy Vencord event family
+        // predates it and stays byte-identical.
+        function hostEvent(type, payload) {
+            const body = config.modId ? { mod_id: config.modId, ...payload } : payload;
+            return JSON.stringify({ version: 1, event: { type, payload: body } });
+        }
         function reportAdapterError(error) {
             const message = String(error?.message ?? error).slice(0, 2048);
             if (state) {
@@ -38,12 +48,7 @@
                 state.error = message;
             }
             try {
-                window.ipc.postMessage(
-                    JSON.stringify({
-                        version: 1,
-                        event: { type: config.errorEvent, payload: { message } },
-                    }),
-                );
+                window.ipc.postMessage(hostEvent(config.errorEvent, { message }));
             } catch (reportError) {
                 console.error(`${config.logTag}[adapter_initialization] could not report failure`, reportError);
             }
@@ -84,19 +89,13 @@
             }
             try {
                 window.ipc.postMessage(
-                    JSON.stringify({
-                        version: 1,
-                        event: {
-                            type: config.resultEvent,
-                            payload: {
-                                request_id: requestId,
-                                ok: state.status === "executed",
-                                marker: state.marker ?? "",
-                                execution_ms: Number.isFinite(state.executionMs) ? state.executionMs : 0,
-                                ...(config.resultPayloadExtra ? config.resultPayloadExtra(result, state) : null),
-                                error: state.status === "executed" ? null : state.error,
-                            },
-                        },
+                    hostEvent(config.resultEvent, {
+                        request_id: requestId,
+                        ok: state.status === "executed",
+                        marker: state.marker ?? "",
+                        execution_ms: Number.isFinite(state.executionMs) ? state.executionMs : 0,
+                        ...(config.resultPayloadExtra ? config.resultPayloadExtra(result, state) : null),
+                        error: state.status === "executed" ? null : state.error,
                     }),
                 );
             } catch (error) {
@@ -119,12 +118,7 @@
                         marker: state.marker,
                         executionMs: state.executionMs,
                     });
-                    window.ipc.postMessage(
-                        JSON.stringify({
-                            version: 1,
-                            event: { type: config.ackEvent, payload: { request_id: requestId } },
-                        }),
-                    );
+                    window.ipc.postMessage(hostEvent(config.ackEvent, { request_id: requestId }));
                 })
                 .catch((error) => {
                     state.status = "failed";

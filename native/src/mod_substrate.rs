@@ -22,6 +22,91 @@ use std::{
     time::{Duration, Instant},
 };
 
+use sha2::{Digest, Sha256};
+
+/// One mod's stylesheet half, present only when the mod actually ships CSS.
+///
+/// Kept as a nested `Option` instead of a flat set of "maybe empty" fields so
+/// a mod with no CSS (`None`) cannot accidentally be handed a placeholder URL,
+/// cache file, style id, or result event. A mod with CSS carries the whole
+/// contract in one struct, so a half-configured stylesheet is impossible.
+#[derive(Debug, Clone, Copy)]
+pub struct ModCssSource {
+    /// Fixed HTTPS URL of the CSS release asset.
+    pub url: &'static str,
+    /// Fixed cache file name for the CSS bundle inside the DEV profile.
+    pub file: &'static str,
+    /// Maximum accepted CSS size in bytes.
+    pub max_bytes: usize,
+    /// Deterministic `<style>` element id managed by the substrate.
+    pub style_element_id: &'static str,
+    /// Renderer event type carrying the CSS injection result.
+    pub result_event: &'static str,
+}
+
+/// How the host proves an artifact is *this* mod's bundle.
+///
+/// Two shapes exist because upstream publishes two shapes; neither fabricates a
+/// marker that the artifact does not carry.
+#[derive(Debug, Clone, Copy)]
+pub enum ModArtifactIdentity {
+    /// The artifact's first line starts with `prefix` followed by a non-empty
+    /// version token of at most 64 bytes. Vencord and Equicord publish
+    /// `// Vencord <sha>` / `// Equicord <sha>` banners.
+    BuildHeader { prefix: &'static str },
+    /// The artifact publishes **no** build header, so the version cannot come
+    /// from a banner. Identity is instead asserted two ways: every sentinel in
+    /// `sentinels` must appear verbatim in the source (each one is a unique
+    /// upstream literal that no other registered mod's artifact contains), and
+    /// the reported version is the host-computed SHA-256 digest prefix of the
+    /// retrieved bytes. Shelter's published build has no banner at all.
+    SourceSentinels { sentinels: &'static [&'static str] },
+}
+
+/// When the mod publishes its page-world global relative to bundle evaluation.
+///
+/// Electron executes every client-mod bundle through
+/// `webFrame.executeJavaScript` from an isolated-world preload, so all of them
+/// land in the page world at document start. What differs is *when* the global
+/// appears: some bundles assign it while their top-level IIFE runs, others
+/// publish it from an inner async IIFE after an await chain. The descriptor
+/// states the requirement; the substrate implements it.
+#[derive(Debug, Clone, Copy)]
+pub enum PageGlobalReadiness {
+    /// Published synchronously by the bundle's top-level evaluation. The
+    /// verifier reads the global once, immediately after the bundle.
+    Synchronous,
+    /// Published asynchronously. The substrate installs a one-shot property
+    /// trap before the bundle runs (so the normal case resolves with no
+    /// polling at all) and keeps a coarse bounded poll as a fallback for a
+    /// bundle that publishes the global through a path that bypasses `[[Set]]`
+    /// (a `var`/lexical global declaration or `defineProperty`). The verdict
+    /// is dispatched exactly once, on first observation or at the deadline.
+    Awaited {
+        /// Page-world global the pre-bundle trap flips to `true` on assignment.
+        ready_global: &'static str,
+        /// Upper bound on how long the verifier waits before failing.
+        timeout_ms: u64,
+        /// Coarse fallback poll interval. Never runs more often than this and
+        /// is cleared as soon as the verdict is dispatched.
+        poll_ms: u64,
+    },
+}
+
+/// How the host decides whether to inject a mod's renderer adapter.
+///
+/// Mirrors the `enabled` value each Electron bundle handler returns, which is
+/// derived from two different places in the traced implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModEnabling {
+    /// Electron hardcodes `enabled: true`, so the mod loads whenever its
+    /// artifact exists regardless of `settings.mods` (Shelter).
+    AlwaysEnabled,
+    /// Electron gates the mod on `settings.mods` containing its id
+    /// (`getConfig("mods").includes(<id>)`, Vencord and Equicord).
+    SettingsMods,
+}
+
 /// Typed contract describing one client mod to the shared substrate.
 ///
 /// Every field is host-controlled. The renderer can request the capability
@@ -30,34 +115,34 @@ use std::{
 pub struct ModDescriptor {
     /// Stable mod identifier, e.g. `"vencord"`. Keys per-document state.
     pub id: &'static str,
-    /// Capability name exposed in the boot snapshot, e.g. `"mod.vencord.get_bundle"`.
+    /// Capability name exposed in the boot snapshot, e.g. `"mod.get_bundle"`.
     pub capability: &'static str,
     /// Fixed HTTPS URL of the JavaScript bundle release asset.
     pub js_url: &'static str,
-    /// Fixed HTTPS URL of the CSS bundle release asset.
-    pub css_url: &'static str,
     /// Fixed cache file name for the JavaScript bundle inside the DEV profile.
     pub js_file: &'static str,
-    /// Fixed cache file name for the CSS bundle inside the DEV profile.
-    pub css_file: &'static str,
+    /// The mod's stylesheet contract, or `None` when the mod ships no CSS.
+    pub css: Option<ModCssSource>,
     /// Exact HTTPS hosts allowed for bundle download and redirects.
     pub allowed_hosts: &'static [&'static str],
     /// Maximum accepted JavaScript bundle size in bytes.
     pub max_js_bytes: usize,
-    /// Maximum accepted CSS bundle size in bytes.
-    pub max_css_bytes: usize,
-    /// Required first-line header prefix proving bundle identity, e.g. `"// Vencord "`.
-    pub version_header_prefix: &'static str,
-    /// Deterministic `<style>` element id managed by the substrate.
-    pub style_element_id: &'static str,
+    /// How bundle identity is proven for this mod's published artifact.
+    pub identity: ModArtifactIdentity,
     /// Page-world global object proving successful execution, e.g. `"Vencord"`.
     pub page_global: &'static str,
+    /// Member the page-world global must expose so the marker proves the real
+    /// mod API object rather than an unrelated global of the same name.
+    pub page_global_requires: Option<&'static str>,
+    /// When the page-world global appears relative to bundle evaluation.
+    pub page_global_readiness: PageGlobalReadiness,
+    /// How the host decides to inject this mod's renderer adapter.
+    pub enabling: ModEnabling,
     /// Success marker reported after the page-world global is observed.
     pub success_marker: &'static str,
-    /// Storage key inspected for diagnostics, e.g. `"VencordSettings"`.
-    pub settings_key: &'static str,
-    /// Renderer event type carrying the CSS injection result.
-    pub css_result_event: &'static str,
+    /// Storage key inspected for diagnostics, e.g. `"VencordSettings"`, or
+    /// `None` for a mod that keeps its settings outside `localStorage`.
+    pub settings_key: Option<&'static str>,
     /// Document-local DOM event carrying the page-world bootstrap verdict.
     pub bootstrap_dom_event: &'static str,
     /// Page-world global holding the storage context snapshot.
@@ -70,10 +155,12 @@ pub struct ModDescriptor {
 #[derive(Debug, Clone)]
 pub struct ModBundle {
     pub js: String,
-    pub css: String,
+    /// `None` for a descriptor that ships no CSS. Never an empty string: an
+    /// absent stylesheet and a zero-byte stylesheet are different states.
+    pub css: Option<String>,
     pub version: String,
     pub js_bytes: usize,
-    pub css_bytes: usize,
+    pub css_bytes: Option<usize>,
 }
 
 /// In-memory bundle cache keyed by mod id.
@@ -321,23 +408,42 @@ pub fn load_mod_bundle(
         descriptor.max_js_bytes,
         "JS bundle",
     )?;
-    let css = cached_or_downloaded_asset(
-        &agent,
-        descriptor,
-        &profile,
-        descriptor.css_file,
-        descriptor.css_url,
-        descriptor.max_css_bytes,
-        "CSS bundle",
-    )?;
+    let css = match descriptor.css {
+        Some(css) => Some(cached_or_downloaded_asset(
+            &agent,
+            descriptor,
+            &profile,
+            css.file,
+            css.url,
+            css.max_bytes,
+            "CSS bundle",
+        )?),
+        None => None,
+    };
     validate_mod_bundle(descriptor, js, css)
 }
 
-/// Validates raw bundle bytes against the descriptor contract.
+/// Number of hex characters of the SHA-256 digest reported as the bundle
+/// version for an artifact that publishes no build header. 16 hex characters
+/// is 64 bits of content identity: long enough to distinguish consecutive
+/// upstream builds in practice, short enough to stay a readable log line, and
+/// deliberately NOT a pin the host enforces — the artifact is still whatever
+/// the fixed upstream source serves.
+const DIGEST_VERSION_CHARS: usize = 16;
+
+/// Proves raw bundle bytes are this mod's artifact and returns the validated
+/// bundle.
+///
+/// Identity is established exactly as [`ModArtifactIdentity`] declares: a build
+/// banner when upstream publishes one, and unique upstream source sentinels
+/// plus a host-computed content digest when it does not. The CSS half is
+/// optional by descriptor — a mod that ships no CSS must not be forced to
+/// present one (no placeholder stylesheet, no empty CSS stage) — while a mod
+/// that does ship CSS must present a bounded, non-empty, UTF-8 stylesheet.
 pub fn validate_mod_bundle(
     descriptor: &ModDescriptor,
     js: Vec<u8>,
-    css: Vec<u8>,
+    css: Option<Vec<u8>>,
 ) -> Result<ModBundle, String> {
     if js.is_empty() || js.len() > descriptor.max_js_bytes {
         return Err(format!(
@@ -345,58 +451,129 @@ pub fn validate_mod_bundle(
             descriptor.id
         ));
     }
-    if css.is_empty() || css.len() > descriptor.max_css_bytes {
-        return Err(format!(
-            "[{}] CSS bundle was empty or exceeded its size limit",
-            descriptor.id
-        ));
-    }
+    // Identity is proven on the RAW bytes, before any text reinterpretation.
+    let version = prove_artifact_identity(descriptor, &js)?;
     let js = String::from_utf8(js)
         .map_err(|error| format!("[{}] JS bundle is not UTF-8: {error}", descriptor.id))?;
-    let css = String::from_utf8(css)
-        .map_err(|error| format!("[{}] CSS bundle is not UTF-8: {error}", descriptor.id))?;
-    let version = js
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix(descriptor.version_header_prefix))
-        .filter(|version| !version.is_empty() && version.len() <= 64)
-        .ok_or_else(|| {
-            format!(
-                "[{}] bundle did not contain the expected build header",
+    let js_bytes = js.len();
+
+    let (css, css_bytes) = match (descriptor.css, css) {
+        (Some(source), Some(bytes)) => {
+            if bytes.is_empty() || bytes.len() > source.max_bytes {
+                return Err(format!(
+                    "[{}] CSS bundle was empty or exceeded its size limit",
+                    descriptor.id
+                ));
+            }
+            let text = String::from_utf8(bytes)
+                .map_err(|error| format!("[{}] CSS bundle is not UTF-8: {error}", descriptor.id))?;
+            let bytes = text.len();
+            (Some(text), Some(bytes))
+        }
+        (Some(_), None) => {
+            return Err(format!(
+                "[{}] descriptor declares CSS but no stylesheet was provided",
                 descriptor.id
-            )
-        })?
-        .to_owned();
+            ))
+        }
+        (None, None) => (None, None),
+        (None, Some(_)) => {
+            return Err(format!(
+                "[{}] received a CSS bundle this descriptor does not declare",
+                descriptor.id
+            ))
+        }
+    };
 
     Ok(ModBundle {
-        js_bytes: js.len(),
-        css_bytes: css.len(),
         js,
         css,
         version,
+        js_bytes,
+        css_bytes,
     })
 }
 
+/// Proves the raw artifact bytes are the registered mod's own release build and
+/// derives the version string reported to the renderer.
+fn prove_artifact_identity(descriptor: &ModDescriptor, js: &[u8]) -> Result<String, String> {
+    match descriptor.identity {
+        ModArtifactIdentity::BuildHeader { prefix } => std::str::from_utf8(js)
+            .ok()
+            .and_then(|source| source.lines().next())
+            .and_then(|line| line.strip_prefix(prefix))
+            .map(|version| version.trim_end_matches('\r'))
+            .filter(|version| !version.is_empty() && version.len() <= 64)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                format!(
+                    "[{}] bundle did not contain the expected build header",
+                    descriptor.id
+                )
+            }),
+        ModArtifactIdentity::SourceSentinels { sentinels } => {
+            if sentinels.is_empty() {
+                return Err(format!(
+                    "[{}] sentinel identity requires at least one sentinel",
+                    descriptor.id
+                ));
+            }
+            let source = std::str::from_utf8(js)
+                .map_err(|error| format!("[{}] JS bundle is not UTF-8: {error}", descriptor.id))?;
+            for sentinel in sentinels {
+                if !source.contains(sentinel) {
+                    return Err(format!(
+                        "[{}] bundle is missing a required identity sentinel",
+                        descriptor.id
+                    ));
+                }
+            }
+            Ok(format!(
+                "sha256-{}",
+                hex_digest_prefix(js, DIGEST_VERSION_CHARS)
+            ))
+        }
+    }
+}
+
+/// Hex-encoded SHA-256 digest of `bytes`, truncated to `chars` hex characters.
+fn hex_digest_prefix(bytes: &[u8], chars: usize) -> String {
+    let encoded = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    encoded[..chars.min(encoded.len())].to_owned()
+}
+
 /// Builds the fixed CSS insertion script for one bundle.
+///
+/// A descriptor that ships no CSS never reaches this builder: [`load_mod_bundle`]
+/// and [`validate_mod_bundle`] refuse a stylesheet the descriptor did not
+/// declare, and the host skips the CSS stage entirely for such a mod rather
+/// than injecting an empty stylesheet.
 ///
 /// The script creates or reuses exactly one `<style>` element with the
 /// descriptor's stable id and reports a typed result; it never duplicates
 /// the element and never evaluates renderer input.
 pub fn mod_css_script(
     descriptor: &ModDescriptor,
+    source: &ModCssSource,
     request_id: &str,
     css: &str,
 ) -> Result<String, serde_json::Error> {
     let request_id = serde_json::to_string(request_id)?;
     let css = serde_json::to_string(css)?;
-    let style_id = serde_json::to_string(descriptor.style_element_id)?;
-    let result_event = descriptor.css_result_event;
+    let style_id = serde_json::to_string(source.style_element_id)?;
+    let result_event = source.result_event;
+    // The mod id is host-supplied and travels with the CSS result so the host
+    // can refuse a result claimed for another registered mod.
+    let mod_id = serde_json::to_string(descriptor.id)?;
     Ok(format!(
         r#"(() => {{
   const requestId = {request_id};
   const report = (ok, error = null) => window.ipc.postMessage(JSON.stringify({{
     version: 1,
-    event: {{ type: "{result_event}", payload: {{ request_id: requestId, ok, error }} }}
+    event: {{ type: "{result_event}", payload: {{ mod_id: {mod_id}, request_id: requestId, ok, error }} }}
   }}));
   const inject = () => {{
   try {{
@@ -422,13 +599,79 @@ pub fn mod_css_script(
     ))
 }
 
-/// Builds the storage-context snapshot executed immediately before the mod
-/// bundle. It records only whether `localStorage` access works and whether
-/// the mod's settings key holds valid JSON.
+/// Builds the pre-execution snapshot run immediately before the mod bundle.
+///
+/// It records whether `localStorage` access works and whether the mod's
+/// settings key holds valid JSON. A descriptor with no settings key (a mod that
+/// keeps its state outside `localStorage`) reports `not_applicable` instead of
+/// inventing a key to read.
+///
+/// For a descriptor whose page-world global is published asynchronously it also
+/// installs a one-shot property trap on that global, BEFORE the bundle runs, so
+/// the verifier learns about the assignment the moment it happens instead of
+/// polling for it. The trap is transparent: reads return the assigned value,
+/// and a bundle that redefines or deletes the property simply bypasses it (the
+/// verifier's bounded poll covers that case).
 pub fn mod_execution_context_script(descriptor: &ModDescriptor) -> String {
-    let settings_key = serde_json::to_string(descriptor.settings_key)
-        .expect("a static settings key must serialize to JSON");
+    let settings_probe = match descriptor.settings_key {
+        Some(key) => {
+            let key =
+                serde_json::to_string(key).expect("a static settings key must serialize to JSON");
+            format!(
+                r#"        const settings = storage.getItem({key});
+        if (settings === null) {{
+          settingsState = "missing";
+        }} else {{
+          JSON.parse(settings);
+          settingsState = "valid_json";
+        }}"#
+            )
+        }
+        None => r#"        settingsState = "not_applicable";"#.to_owned(),
+    };
     let context_global = descriptor.storage_context_global;
+    let page_trap = match descriptor.page_global_readiness {
+        PageGlobalReadiness::Synchronous => String::new(),
+        PageGlobalReadiness::Awaited { ready_global, .. } => {
+            let page_global = serde_json::to_string(descriptor.page_global)
+                .expect("a static page global must serialize to JSON");
+            let ready_global =
+                serde_json::to_string(ready_global).expect("a static ready global must serialize");
+            format!(
+                r#"  try {{
+    const target = {page_global};
+    const existing = Object.getOwnPropertyDescriptor(globalThis, target);
+    if (!existing && typeof globalThis[target] === "undefined") {{
+      let captured;
+      let notified = false;
+      const notify = () => {{
+        if (notified) return;
+        notified = true;
+        Object.defineProperty(globalThis, {ready_global}, {{
+          configurable: false,
+          enumerable: false,
+          value: true
+        }});
+      }};
+      Object.defineProperty(globalThis, target, {{
+        configurable: true,
+        enumerable: true,
+        get() {{
+          return captured;
+        }},
+        set(value) {{
+          captured = value;
+          notify();
+        }}
+      }});
+    }}
+  }} catch (error) {{
+    console.error("[Legcord native][mods] page-global observation trap was unavailable", error);
+  }}
+"#
+            )
+        }
+    };
     format!(
         r#"(() => {{
   let localStorageApi = "blocked";
@@ -438,13 +681,7 @@ pub fn mod_execution_context_script(descriptor: &ModDescriptor) -> String {
     localStorageApi = typeof storage?.getItem === "function" ? "available" : "missing";
     if (localStorageApi === "available") {{
       try {{
-        const settings = storage.getItem({settings_key});
-        if (settings === null) {{
-          settingsState = "missing";
-        }} else {{
-          JSON.parse(settings);
-          settingsState = "valid_json";
-        }}
+{settings_probe}
       }} catch (error) {{
         settingsState = error instanceof SyntaxError ? "invalid_json" : "read_error";
       }}
@@ -455,7 +692,7 @@ pub fn mod_execution_context_script(descriptor: &ModDescriptor) -> String {
     enumerable: false,
     value: Object.freeze({{ localStorageApi, settingsState }})
   }});
-}})();
+{page_trap}}})();
 "#
     )
 }
@@ -463,6 +700,15 @@ pub fn mod_execution_context_script(descriptor: &ModDescriptor) -> String {
 /// Builds the post-execution verifier. It checks the descriptor's page-world
 /// global and dispatches the bootstrap verdict on the document-local DOM
 /// event; it never evaluates renderer input.
+///
+/// Readiness is descriptor-driven:
+/// - [`PageGlobalReadiness::Synchronous`] reads the global exactly once, right
+///   after the bundle, as it always has.
+/// - [`PageGlobalReadiness::Awaited`] resolves on the first observation of the
+///   global (immediately when the pre-execution trap fired, otherwise on a
+///   coarse bounded poll) and dispatches exactly one verdict. Every timer is
+///   cleared as soon as the verdict is sent, so a successful mod leaves no
+///   interval and a failed mod leaves nothing behind either.
 pub fn mod_marker_script(
     descriptor: &ModDescriptor,
     request_id: &str,
@@ -473,18 +719,16 @@ pub fn mod_marker_script(
     let dom_event = descriptor.bootstrap_dom_event;
     let context_global = descriptor.storage_context_global;
     let page_global = descriptor.page_global;
-    Ok(format!(
-        r#"(() => {{
-  const requestId = {request_id};
-  const marker = {marker};
-  const storageContext = globalThis.{context_global} || {{}};
-  const localStorageApi = storageContext.localStorageApi || "blocked";
-  const settingsState = storageContext.settingsState || "storage_unavailable";
-  let result;
-  try {{
+    let observation = match descriptor.page_global_readiness {
+        PageGlobalReadiness::Synchronous => format!(
+            r#"  const observed = () => {{
     if (!globalThis.{page_global} || typeof globalThis.{page_global} !== "object") {{
       throw new Error("The mod global was not initialized by the bundle");
     }}
+  }};
+  let result;
+  try {{
+    observed();
     result = {{
       request_id: requestId,
       ok: true,
@@ -505,9 +749,233 @@ pub fn mod_marker_script(
       error: String(error?.message || error).slice(0, 2048)
     }};
   }}
-  window.dispatchEvent(new CustomEvent("{dom_event}", {{ detail: result }}));
+  window.dispatchEvent(new CustomEvent("{dom_event}", {{ detail: result }}));"#
+        ),
+        PageGlobalReadiness::Awaited {
+            ready_global,
+            timeout_ms,
+            poll_ms,
+        } => {
+            let requires_probe = match descriptor.page_global_requires {
+                Some(member) => {
+                    format!("\n    if (typeof value.{member} === \"undefined\") return false;")
+                }
+                None => String::new(),
+            };
+            format!(
+                r#"  const observed = () => {{
+    let value;
+    try {{
+      value = globalThis.{page_global};
+    }} catch (error) {{
+      return false;
+    }}
+    if (!value || typeof value !== "object") return false;{requires_probe}
+    return true;
+  }};
+  let settled = false;
+  let poll = null;
+  let deadline = null;
+  const finish = (ok, error) => {{
+    if (settled) return;
+    settled = true;
+    if (poll !== null) clearInterval(poll);
+    if (deadline !== null) clearTimeout(deadline);
+    window.dispatchEvent(new CustomEvent("{dom_event}", {{ detail: {{
+      request_id: requestId,
+      ok,
+      marker: ok ? marker : "",
+      execution_ms: {execution_ms},
+      local_storage_api: localStorageApi,
+      settings_state: settingsState,
+      error: ok ? null : String(error ?? "the mod global was never published").slice(0, 2048)
+    }} }}));
+  }};
+  if (globalThis.{ready_global} === true || observed()) {{
+    finish(true, null);
+    return;
+  }}
+  poll = setInterval(() => {{
+    if (globalThis.{ready_global} === true || observed()) finish(true, null);
+  }}, {poll_ms});
+  deadline = setTimeout(
+    () => finish(false, "the mod global was not published before the deadline"),
+    {timeout_ms}
+  );"#
+            )
+        }
+    };
+    Ok(format!(
+        r#"(() => {{
+  const requestId = {request_id};
+  const marker = {marker};
+  const storageContext = globalThis.{context_global} || {{}};
+  const localStorageApi = storageContext.localStorageApi || "blocked";
+  const settingsState = storageContext.settingsState || "storage_unavailable";
+{observation}
 }})();"#
     ))
+}
+
+/// Fail-fast structural validation of one descriptor.
+///
+/// Every value the substrate splices into generated JavaScript must be a safe
+/// identifier or a JSON-escaped string; this check runs once per descriptor at
+/// startup and in tests, so a malformed descriptor can never reach a script
+/// builder. It is deliberately not a renderer-facing validation: the renderer
+/// supplies nothing here.
+pub fn validate_descriptor(descriptor: &ModDescriptor) -> Result<(), String> {
+    let identifier = |label: &str, value: &'static str| -> Result<(), String> {
+        let mut chars = value.chars();
+        let starts_ok = chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$');
+        if !starts_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+            return Err(format!(
+                "[{}] {label} '{value}' is not a plain ASCII identifier",
+                descriptor.id
+            ));
+        }
+        if value.len() > 64 {
+            return Err(format!(
+                "[{}] {label} '{value}' exceeds 64 bytes",
+                descriptor.id
+            ));
+        }
+        Ok(())
+    };
+    // Names that are spliced into a string literal or a quoted event type
+    // rather than read as a bare identifier: separators are allowed, quoting
+    // characters and whitespace are not.
+    let token = |label: &str, value: &'static str, max: usize| -> Result<(), String> {
+        if value.is_empty() || value.len() > max {
+            return Err(format!(
+                "[{}] {label} must be 1..={max} bytes",
+                descriptor.id
+            ));
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+        {
+            return Err(format!(
+                "[{}] {label} '{value}' contains an unusable character",
+                descriptor.id
+            ));
+        }
+        Ok(())
+    };
+    if descriptor.id.is_empty()
+        || !descriptor
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(format!(
+            "[{}] descriptor id has an unusable shape",
+            descriptor.id
+        ));
+    }
+    token("capability", descriptor.capability, 64)?;
+    token("bootstrap_dom_event", descriptor.bootstrap_dom_event, 128)?;
+    token("success_marker", descriptor.success_marker, 64)?;
+    identifier("page_global", descriptor.page_global)?;
+    identifier("storage_context_global", descriptor.storage_context_global)?;
+    if let Some(member) = descriptor.page_global_requires {
+        identifier("page_global_requires", member)?;
+    }
+    if let Some(key) = descriptor.settings_key {
+        identifier("settings_key", key)?;
+    }
+    if let Some(source) = descriptor.css {
+        if source.file.is_empty()
+            || !source
+                .file
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            || source.file.contains("..")
+            || source.file.len() > 64
+        {
+            return Err(format!(
+                "[{}] CSS cache file name '{}' must be a bare file name",
+                descriptor.id, source.file
+            ));
+        }
+        if source.style_element_id.is_empty() || source.style_element_id.len() > 256 {
+            return Err(format!(
+                "[{}] CSS style element id must be 1..=256 bytes",
+                descriptor.id
+            ));
+        }
+        if source.result_event.is_empty()
+            || !source
+                .result_event
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(format!(
+                "[{}] CSS result event '{}' must be a snake_case wire name",
+                descriptor.id, source.result_event
+            ));
+        }
+        if source.max_bytes == 0 || source.url.is_empty() {
+            return Err(format!("[{}] CSS source is incomplete", descriptor.id));
+        }
+    }
+    match descriptor.identity {
+        ModArtifactIdentity::BuildHeader { prefix } => {
+            if prefix.is_empty() {
+                return Err(format!("[{}] build header prefix is empty", descriptor.id));
+            }
+        }
+        ModArtifactIdentity::SourceSentinels { sentinels } => {
+            if sentinels.is_empty() {
+                return Err(format!(
+                    "[{}] sentinel identity needs at least one sentinel",
+                    descriptor.id
+                ));
+            }
+            if sentinels
+                .iter()
+                .any(|sentinel| sentinel.is_empty() || sentinel.len() > 256)
+            {
+                return Err(format!(
+                    "[{}] identity sentinels must be 1..=256 bytes",
+                    descriptor.id
+                ));
+            }
+        }
+    }
+    match descriptor.page_global_readiness {
+        PageGlobalReadiness::Synchronous => {
+            if descriptor.page_global_requires.is_some() {
+                return Err(format!(
+                    "[{}] a synchronous global needs no member probe",
+                    descriptor.id
+                ));
+            }
+        }
+        PageGlobalReadiness::Awaited {
+            ready_global,
+            timeout_ms,
+            poll_ms,
+        } => {
+            identifier("page_global_readiness.ready_global", ready_global)?;
+            if !(16..=300_000).contains(&poll_ms) {
+                return Err(format!(
+                    "[{}] awaited poll interval must be 16..=300000 ms",
+                    descriptor.id
+                ));
+            }
+            if poll_ms > 5_000 || timeout_ms > 600_000 || poll_ms >= timeout_ms {
+                return Err(format!(
+                    "[{}] awaited readiness bounds are not a coarse bounded poll",
+                    descriptor.id
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Builds a managed-CSS insertion script for CSS-only consumers (themes).
@@ -635,10 +1103,12 @@ pub struct PendingModBootstrap {
     pub retrieval_ms: f64,
     pub bundle_version: String,
     pub bundle_bytes: usize,
-    pub css_bytes: usize,
+    /// `None` for a mod whose descriptor declares no stylesheet.
+    pub css_bytes: Option<usize>,
     pub execution_ms: f64,
     pub css_started_at: Instant,
-    pub css_injection_ms: f64,
+    /// Elapsed time of the CSS stage. `None` means no CSS stage ran at all.
+    pub css_injection_ms: Option<f64>,
 }
 
 #[cfg(test)]
@@ -646,51 +1116,284 @@ mod tests {
     use super::{
         is_allowed_mod_download_url, managed_css_order_script, managed_css_remove_script,
         managed_css_script, mod_css_script, mod_execution_context_script, mod_marker_script,
-        validate_mod_bundle, DocumentModLifecycle, ModCache, ModDescriptor, ModHostMetrics,
+        validate_descriptor, validate_mod_bundle, DocumentModLifecycle, ModArtifactIdentity,
+        ModCache, ModCssSource, ModDescriptor, ModEnabling, ModHostMetrics, PageGlobalReadiness,
     };
 
-    /// Synthetic adapter contract proving the substrate is not Vencord-specific.
+    /// Synthetic adapter contract proving the substrate is not tied to any one
+    /// mod's shape. It deliberately mixes every optional dimension at once:
+    /// a stylesheet, a build header, a synchronous page global, a settings key,
+    /// and a settings-gated enablement — the opposite combination from the
+    /// header-less/CSS-less/asynchronous consumer registered in `main.rs`.
     pub fn test_descriptor() -> ModDescriptor {
         ModDescriptor {
             id: "testmod",
             capability: "mod.test.get_bundle",
             js_url: "https://github.com/example/TestMod/releases/download/devbuild/browser.js",
-            css_url: "https://github.com/example/TestMod/releases/download/devbuild/browser.css",
             js_file: "testmod.js",
-            css_file: "testmod.css",
+            css: Some(ModCssSource {
+                url: "https://github.com/example/TestMod/releases/download/devbuild/browser.css",
+                file: "testmod.css",
+                max_bytes: 256 * 1024,
+                style_element_id: "legcord-native-testmod-css",
+                result_event: "testmod_css_result",
+            }),
             allowed_hosts: &["github.com", "release-assets.githubusercontent.com"],
             max_js_bytes: 1024 * 1024,
-            max_css_bytes: 256 * 1024,
-            version_header_prefix: "// TestMod ",
-            style_element_id: "legcord-native-testmod-css",
+            identity: ModArtifactIdentity::BuildHeader {
+                prefix: "// TestMod ",
+            },
             page_global: "TestMod",
+            page_global_requires: None,
+            page_global_readiness: PageGlobalReadiness::Synchronous,
+            enabling: ModEnabling::SettingsMods,
             success_marker: "testmod-bootstrap-executed",
-            settings_key: "TestModSettings",
-            css_result_event: "testmod_css_result",
+            settings_key: Some("TestModSettings"),
             bootstrap_dom_event: "legcord-native:testmod-bootstrap",
             storage_context_global: "__legcordNativeTestModStorageAtExecution",
             log_tag: "Mod:TestMod",
         }
     }
 
+    /// Synthetic descriptor for the opposite shape: no stylesheet, no build
+    /// header, an asynchronously published page global with a required member,
+    /// no `localStorage` settings key, and unconditional enablement.
+    pub fn headerless_descriptor() -> ModDescriptor {
+        ModDescriptor {
+            id: "headerless",
+            capability: "mod.get_bundle",
+            js_url: "https://raw.githubusercontent.com/example/builds/main/headerless.js",
+            js_file: "headerless.js",
+            css: None,
+            allowed_hosts: &["raw.githubusercontent.com"],
+            max_js_bytes: 8 * 1024 * 1024,
+            identity: ModArtifactIdentity::SourceSentinels {
+                sentinels: &[
+                    "headerless is initializing...",
+                    "headerless is initialized. took: ",
+                ],
+            },
+            page_global: "headerless",
+            page_global_requires: Some("plugins"),
+            page_global_readiness: PageGlobalReadiness::Awaited {
+                ready_global: "__legcordNativeHeaderlessPageReady",
+                timeout_ms: 120_000,
+                poll_ms: 250,
+            },
+            enabling: ModEnabling::AlwaysEnabled,
+            success_marker: "headerless-bootstrap-executed",
+            settings_key: None,
+            bootstrap_dom_event: "legcord-native:headerless-bootstrap",
+            storage_context_global: "__legcordNativeHeaderlessStorageAtExecution",
+            log_tag: "Mod:Headerless",
+        }
+    }
+
+    fn headerless_bundle() -> Vec<u8> {
+        b"(()=>{var a=1;console.error(\"headerless is initializing...\");\
+         (async()=>{window.headerless={plugins:{}}})();\
+         console.error(\"headerless is initialized. took: 1ms\");})();"
+            .to_vec()
+    }
+
     #[test]
     fn synthetic_adapter_contract_validates_bundle_identity() {
         let descriptor = test_descriptor();
         assert_eq!(descriptor.capability, "mod.test.get_bundle");
+        assert!(validate_descriptor(&descriptor).is_ok());
         let bundle = validate_mod_bundle(
             &descriptor,
             b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec(),
-            b"/* test CSS */".to_vec(),
+            Some(b"/* test CSS */".to_vec()),
         )
         .unwrap();
         assert_eq!(bundle.version, "1.0.0");
         assert_eq!(bundle.js_bytes, bundle.js.len());
-        assert_eq!(bundle.css_bytes, bundle.css.len());
+        assert_eq!(bundle.css_bytes, Some(bundle.css.as_ref().unwrap().len()));
         assert!(validate_mod_bundle(
             &descriptor,
             b"// Vencord b52ed36\nvar Vencord = {};\n".to_vec(),
-            b"/*css*/".to_vec(),
+            Some(b"/*css*/".to_vec()),
         )
+        .is_err());
+    }
+
+    #[test]
+    fn a_mod_without_css_is_never_forced_to_present_a_stylesheet() {
+        // The header-less shape declares no stylesheet at all. Validation must
+        // accept the artifact with no CSS half, and must REFUSE a stylesheet
+        // the descriptor did not declare instead of silently carrying one.
+        let descriptor = headerless_descriptor();
+        assert!(validate_descriptor(&descriptor).is_ok());
+        let bundle = validate_mod_bundle(&descriptor, headerless_bundle(), None).unwrap();
+        assert!(
+            bundle.css.is_none(),
+            "no placeholder stylesheet may be manufactured"
+        );
+        assert_eq!(bundle.css_bytes, None);
+        assert!(
+            validate_mod_bundle(&descriptor, headerless_bundle(), Some(b".x{}".to_vec())).is_err()
+        );
+        // A descriptor that DOES declare CSS must not accept a missing half.
+        assert!(validate_mod_bundle(
+            &test_descriptor(),
+            b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec(),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_headerless_artifact_is_identified_by_real_sentinels_and_a_content_digest() {
+        let descriptor = headerless_descriptor();
+        let bundle = validate_mod_bundle(&descriptor, headerless_bundle(), None).unwrap();
+        // No build banner exists upstream, so the version is the host's own
+        // content digest of the retrieved bytes — never an invented marker.
+        assert!(bundle.version.starts_with("sha256-"), "{}", bundle.version);
+        assert_eq!(bundle.version.len(), "sha256-".len() + 16);
+        // The digest is exact: any byte change produces a different version.
+        let mut tampered = headerless_bundle();
+        *tampered.last_mut().unwrap() = b'!';
+        let other = validate_mod_bundle(&descriptor, tampered, None).unwrap();
+        assert_ne!(other.version, bundle.version);
+        // Identical bytes always produce the identical version.
+        let again = validate_mod_bundle(&descriptor, headerless_bundle(), None).unwrap();
+        assert_eq!(again.version, bundle.version);
+
+        // An artifact that is missing a sentinel is refused: a different mod's
+        // bundle can never be served as this one.
+        let missing = validate_mod_bundle(
+            &descriptor,
+            b"(()=>{console.error(\"other mod is initializing...\");})();".to_vec(),
+            None,
+        );
+        assert!(missing.unwrap_err().contains("sentinel"), "sentinel check");
+        // An empty sentinel list is a descriptor bug, not a pass.
+        let empty = ModDescriptor {
+            identity: ModArtifactIdentity::SourceSentinels { sentinels: &[] },
+            ..headerless_descriptor()
+        };
+        assert!(validate_mod_bundle(&empty, headerless_bundle(), None).is_err());
+        assert!(validate_descriptor(&empty).is_err());
+    }
+
+    #[test]
+    fn awaited_readiness_installs_a_trap_before_the_bundle_and_a_bounded_fallback_after() {
+        let descriptor = headerless_descriptor();
+        let context = mod_execution_context_script(&descriptor);
+        // The trap is installed by the PRE-execution script, so it is in place
+        // before the bundle assigns the global.
+        assert!(
+            context.contains("Object.defineProperty(globalThis, target"),
+            "{context}"
+        );
+        assert!(
+            context.contains("__legcordNativeHeaderlessPageReady"),
+            "{context}"
+        );
+        assert!(
+            !context.contains("setInterval"),
+            "no polling before the bundle runs"
+        );
+        // A mod with no localStorage settings key reports not_applicable rather
+        // than reading an invented key.
+        assert!(
+            context.contains(r#"settingsState = "not_applicable";"#),
+            "{context}"
+        );
+        assert!(!context.contains("getItem(\"headerless"), "{context}");
+
+        let marker = mod_marker_script(&descriptor, "request-1", 1.5).unwrap();
+        assert!(marker.contains("globalThis.headerless"));
+        // The required member makes the marker prove the real mod API object.
+        assert!(
+            marker.contains(r#"typeof value.plugins === "undefined""#),
+            "{marker}"
+        );
+        assert!(marker.contains("__legcordNativeHeaderlessPageReady"));
+        assert!(marker.contains("headerless-bootstrap-executed"));
+        assert!(marker.contains("legcord-native:headerless-bootstrap"));
+        // Bounded, coarse, and self-clearing: exactly one interval and one
+        // deadline, both cleared as soon as the single verdict is dispatched.
+        assert_eq!(marker.matches("setInterval").count(), 1, "{marker}");
+        assert_eq!(marker.matches("setTimeout").count(), 1, "{marker}");
+        assert!(marker.contains("clearInterval(poll)"));
+        assert!(marker.contains("clearTimeout(deadline)"));
+        assert!(marker.contains("250"));
+        assert!(marker.contains("120000"));
+        assert!(!marker.contains("eval("));
+        assert!(!marker.contains("new Function"));
+
+        // A synchronous descriptor keeps the single-read shape with no timer
+        // and no trap at all.
+        let sync_descriptor = test_descriptor();
+        let sync = mod_execution_context_script(&sync_descriptor);
+        assert!(!sync.contains("setInterval"));
+        assert!(!sync.contains("ready_global"));
+        let sync_marker = mod_marker_script(&sync_descriptor, "request-1", 1.5).unwrap();
+        assert!(!sync_marker.contains("setInterval"));
+        assert!(!sync_marker.contains("setTimeout"));
+        // The settings-key read belongs to the PRE-execution snapshot, not the
+        // marker: the marker only reports the state it recorded there.
+        assert!(sync.contains("TestModSettings"));
+        assert!(sync_marker.contains("__legcordNativeTestModStorageAtExecution"));
+    }
+
+    #[test]
+    fn descriptor_validation_rejects_shapes_that_could_break_generated_scripts() {
+        assert!(validate_descriptor(&headerless_descriptor()).is_ok());
+        // An injected quote in a spliced name can never reach a script builder.
+        assert!(validate_descriptor(&ModDescriptor {
+            page_global: "shelter\";globalThis.pwned=1;//",
+            ..headerless_descriptor()
+        })
+        .is_err());
+        assert!(validate_descriptor(&ModDescriptor {
+            page_global_requires: Some("plugins\"+alert(1)+\""),
+            ..headerless_descriptor()
+        })
+        .is_err());
+        assert!(validate_descriptor(&ModDescriptor {
+            bootstrap_dom_event: "legcord-native:bootstrap\");evil();//",
+            ..headerless_descriptor()
+        })
+        .is_err());
+        // A cache name that could traverse or escape the profile directory.
+        assert!(validate_descriptor(&ModDescriptor {
+            css: Some(ModCssSource {
+                url: "https://raw.githubusercontent.com/example/builds/main/x.css",
+                file: "../escape.css",
+                max_bytes: 1024,
+                style_element_id: "legcord-native-x-css",
+                result_event: "x_css_result",
+            }),
+            ..test_descriptor()
+        })
+        .is_err());
+        // A readiness bound that is not a coarse, bounded poll.
+        assert!(validate_descriptor(&ModDescriptor {
+            page_global_readiness: PageGlobalReadiness::Awaited {
+                ready_global: "__legcordNativeXPageReady",
+                timeout_ms: 1000,
+                poll_ms: 5,
+            },
+            ..headerless_descriptor()
+        })
+        .is_err());
+        assert!(validate_descriptor(&ModDescriptor {
+            page_global_readiness: PageGlobalReadiness::Awaited {
+                ready_global: "__legcordNativeXPageReady",
+                timeout_ms: 1000,
+                poll_ms: 600_000,
+            },
+            ..headerless_descriptor()
+        })
+        .is_err());
+        // A member probe only means something for an awaited global.
+        assert!(validate_descriptor(&ModDescriptor {
+            page_global_requires: Some("plugins"),
+            ..test_descriptor()
+        })
         .is_err());
     }
 
@@ -703,42 +1406,46 @@ mod tests {
         // Missing/empty artifact: both halves are required (Electron's
         // ModBundle declares `js: string`, and the substrate refuses to
         // execute a bundle it cannot fully validate).
-        assert!(validate_mod_bundle(&descriptor, Vec::new(), good_css.clone()).is_err());
-        assert!(validate_mod_bundle(&descriptor, good_js.clone(), Vec::new()).is_err());
+        assert!(validate_mod_bundle(&descriptor, Vec::new(), Some(good_css.clone())).is_err());
+        assert!(validate_mod_bundle(&descriptor, good_js.clone(), Some(Vec::new())).is_err());
 
         // Oversized artifacts are rejected before allocation of any source
         // string, on the descriptor's own limits.
         let big_js = vec![b'a'; descriptor.max_js_bytes + 1];
-        assert!(validate_mod_bundle(&descriptor, big_js, good_css.clone()).is_err());
-        let big_css = vec![b'a'; descriptor.max_css_bytes + 1];
-        assert!(validate_mod_bundle(&descriptor, good_js.clone(), big_css).is_err());
+        assert!(validate_mod_bundle(&descriptor, big_js, Some(good_css.clone())).is_err());
+        let max_css = descriptor.css.unwrap().max_bytes;
+        let big_css = vec![b'a'; max_css + 1];
+        assert!(validate_mod_bundle(&descriptor, good_js.clone(), Some(big_css)).is_err());
 
         // Invalid UTF-8 in either half is a typed failure, never a lossy
         // conversion.
         let bad_js = vec![0x66, 0xFF, 0x66];
-        assert!(validate_mod_bundle(&descriptor, bad_js, good_css.clone()).is_err());
+        assert!(validate_mod_bundle(&descriptor, bad_js, Some(good_css.clone())).is_err());
         let bad_css = vec![0x66, 0xFF, 0x66];
-        assert!(validate_mod_bundle(&descriptor, good_js.clone(), bad_css).is_err());
+        assert!(validate_mod_bundle(&descriptor, good_js.clone(), Some(bad_css)).is_err());
 
         // A missing build header is a different failure from a malformed one:
         // an artifact from a DIFFERENT mod must never be served as this one.
         let foreign = validate_mod_bundle(
             &descriptor,
             b"// Vencord b52ed36\nvar Vencord = {};\n".to_vec(),
-            good_css,
+            Some(good_css),
         );
         let foreign = foreign.unwrap_err();
         assert!(foreign.contains("build header"), "{foreign}");
 
         // An over-long or empty version header is refused as well.
         let long_version = format!("// TestMod {}\n", "a".repeat(65));
-        assert!(
-            validate_mod_bundle(&descriptor, long_version.into_bytes(), b"/*c*/".to_vec()).is_err()
-        );
+        assert!(validate_mod_bundle(
+            &descriptor,
+            long_version.into_bytes(),
+            Some(b"/*c*/".to_vec())
+        )
+        .is_err());
         assert!(validate_mod_bundle(
             &descriptor,
             b"// TestMod \nvar TestMod = {};\n".to_vec(),
-            b"/*c*/".to_vec()
+            Some(b"/*c*/".to_vec())
         )
         .is_err());
     }
@@ -765,7 +1472,7 @@ mod tests {
         let bundle = validate_mod_bundle(
             &descriptor,
             b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec(),
-            b"/*css*/".to_vec(),
+            Some(b"/*css*/".to_vec()),
         )
         .unwrap();
         cache.insert(descriptor.id, bundle);
@@ -833,7 +1540,13 @@ mod tests {
     #[test]
     fn generated_scripts_use_only_descriptor_values_and_no_eval_surface() {
         let descriptor = test_descriptor();
-        let css = mod_css_script(&descriptor, "request-1", r#"body::after{content:"ok"}"#).unwrap();
+        let css = mod_css_script(
+            &descriptor,
+            descriptor.css.as_ref().unwrap(),
+            "request-1",
+            r#"body::after{content:"ok"}"#,
+        )
+        .unwrap();
         assert!(css.contains("legcord-native-testmod-css"));
         assert!(css.contains("testmod_css_result"));
         assert!(css.contains(r#"body::after{content:\"ok\"}"#));
@@ -935,5 +1648,119 @@ mod tests {
         let testmod = metrics.snapshot("testmod").unwrap();
         assert_eq!(testmod.duplicate_bootstraps, 1);
         assert!(metrics.snapshot("shelter").is_none());
+    }
+
+    /// Proves the substrate lifecycle is genuinely shared rather than shaped
+    /// around one mod: both synthetic shapes — the stylesheet/build-header/
+    /// synchronous/settings-key one and the header-less/CSS-less/asynchronous
+    /// one — must satisfy the SAME registry, cache, validation, bootstrap,
+    /// execution, duplicate-prevention, reload-reset, and failure-propagation
+    /// contract.
+    #[test]
+    fn every_mod_shape_satisfies_the_same_substrate_lifecycle() {
+        for descriptor in [test_descriptor(), headerless_descriptor()] {
+            assert!(
+                validate_descriptor(&descriptor).is_ok(),
+                "{} must be a servable descriptor",
+                descriptor.id
+            );
+
+            // Capability lookup: the descriptor id is the only key, and every
+            // shape shares ONE capability name.
+            assert!(descriptor.capability.ends_with(".get_bundle"));
+            assert!(validate_id(descriptor.id).is_ok());
+
+            // Retrieval + validation through one code path: the artifact bytes
+            // are shaped to satisfy whatever identity the descriptor declares.
+            let js = match descriptor.identity {
+                ModArtifactIdentity::BuildHeader { .. } => {
+                    b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec()
+                }
+                ModArtifactIdentity::SourceSentinels { .. } => headerless_bundle(),
+            };
+            let css = descriptor
+                .css
+                .map(|source| format!("/* {} */", source.file).into_bytes());
+            let bundle = validate_mod_bundle(&descriptor, js, css)
+                .unwrap_or_else(|error| panic!("{} retrieval failed: {error}", descriptor.id));
+            assert!(!bundle.version.is_empty() && bundle.version.len() <= 64);
+
+            // Caching is keyed per mod with no cross-talk.
+            let mut cache = ModCache::default();
+            assert!(cache.get(descriptor.id).is_none());
+            cache.insert(descriptor.id, bundle.clone());
+            assert!(cache.get(descriptor.id).is_some());
+            assert_eq!(cache.get(descriptor.id).unwrap().version, bundle.version);
+
+            // Bootstrap: exactly one start and one execution per document.
+            let mut lifecycle = DocumentModLifecycle::default();
+            lifecycle.begin_document();
+            assert!(lifecycle.begin_mod(descriptor.id));
+            assert!(!lifecycle.begin_mod(descriptor.id), "duplicate bootstrap");
+            assert!(lifecycle.record_mod_execution(descriptor.id));
+            assert!(
+                !lifecycle.record_mod_execution(descriptor.id),
+                "duplicate execution"
+            );
+
+            // Reload: every guard resets and the mod can bootstrap again.
+            lifecycle.begin_document();
+            assert_eq!(lifecycle.generation(), 2);
+            assert!(lifecycle.begin_mod(descriptor.id));
+            assert!(lifecycle.record_mod_execution(descriptor.id));
+            assert_eq!(lifecycle.mod_execution_count(descriptor.id), 1);
+
+            // CSS stage exists exactly when the descriptor declares one.
+            let scripts: Vec<String> = if let Some(source) = descriptor.css {
+                let css = bundle.css.clone().unwrap_or_default();
+                vec![mod_css_script(&descriptor, &source, "r1", &css).unwrap()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                scripts.len(),
+                usize::from(descriptor.css.is_some()),
+                "{} CSS stage must follow the descriptor",
+                descriptor.id
+            );
+
+            // Execution + marker scripts always exist and never evaluate input.
+            let context = mod_execution_context_script(&descriptor);
+            let marker = mod_marker_script(&descriptor, "r1", 1.0).unwrap();
+            assert!(context.contains(descriptor.storage_context_global));
+            assert!(marker.contains(descriptor.success_marker));
+            assert!(marker.contains(descriptor.bootstrap_dom_event));
+            for script in std::iter::once(&context)
+                .chain(std::iter::once(&marker))
+                .chain(scripts.iter())
+            {
+                assert!(!script.contains("eval("), "{}", descriptor.id);
+                assert!(!script.contains("new Function"), "{}", descriptor.id);
+            }
+
+            // Failure propagation: a bad artifact is typed, never silent.
+            let mut tampered = if descriptor.css.is_some() {
+                b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec()
+            } else {
+                headerless_bundle()
+            };
+            tampered.truncate(tampered.len() / 2);
+            assert!(validate_mod_bundle(&descriptor, tampered, None).is_err());
+        }
+    }
+
+    /// Registry-shaped id validation mirroring the protocol layer, so the
+    /// substrate can assert a descriptor id is servable on its own.
+    pub fn validate_id(id: &str) -> Result<(), String> {
+        if id.is_empty() || id.len() > 64 {
+            return Err("mod id must be 1..=64 bytes".to_owned());
+        }
+        if !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err("mod id has an unusable character".to_owned());
+        }
+        Ok(())
     }
 }
