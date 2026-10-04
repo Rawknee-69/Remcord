@@ -1,14 +1,19 @@
+mod mod_substrate;
 mod protocol;
 
 use std::{
     collections::HashMap,
     error::Error,
-    fs,
-    io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
+};
+
+use mod_substrate::{
+    load_mod_bundle, mod_css_script, mod_execution_context_script, mod_marker_script,
+    stage as mod_stage, DocumentModLifecycle, ModCache, ModDescriptor, ModHostMetrics,
+    PendingModBootstrap,
 };
 
 use protocol::{
@@ -30,18 +35,45 @@ use wry::{
 
 const DISCORD_URL: &str = "https://discord.com/app";
 const WEBVIEW_PROFILE: &str = r"E:\Legcord.webview-dev-user-data";
-const VENCORD_JS_URL: &str =
-    "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js";
-const VENCORD_CSS_URL: &str =
-    "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.css";
-const VENCORD_JS_FILE: &str = "vencord.js";
-const VENCORD_CSS_FILE: &str = "vencord.css";
-const VENCORD_MARKER: &str = "vencord-bootstrap-executed";
+/// Vencord as the first consumer of the shared mod substrate. Every bundle
+/// identity value lives in this descriptor; the substrate mechanics in
+/// `mod_substrate.rs` never name Vencord. Registering Shelter or Equicord
+/// means adding a second descriptor plus a thin renderer adapter.
+const VENCORD_MOD: ModDescriptor = ModDescriptor {
+    id: "vencord",
+    capability: "mod.vencord.get_bundle",
+    js_url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js",
+    css_url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.css",
+    js_file: "vencord.js",
+    css_file: "vencord.css",
+    allowed_hosts: &["github.com", "release-assets.githubusercontent.com"],
+    max_js_bytes: 32 * 1024 * 1024,
+    max_css_bytes: 8 * 1024 * 1024,
+    version_header_prefix: "// Vencord ",
+    style_element_id: "legcord-native-vencord-css",
+    page_global: "Vencord",
+    success_marker: "vencord-bootstrap-executed",
+    settings_key: "VencordSettings",
+    css_result_event: "vencord_css_result",
+    bootstrap_dom_event: "legcord-native:vencord-bootstrap",
+    storage_context_global: "__legcordNativeVencordStorageAtExecution",
+    log_tag: "Mod:Vencord",
+};
+
+fn lookup_mod_descriptor(mod_id: &str) -> Option<ModDescriptor> {
+    KNOWN_MODS
+        .iter()
+        .find(|descriptor| descriptor.id == mod_id)
+        .copied()
+}
+
+/// Every mod the native host serves. Adding Shelter or Equicord means
+/// appending a descriptor here plus a thin renderer adapter; the substrate
+/// mechanics do not change.
+const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD];
 const DISABLE_VENCORD_ADAPTER_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_NO_VENCORD";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
-const MAX_VENCORD_JS_BYTES: usize = 32 * 1024 * 1024;
-const MAX_VENCORD_CSS_BYTES: usize = 8 * 1024 * 1024;
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
     runtime: "webview2",
     platform: "win32",
@@ -49,77 +81,11 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
     capabilities: &["bridge.ping", "mod.vencord.get_bundle"],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
+const MOD_SUBSTRATE_SCRIPT: &str = include_str!("../web/mod-substrate/mod-bootstrap.js");
 const VENCORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/vencord/adapter.js");
 
-const STORAGE_START_DIAGNOSTIC_SCRIPT: &str = r#"
-(() => {
-  if (location.origin !== "https://discord.com") return;
-  const describe = (descriptor) => {
-    if (!descriptor) return "missing";
-    if (Object.hasOwn(descriptor, "value")) return `value:${typeof descriptor.value}`;
-    return `getter:${typeof descriptor.get}`;
-  };
-  let localStorageApi;
-  try {
-    localStorageApi = typeof window.localStorage?.getItem;
-  } catch (error) {
-    localStorageApi = `blocked:${error?.name || "unknown"}`;
-  }
-  try {
-    const nativeStorage = window.localStorage;
-    if (nativeStorage && typeof Window !== "undefined" && Window.prototype) {
-      if (!Object.getOwnPropertyDescriptor(Window.prototype, "localStorage")) {
-        Object.defineProperty(Window.prototype, "localStorage", {
-          configurable: true,
-          enumerable: true,
-          get: () => nativeStorage,
-        });
-      }
-    }
-  } catch {}
-  Object.defineProperty(window, "__legcordNativeStorageAtDocumentStart", {
-    configurable: false,
-    enumerable: false,
-    value: Object.freeze({
-      localStorageApi,
-      windowDescriptor: describe(Object.getOwnPropertyDescriptor(window, "localStorage")),
-      prototypeDescriptor: describe(
-        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(window), "localStorage")
-      ),
-      storageConstructor: typeof Storage
-    })
-  });
-})();
-"#;
-
-const VENCORD_EXECUTION_CONTEXT_SCRIPT: &str = r#"
-(() => {
-  let localStorageApi = "blocked";
-  let settingsState = "storage_unavailable";
-  try {
-    const storage = window.localStorage;
-    localStorageApi = typeof storage?.getItem === "function" ? "available" : "missing";
-    if (localStorageApi === "available") {
-      try {
-        const settings = storage.getItem("VencordSettings");
-        if (settings === null) {
-          settingsState = "missing";
-        } else {
-          JSON.parse(settings);
-          settingsState = "valid_json";
-        }
-      } catch (error) {
-        settingsState = error instanceof SyntaxError ? "invalid_json" : "read_error";
-      }
-    }
-  } catch {}
-  Object.defineProperty(globalThis, "__legcordNativeVencordStorageAtExecution", {
-    configurable: false,
-    enumerable: false,
-    value: Object.freeze({ localStorageApi, settingsState })
-  });
-})();
-"#;
+const STORAGE_START_DIAGNOSTIC_SCRIPT: &str =
+    include_str!("../web/mod-substrate/storage-preservation.js");
 
 const CSS_INJECTION_SCRIPT: &str = r#"
 (() => {
@@ -306,62 +272,14 @@ enum NativeEvent {
     PageLoadFinished(String),
     BridgeRequest(BridgeRequest, Instant),
     BridgeEvent(BridgeEventMessage),
-    VencordBundleReady {
+    ModBundleReady {
+        mod_id: &'static str,
         generation: u64,
         request_id: String,
         received_at: Instant,
         retrieval_ms: f64,
-        result: Result<VencordBundle, String>,
+        result: Result<mod_substrate::ModBundle, String>,
     },
-}
-
-#[derive(Clone)]
-struct VencordBundle {
-    js: String,
-    css: String,
-    version: String,
-    js_bytes: usize,
-    css_bytes: usize,
-}
-
-struct PendingVencord {
-    generation: u64,
-    received_at: Instant,
-    retrieval_ms: f64,
-    bundle_version: String,
-    bundle_bytes: usize,
-    css_bytes: usize,
-    execution_ms: f64,
-    css_started_at: Instant,
-    css_injection_ms: f64,
-}
-
-#[derive(Default)]
-struct DocumentLifecycle {
-    generation: u64,
-    vencord_started: bool,
-    vencord_execution_count: u8,
-}
-
-impl DocumentLifecycle {
-    fn begin_document(&mut self) {
-        self.generation += 1;
-        self.vencord_started = false;
-        self.vencord_execution_count = 0;
-    }
-
-    fn begin_vencord(&mut self) -> bool {
-        if self.vencord_started {
-            return false;
-        }
-        self.vencord_started = true;
-        true
-    }
-
-    fn record_vencord_execution(&mut self) -> bool {
-        self.vencord_execution_count += 1;
-        self.vencord_execution_count == 1
-    }
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -392,11 +310,11 @@ fn initialization_script(include_vencord_adapter: bool) -> Result<String, serde_
     let compatibility = COMPATIBILITY_SCRIPT.replace("__LEGCORD_BOOT_SNAPSHOT__", &snapshot);
     if include_vencord_adapter {
         Ok(format!(
-            "{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}\n{VENCORD_ADAPTER_SCRIPT}"
+            "{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}\n{MOD_SUBSTRATE_SCRIPT}\n{VENCORD_ADAPTER_SCRIPT}"
         ))
     } else {
         Ok(format!(
-            "{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}"
+            "{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}\n{MOD_SUBSTRATE_SCRIPT}"
         ))
     }
 }
@@ -426,220 +344,15 @@ fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
     }
 }
 
-fn is_allowed_vencord_download_url(url: &str) -> bool {
-    url.parse::<Uri>().is_ok_and(|uri| {
-        uri.scheme_str() == Some("https")
-            && uri.authority().is_some_and(|authority| {
-                matches!(
-                    authority.host().to_ascii_lowercase().as_str(),
-                    "github.com" | "release-assets.githubusercontent.com"
-                )
-            })
-    })
-}
-
-fn download_vencord_asset(
-    agent: &ureq::Agent,
-    url: &str,
-    max_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    let mut current_url = url.to_owned();
-    for _ in 0..=3 {
-        if !is_allowed_vencord_download_url(&current_url) {
-            return Err("Vencord asset redirect used an unapproved HTTPS host".to_owned());
-        }
-
-        let response = match agent.get(&current_url).call() {
-            Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
-            Err(error) => return Err(format!("Vencord asset request failed: {error}")),
-        };
-        let status = response.status();
-        if (200..300).contains(&status) {
-            let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .take(max_bytes as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|error| format!("Could not read Vencord asset: {error}"))?;
-            if bytes.is_empty() || bytes.len() > max_bytes {
-                return Err("Vencord asset was empty or exceeded its size limit".to_owned());
-            }
-            return Ok(bytes);
-        }
-
-        if (300..400).contains(&status) {
-            let location = response
-                .header("Location")
-                .ok_or_else(|| "Vencord asset redirect had no Location header".to_owned())?;
-            current_url = location.to_owned();
-            continue;
-        }
-        return Err(format!("Vencord asset request returned HTTP {status}"));
-    }
-    Err("Vencord asset exceeded the redirect limit".to_owned())
-}
-
-fn cached_or_downloaded_asset(
-    agent: &ureq::Agent,
-    profile: &Path,
-    file_name: &str,
-    url: &str,
-    max_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    let path = profile.join(file_name);
-    if path.exists() {
-        let bytes =
-            fs::read(&path).map_err(|error| format!("Could not read {file_name}: {error}"))?;
-        if bytes.is_empty() || bytes.len() > max_bytes {
-            return Err(format!(
-                "{file_name} cache was empty or exceeded its size limit"
-            ));
-        }
-        return Ok(bytes);
-    }
-
-    let bytes = download_vencord_asset(agent, url, max_bytes)?;
-    let temp_path = profile.join(format!("{file_name}.tmp"));
-    fs::write(&temp_path, &bytes)
-        .map_err(|error| format!("Could not cache {file_name} in the DEV profile: {error}"))?;
-    fs::rename(&temp_path, &path)
-        .map_err(|error| format!("Could not finalize {file_name} in the DEV profile: {error}"))?;
-    Ok(bytes)
-}
-
-fn load_vencord_bundle(profile: PathBuf) -> Result<VencordBundle, String> {
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(Duration::from_secs(30))
-        .build();
-    let js = cached_or_downloaded_asset(
-        &agent,
-        &profile,
-        VENCORD_JS_FILE,
-        VENCORD_JS_URL,
-        MAX_VENCORD_JS_BYTES,
-    )?;
-    let css = cached_or_downloaded_asset(
-        &agent,
-        &profile,
-        VENCORD_CSS_FILE,
-        VENCORD_CSS_URL,
-        MAX_VENCORD_CSS_BYTES,
-    )?;
-    validate_vencord_bundle(js, css)
-}
-
-fn validate_vencord_bundle(js: Vec<u8>, css: Vec<u8>) -> Result<VencordBundle, String> {
-    if js.is_empty() || js.len() > MAX_VENCORD_JS_BYTES {
-        return Err("Vencord JS bundle was empty or exceeded its size limit".to_owned());
-    }
-    if css.is_empty() || css.len() > MAX_VENCORD_CSS_BYTES {
-        return Err("Vencord CSS bundle was empty or exceeded its size limit".to_owned());
-    }
-    let js = String::from_utf8(js)
-        .map_err(|error| format!("Vencord JS bundle is not UTF-8: {error}"))?;
-    let css = String::from_utf8(css)
-        .map_err(|error| format!("Vencord CSS bundle is not UTF-8: {error}"))?;
-    let version = js
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("// Vencord "))
-        .filter(|version| !version.is_empty() && version.len() <= 64)
-        .ok_or_else(|| "Vencord bundle did not contain the expected build header".to_owned())?
-        .to_owned();
-
-    Ok(VencordBundle {
-        js_bytes: js.len(),
-        css_bytes: css.len(),
-        js,
-        css,
-        version,
-    })
-}
-
-fn vencord_css_script(request_id: &str, css: &str) -> Result<String, serde_json::Error> {
-    let request_id = serde_json::to_string(request_id)?;
-    let css = serde_json::to_string(css)?;
-    Ok(format!(
-        r#"(() => {{
-  const requestId = {request_id};
-  const report = (ok, error = null) => window.ipc.postMessage(JSON.stringify({{
-    version: 1,
-    event: {{ type: "vencord_css_result", payload: {{ request_id: requestId, ok, error }} }}
-  }}));
-  const inject = () => {{
-  try {{
-    const root = document.head;
-    if (!root) return false;
-    let style = document.getElementById("legcord-native-vencord-css");
-    if (!style) {{
-      style = document.createElement("style");
-      style.id = "legcord-native-vencord-css";
-    }}
-    style.textContent = {css};
-    root.appendChild(style);
-    if (!style.sheet) throw new Error("Vencord stylesheet was rejected by the document");
-    report(true);
-    return true;
-  }} catch (error) {{
-    report(false, String(error?.message || error).slice(0, 2048));
-    return true;
-  }}
-  }};
-  if (!inject()) document.addEventListener("DOMContentLoaded", inject, {{ once: true }});
-}})();"#
-    ))
-}
-
-fn vencord_marker_script(request_id: &str, execution_ms: f64) -> Result<String, serde_json::Error> {
-    let request_id = serde_json::to_string(request_id)?;
-    let marker = serde_json::to_string(VENCORD_MARKER)?;
-    Ok(format!(
-        r#"(() => {{
-  const requestId = {request_id};
-  const marker = {marker};
-  const storageContext = globalThis.__legcordNativeVencordStorageAtExecution || {{}};
-  const localStorageApi = storageContext.localStorageApi || "blocked";
-  const settingsState = storageContext.settingsState || "storage_unavailable";
-  let result;
-  try {{
-    if (!globalThis.Vencord || typeof globalThis.Vencord !== "object") {{
-      throw new Error("The Vencord global was not initialized by the bundle");
-    }}
-    result = {{
-      request_id: requestId,
-      ok: true,
-      marker,
-      execution_ms: {execution_ms},
-      local_storage_api: localStorageApi,
-      settings_state: settingsState,
-      error: null
-    }};
-  }} catch (error) {{
-    result = {{
-      request_id: requestId,
-      ok: false,
-      marker: "",
-      execution_ms: {execution_ms},
-      local_storage_api: localStorageApi,
-      settings_state: settingsState,
-      error: String(error?.message || error).slice(0, 2048)
-    }};
-  }}
-  window.dispatchEvent(new CustomEvent("legcord-native:vencord-bootstrap", {{ detail: result }}));
-}})();"#
-    ))
-}
-
-fn send_vencord_failure(
+fn send_mod_failure(
+    descriptor: &ModDescriptor,
     webview: &WebView,
     request_tracker: &mut RequestTracker,
     request_id: String,
     code: &'static str,
     message: String,
 ) {
-    eprintln!("[Mod:Vencord][{code}] {message}");
+    eprintln!("[{}][{code}] {message}", descriptor.log_tag);
     let response = BridgeResponse {
         version: PROTOCOL_VERSION,
         request_id: request_id.clone(),
@@ -664,9 +377,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build(&event_loop)?;
 
     let profile_path = PathBuf::from(WEBVIEW_PROFILE);
-    fs::create_dir_all(&profile_path)?;
+    std::fs::create_dir_all(&profile_path)?;
+    for descriptor in KNOWN_MODS {
+        if !BOOT_SNAPSHOT.capabilities.contains(&descriptor.capability) {
+            return Err(format!(
+                "mod '{}' requires capability '{}' missing from the boot snapshot",
+                descriptor.id, descriptor.capability
+            )
+            .into());
+        }
+    }
     let mut web_context = WebContext::new(Some(profile_path.clone()));
-    let bundle_cache = Arc::new(Mutex::new(None::<Arc<VencordBundle>>));
+    let bundle_cache = Arc::new(Mutex::new(ModCache::default()));
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
     let include_vencord_adapter =
@@ -748,11 +470,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or(0);
     let mut smoke_reload_request_id = None::<String>;
     let mut request_tracker = RequestTracker::default();
-    let mut document_lifecycle = DocumentLifecycle::default();
-    let mut pending_vencord = HashMap::<String, PendingVencord>::new();
-    let mut vencord_capability_request_count = 0_u64;
-    let mut vencord_execution_count = 0_u64;
-    let mut vencord_duplicate_count = 0_u64;
+    let mut document_lifecycle = DocumentModLifecycle::default();
+    let mut pending_mods = HashMap::<String, PendingModBootstrap>::new();
+    let mut mod_metrics = ModHostMetrics::default();
     let mut page_load_started_at = None;
     let mut incoming_messages = 0_u64;
     let mut request_count = 0_u64;
@@ -771,19 +491,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!(
                     "[Bridge][Metrics] messages_in={incoming_messages} requests={request_count} events={event_count} responses={response_count}"
                 );
-                println!(
-                    "[Mod:Vencord][Metrics] capability_requests={vencord_capability_request_count} successful_document_bootstraps={vencord_execution_count} duplicate_bootstraps={vencord_duplicate_count}"
-                );
+                for descriptor in KNOWN_MODS {
+                    if let Some(snapshot) = mod_metrics.snapshot(descriptor.id) {
+                        println!(
+                            "[{}][Metrics] capability_requests={} successful_document_bootstraps={} duplicate_bootstraps={}",
+                            descriptor.log_tag,
+                            snapshot.capability_requests,
+                            snapshot.successful_bootstraps,
+                            snapshot.duplicate_bootstraps,
+                        );
+                    }
+                }
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(NativeEvent::PageLoadStarted) => {
                 document_lifecycle.begin_document();
                 request_tracker.clear();
-                pending_vencord.clear();
+                pending_mods.clear();
                 page_load_started_at = Some(Instant::now());
                 println!(
                     "[Navigation] new document generation={} (bridge state reset)",
-                    document_lifecycle.generation
+                    document_lifecycle.generation()
                 );
             }
             Event::UserEvent(NativeEvent::PageLoadFinished(url)) => {
@@ -847,15 +575,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                         BridgeCommand::ModVencordGetBundle(_) => {
-                            vencord_capability_request_count += 1;
+                            let descriptor = VENCORD_MOD;
+                            mod_metrics.record_request(descriptor.id);
                             let request_id = request.request_id;
-                            if !document_lifecycle.begin_vencord() {
-                                vencord_duplicate_count += 1;
-                                send_vencord_failure(
+                            if !document_lifecycle.begin_mod(descriptor.id) {
+                                mod_metrics.record_duplicate(descriptor.id);
+                                send_mod_failure(
+                                    &descriptor,
                                     &webview,
                                     &mut request_tracker,
                                     request_id.clone(),
-                                    "duplicate_bootstrap",
+                                    mod_stage::DUPLICATE_BOOTSTRAP,
                                     "Vencord bootstrap was already requested for this document"
                                         .to_owned(),
                                 );
@@ -863,18 +593,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 return;
                             }
 
-                            let generation = document_lifecycle.generation;
+                            let generation = document_lifecycle.generation();
                             let cached_bundle = bundle_cache
                                 .lock()
                                 .ok()
-                                .and_then(|guard| guard.as_ref().cloned());
+                                .and_then(|guard| guard.get(descriptor.id));
                             if let Some(bundle) = cached_bundle {
                                 println!(
-                                    "[Mod:Vencord][capability] request accepted from in-memory cache (document_generation={generation})"
+                                    "[{}][capability] request accepted from in-memory cache (document_generation={generation})",
+                                    descriptor.log_tag
                                 );
                                 queue_event(
                                     &proxy,
-                                    NativeEvent::VencordBundleReady {
+                                    NativeEvent::ModBundleReady {
+                                        mod_id: descriptor.id,
                                         generation,
                                         request_id,
                                         received_at,
@@ -891,17 +623,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     .name("legcord-vencord-bundle".to_owned())
                                     .spawn(move || {
                                         let retrieval_started_at = Instant::now();
-                                        let result = load_vencord_bundle(profile);
+                                        let result = load_mod_bundle(&descriptor, profile);
                                         if let Ok(ref bundle) = result {
                                             if let Ok(mut guard) = cache_ref.lock() {
-                                                *guard = Some(Arc::new(bundle.clone()));
+                                                guard.insert(descriptor.id, bundle.clone());
                                             }
                                         }
                                         let retrieval_ms =
                                             retrieval_started_at.elapsed().as_secs_f64() * 1000.0;
                                         queue_event(
                                             &worker_proxy,
-                                            NativeEvent::VencordBundleReady {
+                                            NativeEvent::ModBundleReady {
+                                                mod_id: descriptor.id,
                                                 generation,
                                                 request_id: worker_request_id,
                                                 received_at,
@@ -911,17 +644,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         );
                                     })
                                 {
-                                    send_vencord_failure(
+                                    send_mod_failure(
+                                        &descriptor,
                                         &webview,
                                         &mut request_tracker,
                                         request_id,
-                                        "bundle_retrieval",
+                                        mod_stage::BUNDLE_RETRIEVAL,
                                         format!("Could not start Vencord bundle retrieval: {error}"),
                                     );
                                     response_count += 1;
                                 } else {
                                     println!(
-                                        "[Mod:Vencord][capability] request accepted (document_generation={generation})"
+                                        "[{}][capability] request accepted (document_generation={generation})",
+                                        descriptor.log_tag
                                     );
                                 }
                             }
@@ -929,27 +664,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                     },
                 }
             }
-            Event::UserEvent(NativeEvent::VencordBundleReady {
+            Event::UserEvent(NativeEvent::ModBundleReady {
+                mod_id,
                 generation,
                 request_id,
                 received_at,
                 retrieval_ms,
                 result,
             }) => {
-                if generation != document_lifecycle.generation {
+                let Some(descriptor) = lookup_mod_descriptor(mod_id) else {
+                    eprintln!("[Mod:{mod_id}][lifecycle] bundle result for unknown mod");
+                    return;
+                };
+                if generation != document_lifecycle.generation() {
                     println!(
-                        "[Mod:Vencord][lifecycle] discarded stale bundle result (generation={generation})"
+                        "[{}][lifecycle] discarded stale bundle result (generation={generation})",
+                        descriptor.log_tag
                     );
                     return;
                 }
                 let bundle = match result {
                     Ok(bundle) => bundle,
                     Err(error) => {
-                        send_vencord_failure(
+                        send_mod_failure(
+                            &descriptor,
                             &webview,
                             &mut request_tracker,
                             request_id,
-                            "bundle_retrieval",
+                            mod_stage::BUNDLE_RETRIEVAL,
                             error,
                         );
                         response_count += 1;
@@ -957,42 +699,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 };
                 println!(
-                    "[Mod:Vencord][Metrics] bundle_version={} bundle_bytes={} css_bytes={} retrieval_ms={retrieval_ms:.3}",
-                    bundle.version, bundle.js_bytes, bundle.css_bytes
+                    "[{}][Metrics] bundle_version={} bundle_bytes={} css_bytes={} retrieval_ms={retrieval_ms:.3}",
+                    descriptor.log_tag, bundle.version, bundle.js_bytes, bundle.css_bytes
                 );
 
                 let execution_started_at = Instant::now();
                 let execution_script =
-                    format!("{VENCORD_EXECUTION_CONTEXT_SCRIPT}\n{}", bundle.js);
+                    format!("{}\n{}", mod_execution_context_script(&descriptor), bundle.js);
                 if let Err(error) = webview.evaluate_script(&execution_script) {
-                    send_vencord_failure(
+                    send_mod_failure(
+                        &descriptor,
                         &webview,
                         &mut request_tracker,
                         request_id,
-                        "script_execution",
+                        mod_stage::SCRIPT_EXECUTION,
                         format!("WebView2 could not execute the Vencord bundle: {error}"),
                     );
                     response_count += 1;
                     return;
                 }
                 let execution_ms = execution_started_at.elapsed().as_secs_f64() * 1000.0;
-                let css_script = match vencord_css_script(&request_id, &bundle.css) {
+                let css_script = match mod_css_script(&descriptor, &request_id, &bundle.css) {
                     Ok(script) => script,
                     Err(error) => {
-                        send_vencord_failure(
+                        send_mod_failure(
+                            &descriptor,
                             &webview,
                             &mut request_tracker,
                             request_id,
-                            "adapter_initialization",
+                            mod_stage::ADAPTER_INITIALIZATION,
                             format!("Could not prepare the Vencord CSS adapter: {error}"),
                         );
                         response_count += 1;
                         return;
                     }
                 };
-                pending_vencord.insert(
+                pending_mods.insert(
                     request_id.clone(),
-                    PendingVencord {
+                    PendingModBootstrap {
+                        mod_id: descriptor.id,
                         generation,
                         received_at,
                         retrieval_ms,
@@ -1005,15 +750,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     },
                 );
                 println!(
-                    "[Mod:Vencord][Metrics] bundle execution call completed in {execution_ms:.3} ms"
+                    "[{}][Metrics] bundle execution call completed in {execution_ms:.3} ms",
+                    descriptor.log_tag
                 );
                 if let Err(error) = webview.evaluate_script(&css_script) {
-                    pending_vencord.remove(&request_id);
-                    send_vencord_failure(
+                    pending_mods.remove(&request_id);
+                    send_mod_failure(
+                        &descriptor,
                         &webview,
                         &mut request_tracker,
                         request_id,
-                        "css_injection",
+                        mod_stage::CSS_INJECTION,
                         format!("WebView2 could not run Vencord CSS injection: {error}"),
                     );
                     response_count += 1;
@@ -1048,24 +795,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                         );
                     }
                     BridgeEvent::VencordCssResult(payload) => {
-                        let Some(pending) = pending_vencord.get_mut(&payload.request_id) else {
+                        let Some(pending) = pending_mods.get_mut(&payload.request_id) else {
                             eprintln!("[Mod:Vencord][css_injection] unmatched CSS result");
                             return;
                         };
-                        if pending.generation != document_lifecycle.generation {
-                            pending_vencord.remove(&payload.request_id);
+                        let Some(descriptor) = lookup_mod_descriptor(pending.mod_id) else {
+                            pending_mods.remove(&payload.request_id);
+                            return;
+                        };
+                        if pending.generation != document_lifecycle.generation() {
+                            pending_mods.remove(&payload.request_id);
                             return;
                         }
                         if !payload.ok {
                             let error = payload
                                 .error
                                 .unwrap_or_else(|| "CSS injection failed without details".to_owned());
-                            pending_vencord.remove(&payload.request_id);
-                            send_vencord_failure(
+                            pending_mods.remove(&payload.request_id);
+                            send_mod_failure(
+                                &descriptor,
                                 &webview,
                                 &mut request_tracker,
                                 payload.request_id,
-                                "css_injection",
+                                mod_stage::CSS_INJECTION,
                                 error,
                             );
                             response_count += 1;
@@ -1073,18 +825,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         pending.css_injection_ms =
                             pending.css_started_at.elapsed().as_secs_f64() * 1000.0;
-                        let marker_script = match vencord_marker_script(
+                        let marker_script = match mod_marker_script(
+                            &descriptor,
                             &payload.request_id,
                             pending.execution_ms,
                         ) {
                             Ok(script) => script,
                             Err(error) => {
-                                pending_vencord.remove(&payload.request_id);
-                                send_vencord_failure(
+                                pending_mods.remove(&payload.request_id);
+                                send_mod_failure(
+                                    &descriptor,
                                     &webview,
                                     &mut request_tracker,
                                     payload.request_id,
-                                    "adapter_initialization",
+                                    mod_stage::ADAPTER_INITIALIZATION,
                                     format!("Could not prepare the Vencord execution marker: {error}"),
                                 );
                                 response_count += 1;
@@ -1092,31 +846,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         };
                         if let Err(error) = webview.evaluate_script(&marker_script) {
-                            pending_vencord.remove(&payload.request_id);
-                            send_vencord_failure(
+                            pending_mods.remove(&payload.request_id);
+                            send_mod_failure(
+                                &descriptor,
                                 &webview,
                                 &mut request_tracker,
                                 payload.request_id,
-                                "adapter_initialization",
+                                mod_stage::ADAPTER_INITIALIZATION,
                                 format!("Could not verify Vencord bootstrap execution: {error}"),
                             );
                             response_count += 1;
                         }
                     }
                     BridgeEvent::VencordBootstrapResult(payload) => {
-                        let Some(pending) = pending_vencord.remove(&payload.request_id) else {
+                        let Some(pending) = pending_mods.remove(&payload.request_id) else {
                             eprintln!("[Mod:Vencord][script_execution] unmatched bootstrap result");
                             return;
                         };
-                        if pending.generation != document_lifecycle.generation {
+                        let Some(descriptor) = lookup_mod_descriptor(pending.mod_id) else {
+                            return;
+                        };
+                        if pending.generation != document_lifecycle.generation() {
                             return;
                         }
-                        if !payload.ok || payload.marker != VENCORD_MARKER {
-                            send_vencord_failure(
+                        if !payload.ok || payload.marker != descriptor.success_marker {
+                            send_mod_failure(
+                                &descriptor,
                                 &webview,
                                 &mut request_tracker,
                                 payload.request_id,
-                                "script_execution",
+                                mod_stage::SCRIPT_EXECUTION,
                                 payload.error.unwrap_or_else(|| {
                                     "Vencord execution marker did not match".to_owned()
                                 }),
@@ -1124,30 +883,33 @@ fn main() -> Result<(), Box<dyn Error>> {
                             response_count += 1;
                             return;
                         }
-                        if !document_lifecycle.record_vencord_execution() {
-                            vencord_duplicate_count += 1;
-                            send_vencord_failure(
+                        if !document_lifecycle.record_mod_execution(descriptor.id) {
+                            mod_metrics.record_duplicate(descriptor.id);
+                            send_mod_failure(
+                                &descriptor,
                                 &webview,
                                 &mut request_tracker,
                                 payload.request_id,
-                                "duplicate_bootstrap",
+                                mod_stage::DUPLICATE_BOOTSTRAP,
                                 "Vencord executed more than once in one document".to_owned(),
                             );
                             response_count += 1;
                             return;
                         }
 
-                        vencord_execution_count += 1;
+                        mod_metrics.record_bootstrap(descriptor.id);
                         let request_latency_ms =
                             pending.received_at.elapsed().as_secs_f64() * 1000.0;
                         println!(
-                            "[Mod:Vencord][Metrics] marker={} execution_count={} request_latency_ms={request_latency_ms:.3} css_injection_ms={css_injection_ms:.3}",
+                            "[{}][Metrics] marker={} execution_count={} request_latency_ms={request_latency_ms:.3} css_injection_ms={css_injection_ms:.3}",
+                            descriptor.log_tag,
                             payload.marker,
-                            document_lifecycle.vencord_execution_count,
+                            document_lifecycle.mod_execution_count(descriptor.id),
                             css_injection_ms = pending.css_injection_ms
                         );
                         println!(
-                            "[Mod:Vencord][Context] localStorage_getItem_at_execution={} VencordSettings={}",
+                            "[{}][Context] localStorage_getItem_at_execution={} VencordSettings={}",
+                            descriptor.log_tag,
                             payload.local_storage_api,
                             payload.settings_state
                         );
@@ -1164,9 +926,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     retrieval_ms: pending.retrieval_ms,
                                     execution_ms: pending.execution_ms,
                                     css_injection_ms: pending.css_injection_ms,
-                                    marker: VENCORD_MARKER,
+                                    marker: descriptor.success_marker,
                                     document_execution_count:
-                                        document_lifecycle.vencord_execution_count,
+                                        document_lifecycle.mod_execution_count(descriptor.id),
                                 },
                             )),
                             error: None,
@@ -1216,56 +978,94 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        initialization_script, is_allowed_navigation, is_allowed_vencord_download_url,
-        is_trusted_bridge_origin, validate_vencord_bundle, vencord_css_script,
-        vencord_marker_script, DocumentLifecycle, VENCORD_MARKER,
+        initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
+        lookup_mod_descriptor, KNOWN_MODS, VENCORD_MOD,
+    };
+    use crate::mod_substrate::{
+        is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
+        mod_marker_script, validate_mod_bundle, DocumentModLifecycle,
     };
 
     #[test]
-    fn diagnostic_can_omit_only_the_automatic_vencord_adapter() {
+    fn diagnostic_keeps_facade_and_substrate_but_can_omit_the_vencord_adapter() {
         let with_adapter = initialization_script(true).unwrap();
         let without_adapter = initialization_script(false).unwrap();
         assert!(with_adapter.contains("native.getVencordBundle"));
         assert!(with_adapter.contains("__legcordNativeVencordAdapter"));
+        assert!(with_adapter.contains("__legcordNativeModSubstrate"));
         assert!(without_adapter.contains("        getVencordBundle,"));
+        assert!(without_adapter.contains("__legcordNativeModSubstrate"));
         assert!(!without_adapter.contains("__legcordNativeVencordAdapter"));
     }
 
     #[test]
+    fn initialization_script_preserves_window_prototype_storage() {
+        let script = initialization_script(true).unwrap();
+        assert!(script.contains("__legcordNativeStorageAtDocumentStart"));
+        assert!(script.contains("Window.prototype"));
+        assert!(script.contains("defineProperty(Window.prototype, \"localStorage\""));
+    }
+
+    #[test]
+    fn vencord_descriptor_registers_exactly_one_typed_capability() {
+        assert_eq!(KNOWN_MODS.len(), 1);
+        let descriptor = lookup_mod_descriptor("vencord").unwrap();
+        assert_eq!(descriptor.id, VENCORD_MOD.id);
+        assert_eq!(descriptor.capability, "mod.vencord.get_bundle");
+        assert_eq!(
+            descriptor.js_url,
+            "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js"
+        );
+        assert_eq!(descriptor.js_file, "vencord.js");
+        assert_eq!(descriptor.css_file, "vencord.css");
+        assert_eq!(descriptor.style_element_id, "legcord-native-vencord-css");
+        assert_eq!(descriptor.page_global, "Vencord");
+        assert_eq!(descriptor.success_marker, "vencord-bootstrap-executed");
+        assert_eq!(descriptor.settings_key, "VencordSettings");
+        assert!(lookup_mod_descriptor("shelter").is_none());
+        assert!(lookup_mod_descriptor("arbitrary").is_none());
+    }
+
+    #[test]
     fn native_document_lifecycle_allows_one_bootstrap_and_resets_after_navigation() {
-        let mut lifecycle = DocumentLifecycle::default();
+        let mut lifecycle = DocumentModLifecycle::default();
         lifecycle.begin_document();
-        assert_eq!(lifecycle.generation, 1);
-        assert!(lifecycle.begin_vencord());
-        assert!(!lifecycle.begin_vencord());
-        assert!(lifecycle.record_vencord_execution());
-        assert!(!lifecycle.record_vencord_execution());
+        assert_eq!(lifecycle.generation(), 1);
+        assert!(lifecycle.begin_mod(VENCORD_MOD.id));
+        assert!(!lifecycle.begin_mod(VENCORD_MOD.id));
+        assert!(lifecycle.record_mod_execution(VENCORD_MOD.id));
+        assert!(!lifecycle.record_mod_execution(VENCORD_MOD.id));
 
         lifecycle.begin_document();
-        assert_eq!(lifecycle.generation, 2);
-        assert!(lifecycle.begin_vencord());
-        assert_eq!(lifecycle.vencord_execution_count, 0);
+        assert_eq!(lifecycle.generation(), 2);
+        assert!(lifecycle.begin_mod(VENCORD_MOD.id));
+        assert_eq!(lifecycle.mod_execution_count(VENCORD_MOD.id), 0);
     }
 
     #[test]
     fn accepts_only_fixed_github_vencord_asset_hosts() {
-        assert!(is_allowed_vencord_download_url(
+        assert!(is_allowed_mod_download_url(
+            &VENCORD_MOD,
             "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.js"
         ));
-        assert!(is_allowed_vencord_download_url(
+        assert!(is_allowed_mod_download_url(
+            &VENCORD_MOD,
             "https://release-assets.githubusercontent.com/asset/browser.js"
         ));
-        assert!(!is_allowed_vencord_download_url(
+        assert!(!is_allowed_mod_download_url(
+            &VENCORD_MOD,
             "http://github.com/Vendicated/Vencord/browser.js"
         ));
-        assert!(!is_allowed_vencord_download_url(
+        assert!(!is_allowed_mod_download_url(
+            &VENCORD_MOD,
             "https://github.com.attacker.invalid/browser.js"
         ));
     }
 
     #[test]
     fn validates_bundle_header_sizes_and_execution_marker() {
-        let bundle = validate_vencord_bundle(
+        let bundle = validate_mod_bundle(
+            &VENCORD_MOD,
             b"// Vencord test-build\nvar Vencord = {};\n".to_vec(),
             b"/* test CSS */".to_vec(),
         )
@@ -1273,24 +1073,32 @@ mod tests {
         assert_eq!(bundle.version, "test-build");
         assert_eq!(bundle.js_bytes, bundle.js.len());
         assert_eq!(bundle.css_bytes, bundle.css.len());
-        assert_eq!(VENCORD_MARKER, "vencord-bootstrap-executed");
-        assert!(
-            validate_vencord_bundle(b"var notVencord = {};".to_vec(), b"/*css*/".to_vec()).is_err()
-        );
+        assert_eq!(VENCORD_MOD.success_marker, "vencord-bootstrap-executed");
+        assert!(validate_mod_bundle(
+            &VENCORD_MOD,
+            b"var notVencord = {};".to_vec(),
+            b"/*css*/".to_vec()
+        )
+        .is_err());
     }
 
     #[test]
     fn generates_fixed_css_and_marker_scripts_without_an_eval_surface() {
-        let css = vencord_css_script("request-1", r#"body::after{content:"ok"}"#).unwrap();
+        let css =
+            mod_css_script(&VENCORD_MOD, "request-1", r#"body::after{content:"ok"}"#).unwrap();
         assert!(css.contains("document.head"));
         assert!(css.contains("legcord-native-vencord-css"));
         assert!(css.contains("vencord_css_result"));
         assert!(css.contains(r#"body::after{content:\"ok\"}"#));
 
-        let marker = vencord_marker_script("request-1", 1.5).unwrap();
+        let context = mod_execution_context_script(&VENCORD_MOD);
+        assert!(context.contains("VencordSettings"));
+        assert!(context.contains("__legcordNativeVencordStorageAtExecution"));
+
+        let marker = mod_marker_script(&VENCORD_MOD, "request-1", 1.5).unwrap();
         assert!(marker.contains("globalThis.Vencord"));
         assert!(marker.contains("local_storage_api"));
-        assert!(marker.contains(VENCORD_MARKER));
+        assert!(marker.contains(VENCORD_MOD.success_marker));
         assert!(!marker.contains("eval("));
         assert!(!marker.contains("new Function"));
     }

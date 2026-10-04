@@ -3,123 +3,60 @@
     "use strict";
 
     if (window.location.origin !== "https://discord.com") return;
-    let state;
-    function reportAdapterError(error) {
-        const message = String(error?.message ?? error).slice(0, 2048);
-        if (state) {
-            state.status = "failed";
-            state.error = message;
-        }
-        try {
-            window.ipc.postMessage(
-                JSON.stringify({
-                    version: 1,
-                    event: { type: "vencord_adapter_error", payload: { message } },
-                }),
-            );
-        } catch (reportError) {
-            console.error("[Vencord native][adapter_initialization] could not report adapter failure", reportError);
-        }
-    }
-
-    if (!window.legcord?.native) {
-        reportAdapterError(new Error("Compatibility facade is unavailable"));
-        return;
-    }
-    if (Object.hasOwn(window, "__legcordNativeVencordAdapter")) return;
-
-    const native = window.legcord.native;
-    state = { status: "pending", marker: null, executionCount: 0 };
-    let requestId = null;
-
-    Object.defineProperty(window, "__legcordNativeVencordAdapter", {
-        configurable: false,
-        enumerable: false,
-        value: true,
-    });
-    Object.defineProperty(window, "__legcordNativeVencord", {
-        configurable: false,
-        enumerable: false,
-        get: () => Object.freeze({ ...state }),
-    });
-
-    window.addEventListener("legcord-native:vencord-bootstrap", (event) => {
-        const result = event.detail;
-        if (!result || result.request_id !== requestId) return;
-        if (result.ok === true && result.marker === "vencord-bootstrap-executed") {
-            state.status = "executed";
-            state.marker = result.marker;
-            state.executionCount = 1;
-            state.executionMs = result.execution_ms;
-            state.localStorageApi = result.local_storage_api;
-            state.settingsState = result.settings_state;
-        } else {
-            state.status = "failed";
-            state.error = String(result.error ?? "Vencord bootstrap marker was not observed");
-        }
+    const substrate = window.__legcordNativeModSubstrate;
+    if (!substrate) {
         try {
             window.ipc.postMessage(
                 JSON.stringify({
                     version: 1,
                     event: {
-                        type: "vencord_bootstrap_result",
-                        payload: {
-                            request_id: requestId,
-                            ok: state.status === "executed",
-                            marker: state.marker ?? "",
-                            execution_ms: Number.isFinite(state.executionMs) ? state.executionMs : 0,
-                            local_storage_api: state.localStorageApi ?? "blocked",
-                            settings_state: state.settingsState ?? "storage_unavailable",
-                            error: state.status === "executed" ? null : state.error,
-                        },
+                        type: "vencord_adapter_error",
+                        payload: { message: "Native mod substrate is unavailable" },
                     },
                 }),
             );
-        } catch (error) {
-            reportAdapterError(error);
+        } catch {
+            console.error("[Vencord native][adapter_initialization] mod substrate is unavailable");
         }
-    });
-
-    try {
-        native.requireCapability("mod.vencord.get_bundle");
-        const request = native.getVencordBundle();
-        requestId = request.requestId;
-        request
-            .then((result) => {
-                if (result.marker !== "vencord-bootstrap-executed") {
-                    throw new Error("Native Vencord bootstrap marker is invalid");
-                }
-                if (state.status !== "executed") {
-                    throw new Error("Native Vencord response arrived before the execution marker");
-                }
-                state.bundleVersion = result.bundle_version;
-                state.bundleBytes = result.bundle_bytes;
-                state.cssBytes = result.css_bytes;
-                state.requestLatencyMs = result.request_latency_ms;
-                state.retrievalMs = result.retrieval_ms;
-                state.cssInjectionMs = result.css_injection_ms;
-                console.info("[Vencord native] bootstrap executed", {
-                    version: state.bundleVersion,
-                    bundleBytes: state.bundleBytes,
-                    cssBytes: state.cssBytes,
-                    requestLatencyMs: state.requestLatencyMs,
-                    retrievalMs: state.retrievalMs,
-                    executionMs: state.executionMs,
-                    cssInjectionMs: state.cssInjectionMs,
-                });
-                window.ipc.postMessage(
-                    JSON.stringify({
-                        version: 1,
-                        event: { type: "vencord_response_ack", payload: { request_id: requestId } },
-                    }),
-                );
-            })
-            .catch((error) => {
-                state.status = "failed";
-                state.error = String(error?.message ?? error).slice(0, 2048);
-                if (!error?.code || error.code === "REQUEST_TIMEOUT") reportAdapterError(error);
-            });
-    } catch (error) {
-        reportAdapterError(error);
+        return;
     }
+
+    // Vencord owns only its identity and typed wire vocabulary here. Bundle
+    // source, URLs, cache paths, execution, CSS, and lifecycle all remain
+    // host-controlled through the shared substrate and the typed capability.
+    substrate.createModAdapter({
+        capability: "mod.vencord.get_bundle",
+        requestBundle: (native) => native.getVencordBundle(),
+        requestTimeoutMs: 120_000,
+        adapterFlag: "__legcordNativeVencordAdapter",
+        stateName: "__legcordNativeVencord",
+        bootstrapEvent: "legcord-native:vencord-bootstrap",
+        expectedMarker: "vencord-bootstrap-executed",
+        resultEvent: "vencord_bootstrap_result",
+        ackEvent: "vencord_response_ack",
+        errorEvent: "vencord_adapter_error",
+        logTag: "[Vencord native]",
+        validateResponse: (result) => {
+            if (result.marker !== "vencord-bootstrap-executed") {
+                throw new Error("Native Vencord bootstrap marker is invalid");
+            }
+        },
+        resultExtra: (result) => ({
+            executionMs: result.execution_ms,
+            localStorageApi: result.local_storage_api,
+            settingsState: result.settings_state,
+        }),
+        resultPayloadExtra: (_result, state) => ({
+            local_storage_api: state.localStorageApi ?? "blocked",
+            settings_state: state.settingsState ?? "storage_unavailable",
+        }),
+        responseExtra: (result) => ({
+            bundleVersion: result.bundle_version,
+            bundleBytes: result.bundle_bytes,
+            cssBytes: result.css_bytes,
+            requestLatencyMs: result.request_latency_ms,
+            retrievalMs: result.retrieval_ms,
+            cssInjectionMs: result.css_injection_ms,
+        }),
+    });
 })();

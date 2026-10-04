@@ -4,7 +4,13 @@ import test from "node:test";
 import vm from "node:vm";
 
 const bootstrapTemplate = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+const modSubstrate = readFileSync(new URL("../web/mod-substrate/mod-bootstrap.js", import.meta.url), "utf8");
+const storagePreservation = readFileSync(
+    new URL("../web/mod-substrate/storage-preservation.js", import.meta.url),
+    "utf8",
+);
 const vencordAdapter = readFileSync(new URL("../web/mods/vencord/adapter.js", import.meta.url), "utf8");
+const testModAdapter = readFileSync(new URL("../web/mods/testmod/adapter.js", import.meta.url), "utf8");
 
 function createBootstrap(capabilities) {
     return bootstrapTemplate.replace(
@@ -73,7 +79,58 @@ function createRuntime(origin = "https://discord.com", capabilities = ["bridge.p
         String,
     });
     vm.runInContext(createBootstrap(capabilities), context);
+    vm.runInContext(modSubstrate, context);
     return { window, context };
+}
+
+/**
+ * Minimal runtime for the synthetic second mod. It uses a hand-built facade
+ * double so the test adapter can exercise the factory without a real
+ * TestMod host capability or touching Discord state.
+ */
+function createSyntheticModRuntime(capabilities = ["mod.test.get_bundle"]) {
+    const window = new FakeWindow("https://discord.com");
+    let hostResolve;
+    const context = vm.createContext({
+        window,
+        performance,
+        TextEncoder,
+        console: { error() {}, info() {} },
+        CustomEvent: FakeCustomEvent,
+        setTimeout,
+        clearTimeout,
+        Date,
+        JSON,
+        Object,
+        Map,
+        Set,
+        Promise,
+        Error,
+        TypeError,
+        String,
+    });
+    window.legcord = {
+        native: {
+            requireCapability(name) {
+                if (!capabilities.includes(name)) {
+                    const error = new Error(`Native capability is not available: ${name}`);
+                    error.code = "UNSUPPORTED_CAPABILITY";
+                    throw error;
+                }
+                return true;
+            },
+            getTestModBundle() {
+                const pending = new Promise((resolve, reject) => {
+                    hostResolve = { resolve, reject };
+                });
+                Object.defineProperty(pending, "requestId", { value: "testmod-1" });
+                return pending;
+            },
+        },
+    };
+    vm.runInContext(modSubstrate, context);
+    vm.runInContext(testModAdapter, context);
+    return { window, context, host: () => hostResolve };
 }
 
 function respondPing(window, request, payload) {
@@ -314,4 +371,113 @@ test("a fresh document gets independent Vencord bootstrap state", () => {
     );
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     secondDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+});
+
+test("the substrate factory is idempotent and shared by every adapter", () => {
+    const { window, context } = createRuntime();
+    const factory = window.__legcordNativeModSubstrate;
+    assert.ok(factory);
+    assert.equal(typeof factory.createModAdapter, "function");
+    assert.equal(Object.isFrozen(factory), true);
+    vm.runInContext(modSubstrate, context);
+    assert.equal(window.__legcordNativeModSubstrate, factory);
+});
+
+test("a synthetic second mod runs the full substrate cycle without Vencord", async () => {
+    const { window, host } = createSyntheticModRuntime();
+    assert.equal(window.__legcordNativeTestMod.status, "pending");
+    assert.equal(window.__legcordNativeVencord, undefined);
+
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:testmod-bootstrap", {
+            detail: {
+                request_id: "testmod-1",
+                ok: true,
+                marker: "testmod-bootstrap-executed",
+                execution_ms: 2,
+            },
+        }),
+    );
+    host().resolve({ marker: "testmod-bootstrap-executed", bundle_version: "9.9.9" });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(window.__legcordNativeTestMod.status, "executed");
+    assert.equal(window.__legcordNativeTestMod.marker, "testmod-bootstrap-executed");
+    assert.equal(window.__legcordNativeTestMod.executionCount, 1);
+    assert.equal(window.__legcordNativeTestMod.bundleVersion, "9.9.9");
+    const result = window.messages.find((message) => message.event?.type === "testmod_bootstrap_result");
+    assert.equal(result.event.payload.ok, true);
+    assert.equal(result.event.payload.marker, "testmod-bootstrap-executed");
+    assert.equal(
+        window.messages.some((message) => message.event?.type === "testmod_response_ack"),
+        true,
+    );
+});
+
+test("the synthetic adapter loads once and rejects a wrong execution marker", async () => {
+    const { window, context, host } = createSyntheticModRuntime();
+    vm.runInContext(testModAdapter, context);
+    assert.equal(window.__legcordNativeTestMod.status, "pending");
+
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:testmod-bootstrap", {
+            detail: { request_id: "testmod-1", ok: true, marker: "testmod-bootstrap-executed", execution_ms: 1 },
+        }),
+    );
+    host().resolve({ marker: "wrong-marker", bundle_version: "9.9.9" });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(window.__legcordNativeTestMod.status, "failed");
+    assert.equal(
+        window.messages.some((message) => message.event?.type === "testmod_response_ack"),
+        false,
+    );
+});
+
+test("the synthetic adapter reports a failed bootstrap verdict without crashing", async () => {
+    const { window, host } = createSyntheticModRuntime();
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:testmod-bootstrap", {
+            detail: { request_id: "testmod-1", ok: false, marker: "", execution_ms: 1, error: "global missing" },
+        }),
+    );
+    host().resolve({ marker: "testmod-bootstrap-executed", bundle_version: "9.9.9" });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(window.__legcordNativeTestMod.status, "failed");
+    const result = window.messages.find((message) => message.event?.type === "testmod_bootstrap_result");
+    assert.equal(result.event.payload.ok, false);
+});
+
+test("the synthetic adapter is denied when its capability is not granted", async () => {
+    const { window } = createSyntheticModRuntime(["bridge.ping"]);
+    await Promise.resolve();
+    assert.equal(window.__legcordNativeTestMod.status, "failed");
+    assert.equal(
+        window.messages.some((message) => message.event?.type === "testmod_adapter_error"),
+        true,
+    );
+});
+
+test("document-start storage preservation survives Discord deleting window.localStorage", () => {
+    const storage = { getItem: () => null };
+    const window = {
+        location: { origin: "https://discord.com" },
+        localStorage: storage,
+    };
+    function FakeStorageCtor() {}
+    const context = vm.createContext({
+        window,
+        location: window.location,
+        Window: FakeStorageCtor,
+        Object,
+        Storage: FakeStorageCtor,
+        console: { error() {} },
+    });
+    vm.runInContext(storagePreservation, context);
+    assert.equal(window.__legcordNativeStorageAtDocumentStart.localStorageApi, "function");
+    delete window.localStorage;
+    assert.equal(window.localStorage, undefined);
+    assert.equal(FakeStorageCtor.prototype.localStorage, storage);
+    assert.equal(typeof FakeStorageCtor.prototype.localStorage.getItem, "function");
 });
