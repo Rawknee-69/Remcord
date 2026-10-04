@@ -155,6 +155,14 @@
         );
     }
 
+    function getVersion(timeoutMs = 5000) {
+        requireCapability("app.get_version");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "app_get_version", payload: {} }, timeoutMs).then((payload) => payload.version);
+    }
+
     function requireCapability(capability) {
         if (typeof capability !== "string" || !capabilities.has(capability)) {
             const error = new Error(`Native capability is not available: ${String(capability)}`);
@@ -245,6 +253,18 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "app_version") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.version !== "string" ||
+                payload.version.length === 0 ||
+                textEncoder.encode(payload.version).length > 64
+            ) {
+                request.reject(new Error("Native app version response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -292,6 +312,7 @@
     const native = Object.freeze({
         ping,
         getVencordBundle,
+        getVersion,
         reportCss(value) {
             sendEvent({
                 type: "css_probe",

@@ -32,6 +32,7 @@ pub enum BridgeCommand {
     SettingsGetConfig(SettingsGetConfigRequest),
     SettingsSetBlockPowerSaving(SettingsSetBlockPowerSavingRequest),
     LocalizationGetLang(LocalizationGetLangRequest),
+    AppGetVersion(AppGetVersionRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +70,13 @@ pub struct LocalizationGetLangRequest {
     pub key: String,
 }
 
+/// Empty request for the read-only `app.get_version` capability. There are no
+/// renderer-supplied parameters by design: no channel, key, path, or
+/// selector. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppGetVersionRequest {}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -103,6 +111,9 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the localization smoke probe
     /// (`LEGCORD_NATIVE_GETLANG_SMOKE=1`). Never sent by shipped adapters.
     GetLangProbe(GetLangProbe),
+    /// DEV-only diagnostic posted by the app-version smoke probe
+    /// (`LEGCORD_NATIVE_APP_VERSION_SMOKE=1`). Never sent by shipped code.
+    AppVersionProbe(AppVersionProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +215,17 @@ pub struct GetLangProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the app-version smoke probe: `version` is the exact
+/// string the migrated update-checker caller compares against the remote
+/// release.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppVersionProbe {
+    pub ok: bool,
+    pub version: String,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
@@ -228,6 +250,7 @@ pub enum BridgeResponsePayload {
     SettingsConfig(Box<SettingsConfigResponse>),
     SettingsMutation(SettingsMutationResponse),
     LocalizationString(LocalizationStringResponse),
+    AppVersion(AppVersionResponse),
 }
 
 #[derive(Serialize)]
@@ -291,6 +314,14 @@ pub struct SettingsMutationResponse {
 pub struct LocalizationStringResponse {
     pub value: String,
     pub lang: String,
+}
+
+/// Single application version response. `version` is the exact string
+/// Electron serves for `window.legcord.version` (`"0.0.0"` on dev builds,
+/// otherwise the package version).
+#[derive(Serialize)]
+pub struct AppVersionResponse {
+    pub version: String,
 }
 
 fn valid_request_id(request_id: &str) -> bool {
@@ -360,6 +391,10 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid localization key".to_owned());
                     }
                 }
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
+                // is needed.
+                BridgeCommand::AppGetVersion(_) => {}
             }
         }
         BridgeMessage::Event(event) => {
@@ -496,6 +531,17 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || payload.ok == payload.error.is_some()
                     {
                         return Err("invalid localization probe result".to_owned());
+                    }
+                }
+                BridgeEvent::AppVersionProbe(payload) => {
+                    if payload.version.len() > crate::app::MAX_APP_VERSION_BYTES
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid app version probe result".to_owned());
                     }
                 }
             }
@@ -870,6 +916,78 @@ mod tests {
             "v".repeat(5000)
         );
         let inconsistent = r#"{"version":1,"event":{"type":"get_lang_probe","payload":{"ok":true,"lang":"en-US","value":"x","missing_is_empty":true,"error":"extra"}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(&oversized).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn accepts_the_app_version_capability_without_renderer_parameters() {
+        let request = r#"{"version":1,"request_id":"app-1","command":{"type":"app_get_version","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No channel, key, path, or selector may be supplied.
+        let with_channel = r#"{"version":1,"request_id":"app-2","command":{"type":"app_get_version","payload":{"channel":"get-app-version"}}}"#;
+        let with_key = r#"{"version":1,"request_id":"app-3","command":{"type":"app_get_version","payload":{"key":"version"}}}"#;
+        let with_path = r#"{"version":1,"request_id":"app-4","command":{"type":"app_get_version","payload":{"path":"C:\\secret"}}}"#;
+        assert!(parse_bridge_message(with_channel).is_err());
+        assert!(parse_bridge_message(with_key).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+    }
+
+    #[test]
+    fn rejects_generic_invocation_for_the_app_version() {
+        let invoke = r#"{"version":1,"request_id":"app-1","command":{"type":"invoke","payload":{"method":"app.getVersion"}}}"#;
+        let version_channel = r#"{"version":1,"request_id":"app-2","command":{"type":"get-app-version","payload":{}}}"#;
+        assert!(parse_bridge_message(invoke).is_err());
+        assert!(parse_bridge_message(version_channel).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_app_version_response() {
+        use super::AppVersionResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "app-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::AppVersion(AppVersionResponse {
+                version: "1.3.0".to_owned(),
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "app_version");
+        assert_eq!(value["payload"]["payload"]["version"], "1.3.0");
+        // The response carries only the version string, never a
+        // channel/key/path selector.
+        assert!(value["payload"]["payload"].get("key").is_none());
+        assert!(value["payload"]["payload"].get("path").is_none());
+    }
+
+    #[test]
+    fn app_version_request_ids_reset_with_the_document() {
+        let mut tracker = RequestTracker::default();
+        assert!(tracker.begin("app-1").is_ok());
+        // A duplicate within one document is rejected (stale/double-submit).
+        assert!(tracker.begin("app-1").is_err());
+        tracker.clear();
+        assert!(tracker.begin("app-1").is_ok());
+        assert!(tracker.complete("app-1").is_ok());
+    }
+
+    #[test]
+    fn validates_app_version_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"app_version_probe","payload":{"ok":true,"version":"1.3.0","error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"app_version_probe","payload":{"ok":false,"version":"","error":"timeout"}}}"#;
+        let oversized = format!(
+            r#"{{"version":1,"event":{{"type":"app_version_probe","payload":{{"ok":true,"version":"{}","error":null}}}}}}"#,
+            "1".repeat(65)
+        );
+        let inconsistent = r#"{"version":1,"event":{"type":"app_version_probe","payload":{"ok":true,"version":"1.3.0","error":"extra"}}}"#;
         assert!(parse_bridge_message(ok).is_ok());
         assert!(parse_bridge_message(failed).is_ok());
         assert!(parse_bridge_message(&oversized).is_err());

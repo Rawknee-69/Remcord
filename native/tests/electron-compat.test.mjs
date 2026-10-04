@@ -16,6 +16,10 @@ const settingsPage = readFileSync(
 );
 const types = readFileSync(new URL("../../src/@types/legcordWindow.d.ts", import.meta.url), "utf8");
 const invite = readFileSync(new URL("../../src/discord/preload/inviteBackButton.mts", import.meta.url), "utf8");
+const heroUpdater = readFileSync(
+    new URL("../../src/shelter/settings/components/HeroUpdater.tsx", import.meta.url),
+    "utf8",
+);
 
 test("preload keeps the synchronous getEntireConfig bridge", () => {
     assert.match(bridge, /getConfig:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getEntireConfig"\)/);
@@ -108,4 +112,31 @@ test("the block-power-saving native mutation is a deliberate separate path", () 
     assert.doesNotMatch(shelterSettings, /sendSync/);
     assert.doesNotMatch(settingsPage, /sendSync/);
     assert.doesNotMatch(shelterSettings, /setBlockPowerSavingInVoiceChat\([^)]*key/);
+});
+
+test("preload keeps the synchronous get-app-version bridge", () => {
+    assert.match(bridge, /version:\s*ipcRenderer\.sendSync\("get-app-version", "app-version"\)/);
+    assert.doesNotMatch(bridge, /invoke\("get-app-version"/);
+});
+
+test("main keeps the get-app-version handler returning the package version", () => {
+    assert.match(ipc, /ipcMain\.on\("get-app-version"/);
+    assert.match(ipc, /event\.returnValue = getVersion\(\)/);
+});
+
+test("declared window.legcord version contract stays a synchronous string", () => {
+    assert.match(types, /version:\s*string/);
+});
+
+test("the update checker Electron path keeps its synchronous version read", () => {
+    // Electron behavior: direct sync read plus the dot-stripped comparison.
+    assert.match(heroUpdater, /return window\.legcord\.version;/);
+    assert.match(heroUpdater, /await getLocalVersion\(\)/);
+});
+
+test("the update checker native path is a deliberate separate branch", () => {
+    assert.match(heroUpdater, /boot\?\.runtime === "webview2"/);
+    assert.match(heroUpdater, /native\.getVersion\(\)/);
+    assert.doesNotMatch(heroUpdater, /sendSync/);
+    assert.doesNotMatch(heroUpdater, /invoke\(/);
 });

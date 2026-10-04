@@ -845,6 +845,140 @@ test("a reloaded document gets a fresh getLang facade with no stale promises", a
     assert.equal(await pending, "Go back to the Discord app");
 });
 
+function createAppRuntime(capabilities = ["bridge.ping", "app.get_version"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondAppVersion(window, request, version = "1.3.0") {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "app_version", payload: { version } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes an asynchronous app.get_version capability", () => {
+    const { window } = createAppRuntime();
+    assert.equal(typeof window.legcord.native.getVersion, "function");
+    assert.equal(Object.isFrozen(window.legcord.native), true);
+    assert.equal(window.legcord.native.supports("app.get_version"), true);
+    // No synchronous version field or generic RPC may exist.
+    assert.equal(window.legcord.version, undefined);
+});
+
+test("app.get_version sends a parameter-free typed request and resolves the version", async () => {
+    const { window } = createAppRuntime();
+    const pending = window.legcord.native.getVersion();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "app_get_version", payload: {} });
+
+    respondAppVersion(window, message);
+    assert.equal(await pending, "1.3.0");
+});
+
+test("app.get_version resolves the dev version exactly like Electron isDev", async () => {
+    const { window } = createAppRuntime();
+    const pending = window.legcord.native.getVersion();
+    const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
+    respondAppVersion(window, message, "0.0.0");
+    assert.equal(await pending, "0.0.0");
+});
+
+test("app.get_version throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createAppRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("app.get_version"), false);
+    assert.throws(
+        () => window.legcord.native.getVersion(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "app_get_version"),
+        false,
+    );
+});
+
+test("app.get_version rejects malformed version responses", async () => {
+    const { window } = createAppRuntime();
+    const pending = window.legcord.native.getVersion();
+    const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
+    respondAppVersion(window, message, 42);
+    await assert.rejects(pending, /app version response schema is invalid/);
+
+    const second = createAppRuntime();
+    const pendingEmpty = second.window.legcord.native.getVersion();
+    const messageEmpty = second.window.messages.find((entry) => entry.command?.type === "app_get_version");
+    respondAppVersion(second.window, messageEmpty, "");
+    await assert.rejects(pendingEmpty, /app version response schema is invalid/);
+});
+
+test("app.get_version rejects host failures with the typed error", async () => {
+    const { window } = createAppRuntime();
+    const pending = window.legcord.native.getVersion();
+    const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "APP_VERSION_UNAVAILABLE", message: "app version is invalid" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /app version is invalid/);
+});
+
+test("app.get_version rejects after its timeout", async () => {
+    const { window } = createAppRuntime();
+    await assert.rejects(window.legcord.native.getVersion(50), /timed out/);
+});
+
+test("app.get_version rejects pending requests when the document is disposed", async () => {
+    const { window } = createAppRuntime();
+    const pending = window.legcord.native.getVersion();
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh app version facade with no stale promises", async () => {
+    const firstDocument = createAppRuntime();
+    const stale = firstDocument.window.legcord.native.getVersion();
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createAppRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.native.getVersion();
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "app_get_version");
+    respondAppVersion(nextDocument.window, message);
+    assert.equal(await pending, "1.3.0");
+});
+
+test("the migrated update checker compares the host-confirmed version", async () => {
+    const { window } = createAppRuntime();
+    // Mirrors src/shelter/settings/components/HeroUpdater.tsx: the remote
+    // dotted version is compared against the capability-resolved local
+    // version with dots stripped, never against a sync field.
+    const pending = window.legcord.native.getVersion();
+    const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
+    respondAppVersion(window, message, "1.3.0");
+    const localVersion = (await pending).replace(/\./g, "");
+    assert.equal(localVersion, "130");
+    assert.equal("140" > localVersion, true);
+    assert.equal("130" > localVersion, false);
+});
+
 test("the synthetic adapter reports a failed bootstrap verdict without crashing", async () => {
     const { window, host } = createSyntheticModRuntime();
     window.dispatchEvent(

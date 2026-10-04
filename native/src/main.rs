@@ -1,3 +1,4 @@
+mod app;
 mod localization;
 mod mod_substrate;
 mod protocol;
@@ -18,10 +19,11 @@ use mod_substrate::{
     PendingModBootstrap,
 };
 
+use app::{current_app_version, validate_version};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use protocol::{
-    parse_bridge_message, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage,
-    BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
+    parse_bridge_message, AppVersionResponse, BridgeCommand, BridgeError, BridgeEvent,
+    BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
     LocalizationStringResponse, PingResponse, RequestTracker, SettingsConfigResponse,
     SettingsMutationResponse, VencordBundleResponse, PROTOCOL_VERSION,
 };
@@ -80,6 +82,7 @@ const DISABLE_VENCORD_ADAPTER_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_NO_VENCORD"
 const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
 const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
+const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
@@ -92,6 +95,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "settings.get_config",
         "settings.set_block_power_saving_in_voice_chat",
         "localization.get_lang",
+        "app.get_version",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -304,6 +308,45 @@ const GETLANG_SMOKE_SCRIPT: &str = r#"
         lang: "unknown",
         value: String(value).slice(0, 256),
         missing_is_empty: missingValue === "",
+        error: null,
+      }),
+      fail,
+    );
+  } catch (error) {
+    fail(error);
+  }
+})();
+"#;
+
+/// DEV-only app-version smoke probe (`LEGCORD_NATIVE_APP_VERSION_SMOKE=1`).
+/// Exercises the exact read the migrated update-checker caller performs:
+/// `window.legcord.native.getVersion()` — the async replacement for the
+/// synchronous `window.legcord.version` Electron read. Reported as one typed
+/// `app_version_probe` event per document.
+const APP_VERSION_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "app_version_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, version: "",
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const getVersion = window.legcord?.native?.getVersion;
+    if (typeof getVersion !== "function") {
+      fail("app version facade missing");
+      return;
+    }
+    const pending = getVersion.call(window.legcord.native);
+    if (!(pending instanceof Promise)) {
+      fail("app version facade is not asynchronous");
+      return;
+    }
+    pending.then(
+      (version) => probe({
+        ok: typeof version === "string" && version.length > 0,
+        version: String(version).slice(0, 64),
         error: null,
       }),
       fail,
@@ -580,6 +623,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let profile_path = PathBuf::from(WEBVIEW_PROFILE);
     std::fs::create_dir_all(&profile_path)?;
+    // Fail fast if the embedded package version ever loses its shape: the
+    // capability serves this constant on every request.
+    if let Err(error) = validate_version(current_app_version()) {
+        return Err(format!("embedded app version is invalid: {error}").into());
+    }
     for descriptor in KNOWN_MODS {
         if !BOOT_SNAPSHOT.capabilities.contains(&descriptor.capability) {
             return Err(format!(
@@ -614,6 +662,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let diagnostic_getlang_smoke = std::env::var(GETLANG_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_getlang_smoke {
         println!("[Localization][Smoke] localization capability smoke probe enabled");
+    }
+    let diagnostic_app_version_smoke =
+        std::env::var(APP_VERSION_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_app_version_smoke {
+        println!("[App][Smoke] app version capability smoke probe enabled");
     }
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
@@ -790,6 +843,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_getlang_smoke {
                             if let Err(error) = webview.evaluate_script(GETLANG_SMOKE_SCRIPT) {
                                 eprintln!("[Localization][Smoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_app_version_smoke {
+                            if let Err(error) = webview.evaluate_script(APP_VERSION_SMOKE_SCRIPT) {
+                                eprintln!("[App][Smoke] probe failed: {error}");
                             }
                         }
                     }
@@ -976,6 +1034,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 found.from_fallback,
                                 payload.key.len(),
                                 payload_bytes,
+                                received_at.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
+                        BridgeCommand::AppGetVersion(_) => {
+                            // Parameter-free read: the version is a
+                            // compile-time constant, so there is no path to
+                            // build and no file to be missing or corrupt.
+                            let request_id = request.request_id;
+                            let version = current_app_version();
+                            let response = BridgeResponse {
+                                version: PROTOCOL_VERSION,
+                                request_id: request_id.clone(),
+                                ok: true,
+                                payload: Some(BridgeResponsePayload::AppVersion(
+                                    AppVersionResponse {
+                                        version: version.to_owned(),
+                                    },
+                                )),
+                                error: None,
+                            };
+                            send_bridge_response(&webview, &response);
+                            if let Err(error) = request_tracker.complete(&request_id) {
+                                eprintln!("[Bridge] correlation failure after response: {error}");
+                            }
+                            response_count += 1;
+                            println!(
+                                "[App][Metrics] version={version} payload_bytes={} request_latency_ms={:.3}",
+                                version.len(),
                                 received_at.elapsed().as_secs_f64() * 1000.0
                             );
                         }
@@ -1453,6 +1539,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     }
+                    BridgeEvent::AppVersionProbe(payload) => {
+                        if payload.ok {
+                            println!("[App][Smoke] ok=true version={}", payload.version);
+                        } else {
+                            eprintln!(
+                                "[App][Smoke] ok=false error={}",
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
                 }
             }
             _ => {
@@ -1737,5 +1833,47 @@ mod tests {
             .replace("__LEGCORD_MUTATION_RESTORE_VALUE__", "false");
         assert!(!rendered.contains("__LEGCORD_MUTATION_RESTORE_VALUE__"));
         assert!(rendered.contains("const RESTORE_TO = false;"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_exactly_the_app_version_capability() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"app.get_version"));
+        // No generic version/channel surface may exist alongside the typed
+        // read.
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"app.getVersion"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"get-app-version"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_async_app_version_facade() {
+        let script = initialization_script(true).unwrap();
+        assert!(script.contains("app_get_version"));
+        assert!(script.contains("app_version"));
+        assert!(script.contains("app.get_version"));
+        assert!(script.contains("getVersion"));
+        // The facade must be asynchronous: no synchronous IPC emulation.
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn app_version_smoke_probe_uses_only_the_typed_capability() {
+        assert!(super::APP_VERSION_SMOKE_SCRIPT.contains("native?.getVersion"));
+        assert!(super::APP_VERSION_SMOKE_SCRIPT.contains("app_version_probe"));
+        assert!(!super::APP_VERSION_SMOKE_SCRIPT.contains("sendSync"));
+        assert!(!super::APP_VERSION_SMOKE_SCRIPT.contains("legcord.version"));
+    }
+
+    #[test]
+    fn embedded_app_version_keeps_a_servable_shape() {
+        // The startup gate serves this constant on every request.
+        assert!(super::validate_version(super::current_app_version()).is_ok());
     }
 }

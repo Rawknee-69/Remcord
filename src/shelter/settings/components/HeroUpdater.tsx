@@ -6,11 +6,22 @@ const {
 } = shelter;
 const LOGO_URL = "https://github.com/Legcord/Branding/raw/main/assets/legcord-banner.png";
 
+async function getLocalVersion(): Promise<string> {
+    // Native WebView2 has no synchronous `window.legcord.version` read: use
+    // the typed async `app.get_version` capability instead. Electron keeps
+    // the original synchronous read below.
+    if ((window.legcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2") {
+        const native = (window.legcord as unknown as { native: { getVersion: () => Promise<string> } }).native;
+        return await native.getVersion();
+    }
+    return window.legcord.version;
+}
+
 async function checkForUpdates() {
     const response = await fetch("https://legcord.app/latest.json");
     const data = await response.json();
     const remoteVersion = data.version.replace(/\./g, ""); // easy to compare
-    if (remoteVersion > window.legcord.version.replace(/\./g, "")) {
+    if (remoteVersion > (await getLocalVersion()).replace(/\./g, "")) {
         return true;
     } else {
         return false;
