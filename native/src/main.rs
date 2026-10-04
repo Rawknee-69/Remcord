@@ -1656,6 +1656,42 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if let Err(error) = webview.evaluate_script(BRIDGE_PROBE_SCRIPT) {
                             eprintln!("[Injection] Bridge probe failed: {error}");
                         }
+                        // CSP adjustment for Vencord badges: Electron's setupNoCSP() removes the
+                        // CSP header entirely; native WebView2 preserves it. Discord's vanilla CSP
+                        // connect-src does not include badges.vencord.dev. We add it explicitly.
+                        // This is the narrowest safe adjustment: only one origin, one directive.
+                        const CSP_BADGES_SCRIPT: &str = r#"
+                            (() => {
+                                const cspMeta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+                                if (!cspMeta) {
+                                    console.log("[Legcord] CSP meta tag not found; CSP may be header-only");
+                                    return;
+                                }
+                                const csp = cspMeta.getAttribute("content");
+                                if (!csp) {
+                                    console.log("[Legcord] CSP content attribute missing");
+                                    return;
+                                }
+                                // Match connect-src and add badges.vencord.dev if not present
+                                const connectSrcMatch = /connect-src\s+([^;]+)/i.exec(csp);
+                                if (!connectSrcMatch) {
+                                    console.log("[Legcord] connect-src directive not found in CSP");
+                                    return;
+                                }
+                                const connectSrc = connectSrcMatch[1].trim();
+                                if (connectSrc.includes("badges.vencord.dev")) {
+                                    console.log("[Legcord] badges.vencord.dev already in connect-src");
+                                    return;
+                                }
+                                const newConnectSrc = connectSrc + " https://badges.vencord.dev";
+                                const newCsp = csp.replace(connectSrc, newConnectSrc);
+                                cspMeta.setAttribute("content", newCsp);
+                                console.log("[Legcord] CSP connect-src updated to allow badges.vencord.dev");
+                            })();
+                        "#;
+                        if let Err(error) = webview.evaluate_script(CSP_BADGES_SCRIPT) {
+                            eprintln!("[CSP] Badges script failed: {error}");
+                        }
                         // Host-pushed Quick CSS injection (Phase D): the renderer
                         // never requests Quick CSS, so there is no bridge
                         // round trip here. The host reads its own fixed
