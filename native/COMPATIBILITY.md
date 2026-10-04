@@ -42,11 +42,13 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | --- | --- |
 | Renderer request | `{"version":1,"request_id":"legcord-<document-time>-<sequence>","command":{"type":"ping","payload":{"nonce":"..."}}}` |
 | Renderer request (Vencord capability) | `{"version":1,"request_id":"...","command":{"type":"mod_vencord_get_bundle","payload":{}}}` |
+| Renderer request (settings capability) | `{"version":1,"request_id":"...","command":{"type":"settings_get_config","payload":{}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Vencord response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"vencord_bundle","payload":{"bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
+| Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping` and `mod_vencord_get_bundle`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, and the typed Vencord CSS/bootstrap/adapter/response acknowledgements. Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_vencord_get_bundle`, and `settings_get_config`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe` diagnostic (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` probe, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -81,6 +83,20 @@ The substrate additionally owns `ModCache` (in-memory validated bundles keyed by
 
 `native/web/mods/testmod/adapter.js` is a synthetic second consumer proving the factory is not Vencord-specific. It is test-only: it is never included in the document-start script, never touches Discord UI, and never submits account state. Shelter and Equicord remain unimplemented; adding either means a new descriptor plus a thin adapter, with no substrate changes.
 
+## Settings capability (Phase C)
+
+The first real mod-facing `window.legcord` capability migrates `settings.getConfig()` from synchronous Electron IPC to typed async WebView2 IPC. Exactly one real caller is migrated: the Shelter power plugin's `blockPowerSavingInVoiceChat` read (`src/shelter/power/index.ts`). All other `settings.getConfig()` callers (Shelter settings, titlebar) keep the unchanged synchronous Electron implementation.
+
+### Electron chain (unchanged)
+
+`bridge.ts` exposes `getConfig: () => ipcRenderer.sendSync("getEntireConfig")`; `ipc.ts` answers `getEntireConfig` with `getEntireConfig()` (the cached `Settings` object from `<userData>/storage/settings.json`). Neither file is modified by Phase C; `native/tests/electron-compat.test.mjs` asserts the synchronous contract.
+
+### Native chain
+
+Renderer `window.legcord.settings.getConfig()` → parameter-free `settings_get_config` request → Rust `settings::load_settings` reads the host-built `<DEV profile>/storage/settings.json` into the typed `SettingsSnapshot` (`native/src/settings.rs`, Electron-compatible camelCase keys, defaults mirroring `src/common/config.ts`) → validated `settings_config` response → renderer schema check → resolved snapshot object. Missing file returns compiled-in defaults (`source: "defaults"`, nothing is written); corrupt file returns typed `SETTINGS_UNAVAILABLE`; unknown future keys are ignored; wrong field types are rejected. There is no `settings.setConfig`, no key argument, no path argument, and no generic invocation.
+
+The facade resolves the snapshot object directly (same shape as Electron's return), never blocks document startup, and uses the shared pending map: correlation by request ID, timeout rejection, and `pagehide` disposal. The Shelter power plugin branches on `window.legcord.boot.runtime === "webview2"`: native uses `await getConfig()` (subscription installed after resolve), Electron keeps the direct synchronous call.
+
 ### Required dependency categories
 
 - **Needed to execute Vencord:** one standalone Vencord browser JS bundle, the matching browser CSS bundle, the page-world execution mechanism, and fixed CSS insertion after the JS. The native bridge transports only a typed request/result, not bundle data.
@@ -92,21 +108,22 @@ Limits: a bridge message is at most 8 KiB; a ping nonce is non-empty and at most
 
 ### Implemented `window.legcord`
 
-The exact facade is `window.legcord = Object.freeze({ boot, native })`, installed in the document-start script only when `location.origin === "https://discord.com"`.
+The exact facade is `window.legcord = Object.freeze({ boot, native, settings })`, installed in the document-start script only when `location.origin === "https://discord.com"`.
 
 | Property | Kind | Behavior |
 | --- | --- | --- |
 | `window.legcord.boot.runtime` | immutable boot snapshot | `"webview2"` |
 | `window.legcord.boot.platform` | immutable boot snapshot | `"win32"`; the native prototype is Windows-only |
 | `window.legcord.boot.protocol_version` | immutable boot snapshot | `1` |
-| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.vencord.get_bundle"]` |
+| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.vencord.get_bundle", "settings.get_config"]` |
 | `window.legcord.native.ping(nonce)` | async native request | Returns `{ nonce, message: "pong" }`; rejects malformed input, transport errors, native errors, timeout, or document disposal |
 | `window.legcord.native.getVencordBundle()` | explicit Vencord-only async request | Requests the fixed native operation; resolves typed size/version/timing/marker metadata only after the host executes the bundle and applies CSS |
 | `window.legcord.native.supports(name)` | renderer-local | Boolean membership test against the frozen boot capability list |
 | `window.legcord.native.requireCapability(name)` | renderer-local | Returns `true` when present; otherwise throws with `code === "UNSUPPORTED_CAPABILITY"` |
 | `window.legcord.native.reportCss(value)` | typed one-way diagnostic event | Sends the native prototype's CSS injection probe result; not a general CSS API |
+| `window.legcord.settings.getConfig()` | explicit settings-only async request (Phase C) | Requires the `settings.get_config` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the parameter-free `settings_get_config` command and resolves the validated `Settings` snapshot object (Electron-compatible keys). Rejects malformed snapshots, `SETTINGS_UNAVAILABLE` host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
 
-No existing Electron-facing `window.legcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Legcord config, Legcord version, OS release, translations, or Electron version.
+No other existing Electron-facing `window.legcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Legcord config, Legcord version, OS release, translations, or Electron version.
 
 ### Classification of the existing renderer contract
 
@@ -163,7 +180,7 @@ There are 35 call sites in the current repository search, grouped below by the c
 | Boot environment: `getOS`, `getOSRelease`, `get-app-version`, `displayVersion` | `bridge.ts`; `titlebar.mts`; `newTitlebar.mts`; `patches.mts`. Returns `process.platform`, `os.release()`, `getVersion()`, `getDisplayVersion()` | Boot snapshot values; safe only if sourced from native runtime/app metadata | Snapshot actual native values; retain separate Legcord app version only when native product version is authoritative. No Electron value is fabricated |
 | Boot config: `getConfig("windowStyle"|"transparency"|"minimizeToTray"|"sdpH264BaselineRewrite"|"disableAutogain")` | `bridge.ts`, `titlebar.mts`, `newTitlebar.mts`, `patches.mts`. Returns configured typed value; setter elsewhere persists and returns `undefined` | Boot config reads, but current settings can be mutable | Include only proven immutable initial settings in a versioned native snapshot; migrate mutations to async and refresh cache/events |
 | Window state: `win-isMaximized`, `win-isNormal` | `bridge.ts`, `titlebar.mts`. Returns current booleans | Dynamic cached-state candidate, not a boot constant | Native state events/local cache or async query; never a sync message |
-| Full settings: `getEntireConfig` | `bridge.ts`; returns full `Settings` object | Cached-state candidate with mutable settings | Async initial read/cache plus events; keep secrets and unsupported fields out |
+| Full settings: `getEntireConfig` | `bridge.ts`; returns full `Settings` object | Cached-state candidate with mutable settings | Phase C migrates exactly one read path: the Shelter power `blockPowerSavingInVoiceChat` read is served natively by the async `settings.get_config` capability (validated snapshot, no mutation). All other readers keep the sync Electron implementation |
 | Settings mutation: `setConfig(key,value)` | `bridge.ts`; updates config and returns `undefined` synchronously | Mutable operation disguised as sync result | Async command; update TS API/callers to await or optimistically cache |
 | Localization: `getTranslations` | `bridge.ts`; returns raw translation JSON | Read-only snapshot candidate, but locale can change | Boot snapshot only for selected locale and immutable copy; language mutation remains async/evented |
 | Theme data: `getThemes`, `refreshThemesCache` | `bridge.ts`; returns theme manifest array; refresh invalidates cache then reads it | Filesystem/plugin/theme reads plus mutable cache invalidation | Async typed theme-list request; local cache with explicit refresh event/operation |

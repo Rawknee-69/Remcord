@@ -108,6 +108,29 @@
         return request({ type: "mod_vencord_get_bundle", payload: {} }, 120_000);
     }
 
+    function isSettingsSnapshot(value) {
+        return (
+            !!value &&
+            typeof value === "object" &&
+            typeof value.blockPowerSavingInVoiceChat === "boolean" &&
+            typeof value.minimizeToTray === "boolean" &&
+            typeof value.windowStyle === "string" &&
+            typeof value.transparency === "string" &&
+            Array.isArray(value.mods) &&
+            value.mods.every((entry) => typeof entry === "string") &&
+            !!value.audio &&
+            typeof value.audio === "object"
+        );
+    }
+
+    function getConfig(timeoutMs = 5000) {
+        requireCapability("settings.get_config");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "settings_get_config", payload: {} }, timeoutMs).then((payload) => payload.settings);
+    }
+
     function requireCapability(capability) {
         if (typeof capability !== "string" || !capabilities.has(capability)) {
             const error = new Error(`Native capability is not available: ${String(capability)}`);
@@ -157,6 +180,18 @@
                 payload.document_execution_count !== 1
             ) {
                 request.reject(new Error("Native Vencord response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "settings_config") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                !isSettingsSnapshot(payload.settings) ||
+                (payload.source !== "file" && payload.source !== "defaults") ||
+                !Number.isSafeInteger(payload.payload_bytes)
+            ) {
+                request.reject(new Error("Native settings response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -218,11 +253,12 @@
         },
         requireCapability,
     });
+    const settings = Object.freeze({ getConfig });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
-        value: Object.freeze({ boot: snapshot, native }),
+        value: Object.freeze({ boot: snapshot, native, settings }),
     });
 
     try {

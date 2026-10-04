@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::settings::SettingsSnapshot;
+
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_IPC_MESSAGE_BYTES: usize = 8 * 1024;
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
@@ -26,6 +28,7 @@ pub struct BridgeRequest {
 pub enum BridgeCommand {
     Ping(PingRequest),
     ModVencordGetBundle(VencordBundleRequest),
+    SettingsGetConfig(SettingsGetConfigRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +40,13 @@ pub struct PingRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VencordBundleRequest {}
+
+/// Empty request for the read-only `settings.get_config` capability. There
+/// are no renderer-supplied parameters by design: no config key, no file
+/// path, no selector. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsGetConfigRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +72,9 @@ pub enum BridgeEvent {
     VencordAdapterError(VencordAdapterError),
     VencordResponseAck(VencordResponseAck),
     InteractionProbe(InteractionProbe),
+    /// DEV-only diagnostic posted by the settings smoke probe
+    /// (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`). Never sent by shipped adapters.
+    SettingsProbe(SettingsProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +141,16 @@ pub struct InteractionProbe {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsProbe {
+    pub ok: bool,
+    pub source: String,
+    pub payload_bytes: usize,
+    pub block_power_saving: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
     Request(BridgeRequest),
@@ -148,6 +171,7 @@ pub struct BridgeResponse {
 pub enum BridgeResponsePayload {
     Ping(PingResponse),
     VencordBundle(VencordBundleResponse),
+    SettingsConfig(Box<SettingsConfigResponse>),
 }
 
 #[derive(Serialize)]
@@ -179,6 +203,16 @@ pub struct VencordBundleResponse {
     pub css_injection_ms: f64,
     pub marker: &'static str,
     pub document_execution_count: u8,
+}
+
+/// Read-only validated settings snapshot response. `source` is `"file"` when
+/// the snapshot came from `<profile>/storage/settings.json` and `"defaults"`
+/// when no settings file exists.
+#[derive(Serialize)]
+pub struct SettingsConfigResponse {
+    pub settings: SettingsSnapshot,
+    pub source: &'static str,
+    pub payload_bytes: usize,
 }
 
 fn valid_request_id(request_id: &str) -> bool {
@@ -238,6 +272,7 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                     }
                 }
                 BridgeCommand::ModVencordGetBundle(_) => {}
+                BridgeCommand::SettingsGetConfig(_) => {}
             }
         }
         BridgeMessage::Event(event) => {
@@ -334,6 +369,23 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                             | "character_erased"
                     ) {
                         return Err("invalid interaction diagnostic phase".to_owned());
+                    }
+                }
+                BridgeEvent::SettingsProbe(payload) => {
+                    if !matches!(
+                        payload.source.as_str(),
+                        // "unknown" is renderer-observed (the facade resolves the
+                        // settings object only); the authoritative source is in
+                        // the host `[Settings]` log for the same request.
+                        "file" | "defaults" | "unavailable" | "unknown"
+                    ) || payload.payload_bytes > 1024 * 1024
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid settings probe result".to_owned());
                     }
                 }
             }
@@ -475,5 +527,79 @@ mod tests {
         assert!(tracker.complete("request-unknown").is_err());
         assert!(tracker.complete("request-1").is_ok());
         assert!(tracker.complete("request-1").is_err());
+    }
+
+    #[test]
+    fn accepts_the_settings_capability_without_renderer_parameters() {
+        let request = r#"{"version":1,"request_id":"settings-1","command":{"type":"settings_get_config","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No config key, filesystem path, or selector may be supplied.
+        let with_key = r#"{"version":1,"request_id":"settings-2","command":{"type":"settings_get_config","payload":{"key":"mods"}}}"#;
+        let with_path = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_get_config","payload":{"path":"C:\\secret"}}}"#;
+        assert!(parse_bridge_message(with_key).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+    }
+
+    #[test]
+    fn rejects_settings_mutation_and_generic_invocation() {
+        let set_config = r#"{"version":1,"request_id":"settings-1","command":{"type":"settings_set_config","payload":{}}}"#;
+        let invoke = r#"{"version":1,"request_id":"settings-2","command":{"type":"invoke","payload":{"method":"settings.getConfig"}}}"#;
+        assert!(parse_bridge_message(set_config).is_err());
+        assert!(parse_bridge_message(invoke).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_settings_snapshot_response() {
+        use super::SettingsConfigResponse;
+        use crate::settings::SettingsSnapshot;
+        let snapshot = SettingsSnapshot::default();
+        let payload_bytes = serde_json::to_string(&snapshot).unwrap().len();
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "settings-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::SettingsConfig(Box::new(
+                SettingsConfigResponse {
+                    settings: snapshot,
+                    source: "defaults",
+                    payload_bytes,
+                },
+            ))),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "settings_config");
+        assert_eq!(
+            value["payload"]["payload"]["settings"]["blockPowerSavingInVoiceChat"],
+            false
+        );
+        assert_eq!(value["payload"]["payload"]["source"], "defaults");
+    }
+
+    #[test]
+    fn settings_request_ids_reset_with_the_document() {
+        let mut tracker = RequestTracker::default();
+        assert!(tracker.begin("settings-1").is_ok());
+        tracker.clear();
+        // After a document reset the same id shape is usable again and stale
+        // completions no longer correlate.
+        assert!(tracker.begin("settings-1").is_ok());
+        assert!(tracker.complete("settings-1").is_ok());
+    }
+
+    #[test]
+    fn validates_settings_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"settings_probe","payload":{"ok":true,"source":"file","payload_bytes":2048,"block_power_saving":false,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"settings_probe","payload":{"ok":false,"source":"unavailable","payload_bytes":0,"block_power_saving":false,"error":"timeout"}}}"#;
+        let bad_source = r#"{"version":1,"event":{"type":"settings_probe","payload":{"ok":true,"source":"electron","payload_bytes":10,"block_power_saving":false,"error":null}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"settings_probe","payload":{"ok":true,"source":"file","payload_bytes":10,"block_power_saving":false,"error":"extra"}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_source).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
     }
 }

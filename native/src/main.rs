@@ -1,5 +1,6 @@
 mod mod_substrate;
 mod protocol;
+mod settings;
 
 use std::{
     collections::HashMap,
@@ -19,9 +20,10 @@ use mod_substrate::{
 use protocol::{
     parse_bridge_message, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage,
     BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload, PingResponse,
-    RequestTracker, VencordBundleResponse, PROTOCOL_VERSION,
+    RequestTracker, SettingsConfigResponse, VencordBundleResponse, PROTOCOL_VERSION,
 };
 use serde::Serialize;
+use settings::load_settings;
 use tao::{
     dpi::{LogicalSize, Size},
     event::{Event, WindowEvent},
@@ -72,13 +74,18 @@ fn lookup_mod_descriptor(mod_id: &str) -> Option<ModDescriptor> {
 /// mechanics do not change.
 const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD];
 const DISABLE_VENCORD_ADAPTER_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_NO_VENCORD";
+const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
     runtime: "webview2",
     platform: "win32",
     protocol_version: PROTOCOL_VERSION,
-    capabilities: &["bridge.ping", "mod.vencord.get_bundle"],
+    capabilities: &[
+        "bridge.ping",
+        "mod.vencord.get_bundle",
+        "settings.get_config",
+    ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
 const MOD_SUBSTRATE_SCRIPT: &str = include_str!("../web/mod-substrate/mod-bootstrap.js");
@@ -267,6 +274,49 @@ struct BootSnapshot {
     capabilities: &'static [&'static str],
 }
 
+/// DEV-only settings smoke probe (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`).
+/// Exercises the exact read the migrated Shelter power caller performs:
+/// `window.legcord.settings.getConfig()` → `blockPowerSavingInVoiceChat`.
+/// The result is reported through the typed `settings_probe` event so the
+/// host log shows request/response behavior per document.
+const SETTINGS_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "settings_probe", payload } })
+  );
+  try {
+    const getConfig = window.legcord?.settings?.getConfig;
+    if (typeof getConfig !== "function") {
+      probe({ ok: false, source: "unavailable", payload_bytes: 0, block_power_saving: false, error: "settings facade missing" });
+      return;
+    }
+    const result = getConfig.call(window.legcord.settings);
+    if (!(result instanceof Promise)) {
+      probe({ ok: false, source: "unavailable", payload_bytes: 0, block_power_saving: false, error: "settings facade is not asynchronous" });
+      return;
+    }
+    result.then(
+      (settings) => probe({
+        ok: true,
+        source: "unknown",
+        payload_bytes: JSON.stringify(settings).length,
+        block_power_saving: settings.blockPowerSavingInVoiceChat === true,
+        error: null,
+      }),
+      (error) => probe({
+        ok: false,
+        source: "unavailable",
+        payload_bytes: 0,
+        block_power_saving: false,
+        error: String(error?.message ?? error).slice(0, 256),
+      }),
+    );
+  } catch (error) {
+    probe({ ok: false, source: "unavailable", payload_bytes: 0, block_power_saving: false, error: String(error).slice(0, 256) });
+  }
+})();
+"#;
+
 enum NativeEvent {
     PageLoadStarted,
     PageLoadFinished(String),
@@ -399,6 +449,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let diagnostic_bare_page = std::env::var(BARE_PAGE_ENV).is_ok_and(|value| value == "1");
     let diagnostic_interaction =
         std::env::var(INTERACTION_DIAGNOSTIC_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_settings_smoke =
+        std::env::var(SETTINGS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_settings_smoke {
+        println!("[Settings][Smoke] settings capability smoke probe enabled");
+    }
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
@@ -543,6 +598,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 eprintln!("[Renderer][Interaction] probe failed: {error}");
                             }
                         }
+                        if diagnostic_settings_smoke {
+                            if let Err(error) = webview.evaluate_script(SETTINGS_SMOKE_SCRIPT) {
+                                eprintln!("[Settings][Smoke] probe failed: {error}");
+                            }
+                        }
                     }
                 }
             }
@@ -573,6 +633,58 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 "[Bridge][Metrics] ping request-response latency: {:.3} ms",
                                 received_at.elapsed().as_secs_f64() * 1000.0
                             );
+                        }
+                        BridgeCommand::SettingsGetConfig(_) => {
+                            // Read-only capability: no renderer parameters exist
+                            // by protocol, and the settings path is built from
+                            // the fixed host profile directory only.
+                            let request_id = request.request_id;
+                            match load_settings(&profile_path) {
+                                Ok(load) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::SettingsConfig(
+                                            Box::new(SettingsConfigResponse {
+                                                settings: load.snapshot,
+                                                source: load.source.as_str(),
+                                                payload_bytes: load.payload_bytes,
+                                            }),
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Settings][Metrics] source={} payload_bytes={} request_latency_ms={:.3}",
+                                        load.source.as_str(),
+                                        load.payload_bytes,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("[Settings][settings_unavailable] {error}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "SETTINGS_UNAVAILABLE",
+                                            message: error,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
                         }
                         BridgeCommand::ModVencordGetBundle(_) => {
                             let descriptor = VENCORD_MOD;
@@ -965,6 +1077,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     BridgeEvent::InteractionProbe(payload) => {
                         println!("[Renderer][Interaction] {}", payload.phase);
                     }
+                    BridgeEvent::SettingsProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Settings][Smoke] ok=true source={} payload_bytes={} block_power_saving={}",
+                                payload.source, payload.payload_bytes, payload.block_power_saving
+                            );
+                        } else {
+                            eprintln!(
+                                "[Settings][Smoke] ok=false source={} error={}",
+                                payload.source,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
                 }
             }
             _ => {
@@ -1128,5 +1254,47 @@ mod tests {
         assert!(!is_trusted_bridge_origin(
             &"https://example.com/app".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn settings_requests_require_the_stable_discord_origin() {
+        // The origin gate runs before command dispatch, so a settings
+        // capability request from any other origin never reaches the
+        // settings reader, including lookalike hosts.
+        assert!(is_trusted_bridge_origin(
+            &"https://discord.com/app".parse().unwrap()
+        ));
+        assert!(!is_trusted_bridge_origin(
+            &"https://discord.com.attacker.invalid/app".parse().unwrap()
+        ));
+        assert!(!is_trusted_bridge_origin(
+            &"https://example.com/app".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_exactly_the_settings_capability() {
+        use crate::protocol::PROTOCOL_VERSION;
+        assert_eq!(super::BOOT_SNAPSHOT.protocol_version, PROTOCOL_VERSION);
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.get_config"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.set_config"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.getConfig"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_async_settings_facade() {
+        let script = initialization_script(true).unwrap();
+        assert!(script.contains("settings_get_config"));
+        assert!(script.contains("settings_config"));
+        assert!(script.contains("settings.get_config"));
+        assert!(script.contains("getConfig"));
+        // The facade must be asynchronous: no synchronous IPC emulation.
+        assert!(!script.contains("sendSync"));
     }
 }
