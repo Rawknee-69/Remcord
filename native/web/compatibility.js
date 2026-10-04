@@ -54,26 +54,36 @@
                 payload: { kind, message: truncateUtf8(message, 2048) },
             });
         } catch {
-            // Error reporting must not interfere with Discord's error handling.
+            console.error("[Legcord native] renderer error could not be sent to the host", {
+                kind,
+                message,
+            });
         }
     }
 
-    function ping(nonce) {
-        if (typeof nonce !== "string" || nonce.length === 0 || textEncoder.encode(nonce).length > 128) {
-            return Promise.reject(new TypeError("nonce must be a non-empty string of at most 128 UTF-8 bytes"));
+    function describeRendererError(error) {
+        try {
+            if (error && typeof error.stack === "string") return error.stack;
+            return String(error);
+        } catch {
+            return "[unprintable renderer error]";
         }
+    }
 
+    function request(command, timeoutMs = 5000) {
         const requestId = nextId();
-        return new Promise((resolve, reject) => {
+        const pendingRequest = new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 pending.delete(requestId);
-                reject(new Error("Native bridge request timed out"));
-            }, 5000);
-            pending.set(requestId, { resolve, reject, timer });
+                const error = new Error("Native bridge request timed out");
+                error.code = "REQUEST_TIMEOUT";
+                reject(error);
+            }, timeoutMs);
+            pending.set(requestId, { resolve, reject, timer, command: command.type });
             try {
                 post({
                     request_id: requestId,
-                    command: { type: "ping", payload: { nonce } },
+                    command,
                 });
             } catch (error) {
                 clearTimeout(timer);
@@ -81,6 +91,30 @@
                 reject(error);
             }
         });
+        Object.defineProperty(pendingRequest, "requestId", { value: requestId });
+        return pendingRequest;
+    }
+
+    function ping(nonce) {
+        if (typeof nonce !== "string" || nonce.length === 0 || textEncoder.encode(nonce).length > 128) {
+            return Promise.reject(new TypeError("nonce must be a non-empty string of at most 128 UTF-8 bytes"));
+        }
+
+        return request({ type: "ping", payload: { nonce } });
+    }
+
+    function getVencordBundle() {
+        requireCapability("mod.vencord.get_bundle");
+        return request({ type: "mod_vencord_get_bundle", payload: {} }, 120_000);
+    }
+
+    function requireCapability(capability) {
+        if (typeof capability !== "string" || !capabilities.has(capability)) {
+            const error = new Error(`Native capability is not available: ${String(capability)}`);
+            error.code = "UNSUPPORTED_CAPABILITY";
+            throw error;
+        }
+        return true;
     }
 
     window.addEventListener("legcord-native:response", (event) => {
@@ -93,18 +127,45 @@
 
         clearTimeout(request.timer);
         pending.delete(response.request_id);
-        if (response.ok === true && response.payload && typeof response.payload.nonce === "string") {
-            request.resolve(response.payload);
+        if (response.ok === true && response.payload?.type === "ping") {
+            const payload = response.payload.payload;
+            if (!payload || typeof payload.nonce !== "string" || typeof payload.message !== "string") {
+                request.reject(new Error("Native ping response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
             try {
                 sendEvent({
                     type: "round_trip_ack",
-                    payload: { nonce: response.payload.nonce },
+                    payload: { nonce: payload.nonce },
                 });
             } catch (error) {
                 reportRendererError("bridge_event", error);
             }
+        } else if (response.ok === true && response.payload?.type === "vencord_bundle") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.bundle_version !== "string" ||
+                !Number.isSafeInteger(payload.bundle_bytes) ||
+                !Number.isSafeInteger(payload.css_bytes) ||
+                !Number.isFinite(payload.request_latency_ms) ||
+                !Number.isFinite(payload.retrieval_ms) ||
+                !Number.isFinite(payload.execution_ms) ||
+                !Number.isFinite(payload.css_injection_ms) ||
+                payload.marker !== "vencord-bootstrap-executed" ||
+                payload.document_execution_count !== 1
+            ) {
+                request.reject(new Error("Native Vencord response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
-            request.reject(new Error("Native bridge request failed"));
+            const error = new Error(
+                typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
+            );
+            if (typeof response.error?.code === "string") error.code = response.error.code;
+            request.reject(error);
         }
     });
 
@@ -121,10 +182,11 @@
     );
 
     window.addEventListener("error", (event) => {
-        reportRendererError("uncaught", event.message || "Uncaught renderer error");
+        const location = event.filename ? ` (${event.filename}:${event.lineno}:${event.colno})` : "";
+        reportRendererError("uncaught", `${event.message || "Uncaught renderer error"}${location}`);
     });
     window.addEventListener("unhandledrejection", (event) => {
-        reportRendererError("unhandled_rejection", event.reason);
+        reportRendererError("unhandled_rejection", describeRendererError(event.reason));
     });
 
     const originalConsoleError = console.error.bind(console);
@@ -134,11 +196,7 @@
             "console.error",
             values
                 .map((value) => {
-                    try {
-                        return String(value);
-                    } catch {
-                        return "[unprintable renderer error]";
-                    }
+                    return describeRendererError(value);
                 })
                 .join(" "),
         );
@@ -148,6 +206,7 @@
     const capabilities = new Set(snapshot.capabilities);
     const native = Object.freeze({
         ping,
+        getVencordBundle,
         reportCss(value) {
             sendEvent({
                 type: "css_probe",
@@ -157,14 +216,7 @@
         supports(capability) {
             return typeof capability === "string" && capabilities.has(capability);
         },
-        requireCapability(capability) {
-            if (typeof capability !== "string" || !capabilities.has(capability)) {
-                const error = new Error(`Native capability is not available: ${String(capability)}`);
-                error.code = "UNSUPPORTED_CAPABILITY";
-                throw error;
-            }
-            return true;
-        },
+        requireCapability,
     });
 
     Object.defineProperty(window, "legcord", {

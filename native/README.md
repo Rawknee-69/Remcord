@@ -33,11 +33,13 @@ Close the native window to drop the WebView and its profile lock cleanly. Discor
 - Navigates to `https://discord.com/app`.
 - Registers the main-frame initialization script before the first navigation.
 - Injects a CSS custom-property probe after page load and reports its computed value.
-- Registers a document-start script that exposes only the initial `window.legcord` compatibility facade on the exact `https://discord.com` origin. The facade contains an immutable native boot snapshot and `native.ping`, `native.supports`, `native.requireCapability`, and the CSS probe diagnostic. Rust accepts only the versioned `ping` command and `round_trip_ack`, `css_probe`, `renderer_error`, and `bootstrap_metrics` events; it does not expose generic host invocation.
-- Logs navigation, popup decisions, renderer console errors, uncaught errors, unhandled rejections, and bridge/injection status to the launch console. Bridge messages are accepted only from the stable `https://discord.com` origin.
+- Registers the compatibility facade and an explicit Vencord adapter at document start on the exact `https://discord.com` origin. The facade exposes `native.ping` and the fixed `native.getVencordBundle` operation; Rust accepts only those typed requests and their documented diagnostic/lifecycle events. It does not expose generic host invocation, filesystem access, or renderer-supplied JavaScript.
+- Retrieves only Vencord's fixed `browser.js` and `browser.css` release assets, caching only `vencord.js` and `vencord.css` inside `E:\Legcord.webview-dev-user-data`. Rust executes the fixed JS bundle in the page world, then appends/replaces one identified Vencord style element. A private document-local marker is set only after `globalThis.Vencord` is present.
+- Resets pending requests, marker state, style state, and native duplicate guards on a full navigation/reload. Stale bundle results from an older document are discarded.
+- Logs navigation, popup decisions, renderer console errors, uncaught errors with source locations, unhandled-rejection stacks, page path/readiness/storage API health, and bridge/injection status to the launch console. Bridge messages are accepted only from the stable `https://discord.com` origin.
 - Records bootstrap script bytes, document-start execution time, request/response latency, and accepted bridge message/request/event/response counts. Allocation counts are not measured.
 
-This is not the compatibility layer. No Electron APIs, existing renderer mods, production build scripts, or production profile are wired to this prototype.
+This is not the compatibility layer. No Electron APIs, existing renderer mods, production build scripts, or production profile are wired to this prototype. Vencord is the only real client-mod path in this milestone; Shelter, Equicord, custom bundles, runtime plugins, and broader Legcord features remain deferred.
 
 `native/COMPATIBILITY.md` records the inspected Electron renderer/preload contract, every repository `sendSync` category, snapshot-versus-async migration decisions, and the explicitly deferred compatibility surface. The existing `src/` implementation has not been changed.
 
@@ -51,8 +53,14 @@ cargo clippy --manifest-path .\native\Cargo.toml --all-targets -- -D warnings
 node --test .\native\tests\compatibility.test.mjs
 ```
 
-Run the targeted JavaScript style check from the repository root with `.\node_modules\.bin\biome.exe check native\web\compatibility.js native\tests\compatibility.test.mjs`.
+Run the targeted JavaScript style check from the repository root with `.\node_modules\.bin\biome.exe check native\web\compatibility.js native\web\mods\vencord\adapter.js native\tests\compatibility.test.mjs`.
 
 The last check links the Windows desktop executable and therefore requires the Microsoft C++ Build Tools in addition to the Rust MSVC target.
 
-For an opt-in one-time reload smoke test, set `LEGCORD_NATIVE_SMOKE_RELOAD=1` before launch. The first successful facade request/response triggers exactly one `window.location.reload()`; normal launches do not force a reload. A new document gets a new facade and request-correlation state.
+For an opt-in Vencord reload smoke test, set `LEGCORD_NATIVE_SMOKE_RELOAD=1` (or `2` for multiple reloads) before launch. Each successful Vencord execution marker and renderer acknowledgement triggers `window.location.reload()` until the count is exhausted; normal launches do not force a reload. Each reload produces one fresh adapter/bootstrap in the new document.
+
+For a controlled DEV-only baseline, set `LEGCORD_NATIVE_DIAGNOSTIC_NO_VENCORD=1` before launch. This omits the automatic Vencord adapter while retaining the same WebView profile, Discord navigation, and health/error diagnostics; unset it to restore normal behavior. The page health log includes the `localStorage` property descriptors and `Storage` constructor type to help identify page-side replacement versus WebView API availability.
+
+For an unmodified Discord/WebView comparison, set `LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE=1`. This injects only a document-start storage observation and the read-only page-health query; it omits the compatibility facade, Vencord adapter, CSS probe, and bridge probe.
+
+For a one-time interaction probe, set `LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION=1`. If no composer is open, it navigates to the first visible existing channel link, then focuses an empty message composer, types a character, erases it, and reports `channel_navigation_requested`, `composer_focused`, `input_observed`, and `character_erased`. It refuses to type when the composer is non-empty, captures no message content, and never submits a message.

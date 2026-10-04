@@ -3,15 +3,20 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const bootstrap = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8").replace(
-    "__LEGCORD_BOOT_SNAPSHOT__",
-    JSON.stringify({
-        runtime: "webview2",
-        platform: "win32",
-        protocol_version: 1,
-        capabilities: ["bridge.ping"],
-    }),
-);
+const bootstrapTemplate = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+const vencordAdapter = readFileSync(new URL("../web/mods/vencord/adapter.js", import.meta.url), "utf8");
+
+function createBootstrap(capabilities) {
+    return bootstrapTemplate.replace(
+        "__LEGCORD_BOOT_SNAPSHOT__",
+        JSON.stringify({
+            runtime: "webview2",
+            platform: "win32",
+            protocol_version: 1,
+            capabilities,
+        }),
+    );
+}
 
 class FakeCustomEvent {
     constructor(type, options = {}) {
@@ -47,7 +52,7 @@ class FakeWindow {
     }
 }
 
-function createRuntime(origin) {
+function createRuntime(origin = "https://discord.com", capabilities = ["bridge.ping", "mod.vencord.get_bundle"]) {
     const window = new FakeWindow(origin);
     const context = vm.createContext({
         window,
@@ -67,18 +72,46 @@ function createRuntime(origin) {
         TypeError,
         String,
     });
-    vm.runInContext(bootstrap, context);
+    vm.runInContext(createBootstrap(capabilities), context);
     return { window, context };
 }
 
-function respond(window, request, payload) {
+function respondPing(window, request, payload) {
     window.dispatchEvent(
         new FakeCustomEvent("legcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
                 ok: true,
-                payload,
+                payload: { type: "ping", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondVencord(window, request, payload = {}) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "vencord_bundle",
+                    payload: {
+                        bundle_version: "b52ed36",
+                        bundle_bytes: 1000,
+                        css_bytes: 250,
+                        request_latency_ms: 20,
+                        retrieval_ms: 10,
+                        execution_ms: 3,
+                        css_injection_ms: 2,
+                        marker: "vencord-bootstrap-executed",
+                        document_execution_count: 1,
+                        ...payload,
+                    },
+                },
                 error: null,
             },
         }),
@@ -92,6 +125,7 @@ test("initializes a frozen compatibility facade with the boot snapshot", () => {
     assert.equal(window.legcord.boot.platform, "win32");
     assert.equal(Object.isFrozen(window.legcord), true);
     assert.equal(Object.isFrozen(window.legcord.boot), true);
+    assert.equal(window.legcord.native.supports("mod.vencord.get_bundle"), true);
     assert.equal(
         window.messages.some((message) => message.event?.type === "bootstrap_metrics"),
         true,
@@ -115,8 +149,8 @@ test("correlates asynchronous responses independently of their arrival order", a
     const requests = window.messages.filter((message) => message.command?.type === "ping");
     assert.equal(requests.length, 2);
 
-    respond(window, requests[1], { nonce: "second", message: "pong" });
-    respond(window, requests[0], { nonce: "first", message: "pong" });
+    respondPing(window, requests[1], { nonce: "second", message: "pong" });
+    respondPing(window, requests[0], { nonce: "first", message: "pong" });
     assert.deepEqual(await Promise.all([first, second]), [
         { nonce: "first", message: "pong" },
         { nonce: "second", message: "pong" },
@@ -144,7 +178,7 @@ test("disposes pending requests on navigation and initializes fresh document sta
     assert.ok(nextDocument.window.legcord);
     const request = nextDocument.window.legcord.native.ping("reloaded");
     const nextPing = nextDocument.window.messages.find((message) => message.command?.type === "ping");
-    respond(nextDocument.window, nextPing, { nonce: "reloaded", message: "pong" });
+    respondPing(nextDocument.window, nextPing, { nonce: "reloaded", message: "pong" });
     assert.deepEqual(await request, { nonce: "reloaded", message: "pong" });
     assert.equal(firstDocument.window.legcord === nextDocument.window.legcord, false);
 });
@@ -153,4 +187,131 @@ test("does not expose the facade outside the exact trusted origin", () => {
     const { window } = createRuntime("https://canary.discord.com");
     assert.equal(window.legcord, undefined);
     assert.equal(window.messages.length, 0);
+});
+
+test("reports renderer exception stacks and source locations to the native log", () => {
+    const { window } = createRuntime();
+    window.dispatchEvent({
+        type: "error",
+        message: "script failed",
+        filename: "https://discord.com/assets/app.js",
+        lineno: 12,
+        colno: 4,
+    });
+    window.dispatchEvent({
+        type: "unhandledrejection",
+        reason: new Error("settings access failed"),
+    });
+    const reports = window.messages.filter((message) => message.event?.type === "renderer_error");
+    assert.match(reports[0].event.payload.message, /assets\/app\.js:12:4/);
+    assert.match(reports[1].event.payload.message, /settings access failed/);
+});
+
+test("requests only the typed Vencord capability and validates its response schema", async () => {
+    const { window } = createRuntime();
+    const request = window.legcord.native.getVencordBundle();
+    const message = window.messages.find((entry) => entry.command?.type === "mod_vencord_get_bundle");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "mod_vencord_get_bundle", payload: {} });
+    assert.equal(request.requestId, message.request_id);
+
+    respondVencord(window, message);
+    assert.equal((await request).marker, "vencord-bootstrap-executed");
+});
+
+test("rejects malformed Vencord responses", async () => {
+    const { window } = createRuntime();
+    const request = window.legcord.native.getVencordBundle();
+    const message = window.messages.find((entry) => entry.command?.type === "mod_vencord_get_bundle");
+    respondVencord(window, message, { document_execution_count: 2 });
+    await assert.rejects(request, /response schema is invalid/);
+});
+
+test("propagates a typed bundle failure without reclassifying it as adapter initialization", async () => {
+    const { window, context } = createRuntime();
+    vm.runInContext(vencordAdapter, context);
+    const request = window.messages.find((message) => message.command?.type === "mod_vencord_get_bundle");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "bundle_retrieval", message: "fixed Vencord asset unavailable" },
+            },
+        }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(window.__legcordNativeVencord.status, "failed");
+    assert.equal(
+        window.messages.some((message) => message.event?.type === "vencord_adapter_error"),
+        false,
+    );
+});
+
+test("denies Vencord startup when the boot snapshot does not grant the capability", () => {
+    const { window, context } = createRuntime("https://discord.com", ["bridge.ping"]);
+    vm.runInContext(vencordAdapter, context);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "mod_vencord_get_bundle"),
+        false,
+    );
+    assert.equal(
+        window.messages.some((message) => message.event?.type === "vencord_adapter_error"),
+        true,
+    );
+    assert.equal(window.__legcordNativeVencord.status, "failed");
+});
+
+test("Vencord adapter executes once and marks only the bootstrap result", async () => {
+    const { window, context } = createRuntime();
+    vm.runInContext(vencordAdapter, context);
+    vm.runInContext(vencordAdapter, context);
+    const request = window.messages.find((message) => message.command?.type === "mod_vencord_get_bundle");
+    assert.ok(request);
+    assert.equal(window.messages.filter((message) => message.command?.type === "mod_vencord_get_bundle").length, 1);
+    assert.equal(window.__legcordNativeVencord.status, "pending");
+
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:vencord-bootstrap", {
+            detail: {
+                request_id: request.request_id,
+                ok: true,
+                marker: "vencord-bootstrap-executed",
+                execution_ms: 3,
+                local_storage_api: "available",
+                settings_state: "missing",
+            },
+        }),
+    );
+    respondVencord(window, request);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(window.__legcordNativeVencord.status, "executed");
+    assert.equal(window.__legcordNativeVencord.marker, "vencord-bootstrap-executed");
+    assert.equal(window.__legcordNativeVencord.executionCount, 1);
+    const bootstrapResult = window.messages.find((message) => message.event?.type === "vencord_bootstrap_result");
+    assert.equal(bootstrapResult.event.payload.local_storage_api, "available");
+    assert.equal(bootstrapResult.event.payload.settings_state, "missing");
+    assert.equal(
+        window.messages.some((message) => message.event?.type === "vencord_response_ack"),
+        true,
+    );
+});
+
+test("a fresh document gets independent Vencord bootstrap state", () => {
+    const firstDocument = createRuntime();
+    vm.runInContext(vencordAdapter, firstDocument.context);
+    const secondDocument = createRuntime();
+    vm.runInContext(vencordAdapter, secondDocument.context);
+    assert.notEqual(firstDocument.window.__legcordNativeVencord, secondDocument.window.__legcordNativeVencord);
+    assert.equal(secondDocument.window.__legcordNativeVencord.status, "pending");
+    assert.equal(
+        secondDocument.window.messages.filter((message) => message.command?.type === "mod_vencord_get_bundle").length,
+        1,
+    );
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    secondDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
 });
