@@ -140,3 +140,38 @@ test("the update checker native path is a deliberate separate branch", () => {
     assert.doesNotMatch(heroUpdater, /sendSync/);
     assert.doesNotMatch(heroUpdater, /invoke\(/);
 });
+
+test("preload keeps the scoped plugin-storage fs bridge", () => {
+    // Third-party plugin API: scoped (pluginId, relativePath) over the
+    // pluginWriteFile/pluginReadFile channels. The native milestone adds a
+    // separate typed capability and must not rewrite this contract.
+    assert.match(bridge, /writeFile:\s*\(pluginId:\s*string, relativePath:\s*string, data:\s*string\)/);
+    assert.match(bridge, /readFile:\s*\(pluginId:\s*string, relativePath:\s*string\)/);
+    assert.match(bridge, /ipcRenderer\.invoke\("pluginWriteFile", pluginId, relativePath, data\)/);
+    assert.match(bridge, /ipcRenderer\.invoke\("pluginReadFile", pluginId, relativePath\)/);
+});
+
+test("main keeps the gated pluginWriteFile/pluginReadFile handlers", () => {
+    assert.match(ipc, /ipcMain\.handle\(\s*"pluginWriteFile"/);
+    assert.match(ipc, /ipcMain\.handle\(\s*"pluginReadFile"/);
+    assert.match(ipc, /if\s*\(!getConfig\("extendedPluginAbilities"\)\)/);
+    assert.match(ipc, /EXTENSION_DISABLED/);
+    assert.match(ipc, /function sanitizePluginId/);
+    assert.match(ipc, /function resolvePluginFilePath/);
+});
+
+test("declared window.legcord fs contract stays scoped", () => {
+    assert.match(types, /fs:\s*\{/);
+    assert.match(types, /writeFile:\s*\(/);
+    assert.match(types, /readFile:\s*\(/);
+});
+
+test("no src caller is migrated to a native plugin-storage path in this milestone", () => {
+    // There are no in-repository window.legcord.fs callers: the contract is
+    // a public third-party plugin API. This milestone therefore branches no
+    // src/ caller; a DEV-only native smoke probe exercises the contract.
+    assert.doesNotMatch(power, /pluginStorage/);
+    assert.doesNotMatch(shelterSettings, /pluginStorage/);
+    assert.doesNotMatch(heroUpdater, /pluginStorage/);
+    assert.doesNotMatch(invite, /pluginStorage/);
+});

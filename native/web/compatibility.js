@@ -163,6 +163,55 @@
         return request({ type: "app_get_version", payload: {} }, timeoutMs).then((payload) => payload.version);
     }
 
+    const PLUGIN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+    const MAX_PLUGIN_STORAGE_BYTES = 1048576;
+
+    function checkPluginStorageArgs(pluginId, relativePath) {
+        if (typeof pluginId !== "string" || !PLUGIN_ID_PATTERN.test(pluginId)) {
+            return "pluginId must match [A-Za-z0-9_-]{1,64}";
+        }
+        if (
+            typeof relativePath !== "string" ||
+            relativePath.length === 0 ||
+            textEncoder.encode(relativePath).length > 256
+        ) {
+            return "relativePath must be a non-empty string of at most 256 UTF-8 bytes";
+        }
+        return null;
+    }
+
+    function readPluginFile(pluginId, relativePath, timeoutMs = 5000) {
+        requireCapability("plugin_storage.read");
+        const invalid = checkPluginStorageArgs(pluginId, relativePath);
+        if (invalid) return Promise.reject(new TypeError(invalid));
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request(
+            { type: "plugin_storage_read", payload: { plugin_id: pluginId, relative_path: relativePath } },
+            timeoutMs,
+        ).then((payload) => payload.data);
+    }
+
+    function writePluginFile(pluginId, relativePath, data, timeoutMs = 5000) {
+        requireCapability("plugin_storage.write");
+        const invalid = checkPluginStorageArgs(pluginId, relativePath);
+        if (invalid) return Promise.reject(new TypeError(invalid));
+        if (typeof data !== "string" || textEncoder.encode(data).length > MAX_PLUGIN_STORAGE_BYTES) {
+            return Promise.reject(new TypeError("data must be a string of at most 1048576 UTF-8 bytes"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request(
+            {
+                type: "plugin_storage_write",
+                payload: { plugin_id: pluginId, relative_path: relativePath, data },
+            },
+            timeoutMs,
+        ).then((payload) => payload.payload_bytes);
+    }
+
     function requireCapability(capability) {
         if (typeof capability !== "string" || !capabilities.has(capability)) {
             const error = new Error(`Native capability is not available: ${String(capability)}`);
@@ -265,6 +314,31 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "plugin_storage_read") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.data !== "string" ||
+                textEncoder.encode(payload.data).length > MAX_PLUGIN_STORAGE_BYTES ||
+                !Number.isSafeInteger(payload.payload_bytes) ||
+                payload.payload_bytes !== textEncoder.encode(payload.data).length
+            ) {
+                request.reject(new Error("Native plugin storage response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "plugin_storage_write") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                !Number.isSafeInteger(payload.payload_bytes) ||
+                payload.payload_bytes < 0 ||
+                payload.payload_bytes > MAX_PLUGIN_STORAGE_BYTES
+            ) {
+                request.reject(new Error("Native plugin storage response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -325,11 +399,12 @@
         requireCapability,
     });
     const settings = Object.freeze({ getConfig, setBlockPowerSavingInVoiceChat });
+    const pluginStorage = Object.freeze({ readFile: readPluginFile, writeFile: writePluginFile });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
-        value: Object.freeze({ boot: snapshot, native, settings, getLang }),
+        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage }),
     });
 
     try {

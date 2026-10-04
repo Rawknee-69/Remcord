@@ -1026,3 +1026,176 @@ test("document-start storage preservation survives Discord deleting window.local
     assert.equal(FakeStorageCtor.prototype.localStorage, storage);
     assert.equal(typeof FakeStorageCtor.prototype.localStorage.getItem, "function");
 });
+
+function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondPluginRead(window, request, data = "hello legcord") {
+    const bytes = new TextEncoder().encode(data).length;
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "plugin_storage_read", payload: { data, payload_bytes: bytes } },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondPluginWrite(window, request, payloadBytes = 5) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "plugin_storage_write", payload: { payload_bytes: payloadBytes } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a namespaced pluginStorage capability and no generic fs", () => {
+    const { window } = createPluginStorageRuntime();
+    assert.equal(typeof window.legcord.pluginStorage.readFile, "function");
+    assert.equal(typeof window.legcord.pluginStorage.writeFile, "function");
+    assert.equal(Object.isFrozen(window.legcord.pluginStorage), true);
+    assert.equal(window.legcord.native.supports("plugin_storage.read"), true);
+    assert.equal(window.legcord.native.supports("plugin_storage.write"), true);
+    // A generic filesystem abstraction must never exist.
+    assert.equal(window.legcord.fs, undefined);
+});
+
+test("pluginStorage.writeFile sends a scoped typed request and resolves bytes", async () => {
+    const { window } = createPluginStorageRuntime();
+    const pending = window.legcord.pluginStorage.writeFile("my-plugin", "cache/note.txt", "hello");
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_write");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "plugin_storage_write",
+        payload: { plugin_id: "my-plugin", relative_path: "cache/note.txt", data: "hello" },
+    });
+    respondPluginWrite(window, message, 5);
+    assert.equal(await pending, 5);
+});
+
+test("pluginStorage.readFile sends a scoped typed request and resolves text", async () => {
+    const { window } = createPluginStorageRuntime();
+    const pending = window.legcord.pluginStorage.readFile("my-plugin", "cache/note.txt");
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "plugin_storage_read",
+        payload: { plugin_id: "my-plugin", relative_path: "cache/note.txt" },
+    });
+    respondPluginRead(window, message, "hello legcord");
+    assert.equal(await pending, "hello legcord");
+});
+
+test("pluginStorage throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const denied = createPluginStorageRuntime(["bridge.ping"]);
+    assert.equal(denied.window.legcord.native.supports("plugin_storage.read"), false);
+    assert.equal(denied.window.legcord.native.supports("plugin_storage.write"), false);
+    assert.throws(
+        () => denied.window.legcord.pluginStorage.readFile("p", "a.txt"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => denied.window.legcord.pluginStorage.writeFile("p", "a.txt", "x"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        denied.window.messages.some((message) => message.command?.type === "plugin_storage_read"),
+        false,
+    );
+    assert.equal(
+        denied.window.messages.some((message) => message.command?.type === "plugin_storage_write"),
+        false,
+    );
+});
+
+test("pluginStorage rejects malformed requests without sending", async () => {
+    const { window } = createPluginStorageRuntime();
+    await assert.rejects(window.legcord.pluginStorage.readFile("", "a.txt"), /pluginId/);
+    await assert.rejects(window.legcord.pluginStorage.readFile("a/b", "a.txt"), /pluginId/);
+    await assert.rejects(window.legcord.pluginStorage.readFile("p", ""), /relativePath/);
+    await assert.rejects(window.legcord.pluginStorage.writeFile("p", "a.txt", 42), /data must be a string/);
+    await assert.rejects(window.legcord.pluginStorage.writeFile(42, "a.txt", "x"), /pluginId/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type?.startsWith("plugin_storage")),
+        false,
+    );
+});
+
+test("pluginStorage rejects malformed responses", async () => {
+    const { window } = createPluginStorageRuntime();
+    const pending = window.legcord.pluginStorage.readFile("p", "a.txt");
+    const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
+    respondPluginRead(window, message, 42);
+    await assert.rejects(pending, /plugin storage response schema is invalid/);
+
+    const second = createPluginStorageRuntime();
+    const pending2 = second.window.legcord.pluginStorage.writeFile("p", "a.txt", "x");
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "plugin_storage_write");
+    respondPluginWrite(second.window, message2, -1);
+    await assert.rejects(pending2, /plugin storage response schema is invalid/);
+});
+
+test("pluginStorage propagates typed host failures", async () => {
+    for (const code of ["NOT_FOUND", "INVALID_PATH", "EXTENSION_DISABLED", "TOO_LARGE"]) {
+        const { window } = createPluginStorageRuntime();
+        const pending = window.legcord.pluginStorage.readFile("p", "a.txt");
+        const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
+        window.dispatchEvent(
+            new FakeCustomEvent("legcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: false,
+                    payload: null,
+                    error: { code, message: code },
+                },
+            }),
+        );
+        await assert.rejects(pending, (error) => error.code === code);
+    }
+});
+
+test("pluginStorage rejects after its timeout", async () => {
+    const { window } = createPluginStorageRuntime();
+    await assert.rejects(window.legcord.pluginStorage.readFile("p", "a.txt", 50), /timed out/);
+    await assert.rejects(window.legcord.pluginStorage.writeFile("p", "a.txt", "x", 50), /timed out/);
+});
+
+test("pluginStorage rejects pending requests when the document is disposed", async () => {
+    const { window } = createPluginStorageRuntime();
+    const read = window.legcord.pluginStorage.readFile("p", "a.txt");
+    const write = window.legcord.pluginStorage.writeFile("p", "a.txt", "x");
+    const readRejection = assert.rejects(read, /document was disposed/);
+    const writeRejection = assert.rejects(write, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await readRejection;
+    await writeRejection;
+});
+
+test("a reloaded document gets a fresh pluginStorage facade with no stale promises", async () => {
+    const firstDocument = createPluginStorageRuntime();
+    const stale = firstDocument.window.legcord.pluginStorage.readFile("p", "a.txt");
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createPluginStorageRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.pluginStorage.readFile("p", "a.txt");
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
+    respondPluginRead(nextDocument.window, message, "persisted");
+    assert.equal(await pending, "persisted");
+});

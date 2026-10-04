@@ -3,6 +3,9 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::localization::MAX_LANG_KEY_BYTES;
+use crate::plugin_storage::{
+    MAX_PLUGIN_FILE_BYTES, MAX_PLUGIN_ID_BYTES, MAX_PLUGIN_REL_PATH_BYTES,
+};
 use crate::settings::SettingsSnapshot;
 
 pub const PROTOCOL_VERSION: u8 = 1;
@@ -33,6 +36,8 @@ pub enum BridgeCommand {
     SettingsSetBlockPowerSaving(SettingsSetBlockPowerSavingRequest),
     LocalizationGetLang(LocalizationGetLangRequest),
     AppGetVersion(AppGetVersionRequest),
+    PluginStorageRead(PluginStorageReadRequest),
+    PluginStorageWrite(PluginStorageWriteRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +82,26 @@ pub struct LocalizationGetLangRequest {
 #[serde(deny_unknown_fields)]
 pub struct AppGetVersionRequest {}
 
+/// Scoped plugin-storage read: a logical plugin id plus a logical relative
+/// path. There is deliberately NO absolute path, root selector, URL, drive,
+/// or file-handle parameter: the host builds the root itself.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginStorageReadRequest {
+    pub plugin_id: String,
+    pub relative_path: String,
+}
+
+/// Scoped plugin-storage write: the same logical addressing as the read plus
+/// UTF-8 text data. No binary envelope, no path, no directory-creation flag.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginStorageWriteRequest {
+    pub plugin_id: String,
+    pub relative_path: String,
+    pub data: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -114,6 +139,10 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the app-version smoke probe
     /// (`LEGCORD_NATIVE_APP_VERSION_SMOKE=1`). Never sent by shipped code.
     AppVersionProbe(AppVersionProbe),
+    /// DEV-only diagnostic posted by the plugin-storage smoke probe
+    /// (`LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Never sent by shipped
+    /// code.
+    PluginStorageProbe(PluginStorageProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +255,22 @@ pub struct AppVersionProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the plugin-storage smoke probe. `stage` is
+/// `"write_read"` (write a fixture, read it back, verify bytes, then block
+/// three attack paths). `attacks_blocked` counts the traversal/absolute/
+/// drive attempts the facade or host rejected. The probe never carries file
+/// contents or host paths.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginStorageProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub payload_bytes: usize,
+    pub round_trip: bool,
+    pub attacks_blocked: u8,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
@@ -251,6 +296,8 @@ pub enum BridgeResponsePayload {
     SettingsMutation(SettingsMutationResponse),
     LocalizationString(LocalizationStringResponse),
     AppVersion(AppVersionResponse),
+    PluginStorageRead(PluginStorageReadResponse),
+    PluginStorageWrite(PluginStorageWriteResponse),
 }
 
 #[derive(Serialize)]
@@ -324,6 +371,21 @@ pub struct AppVersionResponse {
     pub version: String,
 }
 
+/// Scoped plugin-storage read response: the file text plus its byte length.
+/// No path, no metadata, no directory listing.
+#[derive(Serialize)]
+pub struct PluginStorageReadResponse {
+    pub data: String,
+    pub payload_bytes: usize,
+}
+
+/// Scoped plugin-storage write response: the persisted byte length. The
+/// envelope `ok` already signals success; no path is echoed back.
+#[derive(Serialize)]
+pub struct PluginStorageWriteResponse {
+    pub payload_bytes: usize,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -395,6 +457,28 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // rejected any renderer-supplied member), so no shape check
                 // is needed.
                 BridgeCommand::AppGetVersion(_) => {}
+                BridgeCommand::PluginStorageRead(payload) => {
+                    // Shape check only (presence + byte caps); charset,
+                    // traversal, drive/UNC, and containment rules live in
+                    // `plugin_storage` and are re-enforced at dispatch.
+                    if payload.plugin_id.is_empty()
+                        || payload.plugin_id.len() > MAX_PLUGIN_ID_BYTES
+                        || payload.relative_path.is_empty()
+                        || payload.relative_path.len() > MAX_PLUGIN_REL_PATH_BYTES
+                    {
+                        return Err("invalid plugin storage read".to_owned());
+                    }
+                }
+                BridgeCommand::PluginStorageWrite(payload) => {
+                    if payload.plugin_id.is_empty()
+                        || payload.plugin_id.len() > MAX_PLUGIN_ID_BYTES
+                        || payload.relative_path.is_empty()
+                        || payload.relative_path.len() > MAX_PLUGIN_REL_PATH_BYTES
+                        || payload.data.len() > MAX_PLUGIN_FILE_BYTES
+                    {
+                        return Err("invalid plugin storage write".to_owned());
+                    }
+                }
             }
         }
         BridgeMessage::Event(event) => {
@@ -542,6 +626,20 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || payload.ok == payload.error.is_some()
                     {
                         return Err("invalid app version probe result".to_owned());
+                    }
+                }
+                BridgeEvent::PluginStorageProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "write_read")
+                        || payload.payload_bytes > MAX_PLUGIN_FILE_BYTES
+                        || payload.attacks_blocked > 8
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok && (!payload.round_trip || payload.attacks_blocked != 3))
+                    {
+                        return Err("invalid plugin storage probe result".to_owned());
                     }
                 }
             }
@@ -992,5 +1090,104 @@ mod tests {
         assert!(parse_bridge_message(failed).is_ok());
         assert!(parse_bridge_message(&oversized).is_err());
         assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn accepts_scoped_plugin_storage_requests() {
+        let read = r#"{"version":1,"request_id":"ps-1","command":{"type":"plugin_storage_read","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt"}}}"#;
+        let write = r#"{"version":1,"request_id":"ps-2","command":{"type":"plugin_storage_write","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt","data":"hello"}}}"#;
+        assert!(matches!(
+            parse_bridge_message(read),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(write),
+            Ok(BridgeMessage::Request(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_generic_filesystem_shapes_for_plugin_storage() {
+        // No absolute path, URL, channel, key, or generic invoke surface.
+        let absolute = r#"{"version":1,"request_id":"ps-1","command":{"type":"plugin_storage_read","payload":{"plugin_id":"p","relative_path":"C:\\secret"}}}"#;
+        // Shape-level: absolute-looking input passes the parser byte check
+        // (strict traversal rejection lives in `plugin_storage`); unknown
+        // members must fail here.
+        assert!(parse_bridge_message(absolute).is_ok());
+        let with_path = r#"{"version":1,"request_id":"ps-2","command":{"type":"plugin_storage_read","payload":{"plugin_id":"p","relative_path":"a.txt","path":"C:\\secret"}}}"#;
+        let with_url = r#"{"version":1,"request_id":"ps-3","command":{"type":"plugin_storage_write","payload":{"plugin_id":"p","relative_path":"a.txt","data":"x","url":"https://attacker.invalid"}}}"#;
+        let invoke = r#"{"version":1,"request_id":"ps-4","command":{"type":"invoke","payload":{"method":"fs.readFile"}}}"#;
+        let fs_read = r#"{"version":1,"request_id":"ps-5","command":{"type":"fs_read_file","payload":{"path":"C:\\secret"}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(invoke).is_err());
+        assert!(parse_bridge_message(fs_read).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_plugin_storage_payloads() {
+        let empty_id = r#"{"version":1,"request_id":"ps-1","command":{"type":"plugin_storage_read","payload":{"plugin_id":"","relative_path":"a.txt"}}}"#;
+        let empty_path = r#"{"version":1,"request_id":"ps-2","command":{"type":"plugin_storage_read","payload":{"plugin_id":"p","relative_path":""}}}}"#;
+        let missing_data = r#"{"version":1,"request_id":"ps-3","command":{"type":"plugin_storage_write","payload":{"plugin_id":"p","relative_path":"a.txt"}}}"#;
+        let numeric_data = r#"{"version":1,"request_id":"ps-4","command":{"type":"plugin_storage_write","payload":{"plugin_id":"p","relative_path":"a.txt","data":42}}}"#;
+        let oversized_id = format!(
+            r#"{{"version":1,"request_id":"ps-5","command":{{"type":"plugin_storage_read","payload":{{"plugin_id":"{}","relative_path":"a.txt"}}}}}}"#,
+            "p".repeat(65)
+        );
+        assert!(parse_bridge_message(empty_id).is_err());
+        assert!(parse_bridge_message(empty_path).is_err());
+        assert!(parse_bridge_message(missing_data).is_err());
+        assert!(parse_bridge_message(numeric_data).is_err());
+        assert!(parse_bridge_message(&oversized_id).is_err());
+    }
+
+    #[test]
+    fn serializes_typed_plugin_storage_responses_without_paths() {
+        use super::{PluginStorageReadResponse, PluginStorageWriteResponse};
+        let read = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "ps-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::PluginStorageRead(
+                PluginStorageReadResponse {
+                    data: "hello".to_owned(),
+                    payload_bytes: 5,
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(read).unwrap();
+        assert_eq!(value["payload"]["type"], "plugin_storage_read");
+        assert_eq!(value["payload"]["payload"]["data"], "hello");
+        assert!(value["payload"]["payload"].get("path").is_none());
+
+        let write = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "ps-2".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::PluginStorageWrite(
+                PluginStorageWriteResponse { payload_bytes: 5 },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(write).unwrap();
+        assert_eq!(value["payload"]["type"], "plugin_storage_write");
+        assert_eq!(value["payload"]["payload"]["payload_bytes"], 5);
+        assert!(value["payload"]["payload"].get("data").is_none());
+        assert!(value["payload"]["payload"].get("path").is_none());
+    }
+
+    #[test]
+    fn validates_plugin_storage_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"plugin_storage_probe","payload":{"ok":true,"stage":"write_read","payload_bytes":32,"round_trip":true,"attacks_blocked":3,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"plugin_storage_probe","payload":{"ok":false,"stage":"write_read","payload_bytes":0,"round_trip":false,"attacks_blocked":0,"error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"plugin_storage_probe","payload":{"ok":true,"stage":"deleted","payload_bytes":1,"round_trip":true,"attacks_blocked":3,"error":null}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"plugin_storage_probe","payload":{"ok":true,"stage":"write_read","payload_bytes":1,"round_trip":true,"attacks_blocked":3,"error":"extra"}}}"#;
+        let missing_attacks = r#"{"version":1,"event":{"type":"plugin_storage_probe","payload":{"ok":true,"stage":"write_read","payload_bytes":1,"round_trip":true,"attacks_blocked":2,"error":null}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
+        assert!(parse_bridge_message(missing_attacks).is_err());
     }
 }

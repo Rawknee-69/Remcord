@@ -1,6 +1,7 @@
 mod app;
 mod localization;
 mod mod_substrate;
+mod plugin_storage;
 mod protocol;
 mod settings;
 
@@ -21,11 +22,13 @@ use mod_substrate::{
 
 use app::{current_app_version, validate_version};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
+use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
     parse_bridge_message, AppVersionResponse, BridgeCommand, BridgeError, BridgeEvent,
     BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
-    LocalizationStringResponse, PingResponse, RequestTracker, SettingsConfigResponse,
-    SettingsMutationResponse, VencordBundleResponse, PROTOCOL_VERSION,
+    LocalizationStringResponse, PingResponse, PluginStorageReadResponse,
+    PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
+    VencordBundleResponse, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use settings::{apply_block_power_saving, load_settings};
@@ -83,6 +86,7 @@ const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
 const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
+const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
 const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
@@ -96,6 +100,8 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "settings.set_block_power_saving_in_voice_chat",
         "localization.get_lang",
         "app.get_version",
+        "plugin_storage.read",
+        "plugin_storage.write",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -354,6 +360,69 @@ const APP_VERSION_SMOKE_SCRIPT: &str = r#"
   } catch (error) {
     fail(error);
   }
+})();
+"#;
+
+/// DEV-only plugin-storage smoke probe
+/// (`LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Exercises the exact public
+/// third-party contract (`window.legcord.pluginStorage.writeFile/readFile`,
+/// the native replacement for Electron's `window.legcord.fs` over
+/// `pluginWriteFile`/`pluginReadFile`): write a fixture under a temporary
+/// logical plugin id, read it back, verify exact bytes, then block three
+/// attack paths (traversal, absolute path, Windows drive path). Reported as
+/// one typed `plugin_storage_probe` event per document with
+/// `stage: "write_read"`. Never touches real user plugin namespaces.
+const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const PLUGIN_ID = "legcordNativeProbe";
+  const REL_PATH = "smoke/note.txt";
+  const CONTENT = "legcord-native-plugin-storage-smoke-v1";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "plugin_storage_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "write_read", payload_bytes: 0,
+    round_trip: false, attacks_blocked: 0,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  const expectReject = async (pending) => {
+    try {
+      await pending;
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  (async () => {
+    try {
+      const storage = window.legcord?.pluginStorage;
+      if (typeof storage?.writeFile !== "function" || typeof storage?.readFile !== "function") {
+        fail("plugin storage facade missing");
+        return;
+      }
+      if (window.legcord.fs !== undefined) {
+        fail("generic fs facade must not exist");
+        return;
+      }
+      const bytes = await storage.writeFile(PLUGIN_ID, REL_PATH, CONTENT);
+      const data = await storage.readFile(PLUGIN_ID, REL_PATH);
+      const blockedTraversal = await expectReject(storage.readFile(PLUGIN_ID, "../escape.txt"));
+      const blockedAbsolute = await expectReject(storage.readFile(PLUGIN_ID, "/absolute/path.txt"));
+      const blockedDrive = await expectReject(storage.readFile(PLUGIN_ID, "C:\\secret.txt"));
+      const attacksBlocked = [blockedTraversal, blockedAbsolute, blockedDrive].filter(Boolean).length;
+      const roundTrip = data === CONTENT;
+      probe({
+        ok: roundTrip && attacksBlocked === 3 && bytes === CONTENT.length,
+        stage: "write_read",
+        payload_bytes: data.length,
+        round_trip: roundTrip,
+        attacks_blocked: attacksBlocked,
+        error: null,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  })();
 })();
 "#;
 
@@ -668,6 +737,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_app_version_smoke {
         println!("[App][Smoke] app version capability smoke probe enabled");
     }
+    let diagnostic_plugin_storage_smoke =
+        std::env::var(PLUGIN_STORAGE_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_plugin_storage_smoke {
+        println!("[PluginStorage][Smoke] plugin storage capability smoke probe enabled");
+    }
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
@@ -848,6 +922,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_app_version_smoke {
                             if let Err(error) = webview.evaluate_script(APP_VERSION_SMOKE_SCRIPT) {
                                 eprintln!("[App][Smoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_plugin_storage_smoke {
+                            if let Err(error) = webview.evaluate_script(PLUGIN_STORAGE_SMOKE_SCRIPT) {
+                                eprintln!("[PluginStorage][Smoke] probe failed: {error}");
                             }
                         }
                     }
@@ -1064,6 +1143,119 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 version.len(),
                                 received_at.elapsed().as_secs_f64() * 1000.0
                             );
+                        }
+                        BridgeCommand::PluginStorageRead(payload) => {
+                            // Scoped read: the id/path shape was checked by
+                            // the protocol parser; strict validation,
+                            // gate, and canonical containment run here.
+                            // The host builds the root from the fixed
+                            // profile directory only.
+                            let request_id = request.request_id;
+                            match read_plugin_file(
+                                &profile_path,
+                                &payload.plugin_id,
+                                &payload.relative_path,
+                            ) {
+                                Ok(read) => {
+                                    let payload_bytes = read.payload_bytes;
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::PluginStorageRead(
+                                                PluginStorageReadResponse {
+                                                    data: read.data,
+                                                    payload_bytes,
+                                                },
+                                            ),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[PluginStorage][Metrics] op=read payload_bytes={payload_bytes} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[PluginStorage][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::PluginStorageWrite(payload) => {
+                            // Scoped write: same addressing as the read plus
+                            // bounded text data. Parent directories are
+                            // created ONLY inside the validated namespace
+                            // and the write is atomic (temp + rename).
+                            let request_id = request.request_id;
+                            match write_plugin_file(
+                                &profile_path,
+                                &payload.plugin_id,
+                                &payload.relative_path,
+                                &payload.data,
+                            ) {
+                                Ok(written) => {
+                                    let payload_bytes = written.payload_bytes;
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::PluginStorageWrite(
+                                                PluginStorageWriteResponse { payload_bytes },
+                                            ),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[PluginStorage][Metrics] op=write payload_bytes={payload_bytes} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[PluginStorage][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
                         }
                         BridgeCommand::ModVencordGetBundle(_) => {
                             let descriptor = VENCORD_MOD;
@@ -1549,6 +1741,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     }
+                    BridgeEvent::PluginStorageProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[PluginStorage][Smoke] ok=true stage={} payload_bytes={} round_trip={} attacks_blocked={}",
+                                payload.stage,
+                                payload.payload_bytes,
+                                payload.round_trip,
+                                payload.attacks_blocked
+                            );
+                        } else {
+                            eprintln!(
+                                "[PluginStorage][Smoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
                 }
             }
             _ => {
@@ -1875,5 +2084,53 @@ mod tests {
     fn embedded_app_version_keeps_a_servable_shape() {
         // The startup gate serves this constant on every request.
         assert!(super::validate_version(super::current_app_version()).is_ok());
+    }
+
+    #[test]
+    fn boot_snapshot_grants_exactly_the_plugin_storage_capabilities() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"plugin_storage.read"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"plugin_storage.write"));
+        // No generic filesystem surface may exist alongside the scoped pair.
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"fs.readFile"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"fs.writeFile"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"plugin_storage"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_plugin_storage_facade() {
+        let script = initialization_script(true).unwrap();
+        assert!(script.contains("plugin_storage_read"));
+        assert!(script.contains("plugin_storage_write"));
+        assert!(script.contains("plugin_storage.read"));
+        assert!(script.contains("plugin_storage.write"));
+        assert!(script.contains("pluginStorage"));
+        // The facade must be asynchronous and namespaced: no generic fs
+        // object and no synchronous IPC emulation.
+        assert!(!script.contains("window.legcord.fs"));
+        assert!(!script.contains("legcord.fs"));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn plugin_storage_smoke_probe_uses_only_the_typed_capability() {
+        assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("pluginStorage"));
+        assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("plugin_storage_probe"));
+        assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("legcordNativeProbe"));
+        assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("../escape.txt"));
+        assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("sendSync"));
+        // The probe asserts the generic facade is ABSENT (`window.legcord.fs
+        // !== undefined` check); what must never appear is a generic fs
+        // method call.
+        assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("fs.readFile"));
+        assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("fs.writeFile"));
+        assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("C:\\Users"));
     }
 }
