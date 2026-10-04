@@ -517,10 +517,16 @@ pub fn mod_marker_script(
 /// event: theme injection is a host push (the renderer never requests theme
 /// CSS), so there is no capability round trip to correlate. The script
 /// creates or reuses exactly one `<style>` element with the host-supplied id,
-/// sets its text, and appends it to `<head>` (falling back to
-/// `DOMContentLoaded` when the head is not yet present). Both arguments are
-/// host-controlled and JSON-escaped; the script never evaluates renderer
-/// input and exposes no eval surface.
+/// sets its text, and appends it to `<head>` ONLY when newly created
+/// (falling back to `DOMContentLoaded` when the head is not yet present).
+/// Updating an existing node sets `textContent` in place and never
+/// re-appends: a real-DOM `appendChild` on an attached node MOVES it, so
+/// re-appending on every content update would drag the updated stylesheet to
+/// the end of `<head>` and corrupt the host emission order (Vencord CSS ->
+/// Quick CSS -> sorted theme CSS). Structural reordering has its own builder
+/// ([`managed_css_order_script`]). Both arguments are host-controlled and
+/// JSON-escaped; the script never evaluates renderer input and exposes no
+/// eval surface.
 pub fn managed_css_script(style_id: &str, css: &str) -> Result<String, serde_json::Error> {
     if style_id.is_empty() || style_id.len() > 256 {
         return Err(serde::de::Error::custom(
@@ -539,9 +545,11 @@ pub fn managed_css_script(style_id: &str, css: &str) -> Result<String, serde_jso
     if (!style) {{
       style = document.createElement("style");
       style.id = {style_id};
+      style.textContent = {css};
+      root.appendChild(style);
+    }} else {{
+      style.textContent = {css};
     }}
-    style.textContent = {css};
-    root.appendChild(style);
     return true;
   }} catch (error) {{
     console.error("[Legcord native][themes] managed CSS injection failed", error);
@@ -549,6 +557,50 @@ pub fn managed_css_script(style_id: &str, css: &str) -> Result<String, serde_jso
   }}
   }};
   if (!inject()) document.addEventListener("DOMContentLoaded", inject, {{ once: true }});
+}})();"#
+    ))
+}
+
+/// Builds an order-enforcement script for a batch of managed `<style>` ids.
+///
+/// Structural changes (a theme added/removed, Quick CSS recreated) can leave
+/// a newly created node at the end of `<head>` instead of its cascade
+/// position. This script re-appends the listed EXISTING nodes in the given
+/// host-controlled order (missing ids are skipped), which moves them into
+/// the correct relative sequence after earlier stylesheets (Vencord CSS,
+/// prototype CSS). Content-only updates must NOT call this: they already
+/// update in place via [`managed_css_script`] with zero position change.
+/// The id list is bounded (at most 257 entries: Quick CSS + 256 themes) and
+/// every entry is validated like [`managed_css_script`]; the script never
+/// evaluates renderer input and exposes no eval surface.
+pub fn managed_css_order_script(ordered_ids: &[&str]) -> Result<String, serde_json::Error> {
+    if ordered_ids.len() > 257 {
+        return Err(serde::de::Error::custom(
+            "managed style order list must hold at most 257 ids",
+        ));
+    }
+    let mut encoded: Vec<String> = Vec::with_capacity(ordered_ids.len());
+    for id in ordered_ids {
+        if id.is_empty() || id.len() > 256 {
+            return Err(serde::de::Error::custom(
+                "managed style id must be a non-empty string of at most 256 bytes",
+            ));
+        }
+        encoded.push(serde_json::to_string(id)?);
+    }
+    let list = encoded.join(",");
+    Ok(format!(
+        r#"(() => {{
+  try {{
+    const root = document.head;
+    if (!root) return;
+    for (const id of [{list}]) {{
+      const style = document.getElementById(id);
+      if (style) root.appendChild(style);
+    }}
+  }} catch (error) {{
+    console.error("[Legcord native][themes] managed CSS order failed", error);
+  }}
 }})();"#
     ))
 }
@@ -592,9 +644,9 @@ pub struct PendingModBootstrap {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_mod_download_url, managed_css_remove_script, managed_css_script, mod_css_script,
-        mod_execution_context_script, mod_marker_script, validate_mod_bundle, DocumentModLifecycle,
-        ModCache, ModDescriptor, ModHostMetrics,
+        is_allowed_mod_download_url, managed_css_order_script, managed_css_remove_script,
+        managed_css_script, mod_css_script, mod_execution_context_script, mod_marker_script,
+        validate_mod_bundle, DocumentModLifecycle, ModCache, ModDescriptor, ModHostMetrics,
     };
 
     /// Synthetic adapter contract proving the substrate is not Vencord-specific.
@@ -756,6 +808,12 @@ mod tests {
         assert!(inject.contains("DOMContentLoaded"));
         assert!(!inject.contains("eval("));
         assert!(!inject.contains("new Function"));
+        // Order preservation: an existing node updates in place and is never
+        // re-appended (a real-DOM appendChild would MOVE it to the end of
+        // head and corrupt the Vencord -> Quick CSS -> sorted-themes
+        // cascade). Exactly one append site, guarded by the creation branch.
+        assert_eq!(inject.matches("appendChild").count(), 1);
+        assert!(inject.contains("} else {"));
         // No request correlation: a host push has no renderer request id.
         assert!(!inject.contains("requestId"));
 
@@ -768,6 +826,37 @@ mod tests {
         assert!(managed_css_script("", "body{}").is_err());
         assert!(managed_css_remove_script("",).is_err());
         assert!(managed_css_script(&"x".repeat(257), "body{}").is_err());
+    }
+
+    #[test]
+    fn managed_css_order_script_reorders_only_host_listed_styles() {
+        let order = managed_css_order_script(&[
+            "legcord-quick-css",
+            "legcord-native-theme-alpha",
+            "legcord-native-theme-zulu",
+        ])
+        .unwrap();
+        assert!(order.contains("legcord-quick-css"));
+        assert!(order.contains("legcord-native-theme-alpha"));
+        assert!(order.contains("legcord-native-theme-zulu"));
+        // Relative order in the script matches the cascade order argument.
+        let quick = order.find("legcord-quick-css").unwrap();
+        let alpha = order.find("legcord-native-theme-alpha").unwrap();
+        let zulu = order.find("legcord-native-theme-zulu").unwrap();
+        assert!(quick < alpha && alpha < zulu);
+        assert!(order.contains("getElementById"));
+        assert!(order.contains("appendChild"));
+        assert!(!order.contains("createElement"));
+        assert!(!order.contains("textContent"));
+        assert!(!order.contains("eval("));
+        assert!(!order.contains("new Function"));
+
+        assert!(managed_css_order_script(&[]).is_ok());
+        assert!(managed_css_order_script(&[""]).is_err());
+        assert!(managed_css_order_script(&[&"x".repeat(257)]).is_err());
+        let too_many: Vec<String> = (0..258).map(|index| format!("id-{index}")).collect();
+        let too_many_refs: Vec<&str> = too_many.iter().map(String::as_str).collect();
+        assert!(managed_css_order_script(&too_many_refs).is_err());
     }
 
     #[test]

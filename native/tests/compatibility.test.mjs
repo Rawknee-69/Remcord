@@ -1217,7 +1217,13 @@ function createFakeThemeDocument() {
         head: {
             children: headChildren,
             appendChild(child) {
-                if (!headChildren.includes(child)) headChildren.push(child);
+                // Real-DOM semantics: appending an attached node MOVES it to
+                // the end of head. This is exactly why the host template
+                // appends only newly created styles and updates existing
+                // ones in place.
+                const index = headChildren.indexOf(child);
+                if (index >= 0) headChildren.splice(index, 1);
+                headChildren.push(child);
                 if (child.id) byId.set(child.id, child);
             },
             querySelectorAll(selector) {
@@ -1261,6 +1267,10 @@ function createFakeThemeDocument() {
 }
 
 function managedThemeInject(document, styleId, css) {
+    // Mirrors the fixed host template step-for-step: a newly created style
+    // is appended once; an existing style updates in place and is NEVER
+    // re-appended (re-appending would move it to the end of head and
+    // corrupt the Vencord -> Quick CSS -> sorted-themes cascade).
     const inject = () => {
         const root = document.head;
         if (!root) return false;
@@ -1268,12 +1278,27 @@ function managedThemeInject(document, styleId, css) {
         if (!style) {
             style = document.createElement("style");
             style.id = styleId;
+            style.textContent = css;
+            root.appendChild(style);
+        } else {
+            style.textContent = css;
         }
-        style.textContent = css;
-        root.appendChild(style);
         return true;
     };
     if (!inject()) document.addEventListener("DOMContentLoaded", inject, { once: true });
+}
+
+function managedCssOrder(document, orderedIds) {
+    // Mirrors the host order-enforcement script: re-append the listed
+    // EXISTING nodes in the given order (missing ids skipped), moving them
+    // into the correct relative sequence. Content-only updates never call
+    // this; structural changes (add/remove/recreate) do.
+    const root = document.head;
+    if (!root) return;
+    for (const id of orderedIds) {
+        const style = document.getElementById(id);
+        if (style) root.appendChild(style);
+    }
 }
 
 function managedThemeRemove(document, styleId) {
@@ -1477,4 +1502,156 @@ test("the smoke observation reports Quick CSS presence and bytes", () => {
         { quickcss_present: Boolean(missing), quickcss_bytes: missing ? missing.textContent.length : 0 },
         { quickcss_present: false, quickcss_bytes: 0 },
     );
+});
+
+// Live CSS lifecycle contract (Phase D live watching).
+//
+// The host owns exactly two native watchers (profile dir filtered to the
+// fixed quickCss.css name; themes root recursive), debounces bursts (~300
+// ms), re-reads authoritative state, and applies minimal managed-CSS work:
+// content updates in place, structural changes finish with an order repair.
+// These tests pin the renderer-side DOM semantics the live path relies on:
+// updates never move nodes, order repair restores cascade position, bursts
+// collapse to one final state, disabled/deleted resources remove exactly
+// their own style, and reloads reset cleanly without watcher or style
+// accumulation (watcher ownership itself is asserted in Rust).
+test("a live content update never moves the style in the cascade", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    // Live: alpha CSS changes on disk -> in-place update, no order repair.
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+    );
+    assert.equal(document.getElementById("legcord-native-theme-alpha").textContent, ":root{--a:2;}");
+    // Live: Quick CSS changes -> still first, themes untouched.
+    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss2;}");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+    );
+});
+
+test("a recreated Quick CSS style is repaired back before themes", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    // Live: file deleted then recreated -> remove + fresh append lands last.
+    managedThemeRemove(document, "legcord-quick-css");
+    assert.equal(document.getElementById("legcord-quick-css"), null);
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:2;}");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-native-theme-alpha", "legcord-quick-css"],
+    );
+    // Host structural repair: Quick CSS first, then sorted themes.
+    managedCssOrder(document, ["legcord-quick-css", "legcord-native-theme-alpha"]);
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha"],
+    );
+    assert.equal(document.getElementById("legcord-quick-css").textContent, ":root{--q:2;}");
+});
+
+test("a newly added theme is repaired into sorted cascade position", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    // Live: theme "mike" created -> appended at the end, out of position.
+    managedThemeInject(document, "legcord-native-theme-mike", ":root{--m:1;}");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu", "legcord-native-theme-mike"],
+    );
+    // Host structural repair restores sorted order without touching bytes.
+    managedCssOrder(document, [
+        "legcord-quick-css",
+        "legcord-native-theme-alpha",
+        "legcord-native-theme-mike",
+        "legcord-native-theme-zulu",
+    ]);
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-mike", "legcord-native-theme-zulu"],
+    );
+});
+
+test("rapid live edits collapse to one node with the final bytes", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    // Burst A -> B -> C within one debounce window: the host re-reads once
+    // and pushes only the latest bytes.
+    managedThemeInject(document, "legcord-quick-css", ":root{--v:a;}");
+    managedThemeInject(document, "legcord-quick-css", ":root{--v:b;}");
+    managedThemeInject(document, "legcord-quick-css", ":root{--v:c;}");
+    assert.equal(headChildren.length, 1);
+    assert.equal(document.getElementById("legcord-quick-css").textContent, ":root{--v:c;}");
+});
+
+test("disable removes the style and re-enable injects current bytes once", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    // Live: disabled while the file keeps changing -> style removed, file
+    // writes issue no renderer work (nothing injected here).
+    managedThemeRemove(document, "legcord-quick-css");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-native-theme-alpha"],
+    );
+    // Live: re-enabled -> current bytes appear exactly once, before themes.
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:99;}");
+    managedCssOrder(document, ["legcord-quick-css", "legcord-native-theme-alpha"]);
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha"],
+    );
+    assert.equal(headChildren.filter((node) => node.id === "legcord-quick-css").length, 1);
+});
+
+test("deleted themes remove exactly their stale style", () => {
+    const { document, headChildren } = createFakeThemeDocument();
+    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    // Live: zulu directory deleted -> stale style removed, rest untouched.
+    managedThemeRemove(document, "legcord-native-theme-zulu");
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha"],
+    );
+    // Live: zulu recreated -> injected, then repaired into sorted position.
+    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:2;}");
+    managedCssOrder(document, ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"]);
+    assert.deepEqual(
+        headChildren.map((node) => node.id),
+        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+    );
+});
+
+test("live updates keep Vencord first across reloads without duplication", () => {
+    const first = createFakeThemeDocument();
+    managedThemeInject(first.document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(first.document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    // Live content update: Vencord stays first, no duplicates.
+    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    managedThemeInject(first.document, "legcord-quick-css", ":root{--q:2;}");
+    assert.deepEqual(
+        first.headChildren.map((node) => node.id),
+        ["legcord-native-vencord-css", "legcord-quick-css", "legcord-native-theme-alpha"],
+    );
+    // Reload: fresh document re-pushes the same order, still no duplicates.
+    const next = createFakeThemeDocument();
+    managedThemeInject(next.document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(next.document, "legcord-quick-css", ":root{--q:2;}");
+    managedThemeInject(next.document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    assert.deepEqual(
+        next.headChildren.map((node) => node.id),
+        ["legcord-native-vencord-css", "legcord-quick-css", "legcord-native-theme-alpha"],
+    );
+    assert.equal(first.headChildren.length, 3);
 });

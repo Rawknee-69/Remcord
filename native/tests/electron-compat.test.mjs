@@ -272,3 +272,34 @@ test("no src caller is migrated to a native Quick CSS path in this milestone", (
     assert.doesNotMatch(heroUpdater, /legcord-quick-css/);
     assert.doesNotMatch(invite, /legcord-quick-css/);
 });
+
+test("Electron keeps the Quick CSS live file-watcher contract", () => {
+    // initQuickCss watches the single file, reacts only to change events,
+    // debounces 300 ms, then re-reads and pushes removeTheme + addTheme.
+    // disableQuickCss and window close tear the watcher down.
+    assert.match(themesMain, /quickCssWatcher = fs\.watch\(quickCssPath/);
+    assert.match(themesMain, /if \(eventType === "change"\)/);
+    assert.match(themesMain, /fs\.readFileSync\(quickCssPath, "utf-8"\)/);
+    assert.match(themesMain, /quickCssWatcher\.close\(\)/);
+});
+
+test("Electron theme watching covers only the manifest list cache", () => {
+    // startThemeWatcher watches the themes folder recursively, filters to
+    // manifest.json/rename events, debounces 500 ms, and refreshes ONLY the
+    // list cache. Per-theme CSS edits have no live update path: they need
+    // an enable toggle or a reload.
+    assert.match(themesMain, /themeWatcher = fs\.watch\(themesFolder, \{ recursive: true \}/);
+    assert.match(themesMain, /filename\.endsWith\("manifest\.json"\)/);
+    assert.match(themesMain, /}, 500\)/);
+    assert.match(themesMain, /refreshThemeListCache\(\)/);
+    assert.doesNotMatch(themesMain, /fs\.watch\(.*\.css/);
+});
+
+test("native live watching exposes no renderer filesystem-watch surface", () => {
+    // Rust owns both watchers; the renderer must never watch the
+    // filesystem itself (no fs.watch bridge, no mtime polling hook, no DOM
+    // observer standing in for filesystem state).
+    assert.doesNotMatch(nativeFacade, /fs\.watch/);
+    assert.doesNotMatch(nativeFacade, /watchFile/);
+    assert.doesNotMatch(nativeFacade, /MutationObserver/);
+});

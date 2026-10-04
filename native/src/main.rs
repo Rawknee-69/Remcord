@@ -1,4 +1,5 @@
 mod app;
+mod css_watch;
 mod localization;
 mod mod_substrate;
 mod plugin_storage;
@@ -13,16 +14,20 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use mod_substrate::{
-    load_mod_bundle, managed_css_remove_script, managed_css_script, mod_css_script,
-    mod_execution_context_script, mod_marker_script, stage as mod_stage, DocumentModLifecycle,
-    ModCache, ModDescriptor, ModHostMetrics, PendingModBootstrap,
+    load_mod_bundle, managed_css_order_script, managed_css_remove_script, managed_css_script,
+    mod_css_script, mod_execution_context_script, mod_marker_script, stage as mod_stage,
+    DocumentModLifecycle, ModCache, ModDescriptor, ModHostMetrics, PendingModBootstrap,
 };
 
 use app::{current_app_version, validate_version};
+use css_watch::{
+    diff_theme_snapshots, quick_css_transition, start_live_css_watchers, LiveCssCounters,
+    LiveCssFsSignal, QuickCssTransition, ResourceDebouncer, CSS_DEBOUNCE_MS,
+};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
@@ -41,7 +46,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
-use themes::load_enabled_themes;
+use themes::{load_enabled_themes, LoadedTheme};
 use wry::{
     http::{Request, Uri},
     NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder,
@@ -622,6 +627,17 @@ enum NativeEvent {
     PageLoadFinished(String),
     BridgeRequest(BridgeRequest, Instant),
     BridgeEvent(BridgeEventMessage),
+    /// Raw filesystem signal from a native watcher thread. Never carries
+    /// paths or content: the event loop debounces, then re-reads
+    /// authoritative host state.
+    LiveCssSignal(LiveCssFsSignal),
+    /// Debounced fire for one logical resource. The epoch + document
+    /// generation gate stale callbacks (superseded bursts, reloads).
+    LiveCssFire {
+        resource: LiveCssFsSignal,
+        epoch: u64,
+        generation: u64,
+    },
     ModBundleReady {
         mod_id: &'static str,
         generation: u64,
@@ -691,6 +707,67 @@ fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
             }
         }
         Err(error) => eprintln!("[Bridge] Could not serialize response: {error}"),
+    }
+}
+
+/// Push one managed style create/update to the live document. Returns true
+/// only when the renderer accepted the script. Used by the live CSS fire
+/// handler; startup injection keeps its own inline path with the same
+/// builders.
+fn apply_managed_css_update(webview: &WebView, style_id: &str, css: &str, tag: &str) -> bool {
+    match managed_css_script(style_id, css) {
+        Ok(script) => {
+            if let Err(error) = webview.evaluate_script(&script) {
+                eprintln!("[{tag}][css_injection] {style_id}: {error}");
+                false
+            } else {
+                true
+            }
+        }
+        Err(error) => {
+            eprintln!("[{tag}][css_injection] {style_id}: {error}");
+            false
+        }
+    }
+}
+
+/// Remove one managed style from the live document. A missing node is a
+/// cheap no-op. Returns true unless script delivery itself failed.
+fn apply_managed_css_removal(webview: &WebView, style_id: &str, tag: &str) -> bool {
+    match managed_css_remove_script(style_id) {
+        Ok(script) => {
+            if let Err(error) = webview.evaluate_script(&script) {
+                eprintln!("[{tag}][css_removal] {style_id}: {error}");
+                false
+            } else {
+                true
+            }
+        }
+        Err(error) => {
+            eprintln!("[{tag}][css_removal] {style_id}: {error}");
+            false
+        }
+    }
+}
+
+/// Re-assert cascade order after a structural change (Quick CSS recreated,
+/// theme added/removed). `ordered_ids` is Quick CSS first (when present)
+/// then sorted theme style ids. Content-only updates never call this.
+fn apply_managed_css_order(webview: &WebView, ordered_ids: &[String], tag: &str) -> bool {
+    let refs: Vec<&str> = ordered_ids.iter().map(String::as_str).collect();
+    match managed_css_order_script(&refs) {
+        Ok(script) => {
+            if let Err(error) = webview.evaluate_script(&script) {
+                eprintln!("[{tag}][css_order] {error}");
+                false
+            } else {
+                true
+            }
+        }
+        Err(error) => {
+            eprintln!("[{tag}][css_order] {error}");
+            false
+        }
     }
 }
 
@@ -865,11 +942,47 @@ fn main() -> Result<(), Box<dyn Error>> {
     // flag flips to disabled. The DOM itself is fresh per document; this
     // only names what to clean on a state change.
     let mut last_quickcss_injected = false;
+    // Exact bytes last pushed for Quick CSS (None when absent). Live updates
+    // compare the debounced re-read against this so duplicate events and
+    // identical rescans issue zero renderer work.
+    let mut last_quickcss_css: Option<String> = None;
     // Managed theme style ids injected into the latest trusted document, so
     // the next document reset can remove styles for themes that are no
     // longer enabled. The DOM itself is fresh per document; this list only
     // names what to clean when the enabled set shrinks.
     let mut last_theme_style_ids: Vec<String> = Vec::new();
+    // Full last-pushed theme snapshot for live diffing: only changed themes
+    // are re-pushed, only removed ones are removed.
+    let mut last_themes: Vec<themes::LoadedTheme> = Vec::new();
+    // Live CSS lifecycle (Phase D): exactly one debouncer per logical
+    // resource plus shared counters. The native watcher set is created once
+    // below and moved into the event-loop closure; document reload never
+    // creates watchers.
+    let live_counters = Arc::new(Mutex::new(LiveCssCounters::default()));
+    let quickcss_debounce = Arc::new(Mutex::new(ResourceDebouncer::default()));
+    let themes_debounce = Arc::new(Mutex::new(ResourceDebouncer::default()));
+    // The single application-owned watcher set. Creation failure only
+    // disables live watching (startup injection still runs); the host never
+    // crashes on a watcher error.
+    let live_watchers = {
+        let live_proxy = proxy.clone();
+        match start_live_css_watchers(&profile_path, Arc::clone(&live_counters), move |signal| {
+            queue_event(&live_proxy, NativeEvent::LiveCssSignal(signal));
+        }) {
+            Ok(watchers) => {
+                println!(
+                    "[LiveCss][Watch] started: watchers={} debounce_ms={}",
+                    css_watch::LiveCssWatchers::watcher_count(),
+                    CSS_DEBOUNCE_MS,
+                );
+                Some(watchers)
+            }
+            Err(error) => {
+                eprintln!("[LiveCss][watch_error] live watching disabled: {error}");
+                None
+            }
+        }
+    };
     let mut mod_metrics = ModHostMetrics::default();
     // Mutation smoke stages: 0 = mutate on the first trusted document,
     // 1 = mutated, reload requested, restore pending on the next document,
@@ -905,6 +1018,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                             snapshot.duplicate_bootstraps,
                         );
                     }
+                }
+                if let Ok(guard) = live_counters.lock() {
+                    let snapshot = guard.snapshot();
+                    println!(
+                        "[LiveCss][Metrics] final watchers={} replacements={} raw_fs_events={} debounced_reloads={} css_updates={} css_removes={} stale_discarded={} order_repairs={}",
+                        snapshot.watcher_count,
+                        snapshot.watcher_replacements,
+                        snapshot.raw_fs_events,
+                        snapshot.debounced_reloads,
+                        snapshot.css_updates,
+                        snapshot.css_removes,
+                        snapshot.stale_discarded,
+                        snapshot.order_repairs,
+                    );
                 }
                 *control_flow = ControlFlow::Exit;
             }
@@ -987,6 +1114,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
                         last_quickcss_injected = quickcss_injected;
+                        // Content snapshot for live diffing: `Some` exactly
+                        // when the managed style is present in this document.
+                        last_quickcss_css = if quickcss_injected {
+                            quickcss_report.css.clone()
+                        } else {
+                            None
+                        };
                         println!(
                             "[QuickCss][Metrics] enabled={} state={} injected={} css_bytes={} read_ms={:.3}",
                             quickcss_report.enabled,
@@ -1030,6 +1164,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         last_theme_style_ids = current_theme_ids;
                         let mut theme_injected = 0_usize;
+                        let mut injected_now: Vec<LoadedTheme> = Vec::new();
                         for theme in &theme_report.injected {
                             match managed_css_script(&theme.style_id, &theme.css) {
                                 Ok(script) => {
@@ -1040,6 +1175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         );
                                     } else {
                                         theme_injected += 1;
+                                        injected_now.push(theme.clone());
                                     }
                                 }
                                 Err(error) => {
@@ -1047,6 +1183,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        // Content snapshot for live diffing: only successfully
+                        // injected themes, so a failed push is retried rather
+                        // than mistaken for present.
+                        last_themes = injected_now;
                         if theme_report.discovered > 0 || diagnostic_themes_smoke {
                             println!(
                                 "[Themes][Metrics] discovered={} enabled={} injected={} skipped={} css_bytes={} read_ms={:.3}",
@@ -1125,6 +1265,263 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
                     }
+                }
+            }
+            Event::UserEvent(NativeEvent::LiveCssSignal(signal)) => {
+                // Raw watcher event: bump the epoch and arm exactly one
+                // debounce timer per burst. The timer re-reads authoritative
+                // host state; this arm never touches the disk or renderer.
+                let generation = document_lifecycle.generation();
+                let debouncer = match signal {
+                    LiveCssFsSignal::QuickCss => &quickcss_debounce,
+                    LiveCssFsSignal::Themes => &themes_debounce,
+                };
+                let tag = match signal {
+                    LiveCssFsSignal::QuickCss => "QuickCss",
+                    LiveCssFsSignal::Themes => "Themes",
+                };
+                let should_spawn = match debouncer.lock() {
+                    Ok(mut guard) => guard.on_fs_event(generation).1,
+                    Err(_) => false,
+                };
+                if should_spawn {
+                    let timer_debouncer = Arc::clone(debouncer);
+                    let timer_proxy = proxy.clone();
+                    if let Err(error) = thread::Builder::new()
+                        .name(format!("legcord-livecss-{tag}"))
+                        .spawn(move || {
+                            thread::sleep(Duration::from_millis(CSS_DEBOUNCE_MS));
+                            let (epoch, arm_generation) = match timer_debouncer.lock() {
+                                Ok(mut guard) => guard.take_fire_epoch(),
+                                Err(_) => return,
+                            };
+                            queue_event(
+                                &timer_proxy,
+                                NativeEvent::LiveCssFire {
+                                    resource: signal,
+                                    epoch,
+                                    generation: arm_generation,
+                                },
+                            );
+                        })
+                    {
+                        eprintln!("[LiveCss][{tag}] could not arm the debounce timer: {error}");
+                        // Un-arm so the next event retries instead of
+                        // stalling the resource forever.
+                        if let Ok(mut guard) = debouncer.lock() {
+                            if guard.is_armed() {
+                                guard.take_fire_epoch();
+                            }
+                        }
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::LiveCssFire {
+                resource,
+                epoch,
+                generation,
+            }) => {
+                // Stale gate first: a superseded burst epoch or a document
+                // reload mid-debounce discards the callback before any
+                // filesystem or renderer work.
+                let current_generation = document_lifecycle.generation();
+                let current_epoch = match resource {
+                    LiveCssFsSignal::QuickCss => {
+                        quickcss_debounce.lock().map(|guard| guard.epoch()).unwrap_or(u64::MAX)
+                    }
+                    LiveCssFsSignal::Themes => {
+                        themes_debounce.lock().map(|guard| guard.epoch()).unwrap_or(u64::MAX)
+                    }
+                };
+                if !ResourceDebouncer::is_fresh(epoch, generation, current_epoch, current_generation) {
+                    if let Ok(mut guard) = live_counters.lock() {
+                        guard.stale_discarded += 1;
+                    }
+                    println!(
+                        "[LiveCss][stale] discarded {:?} fire (epoch={epoch} gen={generation} vs current epoch={current_epoch} gen={current_generation})",
+                        resource
+                    );
+                    return;
+                }                match resource {
+                    LiveCssFsSignal::QuickCss => {
+                        let read_started_at = Instant::now();
+                        let report = load_quick_css(&profile_path);
+                        let read_ms = read_started_at.elapsed().as_secs_f64() * 1000.0;
+                        if let Ok(mut guard) = live_counters.lock() {
+                            guard.debounced_reloads += 1;
+                        }
+                        match quick_css_transition(
+                            last_quickcss_css.as_deref(),
+                            report.css.as_deref(),
+                        ) {
+                            QuickCssTransition::NoChange => {
+                                println!(
+                                    "[QuickCss][Live] no-change state={} read_ms={read_ms:.3}",
+                                    report.state
+                                );
+                            }
+                            QuickCssTransition::InjectOrUpdate { css } => {
+                                let created = last_quickcss_css.is_none();
+                                let inject_started_at = Instant::now();
+                                let applied = apply_managed_css_update(
+                                    &webview,
+                                    QUICK_CSS_STYLE_ID,
+                                    &css,
+                                    "QuickCss",
+                                );
+                                let inject_ms =
+                                    inject_started_at.elapsed().as_secs_f64() * 1000.0;
+                                if applied {
+                                    last_quickcss_css = Some(css);
+                                    last_quickcss_injected = true;
+                                    if let Ok(mut guard) = live_counters.lock() {
+                                        guard.css_updates += 1;
+                                    }
+                                    // A recreated node appends at the head
+                                    // end; repair order so Quick CSS still
+                                    // precedes themes.
+                                    if created && !last_themes.is_empty() {
+                                        let mut ordered: Vec<String> =
+                                            vec![QUICK_CSS_STYLE_ID.to_owned()];
+                                        ordered.extend(
+                                            last_themes
+                                                .iter()
+                                                .map(|theme| theme.style_id.clone()),
+                                        );
+                                        if apply_managed_css_order(&webview, &ordered, "QuickCss")
+                                        {
+                                            if let Ok(mut guard) = live_counters.lock() {
+                                                guard.order_repairs += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                println!(
+                                    "[QuickCss][Live] update state={} created={created} applied={applied} read_ms={read_ms:.3} inject_ms={inject_ms:.3}",
+                                    report.state
+                                );
+                            }
+                            QuickCssTransition::Remove => {
+                                let removed = if last_quickcss_injected {
+                                    apply_managed_css_removal(&webview, QUICK_CSS_STYLE_ID, "QuickCss")
+                                } else {
+                                    true
+                                };
+                                if removed {
+                                    last_quickcss_css = None;
+                                    last_quickcss_injected = false;
+                                    if let Ok(mut guard) = live_counters.lock() {
+                                        guard.css_removes += 1;
+                                    }
+                                }
+                                println!(
+                                    "[QuickCss][Live] remove state={} applied={removed} read_ms={read_ms:.3}",
+                                    report.state
+                                );
+                            }
+                        }
+                    }
+                    LiveCssFsSignal::Themes => {
+                        let read_started_at = Instant::now();
+                        let report = load_enabled_themes(&profile_path);
+                        let read_ms = read_started_at.elapsed().as_secs_f64() * 1000.0;
+                        if let Ok(mut guard) = live_counters.lock() {
+                            guard.debounced_reloads += 1;
+                        }
+                        let next = report.injected.clone();
+                        let diff = diff_theme_snapshots(&last_themes, &next);
+                        // Per-theme skip audit (mirrors the startup path):
+                        // a rejected manifest/CSS must name its reason live.
+                        for skipped in &report.skipped {
+                            println!(
+                                "[Themes][Skip] id={} reason={}",
+                                skipped.id, skipped.reason
+                            );
+                        }
+                        if diff.is_empty() {
+                            println!(
+                                "[Themes][Live] no-change discovered={} enabled={} read_ms={read_ms:.3}",
+                                report.discovered, report.enabled
+                            );
+                        } else {
+                            let inject_started_at = Instant::now();
+                            // Merge into the last-pushed snapshot only on
+                            // per-item success, so a failed push is retried
+                            // instead of mistaken for present.
+                            let mut merged: HashMap<String, LoadedTheme> = last_themes
+                                .iter()
+                                .map(|theme| (theme.style_id.clone(), theme.clone()))
+                                .collect();
+                            for theme in diff.updated.iter().chain(diff.added.iter()) {
+                                if apply_managed_css_update(
+                                    &webview,
+                                    &theme.style_id,
+                                    &theme.css,
+                                    "Themes",
+                                ) {
+                                    merged.insert(theme.style_id.clone(), theme.clone());
+                                    if let Ok(mut guard) = live_counters.lock() {
+                                        guard.css_updates += 1;
+                                    }
+                                }
+                            }
+                            for style_id in &diff.removed_style_ids {
+                                if apply_managed_css_removal(&webview, style_id, "Themes") {
+                                    merged.remove(style_id);
+                                    if let Ok(mut guard) = live_counters.lock() {
+                                        guard.css_removes += 1;
+                                    }
+                                }
+                            }
+                            let mut merged_list: Vec<LoadedTheme> =
+                                merged.into_values().collect();
+                            merged_list.sort_by(|left, right| left.id.cmp(&right.id));
+                            last_themes = merged_list;
+                            last_theme_style_ids = last_themes
+                                .iter()
+                                .map(|theme| theme.style_id.clone())
+                                .collect();
+                            // Structural changes can misplace newly appended
+                            // nodes; re-assert Quick CSS-first + sorted
+                            // themes. Content-only updates skip this.
+                            if diff.is_structural() {
+                                let mut ordered: Vec<String> = Vec::new();
+                                if last_quickcss_injected {
+                                    ordered.push(QUICK_CSS_STYLE_ID.to_owned());
+                                }
+                                ordered.extend(
+                                    last_themes.iter().map(|theme| theme.style_id.clone()),
+                                );
+                                if apply_managed_css_order(&webview, &ordered, "Themes") {
+                                    if let Ok(mut guard) = live_counters.lock() {
+                                        guard.order_repairs += 1;
+                                    }
+                                }
+                            }
+                            let inject_ms =
+                                inject_started_at.elapsed().as_secs_f64() * 1000.0;
+                            println!(
+                                "[Themes][Live] updated={} added={} removed={} structural={} read_ms={read_ms:.3} inject_ms={inject_ms:.3}",
+                                diff.updated.len(),
+                                diff.added.len(),
+                                diff.removed_style_ids.len(),
+                                diff.is_structural(),
+                            );
+                        }
+                    }
+                }
+                if let Ok(guard) = live_counters.lock() {
+                    let snapshot = guard.snapshot();
+                    println!(
+                        "[LiveCss][Metrics] watchers={} raw_fs_events={} debounced_reloads={} css_updates={} css_removes={} stale_discarded={} order_repairs={}",
+                        snapshot.watcher_count,
+                        snapshot.raw_fs_events,
+                        snapshot.debounced_reloads,
+                        snapshot.css_updates,
+                        snapshot.css_removes,
+                        snapshot.stale_discarded,
+                        snapshot.order_repairs,
+                    );
                 }
             }
             Event::UserEvent(NativeEvent::BridgeRequest(request, received_at)) => {
@@ -1958,6 +2355,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             _ => {
                 let _keep_window_alive = &window;
                 let _keep_web_context_alive = &web_context;
+                // Owned here so the two native CSS watchers live exactly as
+                // long as the application: created once at startup, never on
+                // document reload, destroyed by RAII drop on shutdown.
+                let _keep_live_watchers_alive = &live_watchers;
             }
         }
     })
@@ -2378,6 +2779,26 @@ mod tests {
         assert!(!script.contains("quickCss"));
         assert!(!script.contains("quickcss"));
         assert!(!script.contains("quick_css"));
+    }
+
+    #[test]
+    fn live_css_watching_adds_no_capability_or_renderer_surface() {
+        // Live watching is a host-owned lifecycle: two native watchers with
+        // no bridge command, no boot capability, no facade member, and no
+        // renderer-supplied path anywhere near this milestone.
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert!(!capability.contains("watch"));
+            assert!(!capability.contains("live"));
+            assert!(!capability.contains("css"));
+        }
+        let script = initialization_script(true).unwrap();
+        assert!(!script.contains("watch"));
+        assert!(!script.contains("LiveCss"));
+        assert!(!script.contains("fs.watch"));
+        assert!(!script.contains("MutationObserver"));
+        // Exactly one watcher set for the whole application lifetime.
+        assert_eq!(crate::css_watch::LiveCssWatchers::watcher_count(), 2);
+        assert_eq!(crate::css_watch::CSS_DEBOUNCE_MS, 300);
     }
 
     #[test]
