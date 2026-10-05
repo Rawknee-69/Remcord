@@ -555,21 +555,34 @@ test("Electron joins the raw theme id with no validation", () => {
     assert.doesNotMatch(ipc, /validate.*id.*openThemeFolder|openThemeFolder.*validate/);
 });
 
-test("no src caller uses the native folder opening path", () => {
-    // The Electron UI keeps its send-based calls; nothing references the
-    // native folders namespace or its capabilities/commands.
-    const backupSection = readFileSync(
-        new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
+test("only the four wired UI actions use the native folder opening path", () => {
+    // The bridge, main handlers, and declared contracts stay Electron-only:
+    // native dispatch lives in the four settings-UI call sites, each gated
+    // behind the shared isNativeWebView check with the Electron send intact.
+    for (const source of [bridge, ipc, types]) {
+        assert.doesNotMatch(source, /folders\.open/);
+        assert.doesNotMatch(source, /folders_open/);
+        assert.doesNotMatch(source, /legcord\.folders/);
+    }
+    const settingsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const pluginsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/PluginsPage.tsx", import.meta.url),
         "utf8",
     );
     const themesCard = readFileSync(
         new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
         "utf8",
     );
-    for (const source of [bridge, ipc, types, backupSection, themesCard]) {
-        assert.doesNotMatch(source, /folders\.open/);
-        assert.doesNotMatch(source, /folders_open/);
-        assert.doesNotMatch(source, /legcord\.folders/);
+    for (const source of [settingsPage, themesPage, pluginsPage, themesCard]) {
+        assert.match(source, /Native WebView2/);
+        assert.match(source, /Electron keeps the original fire-and-forget send/);
     }
     assert.match(themesCard, /window\.legcord\.themes\.folder\(props\.theme\.id\)/);
 });
@@ -597,4 +610,82 @@ test("native folder facade exposes identifiers only, no shell surface", () => {
     assert.doesNotMatch(nativeFacade, /ShellExecute/);
     assert.doesNotMatch(nativeFacade, /openExternal/);
     assert.doesNotMatch(nativeFacade, /showOpenDialog|showSaveDialog/);
+});
+
+test("settings UI reveals the storage folder natively and sends otherwise", () => {
+    const settingsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    // Native branch calls the typed capability with the exact location;
+    // Electron branch keeps the original fire-and-forget send.
+    assert.match(settingsPage, /revealFolderNative\("storage"\)/);
+    assert.match(settingsPage, /window\.legcord\.settings\.openStorageFolder\(\)/);
+    // Exactly one dispatch: native success short-circuits the Electron call.
+    assert.equal((settingsPage.match(/revealFolderNative\("storage"\)/g) ?? []).length, 1);
+});
+
+test("themes UI reveals the themes folder natively and sends otherwise", () => {
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(themesPage, /revealFolderNative\("themes"\)/);
+    assert.match(themesPage, /window\.legcord\.settings\.openThemesFolder\(\)/);
+    assert.equal((themesPage.match(/revealFolderNative\("themes"\)/g) ?? []).length, 1);
+});
+
+test("plugins UI reveals the plugins folder natively and sends otherwise", () => {
+    const pluginsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/PluginsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(pluginsPage, /revealFolderNative\("plugins"\)/);
+    assert.match(pluginsPage, /window\.legcord\.plugins\.openFolder\(\)/);
+    // Both the toolbar button and the empty-state action dispatch once.
+    assert.equal((pluginsPage.match(/revealFolderNative\("plugins"\)/g) ?? []).length, 2);
+});
+
+test("theme cards open the theme folder natively with the verbatim id", () => {
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(themesCard, /openThemeFolderNative\(props\.theme\.id\)/);
+    assert.match(themesCard, /window\.legcord\.themes\.folder\(props\.theme\.id\)/);
+    // No renderer-side id filtering: validation is owned by the host.
+    assert.doesNotMatch(themesCard, /RegExp|new RegExp|\.test\(props\.theme\.id\)|\.match\(props\.theme\.id\)/);
+});
+
+test("folder UI wiring introduces no generic filesystem surface", () => {
+    const settingsHelper = readFileSync(
+        new URL("../../src/shelter/settings/settings.ts", import.meta.url),
+        "utf8",
+    );
+    const settingsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const pluginsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/PluginsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [settingsHelper, settingsPage, themesPage, pluginsPage, themesCard]) {
+        assert.doesNotMatch(source, /openPath|showItemInFolder|ShellExecute|openExternal/);
+        assert.doesNotMatch(source, /invoke\(|sendSync|eval\(|new Function/);
+        assert.doesNotMatch(source, /\bany\b/);
+    }
+    // One environment check, reused: no second detection mechanism.
+    assert.match(settingsHelper, /export function isNativeWebView/);
+    for (const source of [settingsPage, themesPage, pluginsPage, themesCard]) {
+        assert.doesNotMatch(source, /function isNativeWebView/);
+    }
 });

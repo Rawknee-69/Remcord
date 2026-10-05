@@ -3,6 +3,7 @@ import type { LegcordPluginInfo } from "../../../@types/legcordWindow.js";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { PluginCard } from "../components/PluginCard.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
+import { revealFolderNative } from "../settings.js";
 import classes from "./PluginsPage.module.css";
 
 const {
@@ -94,7 +95,14 @@ export function PluginsPage() {
                 <Button size={ButtonSizes.LARGE} onClick={() => void refreshPlugins()}>
                     {t()["plugins-refresh"]}
                 </Button>
-                <Button size={ButtonSizes.LARGE} onClick={window.legcord.plugins.openFolder}>
+                <Button
+                    size={ButtonSizes.LARGE}
+                    onClick={() => {
+                        // Native WebView2 reveals via the typed folders.open capability;
+                        // Electron keeps the original fire-and-forget send.
+                        if (!revealFolderNative("plugins")) window.legcord.plugins.openFolder();
+                    }}
+                >
                     {t()["plugins-openFolder"]}
                 </Button>
             </div>
@@ -105,7 +113,9 @@ export function PluginsPage() {
                         message={t()["plugins-empty"]}
                         description={t()["plugins-emptyDesc"]}
                         actionLabel={t()["plugins-openFolder"]}
-                        onAction={window.legcord.plugins.openFolder}
+                        onAction={() => {
+                            if (!revealFolderNative("plugins")) window.legcord.plugins.openFolder();
+                        }}
                     />
                 }
             >

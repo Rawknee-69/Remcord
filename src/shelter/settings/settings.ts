@@ -158,6 +158,59 @@ export async function setBlockPowerSavingInVoiceChat(value: boolean): Promise<bo
     return applied;
 }
 
+/** Closed folder locations the native `folders.open` capability reveals. */
+export type NativeFolderLocation = "storage" | "themes" | "plugins";
+
+/** Minimal native folders shape (Phase D Step 2). */
+interface NativeFolders {
+    open: (location: NativeFolderLocation) => Promise<string>;
+    openTheme: (id: string) => Promise<string>;
+}
+
+/**
+ * Native folders namespace when the WebView2 shell grants it, `undefined`
+ * otherwise. Capability-gated: the namespace exists only when the boot
+ * snapshot grants `folders.open`/`folders.open_theme`. Uses the existing
+ * `isNativeWebView` environment check — no second detection mechanism.
+ */
+function nativeFolders(): NativeFolders | undefined {
+    if (!isNativeWebView()) return undefined;
+    const folders = (window.legcord as unknown as { folders?: NativeFolders }).folders;
+    if (typeof folders?.open !== "function" || typeof folders?.openTheme !== "function") return undefined;
+    return folders;
+}
+
+/**
+ * Native WebView2 folder reveal for a fixed root. Returns `true` when the
+ * native typed capability handled the action; `false` when the caller must
+ * use the Electron IPC path. Fire-and-forget like the Electron `send` it
+ * replaces: rejections are swallowed after a path-free console diagnostic,
+ * so no unhandled rejection can escape a click handler and no filesystem
+ * path ever reaches the UI.
+ */
+export function revealFolderNative(location: NativeFolderLocation): boolean {
+    const folders = nativeFolders();
+    if (!folders) return false;
+    void folders
+        .open(location)
+        .catch(() => console.warn(`[Legcord] Could not reveal the ${location} folder in the native shell.`));
+    return true;
+}
+
+/**
+ * Native WebView2 open for one theme directory. The id passes through
+ * verbatim — validation is owned by the native capability, not recreated
+ * here. Same fire-and-forget contract as `revealFolderNative`.
+ */
+export function openThemeFolderNative(id: string): boolean {
+    const folders = nativeFolders();
+    if (!folders) return false;
+    void folders
+        .openTheme(id)
+        .catch(() => console.warn("[Legcord] Could not open the theme folder in the native shell."));
+    return true;
+}
+
 function removeMod(array: ValidMods[], filter: ValidMods) {
     return array.filter((i) => i !== filter);
 }

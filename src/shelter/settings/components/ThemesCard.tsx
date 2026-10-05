@@ -1,6 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import type { ThemeManifest } from "../../../@types/themeManifest.js";
-import { refreshThemes } from "../settings.js";
+import { openThemeFolderNative, refreshThemes } from "../settings.js";
 import classes from "./ThemesCard.module.css";
 
 const {
@@ -44,7 +44,10 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
     }
     function openThemesFolder() {
         if (props.theme.id) {
-            window.legcord.themes.folder(props.theme.id);
+            // Native WebView2 opens via the typed folders.open_theme capability
+            // (id passes through verbatim; the host owns validation).
+            // Electron keeps the original fire-and-forget send.
+            if (!openThemeFolderNative(props.theme.id)) window.legcord.themes.folder(props.theme.id);
         }
     }
     const showUpdate = !!props.theme.updateSrc;

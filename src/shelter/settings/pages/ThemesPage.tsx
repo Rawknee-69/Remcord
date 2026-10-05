@@ -4,7 +4,7 @@ import type { ThemeManifest } from "../../../@types/themeManifest.js";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
 import { ThemesCard } from "../components/ThemesCard.jsx";
-import { refreshThemes, setConfig } from "../settings.js";
+import { refreshThemes, revealFolderNative, setConfig } from "../settings.js";
 import classes from "./ThemesPages.module.css";
 
 const {
@@ -64,7 +64,14 @@ export function ThemesPage() {
                 <Button size={ButtonSizes.LARGE} onClick={window.legcord.themes.openImportPicker}>
                     {t["themes-importFromFile"]}
                 </Button>
-                <Button size={ButtonSizes.LARGE} onClick={window.legcord.settings.openThemesFolder}>
+                <Button
+                    size={ButtonSizes.LARGE}
+                    onClick={() => {
+                        // Native WebView2 reveals via the typed folders.open capability;
+                        // Electron keeps the original fire-and-forget send.
+                        if (!revealFolderNative("themes")) window.legcord.settings.openThemesFolder();
+                    }}
+                >
                     {t["themes-openThemesFolder"]}
                 </Button>
                 <Button

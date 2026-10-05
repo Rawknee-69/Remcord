@@ -19,6 +19,7 @@ import { TextBoxItem } from "../components/TextBoxItem.jsx";
 import {
     isMinWindowsVersion,
     isNativeWebView,
+    revealFolderNative,
     setBlockPowerSavingInVoiceChat,
     setConfig,
     toggleMod,
@@ -1019,7 +1020,14 @@ export function SettingsPage() {
                         </Button>
                     </SearchableSetting>
                     <SearchableSetting keywords={[t["settings-storageFolder"], "storage"]}>
-                        <Button size={ButtonSizes.MAX} onClick={window.legcord.settings.openStorageFolder}>
+                        <Button
+                            size={ButtonSizes.MAX}
+                            onClick={() => {
+                                // Native WebView2 reveals via the typed folders.open capability;
+                                // Electron keeps the original fire-and-forget send.
+                                if (!revealFolderNative("storage")) window.legcord.settings.openStorageFolder();
+                            }}
+                        >
                             {t["settings-storageFolder"]}
                         </Button>
                     </SearchableSetting>
