@@ -2016,7 +2016,7 @@ test("a reloaded document gets a fresh folders facade with no stale promises", a
     assert.equal(await pending, "my-theme");
 });
 
-function createThemesRuntime(capabilities = ["bridge.ping", "themes.install_code"]) {
+function createThemesRuntime(capabilities = ["bridge.ping", "themes.install_code", "themes.write_css"]) {
     return createRuntime("https://discord.com", capabilities);
 }
 
@@ -2042,8 +2042,10 @@ function respondThemeInstalled(window, request, payload = { id: "Midnight-Harbor
 test("the facade exposes a CSS-text-only themes.install_code capability", () => {
     const { window } = createThemesRuntime();
     assert.equal(typeof window.legcord.themes.installFromCode, "function");
+    assert.equal(typeof window.legcord.themes.writeCss, "function");
     assert.equal(Object.isFrozen(window.legcord.themes), true);
     assert.equal(window.legcord.native.supports("themes.install_code"), true);
+    assert.equal(window.legcord.native.supports("themes.write_css"), true);
     // No URL install, list, enable, edit, dialog, or picker surface may exist.
     assert.equal(window.legcord.themes.install, undefined);
     assert.equal(window.legcord.themes.getThemes, undefined);
@@ -2181,6 +2183,182 @@ test("a reloaded document gets a fresh theme install facade with no stale promis
         enabled: false,
         css_bytes: INSTALL_FIXTURE_CSS.length,
     });
+});
+
+const WRITE_FIXTURE_CSS = ":root{\n  --legcord-native-write-probe: second;\n}\n";
+
+function respondThemeWritten(window, request, payload = { id: "my-theme", enabled: true }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "theme_written",
+                    payload: { ...payload, css_bytes: WRITE_FIXTURE_CSS.length },
+                },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("themes.write_css sends id plus CSS text and resolves bounded metadata", async () => {
+    const { window } = createThemesRuntime();
+    const pending = window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "theme_write_css");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "theme_write_css", payload: { id: "my-theme", css: WRITE_FIXTURE_CSS } });
+
+    respondThemeWritten(window, message);
+    assert.deepEqual(await pending, {
+        id: "my-theme",
+        enabled: true,
+        css_bytes: WRITE_FIXTURE_CSS.length,
+    });
+});
+
+test("themes.write_css throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createThemesRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("themes.write_css"), false);
+    assert.throws(
+        () => window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "theme_write_css"),
+        false,
+    );
+});
+
+test("themes.write_css rejects hostile ids and oversized CSS without sending", async () => {
+    const { window } = createThemesRuntime();
+    for (const id of ["", ".", "..", "../escape", "..\\escape", "a/b", "C:\\x", 42, null]) {
+        await assert.rejects(window.legcord.themes.writeCss(id, WRITE_FIXTURE_CSS), /id must match/);
+    }
+    const oversized = `t${"t".repeat(64)}`;
+    await assert.rejects(window.legcord.themes.writeCss(oversized, WRITE_FIXTURE_CSS), /id must match/);
+    await assert.rejects(window.legcord.themes.writeCss("my-theme", 42), /css must be a string/);
+    await assert.rejects(window.legcord.themes.writeCss("my-theme", "x".repeat(1048577)), /css must be a string/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "theme_write_css"),
+        false,
+    );
+});
+
+test("themes.write_css rejects mismatched echoes and foreign members", async () => {
+    // Host echoes a different id than requested.
+    const mismatched = createThemesRuntime();
+    const pendingMismatch = mismatched.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const messageMismatch = mismatched.window.messages.find((entry) => entry.command?.type === "theme_write_css");
+    respondThemeWritten(mismatched.window, messageMismatch, { id: "other-theme", enabled: true });
+    await assert.rejects(pendingMismatch, /theme write response schema is invalid/);
+
+    // A path riding along is rejected.
+    const withPath = createThemesRuntime();
+    const pendingPath = withPath.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_write_css");
+    withPath.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messagePath.request_id,
+                ok: true,
+                payload: {
+                    type: "theme_written",
+                    payload: {
+                        id: "my-theme",
+                        enabled: true,
+                        css_bytes: WRITE_FIXTURE_CSS.length,
+                        path: "C:\\themes\\x",
+                    },
+                },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(pendingPath, /theme write response schema is invalid/);
+
+    // Enabled must be a real boolean.
+    const noBool = createThemesRuntime();
+    const pendingBool = noBool.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const messageBool = noBool.window.messages.find((entry) => entry.command?.type === "theme_write_css");
+    noBool.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messageBool.request_id,
+                ok: true,
+                payload: {
+                    type: "theme_written",
+                    payload: { id: "my-theme", enabled: "yes", css_bytes: WRITE_FIXTURE_CSS.length },
+                },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(pendingBool, /theme write response schema is invalid/);
+});
+
+test("themes.write_css rejects host failures with the typed error", async () => {
+    const { window } = createThemesRuntime();
+    const pending = window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const message = window.messages.find((entry) => entry.command?.type === "theme_write_css");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "UNKNOWN_THEME", message: "theme folder is unknown" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /theme folder is unknown/);
+});
+
+test("themes.write_css rejects after its timeout", async () => {
+    const { window } = createThemesRuntime();
+    await assert.rejects(window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS, 50), /timed out/);
+});
+
+test("themes.write_css rejects pending requests when the document is disposed", async () => {
+    const { window } = createThemesRuntime();
+    const pending = window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh theme write facade with no stale promises", async () => {
+    const firstDocument = createThemesRuntime();
+    const stale = firstDocument.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createThemesRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_write_css");
+    respondThemeWritten(nextDocument.window, message);
+    assert.deepEqual(await pending, {
+        id: "my-theme",
+        enabled: true,
+        css_bytes: WRITE_FIXTURE_CSS.length,
+    });
+});
+
+test("theme requests stay inert off the trusted origin", async () => {
+    const { window } = createRuntime("https://attacker.invalid", [
+        "bridge.ping",
+        "themes.install_code",
+        "themes.write_css",
+    ]);
+    assert.equal(window.legcord, undefined);
 });
 
 function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {

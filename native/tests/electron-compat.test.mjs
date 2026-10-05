@@ -623,7 +623,10 @@ test("Electron keeps the theme install/edit/picker implementation", () => {
     assert.match(themesMain, /code = fs\.readFileSync\(linkOrPath, "utf8"\);/);
     assert.match(themesMain, /function installThemeFromCode\(code: string, linkOrPath\?: string\)/);
     assert.match(themesMain, /manifest\.name\?\.replace\(" ", "-"\)\}-BD/);
-    assert.match(themesMain, /fs\.writeFileSync\(path\.join\(themePath, "manifest\.json"\), JSON\.stringify\(manifest\)\)/);
+    assert.match(
+        themesMain,
+        /fs\.writeFileSync\(path\.join\(themePath, "manifest\.json"\), JSON\.stringify\(manifest\)\)/,
+    );
     assert.match(themesMain, /fs\.writeFileSync\(path\.join\(themePath, "src\.css"\), code\)/);
     assert.match(themesMain, /if \(!content\.startsWith\("\/\*\*"\)\) \{\s*throw new Error\("Not a manifest\."\);/);
     assert.match(themesMain, /theme: "src\.css",\s*name: "null",\s*enabled: false,/);
@@ -679,7 +682,7 @@ test("native theme install is CSS-text-only with no network or dialog surface", 
     // the shipped install path itself must have no network, dialog, picker,
     // editor-launch, or shell surface.
     const shippedThemes = nativeThemes.slice(0, nativeThemes.indexOf("#[cfg(test)]"));
-    assert.doesNotMatch(shippedThemes, /fetch|ureq|Dialog|ShellExecute|openPath|Command::new/);
+    assert.doesNotMatch(shippedThemes, /fetch\(|ureq|Dialog|ShellExecute|openPath|Command::new/);
     assert.doesNotMatch(shippedThemes, /https?:\/\//);
     // The facade takes CSS text and returns metadata: no URL/path/id
     // member, no install-from-URL shape.
@@ -691,6 +694,58 @@ test("native theme install is CSS-text-only with no network or dialog surface", 
     assert.match(installFacade, /requireCapability\("themes\.install_code"\)/);
     assert.match(installFacade, /\{\s*type:\s*"theme_install_code",\s*payload:\s*\{\s*css\s*\}\s*\}/);
     assert.doesNotMatch(installFacade, /fetch\(|installBDTheme|showOpenDialog|openPath/);
+});
+
+test("Electron keeps the theme edit and CSS editor implementation", () => {
+    // editTheme reads the manifest with raw interpolation and opens the
+    // manifest-named file in the system editor or the internal Monaco
+    // editor window, which reads/writes the file directly.
+    assert.match(ipc, /ipcMain\.on\("editTheme", \(_event, id: string\)/);
+    assert.match(ipc, /readFileSync\(`\$\{themesPath\}\/\$\{id\}\/manifest\.json`/);
+    assert.match(ipc, /shell\.openPath\(`\$\{themesPath\}\/\$\{id\}\/\$\{manifest\.theme\}`\)/);
+    const cssEditor = readFileSync(new URL("../../src/cssEditor/main.ts", import.meta.url), "utf8");
+    assert.match(cssEditor, /export function openCssEditor\(file: string\)/);
+    assert.match(cssEditor, /fs\.writeFileSync\(file, css\)/);
+    assert.match(cssEditor, /fs\.readFileSync\(file, "utf-8"\)/);
+    // The renderer bridge keeps the id-only edit send.
+    assert.match(bridge, /edit: \(id: string\) => ipcRenderer\.send\("editTheme", id\)/);
+});
+
+test("no src caller uses the native theme write path", () => {
+    // Step 3b ships the capability without UI wiring: a native branch in
+    // src/ would be fabrication. The Electron theme UI keeps calling edit,
+    // and nothing references the native write surface.
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [bridge, ipc, types, themesCard]) {
+        assert.doesNotMatch(source, /writeCss/);
+        assert.doesNotMatch(source, /themes\.write_css/);
+        assert.doesNotMatch(source, /theme_write_css/);
+    }
+    assert.match(themesCard, /window\.legcord\.themes\.edit\(props\.theme\.id\)/);
+});
+
+test("native theme write resolves the manifest file with no editor surface", () => {
+    // The native module follows manifest.theme through the filename
+    // allowlist (Electron interpolates it raw): no editor window, no
+    // Monaco round-trip, no system-editor launch, no shell execution.
+    const nativeThemes = readFileSync(new URL("../src/themes.rs", import.meta.url), "utf8");
+    assert.match(nativeThemes, /pub fn write_theme_css/);
+    assert.match(nativeThemes, /validate_theme_css_filename\(&manifest\.theme\)/);
+    const shippedThemes = nativeThemes.slice(0, nativeThemes.indexOf("#[cfg(test)]"));
+    assert.doesNotMatch(shippedThemes, /openCssEditor|monaco|Monaco|ShellExecute|openPath|Command::new/);
+    // The facade takes a validated id plus CSS text and returns metadata:
+    // no path, filename, URL, destination, or enablement member.
+    const writeFacade = nativeFacade.slice(
+        nativeFacade.indexOf("function writeThemeCss"),
+        nativeFacade.indexOf('window.addEventListener("legcord-native:response"'),
+    );
+    assert.ok(writeFacade.length > 0);
+    assert.match(writeFacade, /requireCapability\("themes\.write_css"\)/);
+    assert.match(writeFacade, /\{\s*type:\s*"theme_write_css",\s*payload:\s*\{\s*id,\s*css\s*\}\s*\}/);
+    assert.doesNotMatch(writeFacade, /fetch\(|installBDTheme|showOpenDialog|openPath/);
 });
 
 test("settings UI reveals the storage folder natively and sends otherwise", () => {

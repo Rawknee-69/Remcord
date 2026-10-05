@@ -43,7 +43,7 @@ use protocol::{
     BridgeResponsePayload, BundleFileEntry, BundlesListResponse, FoldersOpenedResponse,
     LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
     PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
-    ThemeFolderOpenedResponse, ThemeInstalledResponse, PROTOCOL_VERSION,
+    ThemeFolderOpenedResponse, ThemeInstalledResponse, ThemeWrittenResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -54,7 +54,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
-use themes::{install_theme_from_code, load_enabled_themes, LoadedTheme};
+use themes::{install_theme_from_code, load_enabled_themes, write_theme_css, LoadedTheme};
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
@@ -236,6 +236,7 @@ const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
 const THEME_INSTALL_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_INSTALL_SMOKE";
+const THEME_WRITE_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_WRITE_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -258,6 +259,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "folders.open",
         "folders.open_theme",
         "themes.install_code",
+        "themes.write_css",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -800,6 +802,89 @@ const THEME_INSTALL_SMOKE_SCRIPT: &str = r#"
         enabled: Boolean(installed && installed.enabled),
         attacks_blocked: attacksBlocked,
         fetch_observed: fetchObserved,
+        error: null,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  })();
+})();
+"#;
+
+/// DEV-only theme write smoke probe (`LEGCORD_NATIVE_THEME_WRITE_SMOKE=1`).
+/// Replaces the CSS of a manually pre-placed ENABLED fixture
+/// (`LegcordWriteProbe`, whose `manifest.theme` is deliberately NOT
+/// `src.css`) through the real `themes.write_css` capability, then proves
+/// the new value is reflected via `getComputedStyle` with exactly one
+/// managed style node. Writes a second value to prove repeated atomic
+/// replacement converges, then blocks three attack shapes (traversal id,
+/// unknown theme, oversized CSS). Reported as one typed
+/// `theme_write_probe` event per document with `stage: "write"`. The
+/// fixture is removed by hand after validation (uninstall is deferred).
+const THEME_WRITE_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const THEME_ID = "LegcordWriteProbe";
+  const FIRST_CSS = ":root{\n  --legcord-native-write-probe: first;\n}\n";
+  const SECOND_CSS = ":root{\n  --legcord-native-write-probe: second;\n}\n";
+  const STYLE_ID = "legcord-native-theme-LegcordWriteProbe";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "theme_write_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "write", id: "", css_bytes: 0, enabled: false,
+    attacks_blocked: 0, reflected: false,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  const expectReject = async (pending) => {
+    try {
+      await pending;
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const probeVar = () => getComputedStyle(document.documentElement)
+    .getPropertyValue("--legcord-native-write-probe").trim();
+  const styleCount = () => document.querySelectorAll('style[id="' + STYLE_ID + '"]').length;
+  const waitFor = async (condition) => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (condition()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  };
+  (async () => {
+    try {
+      const themes = window.legcord?.themes;
+      if (typeof themes?.writeCss !== "function") {
+        fail("theme write facade missing");
+        return;
+      }
+      if (typeof themes.edit === "function") {
+        fail("editor-launch surface must not exist");
+        return;
+      }
+      const first = await themes.writeCss(THEME_ID, FIRST_CSS);
+      const reflectedFirst = await waitFor(() => probeVar() === "first");
+      const singleFirst = styleCount() === 1;
+      const second = await themes.writeCss(THEME_ID, SECOND_CSS);
+      const reflectedSecond = await waitFor(() => probeVar() === "second");
+      const singleSecond = styleCount() === 1;
+      const blockedTraversal = await expectReject(themes.writeCss("../escape", FIRST_CSS));
+      const blockedUnknown = await expectReject(themes.writeCss("legcord-native-no-such-theme", FIRST_CSS));
+      const blockedOversized = await expectReject(themes.writeCss(THEME_ID, "x".repeat(1048577)));
+      const attacksBlocked = [blockedTraversal, blockedUnknown, blockedOversized].filter(Boolean).length;
+      const contract = first && first.id === THEME_ID && first.enabled === true
+        && second && second.id === THEME_ID && second.css_bytes === SECOND_CSS.length;
+      const reflected = reflectedFirst && singleFirst && reflectedSecond && singleSecond;
+      probe({
+        ok: Boolean(contract) && reflected && attacksBlocked === 3,
+        stage: "write",
+        id: second && typeof second.id === "string" ? second.id : "",
+        css_bytes: second && typeof second.css_bytes === "number" ? second.css_bytes : 0,
+        enabled: Boolean(second && second.enabled),
+        attacks_blocked: attacksBlocked,
+        reflected: reflected,
         error: null,
       });
     } catch (error) {
@@ -1527,6 +1612,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(THEME_INSTALL_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_theme_install_smoke {
         println!("[Themes][InstallSmoke] theme install smoke probe enabled");
+    }
+    let diagnostic_theme_write_smoke =
+        std::env::var(THEME_WRITE_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_theme_write_smoke {
+        println!("[Themes][WriteSmoke] theme write smoke probe enabled");
     }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
@@ -2272,6 +2362,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_theme_install_smoke {
                             if let Err(error) = webview.evaluate_script(THEME_INSTALL_SMOKE_SCRIPT) {
                                 eprintln!("[Themes][InstallSmoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_theme_write_smoke {
+                            if let Err(error) = webview.evaluate_script(THEME_WRITE_SMOKE_SCRIPT) {
+                                eprintln!("[Themes][WriteSmoke] probe failed: {error}");
                             }
                         }
                     }
@@ -3081,8 +3176,63 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
-                        BridgeCommand::ModGetBundle(payload) => {
+                        BridgeCommand::ThemeWriteCss(payload) => {
+                            // Replace one theme's CSS text: the destination
+                            // is the manifest-declared file resolved by the
+                            // host, and the manifest itself is never
+                            // touched. The existing live watcher observes
+                            // the replacement and drives the managed CSS
+                            // lifecycle.
                             let request_id = request.request_id;
+                            match write_theme_css(&profile_path, &payload.id, &payload.css) {
+                                Ok(written) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::ThemeWritten(
+                                            ThemeWrittenResponse {
+                                                id: written.id.clone(),
+                                                enabled: written.enabled,
+                                                css_bytes: written.css_bytes,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Themes][Write] id={} enabled={} css_bytes={} request_latency_ms={:.3}",
+                                        written.id,
+                                        written.enabled,
+                                        written.css_bytes,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Themes][Write:{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::ModGetBundle(payload) => {                            let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
                                 let response = BridgeResponse {
                                     version: PROTOCOL_VERSION,
@@ -3653,6 +3803,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[Themes][InstallSmoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::ThemeWriteProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Themes][WriteSmoke] ok=true stage={} id={} css_bytes={} enabled={} attacks_blocked={} reflected={}",
+                                payload.stage,
+                                payload.id,
+                                payload.css_bytes,
+                                payload.enabled,
+                                payload.attacks_blocked,
+                                payload.reflected
+                            );
+                        } else {
+                            eprintln!(
+                                "[Themes][WriteSmoke] ok=false stage={} error={}",
                                 payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
@@ -4419,13 +4588,16 @@ mod tests {
     #[test]
     fn boot_snapshot_grants_no_theme_capability() {
         // Theme injection is a host push: the renderer never requests theme
-        // CSS, so no theme-CSS pull capability may exist. `folders.open_theme`
-        // and `themes.install_code` are explicitly allowed: the first names
-        // the themes ROOT for folder opening (validated id → host-built
-        // path → OS shell), the second writes theme files the host then
-        // pushes itself — neither reads theme CSS back to the renderer.
+        // CSS, so no theme-CSS pull capability may exist. `folders.open_theme`,
+        // `themes.install_code`, and `themes.write_css` are explicitly
+        // allowed: the first names the themes ROOT for folder opening, the
+        // others write theme files the host then pushes itself — none reads
+        // theme CSS back to the renderer.
         for capability in super::BOOT_SNAPSHOT.capabilities {
-            if *capability == "folders.open_theme" || *capability == "themes.install_code" {
+            if *capability == "folders.open_theme"
+                || *capability == "themes.install_code"
+                || *capability == "themes.write_css"
+            {
                 continue;
             }
             assert!(!capability.starts_with("themes."));
@@ -4497,9 +4669,14 @@ mod tests {
         // Live watching is a host-owned lifecycle: two native watchers with
         // no bridge command, no boot capability, no facade member, and no
         // renderer-supplied path anywhere near this milestone.
+        // (`themes.write_css` names CSS but is a file-writing capability
+        // consumed BY the watchers, not a watching surface itself.)
         for capability in super::BOOT_SNAPSHOT.capabilities {
             assert!(!capability.contains("watch"));
             assert!(!capability.contains("live"));
+            if *capability == "themes.write_css" {
+                continue;
+            }
             assert!(!capability.contains("css"));
         }
         let script = initialization_script(&[]).unwrap();
@@ -4667,5 +4844,55 @@ mod tests {
         assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("fetch_observed"));
         assert!(!super::THEME_INSTALL_SMOKE_SCRIPT.contains("installBDTheme"));
         assert!(!super::THEME_INSTALL_SMOKE_SCRIPT.contains("sendSync"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_only_theme_write_for_edits() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"themes.write_css"));
+        // No editor launch, dialog, picker, URL install, or generic
+        // capability may exist alongside the write command.
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert_ne!(*capability, "themes.edit");
+            assert_ne!(*capability, "themes.open_editor");
+            assert_ne!(*capability, "themes.install");
+        }
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"network"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"shell"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_theme_write_facade() {
+        let script = initialization_script(&[]).unwrap();
+        assert!(script.contains("theme_write_css"));
+        assert!(script.contains("themes.write_css"));
+        assert!(script.contains("writeCss"));
+        // CSS text in, metadata out: no editor surface, URL install,
+        // dialog, picker, fetch, or synchronous IPC anywhere near it.
+        assert!(!script.contains("openCssEditor"));
+        assert!(!script.contains("installBDTheme"));
+        assert!(!script.contains("showOpenDialog"));
+        assert!(!script.contains("fetch("));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn theme_write_smoke_probe_reports_reflection_through_the_typed_probe_event() {
+        assert_eq!(
+            super::THEME_WRITE_SMOKE_ENV,
+            "LEGCORD_NATIVE_THEME_WRITE_SMOKE"
+        );
+        assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("writeCss"));
+        assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("theme_write_probe"));
+        assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("LegcordWriteProbe"));
+        // The probe proves in-WebView reflection and single-node updates;
+        // it never launches an editor or fetches code.
+        assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("getComputedStyle"));
+        assert!(!super::THEME_WRITE_SMOKE_SCRIPT.contains("openCssEditor"));
+        assert!(!super::THEME_WRITE_SMOKE_SCRIPT.contains("installBDTheme"));
+        assert!(!super::THEME_WRITE_SMOKE_SCRIPT.contains("sendSync"));
     }
 }

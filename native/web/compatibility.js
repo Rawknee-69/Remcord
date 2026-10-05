@@ -307,6 +307,30 @@
         return request({ type: "theme_install_code", payload: { css } }, timeoutMs).then((payload) => payload);
     }
 
+    function writeThemeCss(id, css, timeoutMs = 5000) {
+        requireCapability("themes.write_css");
+        if (typeof id !== "string" || !THEME_ID_PATTERN.test(id) || id === "." || id === "..") {
+            return Promise.reject(new TypeError("id must match [A-Za-z0-9._-]{1,64} and not be . or .."));
+        }
+        if (typeof css !== "string" || textEncoder.encode(css).length > MAX_THEME_CSS_BYTES) {
+            return Promise.reject(new TypeError("css must be a string of at most 1048576 UTF-8 bytes"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Id plus CSS text only: the host resolves the manifest-declared
+        // file under its own themes root and preserves the manifest. The
+        // response echoes the validated id so the caller can confirm the
+        // target. No path, filename, URL, destination, or enablement flag
+        // may be supplied.
+        return request({ type: "theme_write_css", payload: { id, css } }, timeoutMs).then((payload) => {
+            if (payload.id !== id) {
+                throw new Error("Native theme write response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
     function listBundles(timeoutMs = 5000) {
         requireCapability("backup.list_bundles");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -528,6 +552,25 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "theme_written") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                typeof payload.id !== "string" ||
+                !THEME_ID_PATTERN.test(payload.id) ||
+                payload.id === "." ||
+                payload.id === ".." ||
+                textEncoder.encode(payload.id).length > 64 ||
+                typeof payload.enabled !== "boolean" ||
+                !Number.isSafeInteger(payload.css_bytes) ||
+                payload.css_bytes < 0 ||
+                payload.css_bytes > MAX_THEME_CSS_BYTES
+            ) {
+                request.reject(new Error("Native theme write response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -598,7 +641,9 @@
     const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });
     // Theme installation only: CSS text in, bounded metadata out. No URL,
     // path, dialog, picker, editor, or list surface.
-    const themes = Object.freeze({ installFromCode: installThemeFromCode });
+    // Theme CSS replacement only: validated id plus CSS text in, bounded
+    // metadata out. No path, filename, URL, destination, or enablement flag.
+    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,

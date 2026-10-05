@@ -52,6 +52,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request (folder reveal) | `{"version":1,"request_id":"...","command":{"type":"folders_open","payload":{"location":"themes"}}}` |
 | Renderer request (theme folder open) | `{"version":1,"request_id":"...","command":{"type":"folders_open_theme","payload":{"id":"my-theme"}}}` |
 | Renderer request (theme install) | `{"version":1,"request_id":"...","command":{"type":"theme_install_code","payload":{"css":"/** @name Midnight Harbor */ :root {}"}}}` |
+| Renderer request (theme CSS write) | `{"version":1,"request_id":"...","command":{"type":"theme_write_css","payload":{"id":"my-theme","css":":root {}"}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Mod bundle response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"mod_bundle","payload":{"mod_id":"vencord","bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
@@ -64,9 +65,10 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Folder reveal response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"folders_opened","payload":{"location":"themes"}},"error":null}` |
 | Theme folder open response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_folder_opened","payload":{"id":"my-theme"}},"error":null}` |
 | Theme install response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_installed","payload":{"id":"Midnight-Harbor-BD","enabled":false,"css_bytes":128}},"error":null}` |
+| Theme CSS write response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_written","payload":{"id":"my-theme","enabled":true,"css_bytes":32}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, `folders_open_theme`, and `theme_install_code`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, `folders_open_theme`, `theme_install_code`, and `theme_write_css`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -282,6 +284,32 @@ renderer await window.legcord.themes.installFromCode(css)
 `parse_bd_manifest` mirrors the JS `/@([^ ]*) (.*)/g` scan byte-for-byte (verified against node: mid-line matches, `@import` break, newline-swallowed keys, kept `\r`, last-wins duplicates). The id is `<first-space-dashed name>-BD` validated by `validate_theme_id`; a missing/empty/evil name is `INVALID_NAME` (Electron's `"null-BD"` fallback deliberately not reproduced). The manifest is the Electron shape minus `updateSrc` (no URL input in this slice; key order normalized — JSON-semantically identical, both loaders order-insensitive) with `enabled: false` always (fresh BD installs start disabled; the native loader skips them until an enable path exists — current migration limitation, not a silent flip). Both files land via sibling-temp + same-directory rename; the existing live watcher observes them and drives the managed CSS lifecycle (verified: a disabled install produces no renderer work; enabling later is a separate slice). Transport note: `theme_install_code` is the single documented exception to the 8 KiB message bound (up to 1 MiB + envelope slack, CSS re-checked at parse); every other command keeps the legacy bound — including the 1 MiB-capable plugin-storage write, whose effective bound therefore stays 8 KiB (pre-existing behavior, unchanged by this slice).
 
 Deliberate Electron differences: validated/rejected names instead of `null-BD`; 1 MiB CSS cap and 128 B/4 KiB header caps (Electron unbounded); atomic writes (Electron in place); no remote fetch, no file dialog, no editor launch; shell display uses the plain Win32 form only where the shell is involved (not in this slice).
+
+## Theme CSS write capability (Phase D Step 3b)
+
+`themes.write_css` (wire `theme_write_css`, facade `window.legcord.themes.writeCss(id, css)`) replaces one theme's CSS text. The renderer supplies only the id and the new CSS: the destination is the manifest-declared file resolved through the filename allowlist, and `manifest.json` is never modified (enablement and metadata preserved byte-for-byte, mirroring Electron's editor save path). No URL, no path, no filename, no destination, no enablement flag, no editor/process launch, no dialog. No `src/` caller is branched.
+
+### Electron edit chain (unchanged)
+
+`editTheme(id)` reads the manifest with raw string interpolation (missing/malformed manifests throw unhandled) and opens the manifest-named file in the system editor (`shell.openPath`, traversal-capable) or the internal Monaco window (`openCssEditor`, which reads/writes the file directly with no ack). `native/tests/electron-compat.test.mjs` asserts this implementation is byte-identical.
+
+### Native chain
+
+```text
+renderer await window.legcord.themes.writeCss("my-theme", css)
+  → requireCapability("themes.write_css") or sync UNSUPPORTED_CAPABILITY throw
+  → client id/css checks (TypeError before dispatch)
+  → {"type":"theme_write_css","payload":{"id":"my-theme","css":"..."}}
+     (path/filename/url/destination/enabled members host-rejected)
+  → Rust themes::write_theme_css (validate id → dir must exist → bounded
+     manifest read → filename allowlist → canonical containment → unique-temp
+     atomic replace; manifest untouched)
+  → validated theme_written { id, enabled, css_bytes } → resolved metadata
+```
+
+The write goes through the canonical directory plus one validated component; a pre-planted link at the destination is refused outright (stricter than follow-then-contain); the temp file is uniquely named with create-new semantics so it cannot be pre-planted either. A missing directory is `UNKNOWN_THEME` (never created); a missing/malformed/oversized manifest is `INVALID_MANIFEST`; an evil manifest filename is `INVALID_FILENAME`. The existing live watcher observes the replacement and drives the managed CSS lifecycle in place (no re-append, no duplication). The bounded-CSS transport exception covers this second code-carrying command (comment updated, bound unchanged).
+
+Deliberate Electron differences (hardening, not regressions): validated ids instead of raw interpolation; manifest filenames allowlisted instead of followed raw (Electron's `../planted.css` equivalent is rejected); 1 MiB cap; atomic unique-temp replacement instead of in-place write; typed path-free errors instead of silent/throwing behavior.
 
 ## Reusable mod substrate (Phase B)
 

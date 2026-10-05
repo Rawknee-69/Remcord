@@ -428,6 +428,185 @@ pub fn install_theme_from_code(
     })
 }
 
+/// Successful CSS-write report: the validated id, the preserved enablement
+/// (read from the untouched manifest), and the stored CSS size. No path
+/// crosses this boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ThemeWriteResult {
+    pub id: String,
+    pub enabled: bool,
+    pub css_bytes: usize,
+}
+
+/// Atomically replace `path` with `bytes` through a uniquely named sibling
+/// temp file plus same-directory rename, with temp cleanup on either
+/// failure. The unique name (process + nanos + counter) means a pre-planted
+/// temp file can never be substituted for the write; `create_new` semantics
+/// fail closed on the residual collision instead of overwriting it.
+fn write_file_atomic_unique(path: &Path, bytes: &[u8]) -> Result<(), ThemeInstallFailure> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temp_name = format!(
+        ".tmp-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let temp_path = path.with_file_name(temp_name);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            if file.write_all(bytes).is_err() {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(install_failure(
+                    "THEME_WRITE_FAILED",
+                    "theme files cannot be written",
+                ));
+            }
+        }
+        Err(_) => {
+            return Err(install_failure(
+                "THEME_WRITE_FAILED",
+                "theme files cannot be written",
+            ));
+        }
+    }
+    if std::fs::rename(&temp_path, path).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(install_failure(
+            "THEME_WRITE_FAILED",
+            "theme files cannot be written",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the CSS file a theme id selects, without writing anything.
+///
+/// The id is validated (never sanitized); the theme directory must already
+/// exist (never created here — a missing directory is `UNKNOWN_THEME`);
+/// the bounded manifest selects the filename, which must pass the same
+/// allowlist the loader enforces; the resolved file must stay under the
+/// canonical themes root. A symlink/junction at the destination that
+/// resolves outside is refused instead of followed.
+fn resolve_theme_css(
+    profile_dir: &Path,
+    theme_id: &str,
+) -> Result<(PathBuf, bool), ThemeInstallFailure> {
+    if theme_id.is_empty() || theme_id.len() > MAX_THEME_ID_BYTES {
+        return Err(install_failure("INVALID_THEME_ID", "theme id is invalid"));
+    }
+    if validate_theme_id(theme_id).is_err() {
+        return Err(install_failure("INVALID_THEME_ID", "theme id is invalid"));
+    }
+    let root = themes_dir(profile_dir);
+    let root_canonical = std::fs::canonicalize(&root)
+        .map_err(|_| install_failure("THEME_UNAVAILABLE", "theme storage is unavailable"))?;
+    // Lexically safe (one validated component, no separators possible).
+    let theme_dir = root.join(theme_id);
+    let theme_canonical = match std::fs::canonicalize(&theme_dir) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(install_failure("UNKNOWN_THEME", "theme folder is unknown"));
+        }
+        Err(_) => {
+            return Err(install_failure(
+                "THEME_UNAVAILABLE",
+                "theme storage is unavailable",
+            ));
+        }
+    };
+    if !theme_canonical.starts_with(&root_canonical) {
+        return Err(install_failure(
+            "OUTSIDE_ROOT",
+            "theme target is outside the approved root",
+        ));
+    }
+    // The manifest selects the file — exactly what Electron edits — but
+    // through the native filename allowlist instead of raw interpolation.
+    let manifest_path = theme_canonical.join("manifest.json");
+    let manifest_len = std::fs::symlink_metadata(&manifest_path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len());
+    let manifest_text = match manifest_len {
+        Some(len) if len <= MAX_MANIFEST_BYTES as u64 => std::fs::read_to_string(&manifest_path)
+            .map_err(|_| install_failure("INVALID_MANIFEST", "theme manifest is invalid"))?,
+        _ => {
+            return Err(install_failure(
+                "INVALID_MANIFEST",
+                "theme manifest is invalid",
+            ));
+        }
+    };
+    let manifest: ThemeManifestFile = serde_json::from_str(&manifest_text)
+        .map_err(|_| install_failure("INVALID_MANIFEST", "theme manifest is invalid"))?;
+    if validate_theme_css_filename(&manifest.theme).is_err() {
+        return Err(install_failure(
+            "INVALID_FILENAME",
+            "theme CSS filename is invalid",
+        ));
+    }
+    // Single validated component onto the verified canonical directory:
+    // lexically unable to escape. A pre-planted link AT the destination is
+    // refused outright instead of written through or followed — the strict
+    // bundles convention, not the follow-then-contain one.
+    let target = theme_canonical.join(&manifest.theme);
+    if !target.starts_with(&root_canonical) {
+        return Err(install_failure(
+            "OUTSIDE_ROOT",
+            "theme target is outside the approved root",
+        ));
+    }
+    if std::fs::symlink_metadata(&target)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(install_failure(
+            "OUTSIDE_ROOT",
+            "theme target is outside the approved root",
+        ));
+    }
+    Ok((target, manifest.enabled != Some(false)))
+}
+
+/// Replace one theme's CSS text.
+///
+/// The renderer supplies only the id and the new CSS: the destination is
+/// the manifest-declared file resolved by [`resolve_theme_css`], and
+/// `manifest.json` is never touched (enablement and metadata are preserved
+/// byte-for-byte, mirroring Electron's editor save path). The write is an
+/// atomic unique-temp + same-directory rename that replaces an existing
+/// destination. The existing live watcher observes the replacement and
+/// drives the managed CSS lifecycle; nothing here touches the renderer.
+pub fn write_theme_css(
+    profile_dir: &Path,
+    theme_id: &str,
+    css: &str,
+) -> Result<ThemeWriteResult, ThemeInstallFailure> {
+    if css.len() > MAX_THEME_CSS_BYTES {
+        return Err(install_failure(
+            "THEME_TOO_LARGE",
+            "theme CSS exceeds the size limit",
+        ));
+    }
+    let (target, enabled) = resolve_theme_css(profile_dir, theme_id)?;
+    write_file_atomic_unique(&target, css.as_bytes())?;
+    Ok(ThemeWriteResult {
+        id: theme_id.to_owned(),
+        enabled,
+        css_bytes: css.len(),
+    })
+}
+
 /// Deterministic DOM id for one theme's managed style element.
 pub fn theme_style_id(theme_id: &str) -> String {
     format!("{THEME_STYLE_ID_PREFIX}{theme_id}")
@@ -654,7 +833,8 @@ pub fn load_enabled_themes(profile_dir: &Path) -> ThemeLoadReport {
 mod tests {
     use super::{
         install_theme_from_code, load_enabled_themes, parse_bd_manifest, theme_style_id,
-        validate_theme_css_filename, validate_theme_id, MAX_THEME_CSS_BYTES, THEME_STYLE_ID_PREFIX,
+        validate_theme_css_filename, validate_theme_id, write_theme_css, MAX_THEME_CSS_BYTES,
+        THEME_STYLE_ID_PREFIX,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1102,6 +1282,223 @@ mod tests {
         let failure = install_theme_from_code(&profile, code).expect_err("outside link must fail");
         assert_eq!(failure.code, "OUTSIDE_ROOT");
         // Nothing escaped: the outside root gained no theme files.
+        assert!(fs::read_dir(&outside)
+            .expect("outside must list")
+            .next()
+            .is_none());
+        fs::remove_dir_all(&profile).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn write_replaces_manifest_declared_css_and_preserves_manifest() {
+        let profile = temp_profile();
+        // Foreign filename on purpose: the write must follow manifest.theme,
+        // never a hardcoded src.css.
+        let manifest =
+            r#"{"theme":"custom-name.css","name":"Foreign","enabled":true,"author":"A"}"#;
+        write_theme(
+            &profile,
+            "foreign",
+            manifest,
+            Some(("custom-name.css", ":root{--v:1;}\n")),
+        );
+        let before = fs::read(profile.join("themes").join("foreign").join("manifest.json"))
+            .expect("manifest must read");
+
+        let result =
+            write_theme_css(&profile, "foreign", ":root{--v:2;}\n").expect("write must succeed");
+        assert_eq!(result.id, "foreign");
+        assert!(result.enabled);
+        assert_eq!(
+            fs::read_to_string(
+                profile
+                    .join("themes")
+                    .join("foreign")
+                    .join("custom-name.css")
+            )
+            .expect("css must read"),
+            ":root{--v:2;}\n"
+        );
+        // manifest.json byte-for-byte unchanged, src.css never created.
+        assert_eq!(
+            fs::read(profile.join("themes").join("foreign").join("manifest.json"))
+                .expect("manifest must read"),
+            before
+        );
+        assert!(!profile
+            .join("themes")
+            .join("foreign")
+            .join("src.css")
+            .exists());
+        // No temp residue from the unique-temp rename.
+        assert!(fs::read_dir(profile.join("themes").join("foreign"))
+            .expect("dir must list")
+            .all(|entry| {
+                let name = entry.expect("entry must read").file_name();
+                name == "manifest.json" || name == "custom-name.css"
+            }));
+        // Repeated writes converge on the latest bytes (rename replaces the
+        // existing Windows destination).
+        write_theme_css(&profile, "foreign", ":root{--v:3;}\n").expect("second write must succeed");
+        write_theme_css(&profile, "foreign", ":root{--v:4;}\n").expect("third write must succeed");
+        assert_eq!(
+            fs::read_to_string(
+                profile
+                    .join("themes")
+                    .join("foreign")
+                    .join("custom-name.css")
+            )
+            .expect("css must read"),
+            ":root{--v:4;}\n"
+        );
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn write_rejects_unknown_invalid_and_evil_targets() {
+        let profile = temp_profile();
+        // Unknown theme: never created.
+        assert_eq!(
+            write_theme_css(&profile, "no-such-theme", ":root{}\n")
+                .expect_err("missing dir must fail")
+                .code,
+            "UNKNOWN_THEME"
+        );
+        assert!(!profile.join("themes").join("no-such-theme").exists());
+        // Id shapes that could select another path.
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "..\\escape",
+            "a/b",
+            "C:\\x",
+            "has space",
+        ] {
+            assert_eq!(
+                write_theme_css(&profile, bad, ":root{}\n")
+                    .expect_err("evil id must fail")
+                    .code,
+                "INVALID_THEME_ID",
+                "{bad:?} must be rejected"
+            );
+        }
+        // Missing manifest.
+        fs::create_dir_all(profile.join("themes").join("nomanifest")).expect("dir must create");
+        assert_eq!(
+            write_theme_css(&profile, "nomanifest", ":root{}\n")
+                .expect_err("missing manifest must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // Malformed and oversized manifests.
+        write_theme(
+            &profile,
+            "badjson",
+            "{not json",
+            Some(("src.css", ":root{}\n")),
+        );
+        assert_eq!(
+            write_theme_css(&profile, "badjson", ":root{}\n")
+                .expect_err("malformed manifest must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // Manifest without a theme field.
+        write_theme(
+            &profile,
+            "notheme",
+            r#"{"name":"X","enabled":true}"#,
+            Some(("src.css", ":root{}\n")),
+        );
+        assert_eq!(
+            write_theme_css(&profile, "notheme", ":root{}\n")
+                .expect_err("theme-less manifest must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // Evil manifest-declared filename (Electron would follow it).
+        write_theme(
+            &profile,
+            "evilfile",
+            r#"{"theme":"../planted.css","name":"E","enabled":true}"#,
+            None,
+        );
+        assert_eq!(
+            write_theme_css(&profile, "evilfile", ":root{}\n")
+                .expect_err("evil filename must fail")
+                .code,
+            "INVALID_FILENAME"
+        );
+        // Oversized CSS with a valid target standing by.
+        write_theme(
+            &profile,
+            "big",
+            r#"{"theme":"src.css","name":"B","enabled":true}"#,
+            Some(("src.css", ":root{}\n")),
+        );
+        let huge = "x".repeat(MAX_THEME_CSS_BYTES + 1);
+        let failure = write_theme_css(&profile, "big", &huge).expect_err("oversized CSS must fail");
+        assert_eq!(failure.code, "THEME_TOO_LARGE");
+        assert!(!failure
+            .message
+            .contains(&profile.to_string_lossy().into_owned()));
+        assert_eq!(
+            fs::read_to_string(profile.join("themes").join("big").join("src.css"))
+                .expect("css must read"),
+            ":root{}\n"
+        );
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn write_refuses_links_at_every_level() {
+        let profile = temp_profile();
+        let outside = temp_profile();
+        let manifest = r#"{"theme":"src.css","name":"Linked","enabled":true}"#;
+        write_theme(&profile, "linked", manifest, Some(("src.css", ":root{}\n")));
+        // Destination symlink pointing outside: refused, outside untouched.
+        #[cfg(windows)]
+        let css_link = std::os::windows::fs::symlink_file(
+            outside.join("secret.css"),
+            profile.join("themes").join("linked").join("src.css"),
+        );
+        #[cfg(not(windows))]
+        let css_link = std::os::unix::fs::symlink(
+            outside.join("secret.css"),
+            profile.join("themes").join("linked").join("src.css"),
+        );
+        // Directory symlink at the theme id pointing outside: refused.
+        #[cfg(windows)]
+        let dir_link = std::os::windows::fs::symlink_dir(
+            outside.as_path(),
+            profile.join("themes").join("dirlinked"),
+        );
+        #[cfg(not(windows))]
+        let dir_link =
+            std::os::unix::fs::symlink(outside.as_path(), profile.join("themes").join("dirlinked"));
+        if css_link.is_err() || dir_link.is_err() {
+            eprintln!("SKIP: link creation needs privileges in this environment; lexical safety still holds");
+            fs::remove_dir_all(&profile).ok();
+            fs::remove_dir_all(&outside).ok();
+            return;
+        }
+        // Replace the linked css with a real file first scenario is covered
+        // by removing the link: the point is the link itself must fail.
+        assert_eq!(
+            write_theme_css(&profile, "linked", ":root{}\n")
+                .expect_err("css link must fail")
+                .code,
+            "OUTSIDE_ROOT"
+        );
+        assert_eq!(
+            write_theme_css(&profile, "dirlinked", ":root{}\n")
+                .expect_err("dir link must fail")
+                .code,
+            "OUTSIDE_ROOT"
+        );
         assert!(fs::read_dir(&outside)
             .expect("outside must list")
             .next()
