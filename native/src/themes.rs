@@ -163,6 +163,271 @@ pub fn themes_dir(profile_dir: &Path) -> PathBuf {
     profile_dir.join("themes")
 }
 
+/// Maximum BetterDiscord header value length in UTF-8 bytes (the theme
+/// name; other header values share the field bound below). Real theme
+/// names are a few dozen bytes; this is a safety rail, not a target.
+pub const MAX_BD_NAME_BYTES: usize = 128;
+/// Maximum any other single BetterDiscord header value in UTF-8 bytes.
+/// Descriptions and links are short strings in real themes.
+pub const MAX_BD_FIELD_BYTES: usize = 4096;
+/// Fixed CSS filename every installed theme carries, mirroring Electron's
+/// `installThemeFromCode` (which always writes `src.css`). Never
+/// renderer-selected.
+pub const INSTALLED_THEME_CSS_FILE: &str = "src.css";
+
+/// Parsed BetterDiscord header block. Mirrors exactly the fields Electron's
+/// `parseBDManifest` (`src/common/themes.ts`) reads: `name` plus the known
+/// metadata keys. `theme`, `enabled`, and `supportsLegcordTitlebar` are
+/// host-fixed/derived, and `updateSrc` is omitted (no URL input exists in
+/// the install capability; a future update flow will validate it then).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ParsedBdManifest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub author: Option<String>,
+    pub invite: Option<String>,
+    pub author_id: Option<String>,
+    pub author_link: Option<String>,
+    pub donate: Option<String>,
+    pub patreon: Option<String>,
+    pub website: Option<String>,
+    pub source: Option<String>,
+}
+
+/// Typed failure for theme installation: a stable machine-readable `code`
+/// plus a human message that never contains a filesystem path.
+#[derive(Debug)]
+pub struct ThemeInstallFailure {
+    pub code: &'static str,
+    pub message: String,
+}
+
+fn install_failure(code: &'static str, message: &str) -> ThemeInstallFailure {
+    ThemeInstallFailure {
+        code,
+        message: message.to_owned(),
+    }
+}
+
+/// Parse a BetterDiscord theme source exactly the way Electron's
+/// `parseBDManifest` does (verified against the JS `/@([^ ]*) (.*)/g` scan):
+/// the `/**` marker is required; `@key value` pairs match anywhere in the
+/// text (including CSS bodies); the key runs to the first space (and may
+/// therefore swallow a newline, hiding a later header — reproduced, not
+/// fixed); the value runs to the next newline with a trailing `\r` kept;
+/// a key of exactly `import` stops the scan; later duplicates overwrite.
+/// Unknown keys are ignored.
+pub fn parse_bd_manifest(code: &str) -> Result<ParsedBdManifest, ThemeInstallFailure> {
+    if !code.starts_with("/**") {
+        return Err(install_failure(
+            "NOT_A_MANIFEST",
+            "theme source is not a BetterDiscord theme",
+        ));
+    }
+    let mut manifest = ParsedBdManifest::default();
+    let bytes = code.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let Some(at_rel) = bytes[pos..].iter().position(|&byte| byte == b'@') else {
+            break;
+        };
+        let at = pos + at_rel;
+        let key_start = at + 1;
+        let Some(space_rel) = bytes[key_start..].iter().position(|&byte| byte == b' ') else {
+            pos = at + 1;
+            continue;
+        };
+        let space = key_start + space_rel;
+        // Byte slicing is safe: `@`, ` `, and `\n` are ASCII and never
+        // appear inside a multibyte UTF-8 sequence.
+        let key = &code[key_start..space];
+        let value_start = space + 1;
+        let value_end = bytes[value_start..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map(|newline_rel| value_start + newline_rel)
+            .unwrap_or(bytes.len());
+        let value = &code[value_start..value_end];
+        // JS `lastIndex` resumes at the end of the match.
+        pos = value_end;
+        if key == "import" {
+            break;
+        }
+        let bounded = |field: &str| {
+            if field.len() > MAX_BD_FIELD_BYTES {
+                None
+            } else {
+                Some(field.to_owned())
+            }
+        };
+        match key {
+            "name" => manifest.name = Some(value.to_owned()),
+            "description" => manifest.description = bounded(value),
+            "version" => manifest.version = bounded(value),
+            "author" => manifest.author = bounded(value),
+            "invite" => manifest.invite = bounded(value),
+            "authorId" => manifest.author_id = bounded(value),
+            "authorLink" => manifest.author_link = bounded(value),
+            "donate" => manifest.donate = bounded(value),
+            "patreon" => manifest.patreon = bounded(value),
+            "website" => manifest.website = bounded(value),
+            "source" => manifest.source = bounded(value),
+            // Electron maps `updateUrl` to `updateSrc`, but installing from a
+            // URL is out of scope: the value is dropped and documented.
+            _ => {}
+        }
+    }
+    Ok(manifest)
+}
+
+/// Derive the theme directory id from a parsed `@name`, mirroring
+/// Electron's `` `${name.replace(" ", "-")}-BD` `` (first space only).
+/// A missing or empty `@name` is rejected: Electron's `"null-BD"` fallback
+/// would turn invalid input into an accepted theme, so it is deliberately
+/// not reproduced.
+fn derive_theme_id(name: Option<String>) -> Result<String, ThemeInstallFailure> {
+    let invalid = || install_failure("INVALID_NAME", "theme name is missing or invalid");
+    let name = match name {
+        Some(name) if !name.is_empty() => name,
+        _ => return Err(invalid()),
+    };
+    if name.len() > MAX_BD_NAME_BYTES {
+        return Err(invalid());
+    }
+    let id = format!("{}-BD", name.replacen(' ', "-", 1));
+    if validate_theme_id(&id).is_err() {
+        return Err(invalid());
+    }
+    Ok(id)
+}
+
+/// Successful installation report: the host-derived id, the persisted
+/// enablement, and the stored CSS size. No path crosses this boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ThemeInstallResult {
+    pub id: String,
+    pub enabled: bool,
+    pub css_bytes: usize,
+}
+
+/// Atomically replace `path` with `bytes`: sibling temp file in the same
+/// directory plus same-directory rename (mirroring the settings mutation),
+/// with temp cleanup on either failure.
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), ThemeInstallFailure> {
+    let temp_path = path.with_extension("tmp");
+    if std::fs::write(&temp_path, bytes).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(install_failure(
+            "THEME_WRITE_FAILED",
+            "theme files cannot be written",
+        ));
+    }
+    if std::fs::rename(&temp_path, path).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(install_failure(
+            "THEME_WRITE_FAILED",
+            "theme files cannot be written",
+        ));
+    }
+    Ok(())
+}
+
+/// Install one BetterDiscord theme from CSS text under the host-controlled
+/// themes root.
+///
+/// The renderer supplies only the source text: the id is derived from
+/// `@name` (validated, never sanitized), the CSS filename is the fixed
+/// `src.css`, and `enabled` is always `false` (Electron parity — a fresh BD
+/// install starts disabled; the native loader skips it until an enable path
+/// exists). Overwriting an existing id directory is deterministic (same
+/// inputs, same files), matching Electron's silent overwrite. The existing
+/// live watcher observes the written files and drives the managed CSS
+/// lifecycle; nothing here touches the renderer.
+pub fn install_theme_from_code(
+    profile_dir: &Path,
+    css: &str,
+) -> Result<ThemeInstallResult, ThemeInstallFailure> {
+    if css.len() > MAX_THEME_CSS_BYTES {
+        return Err(install_failure(
+            "THEME_TOO_LARGE",
+            "theme CSS exceeds the size limit",
+        ));
+    }
+    let parsed = parse_bd_manifest(css)?;
+    let titlebar = css.contains(".titlebar");
+    // Electron-identical manifest shape (key order normalized —
+    // JSON semantics are order-insensitive and both loaders ignore order),
+    // minus `updateSrc` (no URL input in this slice).
+    let mut manifest = serde_json::Map::new();
+    manifest.insert(
+        "theme".to_owned(),
+        serde_json::Value::String(INSTALLED_THEME_CSS_FILE.to_owned()),
+    );
+    // The name was validated present and non-empty during id derivation.
+    let name = parsed.name.clone().unwrap_or_default();
+    let id = derive_theme_id(parsed.name)?;
+    manifest.insert("name".to_owned(), serde_json::Value::String(name));
+    manifest.insert("enabled".to_owned(), serde_json::Value::Bool(false));
+    for (key, value) in [
+        ("description", parsed.description),
+        ("version", parsed.version),
+        ("author", parsed.author),
+        ("invite", parsed.invite),
+        ("authorId", parsed.author_id),
+        ("authorLink", parsed.author_link),
+        ("donate", parsed.donate),
+        ("patreon", parsed.patreon),
+        ("website", parsed.website),
+        ("source", parsed.source),
+    ] {
+        if let Some(value) = value {
+            manifest.insert(key.to_owned(), serde_json::Value::String(value));
+        }
+    }
+    manifest.insert(
+        "supportsLegcordTitlebar".to_owned(),
+        serde_json::Value::Bool(titlebar),
+    );
+    let manifest_text = serde_json::to_string(&serde_json::Value::Object(manifest))
+        .map_err(|_| install_failure("THEME_WRITE_FAILED", "theme files cannot be written"))?;
+
+    let root = themes_dir(profile_dir);
+    std::fs::create_dir_all(&root)
+        .map_err(|_| install_failure("THEME_UNAVAILABLE", "theme storage is unavailable"))?;
+    let root_canonical = std::fs::canonicalize(&root)
+        .map_err(|_| install_failure("THEME_UNAVAILABLE", "theme storage is unavailable"))?;
+    // Lexically safe (one validated component), then canonical containment
+    // so a pre-planted symlink/junction at the id can never redirect the
+    // write outside the root. The directory is created by the host when
+    // missing; an existing one is reused for deterministic overwrite.
+    let theme_dir = root.join(&id);
+    std::fs::create_dir_all(&theme_dir)
+        .map_err(|_| install_failure("THEME_UNAVAILABLE", "theme storage is unavailable"))?;
+    let theme_canonical = std::fs::canonicalize(&theme_dir)
+        .map_err(|_| install_failure("THEME_UNAVAILABLE", "theme storage is unavailable"))?;
+    if !theme_canonical.starts_with(&root_canonical) {
+        return Err(install_failure(
+            "OUTSIDE_ROOT",
+            "theme target is outside the approved root",
+        ));
+    }
+
+    write_file_atomic(
+        &theme_canonical.join("manifest.json"),
+        manifest_text.as_bytes(),
+    )?;
+    write_file_atomic(
+        &theme_canonical.join(INSTALLED_THEME_CSS_FILE),
+        css.as_bytes(),
+    )?;
+    Ok(ThemeInstallResult {
+        id,
+        enabled: false,
+        css_bytes: css.len(),
+    })
+}
+
 /// Deterministic DOM id for one theme's managed style element.
 pub fn theme_style_id(theme_id: &str) -> String {
     format!("{THEME_STYLE_ID_PREFIX}{theme_id}")
@@ -388,8 +653,8 @@ pub fn load_enabled_themes(profile_dir: &Path) -> ThemeLoadReport {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_enabled_themes, theme_style_id, validate_theme_css_filename, validate_theme_id,
-        MAX_THEME_CSS_BYTES, THEME_STYLE_ID_PREFIX,
+        install_theme_from_code, load_enabled_themes, parse_bd_manifest, theme_style_id,
+        validate_theme_css_filename, validate_theme_id, MAX_THEME_CSS_BYTES, THEME_STYLE_ID_PREFIX,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -623,5 +888,225 @@ mod tests {
             format!("{THEME_STYLE_ID_PREFIX}midnight")
         );
         assert_ne!(theme_style_id("a"), "a");
+    }
+
+    const BD_BASIC: &str = "/**\n * @name Midnight Harbor\n * @author Harbor Line\n * @version 1.2.0\n * @description A dark harbor theme.\n */\n:root {\n  --bg: #000;\n}\n";
+
+    #[test]
+    fn bd_parser_mirrors_electron_header_semantics() {
+        // Basic headers, incl. the first-space-only id derivation analogue.
+        let parsed = parse_bd_manifest(BD_BASIC).expect("basic BD source must parse");
+        assert_eq!(parsed.name.as_deref(), Some("Midnight Harbor"));
+        assert_eq!(parsed.author.as_deref(), Some("Harbor Line"));
+        assert_eq!(parsed.version.as_deref(), Some("1.2.0"));
+        // Unknown keys are ignored; @media bodies must not register.
+        let media = "/**\n * @name T\n */\n@media screen {\n  :root {}\n}\n";
+        assert_eq!(
+            parse_bd_manifest(media)
+                .expect("media body must parse")
+                .name
+                .as_deref(),
+            Some("T")
+        );
+        // A key of exactly `import` stops the scan; later headers are lost.
+        let broken = "/**\n * @name First\n * @import https://example.invalid/x\n * @name Second\n */\n:root {}\n";
+        assert_eq!(
+            parse_bd_manifest(broken)
+                .expect("import break must parse")
+                .name
+                .as_deref(),
+            Some("First")
+        );
+        // Mid-line matches count (global scan, not line-based).
+        let midline = "/**\n * @name First\nfoo @name Sneaky\n */\n:root {}\n";
+        assert_eq!(
+            parse_bd_manifest(midline)
+                .expect("midline must parse")
+                .name
+                .as_deref(),
+            Some("Sneaky")
+        );
+        // A newline swallowed into a key hides the following header.
+        let swallowed = "/**\n * @note\n * @name After\n */\n:root {}\n";
+        assert_eq!(
+            parse_bd_manifest(swallowed)
+                .expect("swallow must parse")
+                .name,
+            None
+        );
+        // Missing marker is the only parse-level failure.
+        assert_eq!(
+            parse_bd_manifest(":root {}\n")
+                .expect_err("bare CSS must fail")
+                .code,
+            "NOT_A_MANIFEST"
+        );
+    }
+
+    #[test]
+    fn install_derives_id_writes_manifest_and_src_css() {
+        let profile = temp_profile();
+        let result =
+            install_theme_from_code(&profile, BD_BASIC).expect("valid BD source must install");
+        assert_eq!(result.id, "Midnight-Harbor-BD");
+        assert!(!result.enabled);
+        assert_eq!(result.css_bytes, BD_BASIC.len());
+
+        // Exact on-disk layout: exactly manifest.json + src.css.
+        let dir = profile.join("themes").join("Midnight-Harbor-BD");
+        assert!(dir.join("manifest.json").is_file());
+        assert!(dir.join("src.css").is_file());
+        assert_eq!(
+            fs::read_to_string(dir.join("src.css")).expect("css must read"),
+            BD_BASIC
+        );
+
+        // Manifest carries the Electron fields (minus updateSrc, which has
+        // no URL input in this slice) with enabled always false.
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("manifest.json")).expect("manifest must read"),
+        )
+        .expect("manifest must be JSON");
+        assert_eq!(manifest["theme"], "src.css");
+        assert_eq!(manifest["name"], "Midnight Harbor");
+        assert_eq!(manifest["enabled"], false);
+        assert_eq!(manifest["author"], "Harbor Line");
+        assert_eq!(manifest["version"], "1.2.0");
+        assert_eq!(manifest["description"], "A dark harbor theme.");
+        assert_eq!(manifest["supportsLegcordTitlebar"], false);
+        assert!(manifest.get("updateSrc").is_none());
+        assert!(manifest.get("id").is_none());
+
+        // The installed theme loads through the existing loader (disabled,
+        // so reported but skipped — enabled=false parity).
+        let report = load_enabled_themes(&profile);
+        assert!(report
+            .skipped
+            .iter()
+            .any(|skipped| skipped.id == "Midnight-Harbor-BD" && skipped.reason == "disabled"));
+
+        // No temp files left behind by the atomic writes.
+        assert!(fs::read_dir(&dir).expect("dir must list").all(|entry| {
+            let name = entry.expect("entry must read").file_name();
+            name == "manifest.json" || name == "src.css"
+        }));
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn install_rejects_missing_and_evil_names_without_null_bd() {
+        let profile = temp_profile();
+        // Missing @name: Electron would write `null-BD`; native rejects.
+        let noname = "/**\n * @author Jane\n */\n:root {}\n";
+        assert_eq!(
+            install_theme_from_code(&profile, noname)
+                .expect_err("missing name must fail")
+                .code,
+            "INVALID_NAME"
+        );
+        // Empty @name likewise.
+        let empty = "/**\n * @name \n */\n:root {}\n";
+        assert_eq!(
+            install_theme_from_code(&profile, empty)
+                .expect_err("empty name must fail")
+                .code,
+            "INVALID_NAME"
+        );
+        // Traversal, absolute, separator, and multi-space names fail id
+        // validation (multi-space keeps a raw space after first-only dash).
+        for bad in [
+            "../escape",
+            "..\\escape",
+            "a/b",
+            "a\\b",
+            "C:\\x",
+            "My Big Theme",
+        ] {
+            let code = format!("/**\n * @name {bad}\n */\n:root {{}}\n");
+            assert_eq!(
+                install_theme_from_code(&profile, &code)
+                    .expect_err("evil name must fail")
+                    .code,
+                "INVALID_NAME",
+                "{bad:?} must be rejected"
+            );
+        }
+        // Nothing was created for any rejection.
+        assert!(fs::read_dir(profile.join("themes"))
+            .expect("root must list")
+            .next()
+            .is_none());
+        // A single space becomes exactly one dash (first-only replacement,
+        // Electron parity) and installs.
+        let single = "/**\n * @name has space\n */\n:root {}\n";
+        let spaced = install_theme_from_code(&profile, single).expect("single space must install");
+        assert_eq!(spaced.id, "has-space-BD");
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn install_rejects_oversized_css_and_reports_exact_size() {
+        let profile = temp_profile();
+        let big = format!(
+            "/**\n * @name Big\n */\n{}",
+            "x".repeat(MAX_THEME_CSS_BYTES + 1)
+        );
+        let failure = install_theme_from_code(&profile, &big).expect_err("oversized CSS must fail");
+        assert_eq!(failure.code, "THEME_TOO_LARGE");
+        assert!(!failure
+            .message
+            .contains(&profile.to_string_lossy().into_owned()));
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn install_overwrites_deterministically_and_never_leaks_paths() {
+        let profile = temp_profile();
+        let first = "/**\n * @name Steady\n * @version 1\n */\n:root { --a: 1; }\n";
+        let second = "/**\n * @name Steady\n * @version 2\n */\n:root { --a: 2; }\n";
+        install_theme_from_code(&profile, first).expect("first install must succeed");
+        let again = install_theme_from_code(&profile, second).expect("reinstall must succeed");
+        assert_eq!(again.id, "Steady-BD");
+        let dir = profile.join("themes").join("Steady-BD");
+        assert_eq!(
+            fs::read_to_string(dir.join("src.css")).expect("css must read"),
+            second
+        );
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("manifest.json")).expect("manifest must read"),
+        )
+        .expect("manifest must be JSON");
+        assert_eq!(manifest["version"], "2");
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn install_never_follows_planted_links_outward() {
+        let profile = temp_profile();
+        let outside = temp_profile();
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_dir(
+            outside.as_path(),
+            profile.join("themes").join("Linked-BD"),
+        );
+        #[cfg(not(windows))]
+        let link_result =
+            std::os::unix::fs::symlink(outside.as_path(), profile.join("themes").join("Linked-BD"));
+        if link_result.is_err() {
+            eprintln!("SKIP: link creation needs privileges in this environment; lexical safety still holds");
+            fs::remove_dir_all(&profile).ok();
+            fs::remove_dir_all(&outside).ok();
+            return;
+        }
+        let code = "/**\n * @name Linked\n */\n:root {}\n";
+        let failure = install_theme_from_code(&profile, code).expect_err("outside link must fail");
+        assert_eq!(failure.code, "OUTSIDE_ROOT");
+        // Nothing escaped: the outside root gained no theme files.
+        assert!(fs::read_dir(&outside)
+            .expect("outside must list")
+            .next()
+            .is_none());
+        fs::remove_dir_all(&profile).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 }

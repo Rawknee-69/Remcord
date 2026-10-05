@@ -43,7 +43,7 @@ use protocol::{
     BridgeResponsePayload, BundleFileEntry, BundlesListResponse, FoldersOpenedResponse,
     LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
     PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
-    ThemeFolderOpenedResponse, PROTOCOL_VERSION,
+    ThemeFolderOpenedResponse, ThemeInstalledResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -54,7 +54,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
-use themes::{load_enabled_themes, LoadedTheme};
+use themes::{install_theme_from_code, load_enabled_themes, LoadedTheme};
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
@@ -235,6 +235,7 @@ const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOK
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
+const THEME_INSTALL_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_INSTALL_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -256,6 +257,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "backup.list_bundles",
         "folders.open",
         "folders.open_theme",
+        "themes.install_code",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -717,6 +719,87 @@ const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
         payload_bytes: data.length,
         round_trip: roundTrip,
         attacks_blocked: attacksBlocked,
+        error: null,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  })();
+})();
+"#;
+
+/// DEV-only theme install smoke probe (`LEGCORD_NATIVE_THEME_INSTALL_SMOKE=1`).
+/// Installs one disposable fixture (`LegcordNativeSmoke` →
+/// `LegcordNativeSmoke-BD`, disabled by Electron parity so the loader skips
+/// it and nothing visual changes) through the real `themes.install_code`
+/// capability, verifies the id/enabled/bytes contract, then blocks three
+/// attack shapes (missing marker, traversal `@name`, oversized CSS).
+/// Reported as one typed `theme_install_probe` event per document with
+/// `stage: "install"`. Separately observes (never alters) whether a real
+/// theme-host fetch survives the Discord CSP, reported as `fetch_observed`.
+/// The disposable fixture directory is removed by hand after validation
+/// (uninstall is a deferred slice).
+const THEME_INSTALL_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const FIXTURE_CSS = "/**\n * @name LegcordNativeSmoke\n * @author Legcord Native Probe\n * @version 0.0.0\n */\n:root {\n  --legcord-native-install-probe: 1;\n}\n";
+  const FETCH_URL = "https://raw.githubusercontent.com/BetterDiscord/themes/main/README.md";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "theme_install_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "install", id: "", css_bytes: 0, enabled: false,
+    attacks_blocked: 0, fetch_observed: "error",
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  const expectReject = async (pending) => {
+    try {
+      await pending;
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const observeFetch = async () => {
+    try {
+      await fetch(FETCH_URL, { method: "GET" });
+      return "allowed";
+    } catch (error) {
+      return String(error?.message ?? error).includes("Failed to fetch") ? "blocked" : "error";
+    }
+  };
+  (async () => {
+    try {
+      const themes = window.legcord?.themes;
+      if (typeof themes?.installFromCode !== "function") {
+        fail("theme install facade missing");
+        return;
+      }
+      if (typeof themes.install === "function") {
+        fail("URL-taking theme install must not exist");
+        return;
+      }
+      const installed = await themes.installFromCode(FIXTURE_CSS);
+      const blockedMarker = await expectReject(themes.installFromCode(":root {}\n"));
+      const blockedTraversal = await expectReject(
+        themes.installFromCode("/**\n * @name ../escape\n */\n:root {}\n")
+      );
+      const blockedOversized = await expectReject(
+        themes.installFromCode("/**\n * @name Big\n */\n" + "x".repeat(1048577))
+      );
+      const attacksBlocked = [blockedMarker, blockedTraversal, blockedOversized].filter(Boolean).length;
+      const fetchObserved = await observeFetch();
+      const contract = installed
+        && installed.id === "LegcordNativeSmoke-BD"
+        && installed.enabled === false
+        && installed.css_bytes === FIXTURE_CSS.length;
+      probe({
+        ok: Boolean(contract) && attacksBlocked === 3,
+        stage: "install",
+        id: installed && typeof installed.id === "string" ? installed.id : "",
+        css_bytes: installed && typeof installed.css_bytes === "number" ? installed.css_bytes : 0,
+        enabled: Boolean(installed && installed.enabled),
+        attacks_blocked: attacksBlocked,
+        fetch_observed: fetchObserved,
         error: null,
       });
     } catch (error) {
@@ -1439,6 +1522,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(PLUGIN_STORAGE_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_plugin_storage_smoke {
         println!("[PluginStorage][Smoke] plugin storage capability smoke probe enabled");
+    }
+    let diagnostic_theme_install_smoke =
+        std::env::var(THEME_INSTALL_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_theme_install_smoke {
+        println!("[Themes][InstallSmoke] theme install smoke probe enabled");
     }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
@@ -2179,6 +2267,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_plugin_storage_smoke {
                             if let Err(error) = webview.evaluate_script(PLUGIN_STORAGE_SMOKE_SCRIPT) {
                                 eprintln!("[PluginStorage][Smoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_theme_install_smoke {
+                            if let Err(error) = webview.evaluate_script(THEME_INSTALL_SMOKE_SCRIPT) {
+                                eprintln!("[Themes][InstallSmoke] probe failed: {error}");
                             }
                         }
                     }
@@ -2933,10 +3026,64 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::ThemeInstallCode(payload) => {
+                            // Install from CSS text only: the id is derived
+                            // from `@name`, the filename is fixed, and the
+                            // theme stays disabled (Electron parity). The
+                            // existing live watcher observes the written
+                            // files and drives the managed CSS lifecycle.
+                            let request_id = request.request_id;
+                            match install_theme_from_code(&profile_path, &payload.css) {
+                                Ok(installed) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::ThemeInstalled(
+                                            ThemeInstalledResponse {
+                                                id: installed.id.clone(),
+                                                enabled: installed.enabled,
+                                                css_bytes: installed.css_bytes,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Themes][Install] id={} enabled={} css_bytes={} request_latency_ms={:.3}",
+                                        installed.id,
+                                        installed.enabled,
+                                        installed.css_bytes,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Themes][Install:{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::ModGetBundle(payload) => {
                             let request_id = request.request_id;
-                            if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {
-                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
+                            if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
                                 let response = BridgeResponse {
                                     version: PROTOCOL_VERSION,
                                     request_id: request_id.clone(),
@@ -3487,6 +3634,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[PluginStorage][Smoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::ThemeInstallProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Themes][InstallSmoke] ok=true stage={} id={} css_bytes={} enabled={} attacks_blocked={} fetch_observed={}",
+                                payload.stage,
+                                payload.id,
+                                payload.css_bytes,
+                                payload.enabled,
+                                payload.attacks_blocked,
+                                payload.fetch_observed
+                            );
+                        } else {
+                            eprintln!(
+                                "[Themes][InstallSmoke] ok=false stage={} error={}",
                                 payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
@@ -4253,11 +4419,13 @@ mod tests {
     #[test]
     fn boot_snapshot_grants_no_theme_capability() {
         // Theme injection is a host push: the renderer never requests theme
-        // CSS, so no theme-CSS capability may exist. `folders.open_theme`
-        // is explicitly allowed: it names the themes ROOT for folder
-        // opening (validated id → host-built path → OS shell), never CSS.
+        // CSS, so no theme-CSS pull capability may exist. `folders.open_theme`
+        // and `themes.install_code` are explicitly allowed: the first names
+        // the themes ROOT for folder opening (validated id → host-built
+        // path → OS shell), the second writes theme files the host then
+        // pushes itself — neither reads theme CSS back to the renderer.
         for capability in super::BOOT_SNAPSHOT.capabilities {
-            if *capability == "folders.open_theme" {
+            if *capability == "folders.open_theme" || *capability == "themes.install_code" {
                 continue;
             }
             assert!(!capability.starts_with("themes."));
@@ -4450,5 +4618,54 @@ mod tests {
         // The DEV-only probe must stay behind its documented env flag and
         // must never run unconditionally.
         assert_eq!(super::FOLDERS_SMOKE_ENV, "LEGCORD_NATIVE_FOLDERS_SMOKE");
+    }
+
+    #[test]
+    fn boot_snapshot_grants_only_theme_install_for_themes() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"themes.install_code"));
+        // No theme read/pull, URL install, dialog, picker, editor, or
+        // generic capability may exist alongside the install command.
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"themes"));
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert_ne!(*capability, "themes.install");
+            assert_ne!(*capability, "themes.get_css");
+            assert_ne!(*capability, "themes.dialog");
+        }
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"network"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_theme_install_facade() {
+        let script = initialization_script(&[]).unwrap();
+        assert!(script.contains("theme_install_code"));
+        assert!(script.contains("themes.install_code"));
+        assert!(script.contains("installFromCode"));
+        // CSS text in, metadata out: no URL install, fetch, dialog,
+        // picker, editor launch, or synchronous IPC anywhere near it.
+        assert!(!script.contains("installBDTheme"));
+        assert!(!script.contains("fetch("));
+        assert!(!script.contains("showOpenDialog"));
+        assert!(!script.contains("ShellExecute"));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn theme_install_smoke_probe_reports_through_the_typed_probe_event() {
+        assert_eq!(
+            super::THEME_INSTALL_SMOKE_ENV,
+            "LEGCORD_NATIVE_THEME_INSTALL_SMOKE"
+        );
+        assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("installFromCode"));
+        assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("theme_install_probe"));
+        assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("LegcordNativeSmoke"));
+        // The probe installs through the capability and observes one fetch;
+        // it never fetches theme code for installation.
+        assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("fetch_observed"));
+        assert!(!super::THEME_INSTALL_SMOKE_SCRIPT.contains("installBDTheme"));
+        assert!(!super::THEME_INSTALL_SMOKE_SCRIPT.contains("sendSync"));
     }
 }

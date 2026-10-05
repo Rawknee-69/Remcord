@@ -2016,6 +2016,173 @@ test("a reloaded document gets a fresh folders facade with no stale promises", a
     assert.equal(await pending, "my-theme");
 });
 
+function createThemesRuntime(capabilities = ["bridge.ping", "themes.install_code"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const INSTALL_FIXTURE_CSS = "/**\n * @name Midnight Harbor\n * @author Harbor Line\n */\n:root {\n  --bg: #000;\n}\n";
+
+function respondThemeInstalled(window, request, payload = { id: "Midnight-Harbor-BD", enabled: false }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "theme_installed",
+                    payload: { ...payload, css_bytes: INSTALL_FIXTURE_CSS.length },
+                },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a CSS-text-only themes.install_code capability", () => {
+    const { window } = createThemesRuntime();
+    assert.equal(typeof window.legcord.themes.installFromCode, "function");
+    assert.equal(Object.isFrozen(window.legcord.themes), true);
+    assert.equal(window.legcord.native.supports("themes.install_code"), true);
+    // No URL install, list, enable, edit, dialog, or picker surface may exist.
+    assert.equal(window.legcord.themes.install, undefined);
+    assert.equal(window.legcord.themes.getThemes, undefined);
+    assert.equal(window.legcord.themes.set, undefined);
+    assert.equal(window.legcord.themes.edit, undefined);
+    assert.equal(window.legcord.themes.openImportPicker, undefined);
+});
+
+test("themes.install_code sends CSS text only and resolves bounded metadata", async () => {
+    const { window } = createThemesRuntime();
+    const pending = window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "theme_install_code");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "theme_install_code", payload: { css: INSTALL_FIXTURE_CSS } });
+
+    respondThemeInstalled(window, message);
+    assert.deepEqual(await pending, {
+        id: "Midnight-Harbor-BD",
+        enabled: false,
+        css_bytes: INSTALL_FIXTURE_CSS.length,
+    });
+});
+
+test("themes.install_code throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createThemesRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("themes.install_code"), false);
+    assert.throws(
+        () => window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "theme_install_code"),
+        false,
+    );
+});
+
+test("themes.install_code rejects non-string, empty, and oversized CSS without sending", async () => {
+    const { window } = createThemesRuntime();
+    await assert.rejects(window.legcord.themes.installFromCode(42), /css must be a non-empty string/);
+    await assert.rejects(window.legcord.themes.installFromCode(""), /css must be a non-empty string/);
+    await assert.rejects(window.legcord.themes.installFromCode("x".repeat(1048577)), /css must be a non-empty string/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "theme_install_code"),
+        false,
+    );
+});
+
+test("themes.install_code rejects malformed install responses", async () => {
+    // Enabled must stay false by Electron parity.
+    const enabled = createThemesRuntime();
+    const pendingEnabled = enabled.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const messageEnabled = enabled.window.messages.find((entry) => entry.command?.type === "theme_install_code");
+    respondThemeInstalled(enabled.window, messageEnabled, { id: "Midnight-Harbor-BD", enabled: true });
+    await assert.rejects(pendingEnabled, /theme install response schema is invalid/);
+
+    // The id must be host-derived (<name>-BD): a foreign id is rejected.
+    const foreign = createThemesRuntime();
+    const pendingForeign = foreign.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const messageForeign = foreign.window.messages.find((entry) => entry.command?.type === "theme_install_code");
+    respondThemeInstalled(foreign.window, messageForeign, { id: "other", enabled: false });
+    await assert.rejects(pendingForeign, /theme install response schema is invalid/);
+
+    // No path, URL, source, or extra member may ride along.
+    const withPath = createThemesRuntime();
+    const pendingPath = withPath.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_install_code");
+    withPath.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messagePath.request_id,
+                ok: true,
+                payload: {
+                    type: "theme_installed",
+                    payload: {
+                        id: "Midnight-Harbor-BD",
+                        enabled: false,
+                        css_bytes: INSTALL_FIXTURE_CSS.length,
+                        path: "C:\\themes\\x",
+                    },
+                },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(pendingPath, /theme install response schema is invalid/);
+});
+
+test("themes.install_code rejects host failures with the typed error", async () => {
+    const { window } = createThemesRuntime();
+    const pending = window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const message = window.messages.find((entry) => entry.command?.type === "theme_install_code");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "INVALID_NAME", message: "theme name is missing or invalid" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /theme name is missing or invalid/);
+});
+
+test("themes.install_code rejects after its timeout", async () => {
+    const { window } = createThemesRuntime();
+    await assert.rejects(window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS, 50), /timed out/);
+});
+
+test("themes.install_code rejects pending requests when the document is disposed", async () => {
+    const { window } = createThemesRuntime();
+    const pending = window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh theme install facade with no stale promises", async () => {
+    const firstDocument = createThemesRuntime();
+    const stale = firstDocument.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createThemesRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_install_code");
+    respondThemeInstalled(nextDocument.window, message);
+    assert.deepEqual(await pending, {
+        id: "Midnight-Harbor-BD",
+        enabled: false,
+        css_bytes: INSTALL_FIXTURE_CSS.length,
+    });
+});
+
 function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {
     return createRuntime("https://discord.com", capabilities);
 }

@@ -11,6 +11,13 @@ use crate::settings::SettingsSnapshot;
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_IPC_MESSAGE_BYTES: usize = 8 * 1024;
+/// Single large-payload exception to the 8 KiB transport bound: one theme
+/// install carries up to 1 MiB of CSS text plus JSON envelope slack in a
+/// single message, so real stylesheets fit without a chunked sub-protocol.
+/// Every other command (including the 1 MiB-capable plugin-storage write,
+/// whose effective bound stays 8 KiB) is held to `MAX_IPC_MESSAGE_BYTES`.
+/// The CSS body itself is re-checked against `MAX_THEME_CSS_BYTES` below.
+pub const MAX_THEME_INSTALL_MESSAGE_BYTES: usize = 1024 * 1024 + 4096;
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_ERROR_BYTES: usize = 2 * 1024;
 pub const MAX_TRACKED_REQUEST_IDS: usize = 4096;
@@ -45,6 +52,7 @@ pub enum BridgeCommand {
     BundlesList(BundlesListRequest),
     FoldersOpen(FoldersOpenRequest),
     FoldersOpenTheme(FoldersOpenThemeRequest),
+    ThemeInstallCode(ThemeInstallCodeRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +173,17 @@ pub struct FoldersOpenThemeRequest {
     pub id: String,
 }
 
+/// Install request for the `themes.install_code` capability: exactly one
+/// bounded CSS text. There is deliberately NO URL, path, filename, theme
+/// id, or destination: the host derives the id from `@name`, fixes the
+/// `src.css` filename, and builds the directory itself. Length is checked
+/// here; marker/name validation lives in `themes` at dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeInstallCodeRequest {
+    pub css: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -216,6 +235,10 @@ pub enum BridgeEvent {
     /// (`LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Never sent by shipped
     /// code.
     PluginStorageProbe(PluginStorageProbe),
+    /// DEV-only diagnostic posted by the theme install smoke probe
+    /// (`LEGCORD_NATIVE_THEME_INSTALL_SMOKE=1`). Never sent by shipped
+    /// code.
+    ThemeInstallProbe(ThemeInstallProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,6 +410,27 @@ pub struct PluginStorageProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the theme install smoke probe. `stage` is
+/// `"install"` (install a disposable fixture through the real capability,
+/// verify the id/enabled/bytes, then block three attack shapes).
+/// `attacks_blocked` counts the missing-marker/traversal/oversized attempts
+/// the facade or host rejected. `fetch_observed` records the separate CSP
+/// network observation (`"allowed"`, `"blocked"`, or `"error"`); it never
+/// affects the install verdict. The probe never carries CSS contents or
+/// host paths.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeInstallProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub id: String,
+    pub css_bytes: usize,
+    pub enabled: bool,
+    pub attacks_blocked: u8,
+    pub fetch_observed: String,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
@@ -417,6 +461,7 @@ pub enum BridgeResponsePayload {
     BundlesList(BundlesListResponse),
     FoldersOpened(FoldersOpenedResponse),
     ThemeFolderOpened(ThemeFolderOpenedResponse),
+    ThemeInstalled(ThemeInstalledResponse),
 }
 
 #[derive(Serialize)]
@@ -551,6 +596,17 @@ pub struct ThemeFolderOpenedResponse {
     pub id: String,
 }
 
+/// Install response for the `themes.install_code` capability: the
+/// host-derived directory id, the persisted enablement (always `false` —
+/// Electron parity for fresh installs), and the stored CSS size. No path,
+/// URL, or source echo crosses the boundary.
+#[derive(Serialize)]
+pub struct ThemeInstalledResponse {
+    pub id: String,
+    pub enabled: bool,
+    pub css_bytes: usize,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -588,11 +644,24 @@ impl RequestTracker {
 }
 
 pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
-    if body.len() > MAX_IPC_MESSAGE_BYTES {
+    // Absolute ceiling first (one theme install may legitimately approach
+    // 1 MiB); the per-command transport bound is enforced after the command
+    // is identified below.
+    if body.len() > MAX_THEME_INSTALL_MESSAGE_BYTES {
         return Err("message exceeds the size limit".to_owned());
     }
 
     let message: BridgeMessage = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    // Only a theme install may exceed the 8 KiB transport bound. Every
+    // other command — requests and events alike — keeps the legacy bound,
+    // so the large-payload exception cannot widen any other surface.
+    let is_theme_install = matches!(
+        &message,
+        BridgeMessage::Request(request) if matches!(request.command, BridgeCommand::ThemeInstallCode(_))
+    );
+    if !is_theme_install && body.len() > MAX_IPC_MESSAGE_BYTES {
+        return Err("message exceeds the size limit".to_owned());
+    }
     match &message {
         BridgeMessage::Request(request) => {
             if request.version != PROTOCOL_VERSION {
@@ -666,6 +735,14 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                     // and are re-enforced at dispatch.
                     if payload.id.is_empty() || payload.id.len() > MAX_FOLDER_THEME_ID_BYTES {
                         return Err("invalid theme folder open".to_owned());
+                    }
+                }
+                BridgeCommand::ThemeInstallCode(payload) => {
+                    // Transport already bounded above; the CSS body itself
+                    // must fit the theme bound. Marker/name rules live in
+                    // `themes` and are enforced at dispatch.
+                    if payload.css.len() > crate::themes::MAX_THEME_CSS_BYTES {
+                        return Err("theme CSS exceeds the size limit".to_owned());
                     }
                 }
             }
@@ -892,6 +969,29 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || (payload.ok && (!payload.round_trip || payload.attacks_blocked != 3))
                     {
                         return Err("invalid plugin storage probe result".to_owned());
+                    }
+                }
+                BridgeEvent::ThemeInstallProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "install")
+                        || (payload.ok && payload.id.is_empty())
+                        || payload.id.len() > MAX_FOLDER_THEME_ID_BYTES
+                        || payload.css_bytes > crate::themes::MAX_THEME_CSS_BYTES
+                        || payload.attacks_blocked > 8
+                        || !matches!(
+                            payload.fetch_observed.as_str(),
+                            "allowed" | "blocked" | "error"
+                        )
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok
+                            && (payload.enabled
+                                || payload.attacks_blocked != 3
+                                || !payload.id.ends_with("-BD")))
+                    {
+                        return Err("invalid theme install probe result".to_owned());
                     }
                 }
             }
@@ -1292,6 +1392,99 @@ mod tests {
         assert_eq!(open_value["payload"]["type"], "theme_folder_opened");
         assert_eq!(open_value["payload"]["payload"]["id"], "my-theme");
         assert!(open_value["payload"]["payload"].get("path").is_none());
+    }
+
+    #[test]
+    fn accepts_theme_install_code_with_a_bounded_body() {
+        let request = r#"{"version":1,"request_id":"install-1","command":{"type":"theme_install_code","payload":{"css":"/** @name T */ :root {}"}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No URL, path, filename, id, destination, or generic member may
+        // ride along; the host derives everything from the CSS text.
+        let with_url = r#"{"version":1,"request_id":"install-2","command":{"type":"theme_install_code","payload":{"css":"/** @name T */","url":"https://attacker.invalid/t.css"}}}"#;
+        let with_path = r#"{"version":1,"request_id":"install-3","command":{"type":"theme_install_code","payload":{"css":"/** @name T */","path":"C:\\x"}}}"#;
+        let with_id = r#"{"version":1,"request_id":"install-4","command":{"type":"theme_install_code","payload":{"css":"/** @name T */","id":"mine"}}}"#;
+        let with_file = r#"{"version":1,"request_id":"install-5","command":{"type":"theme_install_code","payload":{"css":"/** @name T */","filename":"x.css"}}}"#;
+        let missing = r#"{"version":1,"request_id":"install-6","command":{"type":"theme_install_code","payload":{}}}"#;
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_id).is_err());
+        assert!(parse_bridge_message(with_file).is_err());
+        assert!(parse_bridge_message(missing).is_err());
+    }
+
+    #[test]
+    fn oversized_bodies_reach_only_the_theme_install_command() {
+        // An 8 KiB-plus body with a legacy command is rejected at the
+        // transport bound, even though the payload itself would parse.
+        let big_css = "x".repeat(9000);
+        let ping = format!(
+            "{{\"version\":1,\"request_id\":\"big-1\",\"command\":{{\"type\":\"ping\",\"payload\":{{\"nonce\":\"{big_css}\"}}}}}}"
+        );
+        assert!(parse_bridge_message(&ping).is_err());
+
+        // The same scale of body parses for a theme install (the CSS
+        // bound itself is enforced on the payload below).
+        let install = format!(
+            "{{\"version\":1,\"request_id\":\"big-2\",\"command\":{{\"type\":\"theme_install_code\",\"payload\":{{\"css\":\"/** @name T */ {big_css}\"}}}}}}"
+        );
+        assert!(matches!(
+            parse_bridge_message(&install),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // Past the theme message ceiling, even installs are rejected.
+        let huge = "x".repeat(super::MAX_THEME_INSTALL_MESSAGE_BYTES);
+        let huge_install = format!(
+            "{{\"version\":1,\"request_id\":\"big-3\",\"command\":{{\"type\":\"theme_install_code\",\"payload\":{{\"css\":\"{huge}\"}}}}}}"
+        );
+        assert!(parse_bridge_message(&huge_install).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_theme_install_response() {
+        use super::ThemeInstalledResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "install-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::ThemeInstalled(
+                ThemeInstalledResponse {
+                    id: "Midnight-Harbor-BD".to_owned(),
+                    enabled: false,
+                    css_bytes: 128,
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "theme_installed");
+        assert_eq!(value["payload"]["payload"]["id"], "Midnight-Harbor-BD");
+        assert_eq!(value["payload"]["payload"]["enabled"], false);
+        assert_eq!(value["payload"]["payload"]["css_bytes"], 128);
+        // Metadata only: no path, URL, source, or destination echo.
+        assert!(value["payload"]["payload"].get("path").is_none());
+        assert!(value["payload"]["payload"].get("url").is_none());
+        assert!(value["payload"]["payload"].get("css").is_none());
+    }
+
+    #[test]
+    fn validates_theme_install_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"theme_install_probe","payload":{"ok":true,"stage":"install","id":"Probe-BD","css_bytes":64,"enabled":false,"attacks_blocked":3,"fetch_observed":"blocked","error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"theme_install_probe","payload":{"ok":false,"stage":"install","id":"","css_bytes":0,"enabled":false,"attacks_blocked":0,"fetch_observed":"error","error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"theme_install_probe","payload":{"ok":true,"stage":"edited","id":"Probe-BD","css_bytes":64,"enabled":false,"attacks_blocked":3,"fetch_observed":"blocked","error":null}}}"#;
+        let enabled = r#"{"version":1,"event":{"type":"theme_install_probe","payload":{"ok":true,"stage":"install","id":"Probe-BD","css_bytes":64,"enabled":true,"attacks_blocked":3,"fetch_observed":"blocked","error":null}}}"#;
+        let bad_fetch = r#"{"version":1,"event":{"type":"theme_install_probe","payload":{"ok":true,"stage":"install","id":"Probe-BD","css_bytes":64,"enabled":false,"attacks_blocked":3,"fetch_observed":"unknown","error":null}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"theme_install_probe","payload":{"ok":true,"stage":"install","id":"Probe-BD","css_bytes":64,"enabled":false,"attacks_blocked":2,"fetch_observed":"blocked","error":null}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(enabled).is_err());
+        assert!(parse_bridge_message(bad_fetch).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
     }
 
     #[test]

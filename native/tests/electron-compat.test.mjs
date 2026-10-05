@@ -612,6 +612,87 @@ test("native folder facade exposes identifiers only, no shell surface", () => {
     assert.doesNotMatch(nativeFacade, /showOpenDialog|showSaveDialog/);
 });
 
+test("Electron keeps the theme install/edit/picker implementation", () => {
+    // installTheme fetches remote URLs and reads local files, then
+    // installThemeFromCode derives `<name>-BD` (first space only) and
+    // overwrites manifest.json + src.css. parseBDManifest requires `/**`,
+    // defaults name "null" with enabled false, and stops at `import`.
+    const themesMain = readFileSync(new URL("../../src/common/themes.ts", import.meta.url), "utf8");
+    assert.match(themesMain, /export async function installTheme\(linkOrPath: string\)/);
+    assert.match(themesMain, /code = await \(await fetch\(linkOrPath\)\)\.text\(\);/);
+    assert.match(themesMain, /code = fs\.readFileSync\(linkOrPath, "utf8"\);/);
+    assert.match(themesMain, /function installThemeFromCode\(code: string, linkOrPath\?: string\)/);
+    assert.match(themesMain, /manifest\.name\?\.replace\(" ", "-"\)\}-BD/);
+    assert.match(themesMain, /fs\.writeFileSync\(path\.join\(themePath, "manifest\.json"\), JSON\.stringify\(manifest\)\)/);
+    assert.match(themesMain, /fs\.writeFileSync\(path\.join\(themePath, "src\.css"\), code\)/);
+    assert.match(themesMain, /if \(!content\.startsWith\("\/\*\*"\)\) \{\s*throw new Error\("Not a manifest\."\);/);
+    assert.match(themesMain, /theme: "src\.css",\s*name: "null",\s*enabled: false,/);
+    assert.match(themesMain, /if \(key === "import"\) break;/);
+    assert.match(themesMain, /manifest\.updateSrc = linkOrPath;/);
+    assert.match(themesMain, /manifest\.supportsLegcordTitlebar = (true|false);/);
+    // editTheme reads the manifest with string interpolation and opens the
+    // manifest-named file in the system editor or the internal CSS editor.
+    assert.match(ipc, /ipcMain\.on\("editTheme", \(_event, id: string\)/);
+    assert.match(ipc, /readFileSync\(`\$\{themesPath\}\/\$\{id\}\/manifest\.json`/);
+    assert.match(ipc, /shell\.openPath\(`\$\{themesPath\}\/\$\{id\}\/\$\{manifest\.theme\}`\)/);
+    // Import picking is a filtered host file dialog feeding installTheme.
+    assert.match(ipc, /ipcMain\.on\("openImportPicker"/);
+    assert.match(ipc, /properties: \["openFile", "multiSelections"\]/);
+    // installBDTheme bridges a renderer URL string to installTheme.
+    assert.match(ipc, /ipcMain\.handle\("installBDTheme", async \(_event, link: string\)/);
+    // The renderer bridge keeps URL install, id edit, and picker sends.
+    assert.match(bridge, /install: async \(url: string\) => ipcRenderer\.invoke\("installBDTheme", url\)/);
+    assert.match(bridge, /edit: \(id: string\) => ipcRenderer\.send\("editTheme", id\)/);
+    assert.match(bridge, /openImportPicker: \(\) => ipcRenderer\.send\("openImportPicker"\)/);
+});
+
+test("no src caller uses the native theme install path", () => {
+    // Step 3a ships the capability without UI wiring: a native branch in
+    // src/ would be fabrication. The Electron theme UI keeps calling
+    // install/edit/picker, and nothing references the native surface.
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [bridge, ipc, types, themesPage, themesCard]) {
+        assert.doesNotMatch(source, /installFromCode/);
+        assert.doesNotMatch(source, /themes\.install_code/);
+        assert.doesNotMatch(source, /theme_install_code/);
+    }
+    assert.match(themesPage, /window\.legcord\.themes\.install\(downloadUrl\(\)\)/);
+    assert.match(themesCard, /window\.legcord\.themes\.install\(props\.theme\.updateSrc\)/);
+    assert.match(themesCard, /window\.legcord\.themes\.edit\(props\.theme\.id\)/);
+});
+
+test("native theme install is CSS-text-only with no network or dialog surface", () => {
+    // The native module derives everything from CSS text: no fetch, no
+    // dialog, no picker, no editor launch, no shell execution, no URL
+    // source anywhere near the install path.
+    const nativeThemes = readFileSync(new URL("../src/themes.rs", import.meta.url), "utf8");
+    assert.match(nativeThemes, /pub fn install_theme_from_code/);
+    assert.match(nativeThemes, /pub fn parse_bd_manifest/);
+    // Test fixtures contain an inert example URL for the import-break case;
+    // the shipped install path itself must have no network, dialog, picker,
+    // editor-launch, or shell surface.
+    const shippedThemes = nativeThemes.slice(0, nativeThemes.indexOf("#[cfg(test)]"));
+    assert.doesNotMatch(shippedThemes, /fetch|ureq|Dialog|ShellExecute|openPath|Command::new/);
+    assert.doesNotMatch(shippedThemes, /https?:\/\//);
+    // The facade takes CSS text and returns metadata: no URL/path/id
+    // member, no install-from-URL shape.
+    const installFacade = nativeFacade.slice(
+        nativeFacade.indexOf("function installThemeFromCode"),
+        nativeFacade.indexOf("window.addEventListener(\"legcord-native:response\""),
+    );
+    assert.ok(installFacade.length > 0);
+    assert.match(installFacade, /requireCapability\("themes\.install_code"\)/);
+    assert.match(installFacade, /\{\s*type:\s*"theme_install_code",\s*payload:\s*\{\s*css\s*\}\s*\}/);
+    assert.doesNotMatch(installFacade, /fetch\(|installBDTheme|showOpenDialog|openPath/);
+});
+
 test("settings UI reveals the storage folder natively and sends otherwise", () => {
     const settingsPage = readFileSync(
         new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),

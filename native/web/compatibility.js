@@ -251,6 +251,9 @@
     // Same rule the host enforces for theme ids ([A-Za-z0-9._-]{1,64},
     // never "." or ".."); separators are impossible by charset.
     const THEME_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+    // Maximum installable CSS text in UTF-8 bytes, mirroring the host
+    // theme bound. Larger stylesheets are rejected before dispatch.
+    const MAX_THEME_CSS_BYTES = 1048576;
 
     function openFolder(location, timeoutMs = 5000) {
         requireCapability("folders.open");
@@ -288,6 +291,20 @@
             }
             return payload.id;
         });
+    }
+
+    function installThemeFromCode(css, timeoutMs = 5000) {
+        requireCapability("themes.install_code");
+        if (typeof css !== "string" || css.length === 0 || textEncoder.encode(css).length > MAX_THEME_CSS_BYTES) {
+            return Promise.reject(new TypeError("css must be a non-empty string of at most 1048576 UTF-8 bytes"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // CSS text only: the host derives the theme id from `@name`, fixes
+        // the `src.css` filename, and keeps the theme disabled. No URL,
+        // path, filename, id, or destination may be supplied.
+        return request({ type: "theme_install_code", payload: { css } }, timeoutMs).then((payload) => payload);
     }
 
     function listBundles(timeoutMs = 5000) {
@@ -477,8 +494,7 @@
                 return;
             }
             request.resolve(payload);
-        } else if (response.ok === true && response.payload?.type === "theme_folder_opened") {
-            const payload = response.payload.payload;
+        } else if (response.ok === true && response.payload?.type === "theme_folder_opened") {            const payload = response.payload.payload;
             if (
                 !payload ||
                 Object.keys(payload).length !== 1 ||
@@ -489,6 +505,26 @@
                 textEncoder.encode(payload.id).length > 64
             ) {
                 request.reject(new Error("Native theme folder response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "theme_installed") {
+            const payload = response.payload.payload;
+            // The id is host-derived (`<name>-BD`); the theme stays
+            // disabled by Electron parity, so `enabled` must be false.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                typeof payload.id !== "string" ||
+                !THEME_ID_PATTERN.test(payload.id) ||
+                !payload.id.endsWith("-BD") ||
+                textEncoder.encode(payload.id).length > 64 ||
+                payload.enabled !== false ||
+                !Number.isSafeInteger(payload.css_bytes) ||
+                payload.css_bytes < 0 ||
+                payload.css_bytes > MAX_THEME_CSS_BYTES
+            ) {
+                request.reject(new Error("Native theme install response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -560,11 +596,14 @@
     // Folder opening only: reveal for the three fixed roots, open for one
     // validated theme id. No path, dialog, picker, or shell surface.
     const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });
+    // Theme installation only: CSS text in, bounded metadata out. No URL,
+    // path, dialog, picker, editor, or list surface.
+    const themes = Object.freeze({ installFromCode: installThemeFromCode });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
-        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage, backup, folders }),
+        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage, backup, folders, themes }),
     });
 
     try {
