@@ -1,6 +1,7 @@
 mod app;
 mod bundles;
 mod css_watch;
+mod folders;
 mod localization;
 mod mod_substrate;
 mod plugin_storage;
@@ -31,14 +32,18 @@ use css_watch::{
     diff_theme_snapshots, quick_css_transition, start_live_css_watchers, LiveCssCounters,
     LiveCssFsSignal, QuickCssTransition, ResourceDebouncer, CSS_DEBOUNCE_MS,
 };
+use folders::{
+    ensure_folder_root, open_folder, resolve_theme_folder, reveal_folder, FolderLocation,
+};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
     parse_bridge_message, validate_mod_bundle_id, AppVersionResponse, BridgeCommand, BridgeError,
     BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
-    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, LocalizationStringResponse,
-    ModBundleResponse, PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse,
-    RequestTracker, SettingsConfigResponse, SettingsMutationResponse, PROTOCOL_VERSION,
+    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, FoldersOpenedResponse,
+    LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
+    PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
+    ThemeFolderOpenedResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -230,6 +235,7 @@ const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOK
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
+const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
@@ -248,6 +254,8 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "plugin_storage.read",
         "plugin_storage.write",
         "backup.list_bundles",
+        "folders.open",
+        "folders.open_theme",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -1431,6 +1439,38 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(PLUGIN_STORAGE_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_plugin_storage_smoke {
         println!("[PluginStorage][Smoke] plugin storage capability smoke probe enabled");
+    }
+    let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_folders_smoke {
+        println!("[Folders][Smoke] folder opening smoke probe enabled");
+        // Host-side only: no renderer surface, no bridge traffic. Reveals
+        // the real themes root once (a genuine OS shell operation) and
+        // exercises the rejection paths, which must have no OS effect.
+        match ensure_folder_root(&profile_path, FolderLocation::Themes)
+            .and_then(|dir| reveal_folder(&dir))
+        {
+            Ok(()) => println!("[Folders][Smoke] reveal target=themes ok=true"),
+            Err(failure) => {
+                eprintln!(
+                    "[Folders][Smoke] reveal target=themes ok=false code={}",
+                    failure.code
+                )
+            }
+        }
+        match resolve_theme_folder(&profile_path, "../escape") {
+            Err(failure) => println!(
+                "[Folders][Smoke] traversal rejected code={} (no OS effect)",
+                failure.code
+            ),
+            Ok(_) => eprintln!("[Folders][Smoke] traversal unexpectedly resolved"),
+        }
+        match resolve_theme_folder(&profile_path, "legcord-native-no-such-theme") {
+            Err(failure) => println!(
+                "[Folders][Smoke] unknown theme rejected code={} (no OS effect)",
+                failure.code
+            ),
+            Ok(_) => eprintln!("[Folders][Smoke] unknown theme unexpectedly resolved"),
+        }
     }
     let diagnostic_themes_smoke = std::env::var(THEMES_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_themes_smoke {
@@ -2786,6 +2826,113 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::FoldersOpen(payload) => {
+                            // Reveal semantics (showItemInFolder equivalent):
+                            // the location is a closed enum, so the host
+                            // reveals exactly one fixed root. No path, URL,
+                            // or selector crosses the boundary.
+                            let request_id = request.request_id;
+                            let location = payload.location;
+                            let location_label = match location {
+                                FolderLocation::Storage => "storage",
+                                FolderLocation::Themes => "themes",
+                                FolderLocation::Plugins => "plugins",
+                            };
+                            match ensure_folder_root(&profile_path, location)
+                                .and_then(|dir| reveal_folder(&dir))
+                            {
+                                Ok(_) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::FoldersOpened(
+                                            FoldersOpenedResponse { location },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Folders][Metrics] op=reveal target={location_label} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Folders][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::FoldersOpenTheme(payload) => {
+                            // Open semantics (openPath equivalent for a
+                            // directory): Explorer opens inside the validated
+                            // theme folder itself. The id is validated and
+                            // the path is built plus contained by the host.
+                            let request_id = request.request_id;
+                            let theme_id = payload.id;
+                            match resolve_theme_folder(&profile_path, &theme_id)
+                                .and_then(|dir| open_folder(&dir))
+                            {
+                                Ok(_) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::ThemeFolderOpened(
+                                                ThemeFolderOpenedResponse { id: theme_id },
+                                            ),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Folders][Metrics] op=open target=theme request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Folders][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::ModGetBundle(payload) => {
                             let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {
@@ -4106,8 +4253,13 @@ mod tests {
     #[test]
     fn boot_snapshot_grants_no_theme_capability() {
         // Theme injection is a host push: the renderer never requests theme
-        // CSS, so no theme capability may exist alongside the scoped pair.
+        // CSS, so no theme-CSS capability may exist. `folders.open_theme`
+        // is explicitly allowed: it names the themes ROOT for folder
+        // opening (validated id → host-built path → OS shell), never CSS.
         for capability in super::BOOT_SNAPSHOT.capabilities {
+            if *capability == "folders.open_theme" {
+                continue;
+            }
             assert!(!capability.starts_with("themes."));
             assert!(!capability.contains("theme"));
         }
@@ -4120,6 +4272,10 @@ mod tests {
         // The earlier theme READ investigation was intentionally rejected:
         // current themes are host -> renderer pushes with no native renderer
         // caller for a pull-style read. The facade must not grow one here.
+        // ("themes" as a bare word now legitimately appears as the closed
+        // folder-opening location for the themes ROOT — validated id,
+        // host-built path, OS shell — so the pull surface is guarded by the
+        // specific CSS tokens below, not by the bare word.)
         let script = initialization_script(&[]).unwrap();
         assert!(!script.contains("getCSS"));
         assert!(!script.contains("getCss"));
@@ -4127,7 +4283,6 @@ mod tests {
         assert!(!script.contains("removeTheme"));
         assert!(!script.contains("quickCss"));
         assert!(!script.contains("legcord-native-theme"));
-        assert!(!script.contains("themes"));
     }
 
     #[test]
@@ -4254,5 +4409,46 @@ mod tests {
                 "custom.css",
             ]
         );
+    }
+
+    #[test]
+    fn boot_snapshot_grants_only_the_two_folder_capabilities() {
+        assert!(super::BOOT_SNAPSHOT.capabilities.contains(&"folders.open"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"folders.open_theme"));
+        // No generic path-opening, dialog, picker, or shell surface may
+        // exist alongside the two scoped capabilities.
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"folders"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"folders.open_path"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"shell"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"dialog"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_folder_facade() {
+        let script = initialization_script(&[]).unwrap();
+        assert!(script.contains("folders_open"));
+        assert!(script.contains("folders_open_theme"));
+        assert!(script.contains("folders.open"));
+        assert!(script.contains("folders.open_theme"));
+        assert!(script.contains("openTheme"));
+        // The facade carries identifiers only: no shell path opener, no
+        // dialog/picker, no synchronous IPC, no OS surface leakage.
+        assert!(!script.contains("openPath("));
+        assert!(!script.contains("showItemInFolder"));
+        assert!(!script.contains("ShellExecute"));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn folders_smoke_probe_is_env_gated_like_other_probes() {
+        // The DEV-only probe must stay behind its documented env flag and
+        // must never run unconditionally.
+        assert_eq!(super::FOLDERS_SMOKE_ENV, "LEGCORD_NATIVE_FOLDERS_SMOKE");
     }
 }

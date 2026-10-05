@@ -49,6 +49,8 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request (plugin storage read) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_read","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt"}}}` |
 | Renderer request (plugin storage write) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_write","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt","data":"..."}}}` |
 | Renderer request (bundle discovery) | `{"version":1,"request_id":"...","command":{"type":"bundles_list","payload":{}}}` |
+| Renderer request (folder reveal) | `{"version":1,"request_id":"...","command":{"type":"folders_open","payload":{"location":"themes"}}}` |
+| Renderer request (theme folder open) | `{"version":1,"request_id":"...","command":{"type":"folders_open_theme","payload":{"id":"my-theme"}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Mod bundle response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"mod_bundle","payload":{"mod_id":"vencord","bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
@@ -58,9 +60,11 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Plugin storage read response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"plugin_storage_read","payload":{"data":"...","payload_bytes":38}},"error":null}` |
 | Plugin storage write response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"plugin_storage_write","payload":{"payload_bytes":38}},"error":null}` |
 | Bundle inventory response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"bundles_list","payload":{"bundles":[{"name":"vencord.js","present":true,"bytes":698272},{"name":"vencord.css","present":true,"bytes":41335},{"name":"equicord.js","present":false,"bytes":0},{"name":"equicord.css","present":false,"bytes":0},{"name":"shelter.js","present":true,"bytes":235850},{"name":"custom.js","present":false,"bytes":0},{"name":"custom.css","present":false,"bytes":0}]}},"error":null}` |
+| Folder reveal response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"folders_opened","payload":{"location":"themes"}},"error":null}` |
+| Theme folder open response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_folder_opened","payload":{"id":"my-theme"}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, and `bundles_list`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, and `folders_open_theme`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -205,6 +209,49 @@ renderer await window.legcord.backup.listBundles()
 Semantic parity with Electron (asserted by comparing the canonical definitions, not by paraphrase): same 7 bundle names, same ordering, same presence semantics for regular files, same `<name>` bundle path naming. `custom.js`/`custom.css` are inventoried exactly like the other five names but stay inventory-only and non-executable — no descriptor registers the `custom` id, so presence can never become execution.
 
 Deliberate Electron differences (hardening, not regressions): metadata only (`{name, present, bytes}` — contents, absolute/profile paths, URLs, and path-bearing errors never cross); symlinks/junctions/directories report absent instead of being followed (Electron's `readFileSync` would follow a planted link and embed outside bytes into a backup); no upper byte bound on reported sizes (nothing is allocated from metadata); non-`NotFound` IO errors fail the whole inventory closed instead of guessing absence. The facade enforces the exact 7-name sequence, `absent ⇒ bytes 0`, and rejects any entry carrying `path`/`url`/`data`.
+
+## Folder opening capability (Phase D Step 2)
+
+Four caller-backed folder behaviors migrate to two typed capabilities under `window.legcord.folders`: `folders.open` (wire `folders_open`, facade `folders.open(location)`) reveals exactly one of three fixed roots, and `folders.open_theme` (wire `folders_open_theme`, facade `folders.openTheme(id)`) opens exactly one validated theme directory. No generic open(path), no dialogs, no pickers, no file-in-editor paths, no theme install/edit.
+
+### Electron chain (unchanged)
+
+| Renderer caller | Channel (`send`, return ignored) | Host call | Input |
+| --- | --- | --- | --- |
+| `settings.openStorageFolder` (`SettingsPage.tsx`) | `openStorageFolder` (`ipc.ts:350`) | `shell.showItemInFolder(<userData>/storage/)` | none (fixed) |
+| `settings.openThemesFolder` (`ThemesPage.tsx`) | `openThemesFolder` (`ipc.ts:159` **and** `:353` — registered twice, both fire identically) | `shell.showItemInFolder(<userData>/themes/)` | none (fixed) |
+| `plugins.openFolder` (`PluginsPage.tsx`) | `openRuntimePluginsFolder` (`ipc.ts:359`) | `shell.showItemInFolder(<userData>/plugins/)` | none (fixed) |
+| `themes.folder(id)` (`ThemesCard.tsx`) | `openThemeFolder` (`ipc.ts:201`) | `shell.openPath(path.join(themesPath, id))` | raw theme id, **no validation** (`../` escapes, absolute wins in `path.join`) |
+
+`openPluginsFolder` (`extensions/`) and `openCrashesFolder` have no renderer caller and no bridge entry — deferred. `openQuickCss`/`editTheme` open files in an editor, `openImportPicker`/`openCustomIconDialog` are picker dialogs, `openExternal` is browser navigation — all separate milestones. `native/tests/electron-compat.test.mjs` asserts every handler, bridge mapping, and declared `void` contract above is byte-identical, including the double `openThemesFolder` registration and the raw `path.join`.
+
+### Native chain
+
+```text
+renderer await window.legcord.folders.open("themes")
+  → requireCapability("folders.open") or sync UNSUPPORTED_CAPABILITY throw
+  → client enum check (storage|themes|plugins, TypeError before dispatch)
+  → {"type":"folders_open","payload":{"location":"themes"}}
+     (unknown variants + any path/url/selector member host-rejected)
+  → Rust folders::ensure_folder_root (create-if-missing, canonical containment)
+  → reveal_folder: SHOpenFolderAndSelectItems(parent, child) — parent opens
+     with the root selected (showItemInFolder-equivalent, direct shell API)
+  → validated folders_opened { location } (echo must equal the request)
+
+renderer await window.legcord.folders.openTheme("my-theme")
+  → requireCapability("folders.open_theme") or sync UNSUPPORTED_CAPABILITY throw
+  → client id check ([A-Za-z0-9._-]{1,64}, never ./.., TypeError before dispatch)
+  → {"type":"folders_open_theme","payload":{"id":"my-theme"}}
+  → Rust folders::resolve_theme_folder (themes::validate_theme_id, host join,
+     canonical containment; missing → UNKNOWN_THEME, never created)
+  → open_folder: ShellExecuteW("open", dir) — Explorer opens inside the
+     folder (openPath-equivalent for a directory, direct shell API)
+  → validated theme_folder_opened { id } (echo must equal the request)
+```
+
+Reveal and open are different shell operations and are implemented, logged (`op=reveal` vs `op=open`), and tested as such — never described as one operation just because both show Explorer. Neither constructs a command line; both dispatch the verb and return immediately without blocking on the opened application. Non-Windows builds fail closed (`FOLDERS_UNSUPPORTED_PLATFORM`); Windows WebView2 is the target platform.
+
+Deliberate Electron differences (hardening, not regressions): closed enum instead of fixed calls scattered across channels (same three roots, one capability); theme ids validated with the exact `themes.rs` rule instead of raw `path.join`; canonical containment with planted links failing closed as `OUTSIDE_ROOT` instead of followed; errors are typed (`INVALID_THEME_ID`, `UNKNOWN_THEME`, `OUTSIDE_ROOT`, `REVEAL_FAILED`, `OPEN_FAILED`, `FOLDERS_UNAVAILABLE`) with no paths in messages instead of silent no-ops; responses echo the validated target. Shell display strings use the plain Win32 form: containment is verified on the canonical path, but the `\\?\` prefix is stripped for the shell call because verb handlers such as `SHParseDisplayName` reject it with `E_INVALIDARG` (found during DEV runtime validation). No `src/` caller is branched in this slice — the Electron UI keeps its `send` calls (asserted), and a DEV-only `LEGCORD_NATIVE_FOLDERS_SMOKE=1` probe exercises the exact host path instead.
 
 ## Reusable mod substrate (Phase B)
 
@@ -466,11 +513,11 @@ Deliberate Electron differences (hardening, not regressions): ids are validated 
 
 ## Explicit capability ownership
 
-The document-start compatibility script owns facade creation, local response correlation, `pagehide` promise cleanup, and renderer diagnostics. The static Vencord adapter owns one request per document and the private execution marker; Rust owns the versioned protocol, exact origin gate, request-ID uniqueness, fixed source retrieval/cache path, page-world execution, CSS insertion, response dispatch, and document generation. The native profile remains exactly `E:\Legcord.webview-dev-user-data`. The renderer supplies no path, URL, channel name, host method, executable source, or filesystem operation beyond the validated plugin-storage logical id and relative path, which never leave the host-built namespace; bundle discovery takes no renderer parameters at all.
+The document-start compatibility script owns facade creation, local response correlation, `pagehide` promise cleanup, and renderer diagnostics. The static Vencord adapter owns one request per document and the private execution marker; Rust owns the versioned protocol, exact origin gate, request-ID uniqueness, fixed source retrieval/cache path, page-world execution, CSS insertion, response dispatch, and document generation. The native profile remains exactly `E:\Legcord.webview-dev-user-data`. The renderer supplies no path, URL, channel name, host method, executable source, or filesystem operation beyond the validated plugin-storage logical id and relative path, which never leave the host-built namespace; bundle discovery takes no renderer parameters at all, and folder opening takes only a closed location enum or a validated theme id whose final path the host builds and contains.
 
 ### Deferred and not tested
 
-Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`legcord://`); arRPC; popup windows; general mod loader; custom bundle execution; runtime plugins; theme install/edit/folders; backup save/restore/zip/dialogs; existing broad `window.legcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's Legcord plugin surface is not implemented. This narrow mod path does not establish full Legcord compatibility.
+Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`legcord://`); arRPC; popup windows; general mod loader; custom bundle execution; runtime plugins; theme install/edit (folder reveal/open now implemented natively); backup save/restore/zip/dialogs; existing broad `window.legcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's Legcord plugin surface is not implemented. This narrow mod path does not establish full Legcord compatibility.
 
 ### Validation status
 

@@ -520,3 +520,81 @@ test("custom bundles stay inventory-only and non-executable natively", () => {
     assert.doesNotMatch(nativeFacade, /showSaveDialog/);
     assert.doesNotMatch(nativeFacade, /AdmZip|readBackupZipToMap|buildBackupZipBuffer/);
 });
+
+test("Electron keeps every folder and file-open IPC handler", () => {
+    // Fixed roots use showItemInFolder (reveal); the per-theme directory
+    // uses openPath (open). File-in-editor and picker paths are separate
+    // milestones and must not be mistaken for folder opening.
+    assert.match(ipc, /ipcMain\.on\("openStorageFolder"/);
+    assert.match(ipc, /shell\.showItemInFolder\(storagePath\)/);
+    assert.match(ipc, /ipcMain\.on\("openThemesFolder"/);
+    assert.match(ipc, /shell\.showItemInFolder\(themesPath\)/);
+    assert.match(ipc, /ipcMain\.on\("openPluginsFolder"/);
+    assert.match(ipc, /shell\.showItemInFolder\(extensionsPath\)/);
+    assert.match(ipc, /ipcMain\.on\("openRuntimePluginsFolder"/);
+    assert.match(ipc, /shell\.showItemInFolder\(pluginsPath\)/);
+    assert.match(ipc, /ipcMain\.on\("openCrashesFolder"/);
+    assert.match(ipc, /ipcMain\.on\("openThemeFolder", \(_event, id: string\)/);
+    assert.match(ipc, /shell\.openPath\(path\.join\(themesPath, id\)\)/);
+    // The renderer bridge keeps the same fire-and-forget sends.
+    assert.match(bridge, /openStorageFolder: \(\) => ipcRenderer\.send\("openStorageFolder"\)/);
+    assert.match(bridge, /openThemesFolder: \(\) => ipcRenderer\.send\("openThemesFolder"\)/);
+    assert.match(bridge, /folder: \(id: string\) => ipcRenderer\.send\("openThemeFolder", id\)/);
+    assert.match(bridge, /openFolder: \(\) => ipcRenderer\.send\("openRuntimePluginsFolder"\)/);
+    // Declared contracts stay void-returning.
+    assert.match(types, /openStorageFolder: \(\) => void/);
+    assert.match(types, /openThemesFolder: \(\) => void/);
+    assert.match(types, /folder: \(id: string\) => void/);
+    assert.match(types, /openFolder: \(\) => void/);
+});
+
+test("Electron joins the raw theme id with no validation", () => {
+    // Documents WHY the native side validates: path.join honors absolute
+    // segments and ../, so a hostile id escapes the themes root here.
+    assert.match(ipc, /shell\.openPath\(path\.join\(themesPath, id\)\)/);
+    assert.doesNotMatch(ipc, /validate.*id.*openThemeFolder|openThemeFolder.*validate/);
+});
+
+test("no src caller uses the native folder opening path", () => {
+    // The Electron UI keeps its send-based calls; nothing references the
+    // native folders namespace or its capabilities/commands.
+    const backupSection = readFileSync(
+        new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
+        "utf8",
+    );
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [bridge, ipc, types, backupSection, themesCard]) {
+        assert.doesNotMatch(source, /folders\.open/);
+        assert.doesNotMatch(source, /folders_open/);
+        assert.doesNotMatch(source, /legcord\.folders/);
+    }
+    assert.match(themesCard, /window\.legcord\.themes\.folder\(props\.theme\.id\)/);
+});
+
+test("native folder opening preserves the reveal versus open distinction", () => {
+    // Both operations may show Explorer, but they are different shell
+    // operations: reveal selects the fixed root in its parent, open enters
+    // the theme directory itself. The module documents and implements both
+    // with direct shell APIs, never a constructed command line.
+    const nativeFolders = readFileSync(new URL("../src/folders.rs", import.meta.url), "utf8");
+    assert.match(nativeFolders, /SHOpenFolderAndSelectItems/);
+    assert.match(nativeFolders, /ShellExecuteW/);
+    assert.match(nativeFolders, /showItemInFolder/);
+    assert.match(nativeFolders, /openPath/);
+    assert.doesNotMatch(nativeFolders, /Command::new|cmd \/C|create_process|system\(/);
+});
+
+test("native folder facade exposes identifiers only, no shell surface", () => {
+    assert.match(nativeFacade, /function openFolder\(/);
+    assert.match(nativeFacade, /function openThemeFolder\(/);
+    assert.match(nativeFacade, /requireCapability\("folders\.open"\)/);
+    assert.match(nativeFacade, /requireCapability\("folders\.open_theme"\)/);
+    assert.doesNotMatch(nativeFacade, /openPath\(/);
+    assert.doesNotMatch(nativeFacade, /showItemInFolder/);
+    assert.doesNotMatch(nativeFacade, /ShellExecute/);
+    assert.doesNotMatch(nativeFacade, /openExternal/);
+    assert.doesNotMatch(nativeFacade, /showOpenDialog|showSaveDialog/);
+});

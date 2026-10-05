@@ -1796,6 +1796,226 @@ test("a reloaded document gets a fresh bundle inventory facade with no stale pro
     assert.deepEqual(await pending, BUNDLE_FIXTURE);
 });
 
+function createFoldersRuntime(capabilities = ["bridge.ping", "folders.open", "folders.open_theme"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondFoldersOpened(window, request, location = "themes") {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "folders_opened", payload: { location } },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondThemeFolderOpened(window, request, id = "my-theme") {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "theme_folder_opened", payload: { id } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes scoped folder reveal and theme open capabilities", () => {
+    const { window } = createFoldersRuntime();
+    assert.equal(typeof window.legcord.folders.open, "function");
+    assert.equal(typeof window.legcord.folders.openTheme, "function");
+    assert.equal(Object.isFrozen(window.legcord.folders), true);
+    assert.equal(window.legcord.native.supports("folders.open"), true);
+    assert.equal(window.legcord.native.supports("folders.open_theme"), true);
+    // No generic path opener, dialog, picker, or shell surface may exist.
+    assert.equal(window.legcord.folders.openPath, undefined);
+    assert.equal(window.legcord.folders.openDialog, undefined);
+    assert.equal(window.legcord.folders.shell, undefined);
+});
+
+test("folders.open sends a closed-enum reveal request and resolves the location", async () => {
+    const { window } = createFoldersRuntime();
+    for (const location of ["storage", "themes", "plugins"]) {
+        const pending = window.legcord.folders.open(location);
+        assert.ok(pending instanceof Promise);
+        const message = window.messages.find((entry) => entry.command?.type === "folders_open");
+        assert.ok(message);
+        assert.deepEqual(message.command, { type: "folders_open", payload: { location } });
+
+        respondFoldersOpened(window, message, location);
+        assert.equal(await pending, location);
+        window.messages.length = 0;
+    }
+});
+
+test("folders.openTheme sends an id-only open request and resolves the id", async () => {
+    const { window } = createFoldersRuntime();
+    const pending = window.legcord.folders.openTheme("my-theme");
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "folders_open_theme");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "folders_open_theme", payload: { id: "my-theme" } });
+
+    respondThemeFolderOpened(window, message, "my-theme");
+    assert.equal(await pending, "my-theme");
+});
+
+test("folder capabilities throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
+    const { window } = createFoldersRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("folders.open"), false);
+    assert.equal(window.legcord.native.supports("folders.open_theme"), false);
+    assert.throws(
+        () => window.legcord.folders.open("themes"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.legcord.folders.openTheme("my-theme"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "folders_open"),
+        false,
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "folders_open_theme"),
+        false,
+    );
+});
+
+test("folder requests reject non-enum locations and hostile ids without sending", async () => {
+    const { window } = createFoldersRuntime();
+    for (const location of ["extensions", "Themes", "", "C:\\themes", "../themes", 42, null]) {
+        await assert.rejects(window.legcord.folders.open(location), /location must be one of/);
+    }
+    for (const id of ["", ".", "..", "../escape", "..\\escape", "a/b", "a\\b", "C:\\x", "has space", 42, null]) {
+        await assert.rejects(window.legcord.folders.openTheme(id), /id must match/);
+    }
+    const oversized = `t${"t".repeat(64)}`;
+    await assert.rejects(window.legcord.folders.openTheme(oversized), /id must match/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "folders_open"),
+        false,
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "folders_open_theme"),
+        false,
+    );
+});
+
+test("folder responses reject mismatched echoes and path-bearing members", async () => {
+    // Host echoes a different location than requested.
+    const mismatched = createFoldersRuntime();
+    const pendingMismatch = mismatched.window.legcord.folders.open("themes");
+    const messageMismatch = mismatched.window.messages.find((entry) => entry.command?.type === "folders_open");
+    respondFoldersOpened(mismatched.window, messageMismatch, "storage");
+    await assert.rejects(pendingMismatch, /folder response schema is invalid/);
+
+    // Unknown location in a well-formed envelope.
+    const unknown = createFoldersRuntime();
+    const pendingUnknown = unknown.window.legcord.folders.open("themes");
+    const messageUnknown = unknown.window.messages.find((entry) => entry.command?.type === "folders_open");
+    respondFoldersOpened(unknown.window, messageUnknown, "extensions");
+    await assert.rejects(pendingUnknown, /folder response schema is invalid/);
+
+    // Path riding along with a theme open response.
+    const withPath = createFoldersRuntime();
+    const pendingPath = withPath.window.legcord.folders.openTheme("my-theme");
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "folders_open_theme");
+    withPath.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messagePath.request_id,
+                ok: true,
+                payload: { type: "theme_folder_opened", payload: { id: "my-theme", path: "C:\\secret" } },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(pendingPath, /theme folder response schema is invalid/);
+
+    // Host echoes a different id than requested.
+    const wrongId = createFoldersRuntime();
+    const pendingId = wrongId.window.legcord.folders.openTheme("my-theme");
+    const messageId = wrongId.window.messages.find((entry) => entry.command?.type === "folders_open_theme");
+    respondThemeFolderOpened(wrongId.window, messageId, "other-theme");
+    await assert.rejects(pendingId, /theme folder response schema is invalid/);
+});
+
+test("folder requests reject host failures with the typed error", async () => {
+    const { window } = createFoldersRuntime();
+    const pendingReveal = window.legcord.folders.open("themes");
+    const messageReveal = window.messages.find((entry) => entry.command?.type === "folders_open");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messageReveal.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "REVEAL_FAILED", message: "folder reveal failed" },
+            },
+        }),
+    );
+    await assert.rejects(pendingReveal, /folder reveal failed/);
+
+    const pendingOpen = window.legcord.folders.openTheme("my-theme");
+    const messageOpen = window.messages.find((entry) => entry.command?.type === "folders_open_theme");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messageOpen.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "UNKNOWN_THEME", message: "theme folder is unknown" },
+            },
+        }),
+    );
+    await assert.rejects(pendingOpen, /theme folder is unknown/);
+});
+
+test("folder requests reject after their timeout", async () => {
+    const { window } = createFoldersRuntime();
+    await assert.rejects(window.legcord.folders.open("themes", 50), /timed out/);
+    await assert.rejects(window.legcord.folders.openTheme("my-theme", 50), /timed out/);
+});
+
+test("folder requests reject pending requests when the document is disposed", async () => {
+    const { window } = createFoldersRuntime();
+    const pendingReveal = window.legcord.folders.open("themes");
+    const pendingOpen = window.legcord.folders.openTheme("my-theme");
+    const rejections = Promise.all([
+        assert.rejects(pendingReveal, /document was disposed/),
+        assert.rejects(pendingOpen, /document was disposed/),
+    ]);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejections;
+});
+
+test("a reloaded document gets a fresh folders facade with no stale promises", async () => {
+    const firstDocument = createFoldersRuntime();
+    const stale = firstDocument.window.legcord.folders.open("themes");
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createFoldersRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.folders.openTheme("my-theme");
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "folders_open_theme");
+    respondThemeFolderOpened(nextDocument.window, message, "my-theme");
+    assert.equal(await pending, "my-theme");
+});
+
 function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {
     return createRuntime("https://discord.com", capabilities);
 }

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::folders::{FolderLocation, MAX_FOLDER_THEME_ID_BYTES};
 use crate::localization::MAX_LANG_KEY_BYTES;
 use crate::plugin_storage::{
     MAX_PLUGIN_FILE_BYTES, MAX_PLUGIN_ID_BYTES, MAX_PLUGIN_REL_PATH_BYTES,
@@ -42,6 +43,8 @@ pub enum BridgeCommand {
     PluginStorageRead(PluginStorageReadRequest),
     PluginStorageWrite(PluginStorageWriteRequest),
     BundlesList(BundlesListRequest),
+    FoldersOpen(FoldersOpenRequest),
+    FoldersOpenTheme(FoldersOpenThemeRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +144,26 @@ pub struct PluginStorageWriteRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundlesListRequest {}
+
+/// Reveal request for the `folders.open` capability: exactly one closed
+/// location enum. There is deliberately NO path, URL, directory name, or
+/// selector: the host builds the fixed root itself. Unknown variants are
+/// rejected during deserialization, before any filesystem or shell work.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FoldersOpenRequest {
+    pub location: FolderLocation,
+}
+
+/// Open request for the `folders.open_theme` capability: exactly one
+/// validated theme id. There is deliberately NO path, URL, or directory
+/// parameter: the host joins the id onto its own themes root and enforces
+/// containment. Charset and length are re-checked at dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FoldersOpenThemeRequest {
+    pub id: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,6 +415,8 @@ pub enum BridgeResponsePayload {
     PluginStorageRead(PluginStorageReadResponse),
     PluginStorageWrite(PluginStorageWriteResponse),
     BundlesList(BundlesListResponse),
+    FoldersOpened(FoldersOpenedResponse),
+    ThemeFolderOpened(ThemeFolderOpenedResponse),
 }
 
 #[derive(Serialize)]
@@ -511,6 +536,21 @@ pub struct BundlesListResponse {
     pub bundles: Vec<BundleFileEntry>,
 }
 
+/// Reveal response for the `folders.open` capability: the validated location
+/// echo, so the renderer can confirm which fixed root was revealed. No path
+/// crosses the boundary.
+#[derive(Serialize)]
+pub struct FoldersOpenedResponse {
+    pub location: FolderLocation,
+}
+
+/// Open response for the `folders.open_theme` capability: the validated
+/// theme id echo. No path crosses the boundary.
+#[derive(Serialize)]
+pub struct ThemeFolderOpenedResponse {
+    pub id: String,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -616,6 +656,18 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // is needed. There is nothing to validate: the inventory
                 // covers the fixed allowlist only.
                 BridgeCommand::BundlesList(_) => {}
+                // The location is a closed enum validated by serde itself:
+                // unknown variants never reach dispatch. No path or
+                // selector exists to shape-check.
+                BridgeCommand::FoldersOpen(_) => {}
+                BridgeCommand::FoldersOpenTheme(payload) => {
+                    // Shape check only (presence + byte cap); charset,
+                    // traversal, and containment rules live in `folders`
+                    // and are re-enforced at dispatch.
+                    if payload.id.is_empty() || payload.id.len() > MAX_FOLDER_THEME_ID_BYTES {
+                        return Err("invalid theme folder open".to_owned());
+                    }
+                }
             }
         }
         BridgeMessage::Event(event) => {
@@ -1156,6 +1208,90 @@ mod tests {
         assert!(parse_bridge_message(save).is_err());
         assert!(parse_bridge_message(restore).is_err());
         assert!(parse_bridge_message(invoke).is_err());
+    }
+
+    #[test]
+    fn accepts_only_the_closed_folder_locations() {
+        for location in ["storage", "themes", "plugins"] {
+            let request = format!(
+                "{{\"version\":1,\"request_id\":\"folders-{location}\",\"command\":{{\"type\":\"folders_open\",\"payload\":{{\"location\":\"{location}\"}}}}}}"
+            );
+            assert!(
+                matches!(
+                    parse_bridge_message(&request),
+                    Ok(BridgeMessage::Request(_))
+                ),
+                "{location} must parse"
+            );
+        }
+
+        // No path, URL, directory name, selector, or second member may ride
+        // along; unknown locations never reach dispatch.
+        let with_path = r#"{"version":1,"request_id":"folders-4","command":{"type":"folders_open","payload":{"location":"themes","path":"C:\\secret"}}}"#;
+        let with_url = r#"{"version":1,"request_id":"folders-5","command":{"type":"folders_open","payload":{"location":"themes","url":"https://attacker.invalid"}}}"#;
+        let unknown = r#"{"version":1,"request_id":"folders-6","command":{"type":"folders_open","payload":{"location":"extensions"}}}"#;
+        let empty = r#"{"version":1,"request_id":"folders-7","command":{"type":"folders_open","payload":{}}}"#;
+        let wrong_case = r#"{"version":1,"request_id":"folders-8","command":{"type":"folders_open","payload":{"location":"Themes"}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(unknown).is_err());
+        assert!(parse_bridge_message(empty).is_err());
+        assert!(parse_bridge_message(wrong_case).is_err());
+    }
+
+    #[test]
+    fn accepts_theme_folder_open_with_shape_checked_ids() {
+        let request = r#"{"version":1,"request_id":"folders-1","command":{"type":"folders_open_theme","payload":{"id":"my-theme"}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // Charset/traversal rules live in `folders` at dispatch, but empty,
+        // oversized, and extra-member payloads are rejected at parse time.
+        let empty = r#"{"version":1,"request_id":"folders-2","command":{"type":"folders_open_theme","payload":{"id":""}}}"#;
+        let with_path = r#"{"version":1,"request_id":"folders-3","command":{"type":"folders_open_theme","payload":{"id":"my-theme","path":"C:\\secret"}}}"#;
+        let missing = r#"{"version":1,"request_id":"folders-4","command":{"type":"folders_open_theme","payload":{}}}"#;
+        assert!(parse_bridge_message(empty).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(missing).is_err());
+    }
+
+    #[test]
+    fn serializes_typed_folder_open_responses_without_paths() {
+        use super::{FoldersOpenedResponse, ThemeFolderOpenedResponse};
+        use crate::folders::FolderLocation;
+        let reveal = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "folders-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::FoldersOpened(
+                FoldersOpenedResponse {
+                    location: FolderLocation::Themes,
+                },
+            )),
+            error: None,
+        };
+        let reveal_value = serde_json::to_value(reveal).unwrap();
+        assert_eq!(reveal_value["payload"]["type"], "folders_opened");
+        assert_eq!(reveal_value["payload"]["payload"]["location"], "themes");
+        assert!(reveal_value["payload"]["payload"].get("path").is_none());
+
+        let open = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "folders-2".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::ThemeFolderOpened(
+                ThemeFolderOpenedResponse {
+                    id: "my-theme".to_owned(),
+                },
+            )),
+            error: None,
+        };
+        let open_value = serde_json::to_value(open).unwrap();
+        assert_eq!(open_value["payload"]["type"], "theme_folder_opened");
+        assert_eq!(open_value["payload"]["payload"]["id"], "my-theme");
+        assert!(open_value["payload"]["payload"].get("path").is_none());
     }
 
     #[test]

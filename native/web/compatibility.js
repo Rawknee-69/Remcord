@@ -245,6 +245,51 @@
         "custom.css",
     ];
 
+    // Closed location enum for the three host-controlled roots. The
+    // renderer selects a variant only; the host builds the directory.
+    const FOLDER_LOCATIONS = ["storage", "themes", "plugins"];
+    // Same rule the host enforces for theme ids ([A-Za-z0-9._-]{1,64},
+    // never "." or ".."); separators are impossible by charset.
+    const THEME_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+    function openFolder(location, timeoutMs = 5000) {
+        requireCapability("folders.open");
+        if (typeof location !== "string" || !FOLDER_LOCATIONS.includes(location)) {
+            return Promise.reject(new TypeError("location must be one of storage, themes, plugins"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Reveal semantics (the Explorer location behavior Electron gets
+        // from its folder-reveal call): the host opens the parent with this
+        // fixed root selected.
+        return request({ type: "folders_open", payload: { location } }, timeoutMs).then((payload) => {
+            if (payload.location !== location) {
+                throw new Error("Native folder response schema is invalid");
+            }
+            return payload.location;
+        });
+    }
+
+    function openThemeFolder(id, timeoutMs = 5000) {
+        requireCapability("folders.open_theme");
+        if (typeof id !== "string" || !THEME_ID_PATTERN.test(id) || id === "." || id === "..") {
+            return Promise.reject(new TypeError("id must match [A-Za-z0-9._-]{1,64} and not be . or .."));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Open semantics (the Explorer behavior Electron gets from opening
+        // a directory path): Explorer opens inside the validated theme
+        // folder itself.
+        return request({ type: "folders_open_theme", payload: { id } }, timeoutMs).then((payload) => {
+            if (payload.id !== id) {
+                throw new Error("Native theme folder response schema is invalid");
+            }
+            return payload.id;
+        });
+    }
+
     function listBundles(timeoutMs = 5000) {
         requireCapability("backup.list_bundles");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -420,6 +465,33 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "folders_opened") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                typeof payload.location !== "string" ||
+                !FOLDER_LOCATIONS.includes(payload.location)
+            ) {
+                request.reject(new Error("Native folder response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "theme_folder_opened") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                typeof payload.id !== "string" ||
+                !THEME_ID_PATTERN.test(payload.id) ||
+                payload.id === "." ||
+                payload.id === ".." ||
+                textEncoder.encode(payload.id).length > 64
+            ) {
+                request.reject(new Error("Native theme folder response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -485,11 +557,14 @@
     // Backup discovery only: save/restore (dialogs + zip) are deferred, so
     // no save/restore member may exist on this namespace.
     const backup = Object.freeze({ listBundles });
+    // Folder opening only: reveal for the three fixed roots, open for one
+    // validated theme id. No path, dialog, picker, or shell surface.
+    const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
-        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage, backup }),
+        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage, backup, folders }),
     });
 
     try {
