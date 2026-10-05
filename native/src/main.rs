@@ -1,4 +1,5 @@
 mod app;
+mod bundles;
 mod css_watch;
 mod localization;
 mod mod_substrate;
@@ -25,6 +26,7 @@ use mod_substrate::{
 };
 
 use app::{current_app_version, validate_version};
+use bundles::{describe_bundle_files, BUNDLE_FILES};
 use css_watch::{
     diff_theme_snapshots, quick_css_transition, start_live_css_watchers, LiveCssCounters,
     LiveCssFsSignal, QuickCssTransition, ResourceDebouncer, CSS_DEBOUNCE_MS,
@@ -34,9 +36,9 @@ use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
     parse_bridge_message, validate_mod_bundle_id, AppVersionResponse, BridgeCommand, BridgeError,
     BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
-    BridgeResponsePayload, LocalizationStringResponse, ModBundleResponse, PingResponse,
-    PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse,
-    SettingsMutationResponse, PROTOCOL_VERSION,
+    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, LocalizationStringResponse,
+    ModBundleResponse, PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse,
+    RequestTracker, SettingsConfigResponse, SettingsMutationResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -245,6 +247,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "app.get_version",
         "plugin_storage.read",
         "plugin_storage.write",
+        "backup.list_bundles",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -2723,6 +2726,66 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::BundlesList(_) => {
+                            // Read-only discovery: parameter-free by
+                            // protocol, so the host inventories exactly the
+                            // fixed allowlist under the profile root. No
+                            // contents, paths, or URLs cross the boundary.
+                            let request_id = request.request_id;
+                            match describe_bundle_files(&profile_path) {
+                                Ok(files) => {
+                                    let present =
+                                        files.iter().filter(|entry| entry.present).count();
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::BundlesList(
+                                            BundlesListResponse {
+                                                bundles: files
+                                                    .into_iter()
+                                                    .map(|entry| BundleFileEntry {
+                                                        name: entry.name.to_owned(),
+                                                        present: entry.present,
+                                                        bytes: entry.bytes,
+                                                    })
+                                                    .collect(),
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Bundles][Metrics] files={} present={} request_latency_ms={:.3}",
+                                        BUNDLE_FILES.len(),
+                                        present,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Bundles][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::ModGetBundle(payload) => {
                             let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {
@@ -4139,5 +4202,57 @@ mod tests {
         assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("fs.readFile"));
         assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("fs.writeFile"));
         assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("C:\\Users"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_only_bundle_discovery_for_backups() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"backup.list_bundles"));
+        // Save/restore (host-mediated dialogs + zip handling) are deferred:
+        // discovery is the only backup-family capability that may exist.
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"backup.save"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"backup.restore"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"backup"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"dialog"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"zip"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_backup_discovery_facade() {
+        let script = initialization_script(&[]).unwrap();
+        assert!(script.contains("backup_list_bundles"));
+        assert!(script.contains("backup.list_bundles"));
+        assert!(script.contains("listBundles"));
+        // No save/restore dialog surface may ride along with discovery.
+        assert!(!script.contains("backupSave"));
+        assert!(!script.contains("backupRestore"));
+        assert!(!script.contains("showSaveDialog"));
+        assert!(!script.contains("showOpenDialog"));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn native_bundle_allowlist_matches_the_seven_electron_names() {
+        // Semantic parity with Electron `BUNDLE_FILES`
+        // (`src/common/backup.ts`): same 7 names in the same order.
+        // `custom.js` / `custom.css` are inventory-only and stay
+        // non-executable natively (asserted by the electron-compat suite).
+        assert_eq!(
+            super::BUNDLE_FILES,
+            &[
+                "vencord.js",
+                "vencord.css",
+                "equicord.js",
+                "equicord.css",
+                "shelter.js",
+                "custom.js",
+                "custom.css",
+            ]
+        );
     }
 }

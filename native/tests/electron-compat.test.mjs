@@ -437,3 +437,86 @@ test("native live watching exposes no renderer filesystem-watch surface", () => 
     assert.doesNotMatch(nativeFacade, /watchFile/);
     assert.doesNotMatch(nativeFacade, /MutationObserver/);
 });
+
+test("Electron keeps the backup save/restore handlers and bundle allowlist", () => {
+    // backupSave takes one JSON string payload, builds the zip from the
+    // host profile paths, and writes only through a host-mediated save
+    // dialog; backupRestore takes no arguments and reads only through a
+    // host-mediated open dialog.
+    const backupMain = readFileSync(new URL("../../src/common/backup.ts", import.meta.url), "utf8");
+    assert.match(ipc, /ipcMain\.handle\(\s*"backupSave"/);
+    assert.match(ipc, /ipcMain\.handle\("backupRestore"/);
+    assert.match(ipc, /buildBackupZipBuffer\(payload,/);
+    assert.match(ipc, /applyBackupFromMap\(map,/);
+    assert.match(ipc, /dialog\.showSaveDialog/);
+    assert.match(ipc, /dialog\.showOpenDialog/);
+    assert.match(backupMain, /const BUNDLE_FILES = \[/);
+    // The declared renderer contract stays the Electron save/restore pair.
+    assert.match(bridge, /ipcRenderer\.invoke\("backupSave", data\)/);
+    assert.match(bridge, /ipcRenderer\.invoke\("backupRestore"\)/);
+    assert.match(types, /save\(data: string\): Promise</);
+    assert.match(types, /restore\(\): Promise<string>/);
+});
+
+test("the native bundle allowlist is the same 7 names in the same order", () => {
+    // Semantic parity with the canonical Electron definition: extract the
+    // quoted names from BUNDLE_FILES in src/common/backup.ts and compare
+    // element-wise against native/src/bundles.rs. This is a literal
+    // comparison of the canonical definitions, not a paraphrase.
+    const backupMain = readFileSync(new URL("../../src/common/backup.ts", import.meta.url), "utf8");
+    const nativeBundles = readFileSync(new URL("../src/bundles.rs", import.meta.url), "utf8");
+    const electronBlock = backupMain.match(/const BUNDLE_FILES = \[([\s\S]*?)\];/);
+    assert.ok(electronBlock);
+    const electronNames = [...electronBlock[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    const nativeBlock = nativeBundles.match(/pub const BUNDLE_FILES[^=]*=\s*&\[([\s\S]*?)\];/);
+    assert.ok(nativeBlock);
+    const nativeNames = [...nativeBlock[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    assert.deepEqual(nativeNames, electronNames);
+    assert.deepEqual(nativeNames, [
+        "vencord.js",
+        "vencord.css",
+        "equicord.js",
+        "equicord.css",
+        "shelter.js",
+        "custom.js",
+        "custom.css",
+    ]);
+});
+
+test("no src caller uses the native bundle discovery path", () => {
+    // This slice migrates discovery only and adds no UI caller: a native
+    // branch in src/ would be fabrication. The Electron backup UI keeps
+    // calling save/restore, and nothing references the native capability.
+    const backupSection = readFileSync(
+        new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [bridge, ipc, types, backupSection]) {
+        assert.doesNotMatch(source, /listBundles/);
+        assert.doesNotMatch(source, /backup\.list_bundles/);
+        assert.doesNotMatch(source, /backup_list_bundles/);
+    }
+    assert.match(backupSection, /window\.legcord\.backup\.save\(JSON\.stringify\(payload\)\)/);
+    assert.match(backupSection, /window\.legcord\.backup\.restore\(\)/);
+});
+
+test("custom bundles stay inventory-only and non-executable natively", () => {
+    // No authoritative host-controlled source exists for custom artifacts,
+    // so presence in the inventory must never imply servability: the mod
+    // registry serves only registered host-controlled descriptors, and the
+    // discovery module documents the restriction.
+    const nativeBundles = readFileSync(new URL("../src/bundles.rs", import.meta.url), "utf8");
+    const main = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    assert.match(nativeBundles, /inventory-only and non-executable/);
+    // No descriptor registers the custom id, so inventory presence can
+    // never become execution (the pre-existing "custom" settings-gate test
+    // below only proves an unregistered id enables nothing).
+    assert.doesNotMatch(main, /id: "custom"/);
+    // The native facade exposes discovery only: no save, restore, zip,
+    // dialog, or bundle-content member may exist alongside it.
+    assert.match(nativeFacade, /function listBundles\(/);
+    assert.doesNotMatch(nativeFacade, /backupSave/);
+    assert.doesNotMatch(nativeFacade, /backupRestore/);
+    assert.doesNotMatch(nativeFacade, /showSaveDialog/);
+    assert.doesNotMatch(nativeFacade, /AdmZip|readBackupZipToMap|buildBackupZipBuffer/);
+});

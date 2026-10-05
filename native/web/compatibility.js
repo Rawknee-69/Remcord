@@ -231,6 +231,33 @@
         return true;
     }
 
+    // Exact Electron BUNDLE_FILES allowlist (src/common/backup.ts), in the
+    // same order. custom.js/custom.css are inventory-only and stay
+    // non-executable natively; they are listed so the inventory reasons
+    // about the same set Electron reasons about.
+    const BUNDLE_NAMES = [
+        "vencord.js",
+        "vencord.css",
+        "equicord.js",
+        "equicord.css",
+        "shelter.js",
+        "custom.js",
+        "custom.css",
+    ];
+
+    function listBundles(timeoutMs = 5000) {
+        requireCapability("backup.list_bundles");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: no path, URL, include flag, or
+        // selector may be supplied. The host inventories the fixed
+        // allowlist only.
+        return request({ type: "backup_list_bundles", payload: {} }, timeoutMs).then(
+            (payload) => payload.bundles,
+        );
+    }
+
     window.addEventListener("legcord-native:response", (event) => {
         const response = event.detail;
         if (!response || response.version !== protocolVersion || typeof response.request_id !== "string") {
@@ -363,6 +390,36 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "bundles_list") {
+            const payload = response.payload.payload;
+            const entries = payload?.bundles;
+            const namesMatch =
+                Array.isArray(entries) &&
+                entries.length === BUNDLE_NAMES.length &&
+                entries.every((entry, index) => entry?.name === BUNDLE_NAMES[index]);
+            const shapesValid =
+                Array.isArray(entries) &&
+                entries.every(
+                    (entry) =>
+                        entry &&
+                        typeof entry.present === "boolean" &&
+                        Number.isSafeInteger(entry.bytes) &&
+                        entry.bytes >= 0 &&
+                        // Absent entries carry no size; present entries carry
+                        // the host-observed length (no upper bound: nothing
+                        // is allocated from this metadata).
+                        (entry.present || entry.bytes === 0) &&
+                        // Metadata only: no path, URL, or content may ride
+                        // along with an entry.
+                        entry.path === undefined &&
+                        entry.url === undefined &&
+                        entry.data === undefined,
+                );
+            if (!payload || !namesMatch || !shapesValid) {
+                request.reject(new Error("Native bundle inventory response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -425,11 +482,14 @@
     });
     const settings = Object.freeze({ getConfig, setBlockPowerSavingInVoiceChat });
     const pluginStorage = Object.freeze({ readFile: readPluginFile, writeFile: writePluginFile });
+    // Backup discovery only: save/restore (dialogs + zip) are deferred, so
+    // no save/restore member may exist on this namespace.
+    const backup = Object.freeze({ listBundles });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
-        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage }),
+        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage, backup }),
     });
 
     try {

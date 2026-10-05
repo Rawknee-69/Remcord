@@ -48,6 +48,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request (app version capability) | `{"version":1,"request_id":"...","command":{"type":"app_get_version","payload":{}}}` |
 | Renderer request (plugin storage read) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_read","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt"}}}` |
 | Renderer request (plugin storage write) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_write","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt","data":"..."}}}` |
+| Renderer request (bundle discovery) | `{"version":1,"request_id":"...","command":{"type":"bundles_list","payload":{}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Mod bundle response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"mod_bundle","payload":{"mod_id":"vencord","bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
@@ -56,9 +57,10 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | App version response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"app_version","payload":{"version":"1.3.0"}},"error":null}` |
 | Plugin storage read response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"plugin_storage_read","payload":{"data":"...","payload_bytes":38}},"error":null}` |
 | Plugin storage write response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"plugin_storage_write","payload":{"payload_bytes":38}},"error":null}` |
+| Bundle inventory response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"bundles_list","payload":{"bundles":[{"name":"vencord.js","present":true,"bytes":698272},{"name":"vencord.css","present":true,"bytes":41335},{"name":"equicord.js","present":false,"bytes":0},{"name":"equicord.css","present":false,"bytes":0},{"name":"shelter.js","present":true,"bytes":235850},{"name":"custom.js","present":false,"bytes":0},{"name":"custom.css","present":false,"bytes":0}]}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, and `plugin_storage_write`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, and `bundles_list`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -177,6 +179,32 @@ To avoid transferring a multi-megabyte script back through the renderer and to p
 CSS uses a descriptor-parameterized host-generated script to create/update one `<style id="legcord-native-vencord-css">` after bundle execution. It appends to the document's current head/root, reports a typed result, and replaces rather than duplicates that style if reused. Each full reload receives a fresh adapter, pending-request map, marker, style element, and native document generation; stale worker completions are discarded. The substrate permits only one request and one successful marker per mod per document.
 
 Failure logs distinguish `bundle_retrieval`, `adapter_initialization`, `script_execution`, `css_injection`, and renderer `uncaught`/`unhandled_rejection`/`console.error` reports. The host remains alive on these failures. The native response contains byte counts, bundle header version, request/retrieval/execution/CSS timings, and the marker; it deliberately does not return source text to JavaScript.
+
+## Bundle discovery capability (Phase D Step 1)
+
+The first backups slice migrates ONLY bundle-file discovery — the `BUNDLE_FILES` half of `src/common/backup.ts` — to a read-only typed capability `backup.list_bundles` (wire `bundles_list`, facade `window.legcord.backup.listBundles()`). No save/restore, no zip handling, no dialogs, no writes, no folder opening, no theme install/edit. There is no migrated `src/` caller (the Electron backup UI keeps calling `save`/`restore`; a native branch would be fabrication), so this slice establishes the allowlist + root-scoping contract that a future export slice will build on.
+
+### Electron chain (unchanged)
+
+`src/common/backup.ts:73-81` defines exactly 7 fixed names at `<userData>/` (`vencord.js`, `vencord.css`, `equicord.js`, `equicord.css`, `shelter.js`, `custom.js`, `custom.css`). `buildBackupZipBuffer` checks each with `addFileIfExists` (existence check; missing files silently skipped, never placeholders), reads whole files unbounded, and stores them as `bundles/<name>`; `applyBackupFromMap` restores them with recursive `mkdir` plus silent overwrite, gated only by `includes.modBundles` and exact allowlist equality. `backupSave` takes one JSON string (`{includes, clientMods}` — the `clientMods` blob is renderer-built from `localStorage`/Shelter and never touches host files) and writes only through a host-mediated save dialog; `backupRestore` takes no arguments and reads only through a host-mediated open dialog. `native/tests/electron-compat.test.mjs` asserts these handlers, the bridge pair, the declared `backup` contract, and the absence of any native backup branch in `src/` are unchanged.
+
+### Native chain
+
+```text
+renderer await window.legcord.backup.listBundles()
+  → requireCapability("backup.list_bundles") or sync UNSUPPORTED_CAPABILITY throw
+  → parameter-free {"type":"bundles_list","payload":{}} request
+     (path/url/include_*/name/method members host-rejected by deny_unknown_fields)
+  → Rust bundles::describe_bundle_files(<DEV profile>/, fixed BUNDLE_FILES only)
+     (host-built paths; symlink_metadata, never followed; missing or
+      non-regular file → present:false, bytes:0; other IO errors fail closed
+      as BUNDLES_UNAVAILABLE with no path in the message)
+  → validated bundles_list { bundles: [{name, present, bytes}] × 7 } → resolved entries
+```
+
+Semantic parity with Electron (asserted by comparing the canonical definitions, not by paraphrase): same 7 bundle names, same ordering, same presence semantics for regular files, same `<name>` bundle path naming. `custom.js`/`custom.css` are inventoried exactly like the other five names but stay inventory-only and non-executable — no descriptor registers the `custom` id, so presence can never become execution.
+
+Deliberate Electron differences (hardening, not regressions): metadata only (`{name, present, bytes}` — contents, absolute/profile paths, URLs, and path-bearing errors never cross); symlinks/junctions/directories report absent instead of being followed (Electron's `readFileSync` would follow a planted link and embed outside bytes into a backup); no upper byte bound on reported sizes (nothing is allocated from metadata); non-`NotFound` IO errors fail the whole inventory closed instead of guessing absence. The facade enforces the exact 7-name sequence, `absent ⇒ bytes 0`, and rejects any entry carrying `path`/`url`/`data`.
 
 ## Reusable mod substrate (Phase B)
 
@@ -438,11 +466,11 @@ Deliberate Electron differences (hardening, not regressions): ids are validated 
 
 ## Explicit capability ownership
 
-The document-start compatibility script owns facade creation, local response correlation, `pagehide` promise cleanup, and renderer diagnostics. The static Vencord adapter owns one request per document and the private execution marker; Rust owns the versioned protocol, exact origin gate, request-ID uniqueness, fixed source retrieval/cache path, page-world execution, CSS insertion, response dispatch, and document generation. The native profile remains exactly `E:\Legcord.webview-dev-user-data`. The renderer supplies no path, URL, channel name, host method, executable source, or filesystem operation beyond the validated plugin-storage logical id and relative path, which never leave the host-built namespace.
+The document-start compatibility script owns facade creation, local response correlation, `pagehide` promise cleanup, and renderer diagnostics. The static Vencord adapter owns one request per document and the private execution marker; Rust owns the versioned protocol, exact origin gate, request-ID uniqueness, fixed source retrieval/cache path, page-world execution, CSS insertion, response dispatch, and document generation. The native profile remains exactly `E:\Legcord.webview-dev-user-data`. The renderer supplies no path, URL, channel name, host method, executable source, or filesystem operation beyond the validated plugin-storage logical id and relative path, which never leave the host-built namespace; bundle discovery takes no renderer parameters at all.
 
 ### Deferred and not tested
 
-Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`legcord://`); arRPC; popup windows; general mod loader; custom bundles; runtime plugins; theme install/edit/folders; backups; existing broad `window.legcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's Legcord plugin surface is not implemented. This narrow mod path does not establish full Legcord compatibility.
+Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`legcord://`); arRPC; popup windows; general mod loader; custom bundle execution; runtime plugins; theme install/edit/folders; backup save/restore/zip/dialogs; existing broad `window.legcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's Legcord plugin surface is not implemented. This narrow mod path does not establish full Legcord compatibility.
 
 ### Validation status
 

@@ -1641,6 +1641,161 @@ test("document-start storage preservation survives Discord deleting window.local
     assert.equal(typeof FakeStorageCtor.prototype.localStorage.getItem, "function");
 });
 
+function createBundlesRuntime(capabilities = ["bridge.ping", "backup.list_bundles"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const BUNDLE_FIXTURE = [
+    { name: "vencord.js", present: true, bytes: 698272 },
+    { name: "vencord.css", present: true, bytes: 41335 },
+    { name: "equicord.js", present: true, bytes: 2516168 },
+    { name: "equicord.css", present: true, bytes: 217092 },
+    { name: "shelter.js", present: true, bytes: 235850 },
+    { name: "custom.js", present: false, bytes: 0 },
+    { name: "custom.css", present: false, bytes: 0 },
+];
+
+function respondBundlesList(window, request, bundles = BUNDLE_FIXTURE) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "bundles_list", payload: { bundles } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a read-only backup.list_bundles capability and no save/restore surface", () => {
+    const { window } = createBundlesRuntime();
+    assert.equal(typeof window.legcord.backup.listBundles, "function");
+    assert.equal(Object.isFrozen(window.legcord.backup), true);
+    assert.equal(window.legcord.native.supports("backup.list_bundles"), true);
+    // Save/restore (dialogs + zip) are deferred: only discovery exists.
+    assert.equal(window.legcord.backup.save, undefined);
+    assert.equal(window.legcord.backup.restore, undefined);
+    assert.equal(window.legcord.native.supports("backup.save"), false);
+    assert.equal(window.legcord.native.supports("backup.restore"), false);
+});
+
+test("backup.list_bundles sends a parameter-free typed request and resolves the inventory", async () => {
+    const { window } = createBundlesRuntime();
+    const pending = window.legcord.backup.listBundles();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "backup_list_bundles", payload: {} });
+
+    respondBundlesList(window, message);
+    assert.deepEqual(await pending, BUNDLE_FIXTURE);
+});
+
+test("backup.list_bundles throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createBundlesRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("backup.list_bundles"), false);
+    assert.throws(
+        () => window.legcord.backup.listBundles(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "backup_list_bundles"),
+        false,
+    );
+});
+
+test("backup.list_bundles rejects malformed inventories", async () => {
+    // Wrong entry count.
+    const short = createBundlesRuntime();
+    const pendingShort = short.window.legcord.backup.listBundles();
+    const messageShort = short.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    respondBundlesList(short.window, messageShort, BUNDLE_FIXTURE.slice(0, 6));
+    await assert.rejects(pendingShort, /bundle inventory response schema is invalid/);
+
+    // Wrong name or order.
+    const renamed = createBundlesRuntime();
+    const pendingRenamed = renamed.window.legcord.backup.listBundles();
+    const messageRenamed = renamed.window.messages.find(
+        (entry) => entry.command?.type === "backup_list_bundles",
+    );
+    respondBundlesList(renamed.window, messageRenamed, [
+        ...BUNDLE_FIXTURE.slice(0, 5),
+        { name: "custom.css", present: false, bytes: 0 },
+        { name: "custom.js", present: false, bytes: 0 },
+    ]);
+    await assert.rejects(pendingRenamed, /bundle inventory response schema is invalid/);
+
+    // Absent entry carrying bytes.
+    const absentBytes = createBundlesRuntime();
+    const pendingAbsent = absentBytes.window.legcord.backup.listBundles();
+    const messageAbsent = absentBytes.window.messages.find(
+        (entry) => entry.command?.type === "backup_list_bundles",
+    );
+    respondBundlesList(absentBytes.window, messageAbsent, [
+        ...BUNDLE_FIXTURE.slice(0, 6),
+        { name: "custom.css", present: false, bytes: 12 },
+    ]);
+    await assert.rejects(pendingAbsent, /bundle inventory response schema is invalid/);
+
+    // Metadata-only: a path riding along is rejected.
+    const withPath = createBundlesRuntime();
+    const pendingPath = withPath.window.legcord.backup.listBundles();
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    respondBundlesList(withPath.window, messagePath, [
+        ...BUNDLE_FIXTURE.slice(0, 6),
+        { name: "custom.css", present: false, bytes: 0, path: "C:\\secret" },
+    ]);
+    await assert.rejects(pendingPath, /bundle inventory response schema is invalid/);
+});
+
+test("backup.list_bundles rejects host failures with the typed error", async () => {
+    const { window } = createBundlesRuntime();
+    const pending = window.legcord.backup.listBundles();
+    const message = window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "BUNDLES_UNAVAILABLE", message: "bundle inventory is unavailable" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /bundle inventory is unavailable/);
+});
+
+test("backup.list_bundles rejects after its timeout", async () => {
+    const { window } = createBundlesRuntime();
+    await assert.rejects(window.legcord.backup.listBundles(50), /timed out/);
+});
+
+test("backup.list_bundles rejects pending requests when the document is disposed", async () => {
+    const { window } = createBundlesRuntime();
+    const pending = window.legcord.backup.listBundles();
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh bundle inventory facade with no stale promises", async () => {
+    const firstDocument = createBundlesRuntime();
+    const stale = firstDocument.window.legcord.backup.listBundles();
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createBundlesRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.backup.listBundles();
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    respondBundlesList(nextDocument.window, message);
+    assert.deepEqual(await pending, BUNDLE_FIXTURE);
+});
+
 function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {
     return createRuntime("https://discord.com", capabilities);
 }

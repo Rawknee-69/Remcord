@@ -41,6 +41,7 @@ pub enum BridgeCommand {
     AppGetVersion(AppGetVersionRequest),
     PluginStorageRead(PluginStorageReadRequest),
     PluginStorageWrite(PluginStorageWriteRequest),
+    BundlesList(BundlesListRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +133,14 @@ pub struct PluginStorageWriteRequest {
     pub relative_path: String,
     pub data: String,
 }
+
+/// Empty request for the read-only `backup.list_bundles` discovery
+/// capability. There are no renderer-supplied parameters by design: no path,
+/// no URL, no include flags, no selector. Any extra field is rejected, so a
+/// renderer cannot narrow, widen, or redirect the fixed allowlist inventory.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundlesListRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -382,6 +391,7 @@ pub enum BridgeResponsePayload {
     AppVersion(AppVersionResponse),
     PluginStorageRead(PluginStorageReadResponse),
     PluginStorageWrite(PluginStorageWriteResponse),
+    BundlesList(BundlesListResponse),
 }
 
 #[derive(Serialize)]
@@ -480,6 +490,25 @@ pub struct PluginStorageReadResponse {
 #[derive(Serialize)]
 pub struct PluginStorageWriteResponse {
     pub payload_bytes: usize,
+}
+
+/// One inventoried bundle file for the read-only `backup.list_bundles`
+/// capability. Only the fixed allowlist name, presence, and byte length
+/// cross the bridge: no absolute path, no profile path, no URL, no arbitrary
+/// filename, and no filesystem error text containing paths. `bytes` is 0
+/// whenever `present` is false.
+#[derive(Serialize)]
+pub struct BundleFileEntry {
+    pub name: String,
+    pub present: bool,
+    pub bytes: u64,
+}
+
+/// Read-only bundle inventory response: exactly one entry per allowlisted
+/// bundle name, in allowlist order. Carries metadata only, never contents.
+#[derive(Serialize)]
+pub struct BundlesListResponse {
+    pub bundles: Vec<BundleFileEntry>,
 }
 
 fn valid_request_id(request_id: &str) -> bool {
@@ -582,6 +611,11 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid plugin storage write".to_owned());
                     }
                 }
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
+                // is needed. There is nothing to validate: the inventory
+                // covers the fixed allowlist only.
+                BridgeCommand::BundlesList(_) => {}
             }
         }
         BridgeMessage::Event(event) => {
@@ -1087,6 +1121,84 @@ mod tests {
         let invoke = r#"{"version":1,"request_id":"settings-2","command":{"type":"invoke","payload":{"method":"settings.getConfig"}}}"#;
         assert!(parse_bridge_message(set_config).is_err());
         assert!(parse_bridge_message(invoke).is_err());
+    }
+
+    #[test]
+    fn accepts_the_bundle_discovery_capability_without_renderer_parameters() {
+        let request = r#"{"version":1,"request_id":"bundles-1","command":{"type":"bundles_list","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No path, URL, include flag, selector, or generic invocation member
+        // may be supplied: the inventory covers the fixed allowlist only.
+        let with_path = r#"{"version":1,"request_id":"bundles-2","command":{"type":"bundles_list","payload":{"path":"C:\\secret"}}}"#;
+        let with_url = r#"{"version":1,"request_id":"bundles-3","command":{"type":"bundles_list","payload":{"url":"https://attacker.invalid/x.js"}}}"#;
+        let with_includes = r#"{"version":1,"request_id":"bundles-4","command":{"type":"bundles_list","payload":{"include_mod_bundles":true}}}"#;
+        let with_name = r#"{"version":1,"request_id":"bundles-5","command":{"type":"bundles_list","payload":{"name":"vencord.js"}}}"#;
+        let with_method = r#"{"version":1,"request_id":"bundles-6","command":{"type":"bundles_list","payload":{"method":"readFile"}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(with_includes).is_err());
+        assert!(parse_bridge_message(with_name).is_err());
+        assert!(parse_bridge_message(with_method).is_err());
+    }
+
+    #[test]
+    fn rejects_backup_save_restore_and_generic_invocation_as_unknown_commands() {
+        // Only discovery exists natively. Save/restore (with dialogs and zip
+        // handling) are deferred, so their Electron channel names must not
+        // parse as commands.
+        let save = r#"{"version":1,"request_id":"bundles-1","command":{"type":"backup_save","payload":{}}}"#;
+        let restore = r#"{"version":1,"request_id":"bundles-2","command":{"type":"backup_restore","payload":{}}}"#;
+        let invoke = r#"{"version":1,"request_id":"bundles-3","command":{"type":"invoke","payload":{"method":"backup.save"}}}"#;
+        assert!(parse_bridge_message(save).is_err());
+        assert!(parse_bridge_message(restore).is_err());
+        assert!(parse_bridge_message(invoke).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_bundle_inventory_response() {
+        use super::{BundleFileEntry, BundlesListResponse};
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "bundles-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::BundlesList(BundlesListResponse {
+                bundles: vec![
+                    BundleFileEntry {
+                        name: "vencord.js".to_owned(),
+                        present: true,
+                        bytes: 698272,
+                    },
+                    BundleFileEntry {
+                        name: "shelter.js".to_owned(),
+                        present: false,
+                        bytes: 0,
+                    },
+                ],
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "bundles_list");
+        assert_eq!(
+            value["payload"]["payload"]["bundles"][0]["name"],
+            "vencord.js"
+        );
+        assert_eq!(value["payload"]["payload"]["bundles"][0]["present"], true);
+        assert_eq!(value["payload"]["payload"]["bundles"][0]["bytes"], 698272);
+        // The response carries metadata only: never a path, URL, or content.
+        assert!(value["payload"]["payload"]["bundles"][0]
+            .get("path")
+            .is_none());
+        assert!(value["payload"]["payload"]["bundles"][0]
+            .get("url")
+            .is_none());
+        assert!(value["payload"]["payload"]["bundles"][0]
+            .get("data")
+            .is_none());
     }
 
     #[test]

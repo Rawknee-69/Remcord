@@ -1117,12 +1117,15 @@ dependencies = [
 name = "legcord-native-prototype"
 version = "0.1.0"
 dependencies = [
+ "http",
  "notify",
  "serde",
  "serde_json",
  "sha2",
  "tao",
  "ureq",
+ "webview2-com",
+ "windows",
  "wry",
 ]
 
