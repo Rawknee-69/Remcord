@@ -370,6 +370,34 @@ The flip never touches styles directly: the existing live watcher observes the m
 
 Deliberate Electron differences (hardening, not regressions): validated ids instead of raw interpolation; canonical containment with planted links failing closed; 64 KiB manifest cap; atomic unique-temp replacement instead of in-place write; typed errors instead of silent/throwing behavior; a wrong-typed stored `enabled` is rejected rather than trusted.
 
+## Themes UI wiring (Phase D Step 3d-2 UI)
+
+The `ThemesPage`/`ThemesCard` renderer UI dispatches to the already-proven native capabilities. No new filesystem logic, no new theme-management capability, no second CSS path: the host watcher keeps owning CSS application, and the UI keeps owning only inventory display.
+
+### Dispatch table (exactly one path per action)
+
+| Action | Native (capability present) | Electron (capability absent) |
+| --- | --- | --- |
+| Page inventory | `loadNativeThemes()` over `themes.listThemes()`, scroll-preserving `store.themes` replace | `refreshThemes()` over sync `getThemes()` |
+| Manual refresh | same native reload | `window.legcord.themes.refresh()` |
+| Toggle | `setNativeThemeEnabled(id, state)` over `themes.setEnabled(id, state)` + reconcile reload | `window.legcord.themes.set(id, state)` + sync `refreshThemes()` |
+| Import | `importNativeThemes()` over `themes.importFiles()` + reload when `imported > 0` | `window.legcord.themes.openImportPicker()` |
+| Theme folder | `openThemeFolderNative(id)` (unchanged) | `window.legcord.themes.folder(id)` (unchanged) |
+| URL install | hidden in native mode | `window.legcord.themes.install(url)` |
+| Edit / uninstall | hidden in native mode (no placeholder RPC) | unchanged Electron calls |
+| Update from URL | hidden (native inventory never carries `updateSrc`) | unchanged |
+| Quick CSS switch / open | disabled in native mode | unchanged |
+
+Gating reuses the existing `isNativeWebView()` check plus per-operation function-presence checks (`isNativeThemeListAvailable`, `isNativeThemeToggleAvailable`, `isNativeThemeImportAvailable`, `isNativeThemesMode`) in `src/shelter/settings/settings.ts`. No window-type, user-agent, Electron, or WebView2 detection was added. Native list entries validate to `{ id, name, author, description, version, enabled, theme: "" }` (`theme` is type-required but never consumed by the card; no CSS/filesystem path is invented). Malformed entries are skipped, never crashing the settings page.
+
+### State flow
+
+Initial mount loads asynchronously (`onMount` + a synchronous `refreshThemes()` only on the Electron path, so first paint never blocks on the bridge); toggle applies an optimistic switch, awaits the host flip, then reconciles from a fresh `listThemes()` (reverting on failure); import reloads only when the summary reports `imported > 0` (cancellation and host failures stay silent with a path-free warning, never an unhandled rejection). No polling, no retry loops. The native watcher — not React — applies/removes CSS; one toggle performs exactly one `setEnabled` plus one inventory reload, never native + Electron together. `native/tests/electron-compat.test.mjs` asserts every Electron string above is still present and that no `install_code`/`write_css`/generic `invoke`/`sendSync` surface entered `src/`.
+
+### Deferred (explicitly not migrated)
+
+Edit, system/Monaco editor, uninstall, remote URL install/update, Quick CSS management, `updateSrc` carriage. The UI hides/disables these in native mode instead of inventing RPCs for them.
+
 ## Reusable mod substrate (Phase B)
 
 `native/src/mod_substrate.rs` owns every behavior identical for all client mods; it names no mod. The typed adapter contract is `ModDescriptor`: stable `id`, boot `capability`, fixed JS URL and cache file, an `Option<ModCssSource>` stylesheet contract, allowed redirect hosts, JS byte limit, `ModArtifactIdentity`, page-world global name and required member, `PageGlobalReadiness`, `ModEnabling`, success marker, an `Option<&str>` settings key, bootstrap DOM event name, storage-context global name, and log tag. `main.rs` registers `VENCORD_MOD`, `SHELTER_MOD`, and `EQUICORD_MOD` in `KNOWN_MODS`; lookup is by exact id only.

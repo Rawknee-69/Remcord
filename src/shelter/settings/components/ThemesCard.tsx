@@ -1,6 +1,13 @@
 import { createSignal, Show } from "solid-js";
 import type { ThemeManifest } from "../../../@types/themeManifest.js";
-import { openThemeFolderNative, refreshThemes } from "../settings.js";
+import {
+    isNativeThemesMode,
+    isNativeThemeToggleAvailable,
+    loadNativeThemes,
+    openThemeFolderNative,
+    refreshThemes,
+    setNativeThemeEnabled,
+} from "../settings.js";
 import classes from "./ThemesCard.module.css";
 
 const {
@@ -10,8 +17,27 @@ const {
 
 export const ThemesCard = (props: { theme: ThemeManifest }) => {
     const [switchState, setSwitchState] = createSignal(props.theme.enabled);
+    const nativeMode = () => isNativeThemesMode();
 
-    function toggleTheme(state: boolean) {
+    async function toggleTheme(state: boolean) {
+        // Native WebView2 flips via the typed native enable capability
+        // (host watcher owns CSS); Electron keeps the fire-and-forget send.
+        // Exactly one path runs per toggle; switches stay independent.
+        if (isNativeThemeToggleAvailable() && props.theme.id) {
+            const previous = switchState();
+            setSwitchState(state);
+            try {
+                await setNativeThemeEnabled(props.theme.id, state);
+                await loadNativeThemes().then((themes) => {
+                    const current = themes.find((entry) => entry.id === props.theme.id);
+                    if (current) setSwitchState(current.enabled);
+                });
+            } catch {
+                console.warn("[Legcord] Could not update the theme in the native shell.");
+                setSwitchState(previous);
+            }
+            return;
+        }
         setSwitchState(state);
         if (props.theme.id) {
             window.legcord.themes.set(props.theme.id, state);
@@ -50,7 +76,12 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
             if (!openThemeFolderNative(props.theme.id)) window.legcord.themes.folder(props.theme.id);
         }
     }
-    const showUpdate = !!props.theme.updateSrc;
+    // Native inventory never carries updateSrc, so the update action stays
+    // hidden natively without extra gating. Edit/uninstall have no native
+    // capability and stay hidden in native mode (functions above preserve
+    // the Electron contract for regression tests).
+    const showUpdate = () => !!props.theme.updateSrc && !nativeMode();
+    const showDeferred = () => !nativeMode();
     return (
         <div class={classes.card}>
             <div class={classes.topRow}>
@@ -62,24 +93,26 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
                         {store.i18n["themes-by"]} {props.theme.author}
                     </div>
                 </div>
-                <Switch checked={switchState()} onChange={toggleTheme} />
+                <Switch checked={switchState()} onChange={(state: boolean) => void toggleTheme(state)} />
             </div>
             <Show when={props.theme.description}>
                 <div class={classes.description}>{props.theme.description}</div>
             </Show>
             <div class={classes.actions}>
-                <button
-                    title={store.i18n["themes-delete"]}
-                    type="button"
-                    onClick={removeTheme}
-                    class={`${classes.btn} ${classes.btnDanger}`}
-                >
-                    <img class={classes.icon} alt={store.i18n["themes-delete"]} src="legcord://assets/Trash.png" />
-                </button>
-                <button title={store.i18n["themes-edit"]} type="button" onClick={editTheme} class={classes.btn}>
-                    <img class={classes.icon} alt={store.i18n["themes-edit"]} src="legcord://assets/Edit.png" />
-                </button>
-                <Show when={showUpdate}>
+                <Show when={showDeferred()}>
+                    <button
+                        title={store.i18n["themes-delete"]}
+                        type="button"
+                        onClick={removeTheme}
+                        class={`${classes.btn} ${classes.btnDanger}`}
+                    >
+                        <img class={classes.icon} alt={store.i18n["themes-delete"]} src="legcord://assets/Trash.png" />
+                    </button>
+                    <button title={store.i18n["themes-edit"]} type="button" onClick={editTheme} class={classes.btn}>
+                        <img class={classes.icon} alt={store.i18n["themes-edit"]} src="legcord://assets/Edit.png" />
+                    </button>
+                </Show>
+                <Show when={showUpdate()}>
                     <button title={store.i18n["themes-update"]} type="button" onClick={updateTheme} class={classes.btn}>
                         <img
                             class={classes.icon}

@@ -773,13 +773,14 @@ test("Electron keeps the import picker dialog configuration", () => {
         new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
         "utf8",
     );
-    assert.match(themesPage, /onClick=\{window\.legcord\.themes\.openImportPicker\}/);
+    assert.match(themesPage, /window\.legcord\.themes\.openImportPicker/);
 });
 
 test("no src caller uses the native theme import path", () => {
-    // Step 3c ships the capability without UI wiring: a native branch in
-    // src/ would be fabrication. The Electron theme UI keeps calling the
-    // picker send, and nothing references the native import surface.
+    // Step 3d-2 wires the ThemesPage import button: native importFiles()
+    // first, Electron openImportPicker only when the capability is absent.
+    // Exactly one path executes per click; remote URL install stays
+    // Electron-only (hidden in native mode).
     const themesPage = readFileSync(
         new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
         "utf8",
@@ -788,12 +789,16 @@ test("no src caller uses the native theme import path", () => {
         new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
         "utf8",
     );
-    for (const source of [bridge, ipc, types, themesPage, themesCard]) {
+    for (const source of [bridge, ipc, types, themesCard]) {
         assert.doesNotMatch(source, /importFiles/);
         assert.doesNotMatch(source, /themes\.import_files/);
         assert.doesNotMatch(source, /theme_import_files/);
     }
+    assert.match(themesPage, /importNativeThemes\(\)/);
+    assert.match(themesPage, /isNativeThemeImportAvailable\(\)/);
     assert.match(themesPage, /window\.legcord\.themes\.openImportPicker/);
+    assert.doesNotMatch(themesPage, /themes\.import_files/);
+    assert.doesNotMatch(themesPage, /theme_import_files/);
 });
 
 test("native theme import shares the installer with a Common Item Dialog and no generic surface", () => {
@@ -858,9 +863,9 @@ test("Electron keeps the sync theme-list and fire-and-forget enable contracts", 
 });
 
 test("no src caller uses the native theme enable path", () => {
-    // Step 3d-1 ships the capability without UI wiring: a native branch in
-    // src/ would be fabrication. The Electron toggle keeps calling set, and
-    // nothing references the native enable surface.
+    // Step 3d-2 wires the ThemesCard toggle: native setEnabled first,
+    // Electron set only when the capability is absent. Exactly one path
+    // executes per toggle; switches stay independent (no mutual exclusion).
     const themesPage = readFileSync(
         new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
         "utf8",
@@ -869,14 +874,19 @@ test("no src caller uses the native theme enable path", () => {
         new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
         "utf8",
     );
-    for (const source of [bridge, ipc, types, themesPage, themesCard]) {
+    for (const source of [bridge, ipc, types]) {
         // Scoped to the theme-enable shapes: the unrelated plugins
         // setEnabled API legitimately contains the bare word.
         assert.doesNotMatch(source, /themes\.setEnabled/);
         assert.doesNotMatch(source, /themes\.set_enabled/);
         assert.doesNotMatch(source, /theme_set_enabled/);
     }
+    assert.match(themesCard, /setNativeThemeEnabled\(props\.theme\.id, state\)/);
+    assert.match(themesCard, /isNativeThemeToggleAvailable\(\)/);
     assert.match(themesCard, /window\.legcord\.themes\.set\(props\.theme\.id, state\)/);
+    assert.doesNotMatch(themesCard, /themes\.set_enabled/);
+    assert.doesNotMatch(themesCard, /theme_set_enabled/);
+    assert.doesNotMatch(themesPage, /themes\.setEnabled/);
 });
 
 test("native theme enable flips only the manifest flag with no CSS machinery", () => {
@@ -925,18 +935,22 @@ test("Electron keeps the metadata-only theme inventory contract", () => {
 });
 
 test("no src caller uses the native theme list path yet", () => {
-    // The list capability ships before UI wiring: a native branch in src/
-    // would be fabrication. The themes UI keeps calling the sync getters.
+    // Step 3d-2 wires the ThemesPage inventory: native listThemes() first,
+    // Electron getThemes/refresh only when the capability is absent.
     const themesPage = readFileSync(
         new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
         "utf8",
     );
-    for (const source of [bridge, ipc, types, themesPage]) {
+    for (const source of [bridge, ipc, types]) {
         assert.doesNotMatch(source, /themes\.listThemes/);
         assert.doesNotMatch(source, /themes\.list\b/);
         assert.doesNotMatch(source, /themes_list/);
     }
+    assert.match(themesPage, /refreshNativeThemes\(\)/);
+    assert.match(themesPage, /isNativeThemeListAvailable\(\)/);
     assert.match(themesPage, /window\.legcord\.themes\.refresh\(\)/);
+    assert.doesNotMatch(themesPage, /themes\.list\b/);
+    assert.doesNotMatch(themesPage, /themes_list/);
 });
 
 test("native theme list is metadata-only with bounded entries", () => {

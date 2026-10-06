@@ -1,10 +1,19 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, onMount, Show } from "solid-js";
 import type { Settings } from "../../../@types/settings.js";
 import type { ThemeManifest } from "../../../@types/themeManifest.js";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
 import { ThemesCard } from "../components/ThemesCard.jsx";
-import { refreshThemes, revealFolderNative, setConfig } from "../settings.js";
+import {
+    importNativeThemes,
+    isNativeThemeImportAvailable,
+    isNativeThemeListAvailable,
+    isNativeThemesMode,
+    refreshNativeThemes,
+    refreshThemes,
+    revealFolderNative,
+    setConfig,
+} from "../settings.js";
 import classes from "./ThemesPages.module.css";
 
 const {
@@ -16,7 +25,33 @@ const BETTERDISCORD_THEMES_URL = "https://betterdiscord.app/themes";
 
 export function ThemesPage() {
     const [downloadUrl, setDownloadUrl] = createSignal("");
-    refreshThemes();
+    const [nativeLoading, setNativeLoading] = createSignal(false);
+    const [nativeError, setNativeError] = createSignal(false);
+    const nativeMode = () => isNativeThemesMode();
+
+    async function loadThemesOnce(): Promise<void> {
+        if (!isNativeThemeListAvailable()) {
+            refreshThemes();
+            return;
+        }
+        setNativeLoading(true);
+        setNativeError(false);
+        try {
+            await refreshNativeThemes();
+        } catch {
+            console.warn("[Legcord] Could not load themes in the native shell.");
+            setNativeError(true);
+        } finally {
+            setNativeLoading(false);
+        }
+    }
+
+    onMount(() => {
+        void loadThemesOnce();
+    });
+    if (!isNativeThemeListAvailable()) {
+        refreshThemes();
+    }
 
     function installTheme() {
         window.legcord.themes.install(downloadUrl());
@@ -31,6 +66,31 @@ export function ThemesPage() {
         });
     }
 
+    async function handleRefresh() {
+        if (isNativeThemeListAvailable()) {
+            await loadThemesOnce();
+            return;
+        }
+        store.themes = window.legcord.themes.refresh();
+    }
+
+    async function handleImport() {
+        if (isNativeThemeImportAvailable()) {
+            const result = await importNativeThemes();
+            // Capability absent is the only `null`; otherwise exactly the
+            // native path ran (cancellation stays silent, failures warn).
+            if (!result || result.canceled || result.imported === 0) return;
+            await loadThemesOnce();
+            showToast({
+                title: store.i18n["themes-success"],
+                content: store.i18n["themes-bdInstalled"],
+                duration: 3000,
+            });
+            return;
+        }
+        window.legcord.themes.openImportPicker();
+    }
+
     const settings = () => store.settings as Settings;
     const t = store.i18n;
     const themes = () => (store.themes as ThemeManifest[]) ?? [];
@@ -41,6 +101,7 @@ export function ThemesPage() {
             <SwitchItem
                 note={store.i18n["settings-quickCss-desc"]}
                 value={settings().quickCss}
+                disabled={nativeMode()}
                 onChange={(e: boolean) => {
                     console.log("Toggled quick CSS", e);
                     if (e) {
@@ -57,11 +118,11 @@ export function ThemesPage() {
                 <Button
                     size={ButtonSizes.LARGE}
                     onClick={window.legcord.themes.openQuickCss}
-                    disabled={!settings().quickCss}
+                    disabled={!settings().quickCss || nativeMode()}
                 >
                     {t["themes-openQuickCss"]}
                 </Button>
-                <Button size={ButtonSizes.LARGE} onClick={window.legcord.themes.openImportPicker}>
+                <Button size={ButtonSizes.LARGE} onClick={() => void handleImport()}>
                     {t["themes-importFromFile"]}
                 </Button>
                 <Button
@@ -74,30 +135,33 @@ export function ThemesPage() {
                 >
                     {t["themes-openThemesFolder"]}
                 </Button>
-                <Button
-                    size={ButtonSizes.LARGE}
-                    onClick={() => {
-                        store.themes = window.legcord.themes.refresh();
-                    }}
-                >
+                <Button size={ButtonSizes.LARGE} onClick={() => void handleRefresh()}>
                     {t["themes-refresh"]}
                 </Button>
             </div>
-            <div class={classes.addBox}>
-                <TextBox
-                    value={downloadUrl()}
-                    onInput={setDownloadUrl}
-                    placeholder={t["themes-importUrlPlaceholder"]}
-                />
-                <Button size={ButtonSizes.MEDIUM} onClick={installTheme}>
-                    {t["themes-import"]}
-                </Button>
-            </div>
-            <Text tag={TextTags.textSM} class={classes.importNote}>
-                {t["themes-importUrlNote"]}
-            </Text>
+            <Show when={!nativeMode()}>
+                <div class={classes.addBox}>
+                    <TextBox
+                        value={downloadUrl()}
+                        onInput={setDownloadUrl}
+                        placeholder={t["themes-importUrlPlaceholder"]}
+                    />
+                    <Button size={ButtonSizes.MEDIUM} onClick={installTheme}>
+                        {t["themes-import"]}
+                    </Button>
+                </div>
+                <Text tag={TextTags.textSM} class={classes.importNote}>
+                    {t["themes-importUrlNote"]}
+                </Text>
+            </Show>
             <hr class={classes.divider} />
             <Header tag={HeaderTags.HeadingLG}>{t["themes-installed"]}</Header>
+            <Show when={nativeLoading()}>
+                <Text tag={TextTags.textSM}>{t["themes-empty"]}</Text>
+            </Show>
+            <Show when={nativeError() && !nativeLoading()}>
+                <Text tag={TextTags.textSM}>{t["themes-emptyDesc"]}</Text>
+            </Show>
             <Show
                 when={themes().length > 0}
                 fallback={
