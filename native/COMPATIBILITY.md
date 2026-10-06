@@ -705,3 +705,25 @@ Mod-consumer errors observed while validating Shelter and Equicord:
 | `TypeError` on `getItem`/`setItem` | none | none | no | shared storage preservation is holding for all three mods | unchanged |
 
 No error was hidden: renderer `uncaught`, `unhandled_rejection`, and `console.error` capture stays in place, and every host-side failure stage still prints through the descriptor's own log tag.
+
+## Settings plugin artifact (3d-2 prerequisite A)
+
+The exact Legcord settings Shelter plugin artifact (`ts-out/plugins/settings/plugin.js`, 243,617 bytes, SHA-256 `071d4acde61f4a2968654685b2161b91236eb1f6a75e06e1bf6e3ca98fee0399`) is now embedded at compile time by `native/build.rs` and exposed read-only through `native/src/settings_plugin.rs`. No execution is wired: the artifact is available to the host, not to the renderer.
+
+### Provenance (traced, not assumed)
+
+- Authored in `src/shelter/settings/` (`index.ts` entrypoint, `plugin.json` name `"Legcord Settings"`, lune per-directory convention).
+- Compiled by the existing JS pipeline: `pnpm build:plugins` ? `lune ci --repoSubDir src/shelter --to ts-out/plugins` (`package.json:11`, chained by `package.json:12` `build`, ordered before packaging in `.github/workflows/package.yml`, packaged via `electron-builder.ts` `files: [..., "ts-out", ...]`).
+- Electron serves it as `legcord://plugins/settings/*`, which resolves to `<bundle-dir>/plugins/settings/*` (`src/protocol.ts:22-31` maps the scheme onto `import.meta.dirname`, i.e. `ts-out/` at runtime). The Shelter preload pins it as `"legcord-settings"` (`src/discord/preload/mods/shelter.mts:8`).
+- `ts-out/` is gitignored (`.gitignore:4`); nothing is committed and no binary blob was added. Rebuild determinism could NOT be re-verified in this environment (the `node_modules/@uwu/lune` entry points are broken symlinks under the bun-shimmed `pnpm`); the recorded identity is from the existing pipeline output and CI rebuilds it via `pnpm build`.
+
+### Build-pipeline decision
+
+Candidate A: the existing JS build produces `ts-out` before cargo. `build.rs` deliberately does NOT invoke `lune`/`pnpm` itself (candidate B): spawning a package manager from a build script would break offline, cross, and CI-cached builds. Moving the plugin source into a native asset (candidate D) would fork it away from `src/shelter/settings/` and drift. A developer cloning the repository runs `pnpm build:plugins` (already required before packaging) and then `cargo build`; a missing artifact fails the build with an actionable message naming the exact command to run.
+
+### Validation and boundary
+
+- `build.rs` rejects a missing file (actionable panic), empty output, output over 2 MiB, non-UTF-8 output, output missing any of the five synchronous boot members (`getConfig`, `getThemes`, `translations`, `setLang`, `restart` — the exact surface `src/shelter/settings/index.ts:90-99` + `settings.ts:14-20` reads during `onLoad()`, confirmed present in the compiled bundle: `getConfig` x2, `getThemes`/`translations`/`setLang` x1 each, `window.legcord.restart` x3), and a `plugin.json` whose `name` is not `"Legcord Settings"`.
+- Identity is a host-computed SHA-256 over the exact embedded bytes (the upstream artifact carries no build banner to pin). Any pipeline byte change yields a different identity and the same bytes always yield the same one.
+- The renderer cannot choose a plugin path, source file, URL, or plugin id through this module: `settings_plugin::artifact()` takes no input and resolves only the pinned artifact. Startup logs one identity line (`[SettingsPlugin] artifact name=... bytes=... sha256=...`).
+- The compiled bundle was verified to reference exactly the five traced boot members above, matching the source trace file-for-file. Full settings-plugin execution remains intentionally unwired (3d-2 prerequisite B, the synchronous boot snapshot, is still pending).

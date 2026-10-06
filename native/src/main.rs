@@ -8,6 +8,7 @@ mod plugin_storage;
 mod protocol;
 mod quick_css;
 mod settings;
+mod settings_plugin;
 mod theme_import;
 mod themes;
 
@@ -2074,6 +2075,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             descriptor.id, enabled, descriptor.enabling
         );
     }
+    let settings_plugin = settings_plugin::artifact();
+    // Defense in depth: the build already validated the artifact, but the
+    // running host re-checks the invariant so a corrupted embed can never be
+    // served silently. Startup fails fast on drift, like the mod registry.
+    settings_plugin::validate_artifact(settings_plugin.js, settings_plugin.name)
+        .expect("embedded settings plugin artifact must validate at startup");
+    settings_plugin::validate_sha256(settings_plugin.sha256)
+        .expect("embedded settings plugin identity must be well-formed");
+    println!(
+        "[SettingsPlugin] artifact name='{}' bytes={} sha256={}",
+        settings_plugin.name, settings_plugin.bytes, settings_plugin.sha256
+    );
     let diagnostic_bare_page = std::env::var(BARE_PAGE_ENV).is_ok_and(|value| value == "1");
     let diagnostic_interaction =
         std::env::var(INTERACTION_DIAGNOSTIC_ENV).is_ok_and(|value| value == "1");

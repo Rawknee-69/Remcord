@@ -14,6 +14,8 @@
 
 use std::{fs, path::Path};
 
+use sha2::Digest as _;
+
 fn generate_lang_catalogs(out_dir: &str) {
     let source_dir = Path::new("../assets/lang");
     let entries = fs::read_dir(source_dir).unwrap_or_else(|error| {
@@ -104,4 +106,130 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR must be set");
     generate_lang_catalogs(&out_dir);
     generate_app_version(&out_dir);
+    generate_settings_plugin_artifact(&out_dir);
+}
+
+/// Maximum accepted settings `plugin.js` size in bytes. The real artifact is
+/// ~244 KiB; this is a safety rail against accidentally embedding an unbounded
+/// build output, not a claim about upstream sizes.
+const MAX_SETTINGS_PLUGIN_BYTES: usize = 2 * 1024 * 1024;
+
+/// Synchronous boot members the real settings plugin reads during `onLoad()`
+/// (`src/shelter/settings/index.ts`, `settings.ts`). The embedded artifact
+/// must surface every one of them; a rename upstream would otherwise silently
+/// desynchronize the native boot snapshot from the artifact it serves.
+const SETTINGS_PLUGIN_BOOT_MARKERS: &[&str] = &[
+    "getConfig",
+    "getThemes",
+    "translations",
+    "setLang",
+    "restart",
+];
+
+/// Validates and embeds the exact Legcord settings Shelter plugin artifact.
+///
+/// The artifact is authored in `src/shelter/settings/` and compiled by the
+/// existing JS pipeline (`pnpm build:plugins` →
+/// `lune ci --repoSubDir src/shelter --to ts-out/plugins`). Electron serves
+/// the result at runtime as `legcord://plugins/settings/*`, which resolves to
+/// `<bundle-dir>/plugins/settings/*` (`src/protocol.ts` maps the scheme onto
+/// `import.meta.dirname`, i.e. `ts-out/`), and the Shelter preload pins it as
+/// `"legcord-settings"` (`src/discord/preload/mods/shelter.mts`). The native
+/// shell has no `legcord://` protocol, so the only host-controlled path to
+/// that exact artifact is embedding it at compile time.
+///
+/// Build-pipeline decision: the existing JS build produces `ts-out` before
+/// cargo (candidate A). This script deliberately does NOT invoke `lune`/`pnpm`
+/// itself (candidate B): spawning a package manager from a build script would
+/// break offline, cross, and CI-cached builds and couple the Rust build to
+/// Node toolchain availability. Moving the plugin source into a native asset
+/// (candidate D) would fork it away from `src/shelter/settings/` and drift.
+/// A developer cloning the repository runs the normal pipeline
+/// (`pnpm build:plugins`, already required before `electron-builder`
+/// packaging, and already ordered before packaging in
+/// `.github/workflows/package.yml`) and then `cargo build`; no
+/// manually-created ignored file is ever needed and no megabyte-scale
+/// artifact is committed.
+fn generate_settings_plugin_artifact(out_dir: &str) {
+    let js_path = Path::new("../ts-out/plugins/settings/plugin.js");
+    let json_path = Path::new("../ts-out/plugins/settings/plugin.json");
+    let js_bytes = fs::read(js_path).unwrap_or_else(|error| {
+        panic!(
+            "native settings plugin artifact requires {}: {error}; run \
+             `pnpm build:plugins` (lune ci --repoSubDir src/shelter \
+             --to ts-out/plugins) from the repository root, then rebuild",
+            js_path.display()
+        );
+    });
+    let js = String::from_utf8(js_bytes).unwrap_or_else(|error| {
+        panic!("{} must be valid UTF-8: {error}", js_path.display());
+    });
+    if js.is_empty() {
+        panic!("{} must not be empty", js_path.display());
+    }
+    if js.len() > MAX_SETTINGS_PLUGIN_BYTES {
+        panic!(
+            "{} exceeds the {MAX_SETTINGS_PLUGIN_BYTES}-byte embed limit",
+            js_path.display()
+        );
+    }
+    for marker in SETTINGS_PLUGIN_BOOT_MARKERS {
+        if !js.contains(marker) {
+            panic!(
+                "{} is missing the synchronous boot member `{marker}`; \
+                 the native boot snapshot would no longer match the artifact",
+                js_path.display()
+            );
+        }
+    }
+
+    let meta_raw = fs::read_to_string(json_path).unwrap_or_else(|error| {
+        panic!(
+            "native settings plugin artifact requires {}: {error}; run \
+             `pnpm build:plugins` from the repository root, then rebuild",
+            json_path.display()
+        );
+    });
+    let meta: serde_json::Value = serde_json::from_str(&meta_raw).unwrap_or_else(|error| {
+        panic!("{} is not valid JSON: {error}", json_path.display());
+    });
+    let name = meta
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("{} must define a string \"name\"", json_path.display()));
+    if name != "Legcord Settings" {
+        panic!(
+            "{} names {name:?}, expected \"Legcord Settings\"; refusing a foreign artifact",
+            json_path.display()
+        );
+    }
+
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    <sha2::Sha256 as sha2::Digest>::update(&mut hasher, js.as_bytes());
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        sha256.push_str(&format!("{byte:02x}"));
+    }
+    let bytes = js.len();
+
+    let out_plugin = Path::new(out_dir).join("legcord_settings_plugin");
+    fs::create_dir_all(&out_plugin).expect("must create OUT_DIR/legcord_settings_plugin");
+    // Stage an exact copy so the embedded text can be diffed against the
+    // pipeline output without re-running the JS build.
+    fs::write(out_plugin.join("plugin.js"), &js).expect("must stage settings plugin.js");
+    // Escape via Debug formatting: always a valid Rust string literal.
+    let generated = format!(
+        "/// Generated by native/build.rs from ../ts-out/plugins/settings/. Do not edit.\n\
+         /// The exact Legcord settings Shelter plugin artifact plus its content identity.\n\
+         pub const SETTINGS_PLUGIN_JS: &str = {js:?};\n\
+         pub const SETTINGS_PLUGIN_SHA256: &str = {sha256:?};\n\
+         pub const SETTINGS_PLUGIN_BYTES: usize = {bytes};\n\
+         pub const SETTINGS_PLUGIN_NAME: &str = {name:?};\n"
+    );
+    fs::write(out_plugin.join("settings_plugin.rs"), generated)
+        .expect("must write generated settings plugin constants");
+
+    println!("cargo:rerun-if-changed=../ts-out/plugins/settings/plugin.js");
+    println!("cargo:rerun-if-changed=../ts-out/plugins/settings/plugin.json");
 }
