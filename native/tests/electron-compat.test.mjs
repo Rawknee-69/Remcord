@@ -837,6 +837,76 @@ test("native theme import shares the installer with a Common Item Dialog and no 
     assert.doesNotMatch(importFacade, /fetch\(|showOpenDialog|openPath|path:|url:/);
 });
 
+test("Electron keeps the sync theme-list and fire-and-forget enable contracts", () => {
+    // Toggle path: ThemesCard calls themes.set(id, state); the bridge sends
+    // setThemeEnabled fire-and-forget; the host reads the manifest, pushes
+    // addTheme/removeTheme per window only when the state differs, persists
+    // ONLY manifest.enabled, and never touches another theme. Refresh path:
+    // getThemes/refresh are synchronous manifest-list reads.
+    const themesMain = readFileSync(new URL("../../src/common/themes.ts", import.meta.url), "utf8");
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(bridge, /set:\s*\(id:\s*string, state:\s*boolean\)\s*=>\s*ipcRenderer\.send\("setThemeEnabled", id, state\)/);
+    assert.match(ipc, /ipcMain\.on\("setThemeEnabled", \(_event, name: string, enabled: boolean\)/);
+    assert.match(ipc, /setThemeEnabled\(name, enabled\)/);
+    assert.match(themesMain, /manifest\.enabled = enabled;/);
+    assert.match(themesMain, /passedWindow\.webContents\.send\("addTheme", id, css\)/);
+    assert.match(themesMain, /passedWindow\.webContents\.send\("removeTheme", id\)/);
+    assert.match(themesCard, /window\.legcord\.themes\.set\(props\.theme\.id, state\)/);
+});
+
+test("no src caller uses the native theme enable path", () => {
+    // Step 3d-1 ships the capability without UI wiring: a native branch in
+    // src/ would be fabrication. The Electron toggle keeps calling set, and
+    // nothing references the native enable surface.
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [bridge, ipc, types, themesPage, themesCard]) {
+        // Scoped to the theme-enable shapes: the unrelated plugins
+        // setEnabled API legitimately contains the bare word.
+        assert.doesNotMatch(source, /themes\.setEnabled/);
+        assert.doesNotMatch(source, /themes\.set_enabled/);
+        assert.doesNotMatch(source, /theme_set_enabled/);
+    }
+    assert.match(themesCard, /window\.legcord\.themes\.set\(props\.theme\.id, state\)/);
+});
+
+test("native theme enable flips only the manifest flag with no CSS machinery", () => {
+    // The host derives the manifest path from the validated id and edits
+    // the parsed JSON document in place: no path/filename input, no style
+    // element construction, no script evaluation near the flip.
+    const nativeThemes = readFileSync(new URL("../src/themes.rs", import.meta.url), "utf8");
+    assert.match(nativeThemes, /pub fn set_theme_enabled/);
+    assert.match(nativeThemes, /resolve_theme_dir\(profile_dir, theme_id\)/);
+    assert.match(nativeThemes, /read_manifest_text\(&manifest_path\)/);
+    const shippedThemes = nativeThemes.slice(0, nativeThemes.indexOf("#[cfg(test)]"));
+    const flipBody = shippedThemes.slice(shippedThemes.indexOf("pub fn set_theme_enabled"));
+    assert.ok(flipBody.length > 0);
+    assert.doesNotMatch(flipBody, /evaluate_script|managed_css_script|apply_managed/);
+    assert.doesNotMatch(flipBody, /fetch\(|ureq|openPath|ShellExecute|Command::new/);
+    // The facade sends id plus boolean and validates the echo: no path,
+    // filename, manifest, CSS, URL, or destination member.
+    const enableFacade = nativeFacade.slice(
+        nativeFacade.indexOf("function setThemeEnabled"),
+        nativeFacade.indexOf("function importFiles"),
+    );
+    assert.ok(enableFacade.length > 0);
+    assert.match(enableFacade, /requireCapability\("themes\.set_enabled"\)/);
+    assert.match(enableFacade, /\{\s*type:\s*"theme_set_enabled",\s*payload:\s*\{\s*id,\s*enabled\s*\}\s*\}/);
+    // No path/URL/filename member may be constructed or read anywhere near
+    // the flip (the comment above documents the rejection in prose, so the
+    // assertion targets member shapes, not bare words).
+    assert.doesNotMatch(enableFacade, /fetch\(|showOpenDialog|openPath|"path"|"filename"|"url"|path:|url:/);
+});
+
 test("settings UI reveals the storage folder natively and sends otherwise", () => {
     const settingsPage = readFileSync(
         new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),

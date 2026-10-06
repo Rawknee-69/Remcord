@@ -44,8 +44,8 @@ use protocol::{
     BridgeResponsePayload, BundleFileEntry, BundlesListResponse, FoldersOpenedResponse,
     LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
     PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
-    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    PROTOCOL_VERSION,
+    ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse,
+    ThemeWrittenResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -60,7 +60,9 @@ use theme_import::{
     import_from_paths, show_import_picker, FileImportOutcome, PickerOutcome, ThemeImportFailure,
     ThemeImportSummary,
 };
-use themes::{install_theme_from_code, load_enabled_themes, write_theme_css, LoadedTheme};
+use themes::{
+    install_theme_from_code, load_enabled_themes, set_theme_enabled, write_theme_css, LoadedTheme,
+};
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
@@ -244,6 +246,7 @@ const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
 const THEME_INSTALL_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_INSTALL_SMOKE";
 const THEME_WRITE_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_WRITE_SMOKE";
 const THEME_IMPORT_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_IMPORT_SMOKE";
+const THEME_SET_ENABLED_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -268,6 +271,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "themes.install_code",
         "themes.write_css",
         "themes.import_files",
+        "themes.set_enabled",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -947,6 +951,129 @@ const THEME_IMPORT_SMOKE_SCRIPT: &str = r#"
         canceled: Boolean(summary && summary.canceled),
         imported: summary && Number.isSafeInteger(summary.imported) ? summary.imported : 0,
         failed: summary && Number.isSafeInteger(summary.failed) ? summary.failed : 0,
+        error: null,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  })();
+})();
+"#;
+
+/// DEV-only theme enable smoke probe (`LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE=1`).
+/// Flips a disposable theme's flag through the real `themes.set_enabled`
+/// capability, proves the managed style node appears carrying the exact
+/// installed CSS bytes, proves a same-state flip changes nothing, installs
+/// and enables a second disposable theme to prove coexistence (no mutual
+/// exclusion), unflips and proves removal, then blocks three attack shapes
+/// (traversal id, unknown theme, non-boolean flag). Reported as one typed
+/// `theme_set_enabled_probe` event per document with `stage: "set_enabled"`.
+/// Both disposable fixture directories are removed by hand after validation
+/// (uninstall is a deferred slice).
+const THEME_SET_ENABLED_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const THEME_ID = "LegcordEnableProbe-BD";
+  const THEME_CSS = "/**\n * @name LegcordEnableProbe\n * @version 0.0.0\n */\n:root {\n  --legcord-native-enable-probe: 1;\n}\n";
+  const SECOND_ID = "LegcordSecondProbe-BD";
+  const SECOND_CSS = "/**\n * @name LegcordSecondProbe\n * @version 0.0.0\n */\n:root {\n  --legcord-native-second-probe: 2;\n}\n";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "theme_set_enabled_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "set_enabled", id: "", enabled: false,
+    attacks_blocked: 0, reflected: false, multi: false, clearvision: "failed",
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  const expectReject = async (pending) => {
+    try {
+      await pending;
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const styleId = (id) => "legcord-native-theme-" + id;
+  const nodeBytes = (id) => {
+    const node = document.getElementById(styleId(id));
+    return node ? (node.textContent || "").length : -1;
+  };
+  const probeVar = () => getComputedStyle(document.documentElement)
+    .getPropertyValue("--legcord-native-enable-probe").trim();
+  const singleNode = (id) => document.querySelectorAll('style[id="' + styleId(id) + '"]').length === 1;
+  const waitFor = async (condition) => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (condition()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  };
+  (async () => {
+    try {
+      const themes = window.legcord?.themes;
+      if (typeof themes?.setEnabled !== "function") {
+        fail("theme enable facade missing");
+        return;
+      }
+      // No generic set surface may exist alongside the typed flip.
+      if (typeof themes.set === "function") {
+        fail("untyped theme set must not exist");
+        return;
+      }
+      // The observed-problem fixture: enable the real imported theme when
+      // present, prove its managed node appears, then restore the found
+      // state. Absent (UNKNOWN_THEME) skips without failing.
+      const CLEARVISION_ID = "ClearVision-BD";
+      let clearvision = "absent";
+      try {
+        const cvOn = await themes.setEnabled(CLEARVISION_ID, true);
+        const cvSeen = await waitFor(() => nodeBytes(CLEARVISION_ID) > 0)
+          && singleNode(CLEARVISION_ID);
+        const cvOff = await themes.setEnabled(CLEARVISION_ID, false);
+        const cvGone = await waitFor(() => nodeBytes(CLEARVISION_ID) === -1);
+        clearvision = (cvOn.enabled && cvSeen && !cvOff.enabled && cvGone)
+          ? "reflected"
+          : "failed";
+      } catch (error) {
+        clearvision = /unknown/i.test(String(error?.message ?? error)) ? "absent" : "failed";
+      }
+      // Fixtures install disabled (Electron parity); the flips below are
+      // the only state changes. Both directories are removed by hand after
+      // validation (uninstall is deferred).
+      await themes.installFromCode(THEME_CSS);
+      const turnedOn = await themes.setEnabled(THEME_ID, true);
+      // Semantic proof: the custom property is actually reflected in the
+      // rendered document, carried by exactly one managed style node.
+      const reflected = await waitFor(() => probeVar() === "1")
+        && singleNode(THEME_ID) && nodeBytes(THEME_ID) > 0;
+      // Same-state flip: resolves the state without side effects.
+      const repeat = await themes.setEnabled(THEME_ID, true);
+      const idempotent = repeat && repeat.id === THEME_ID && repeat.enabled === true;
+      // A second enabled theme coexists: no mutual exclusion.
+      await themes.installFromCode(SECOND_CSS);
+      const secondOn = await themes.setEnabled(SECOND_ID, true);
+      const multi = await waitFor(() => nodeBytes(SECOND_ID) > 0)
+        && probeVar() === "1" && singleNode(THEME_ID)
+        && secondOn && secondOn.enabled === true;
+      const turnedOff = await themes.setEnabled(THEME_ID, false);
+      const removed = await waitFor(() => probeVar() === "" && nodeBytes(THEME_ID) === -1)
+        && turnedOff && turnedOff.enabled === false;
+      // Second fixture stays enabled (its directory is removed by hand
+      // after validation, like every disposable fixture).
+      const blockedTraversal = await expectReject(themes.setEnabled("../escape", true));
+      const blockedUnknown = await expectReject(themes.setEnabled("legcord-native-no-such-theme", true));
+      const blockedFlag = await expectReject(themes.setEnabled(THEME_ID, "yes"));
+      const attacksBlocked = [blockedTraversal, blockedUnknown, blockedFlag].filter(Boolean).length;
+      const contract = turnedOn && turnedOn.id === THEME_ID && turnedOn.enabled === true;
+      probe({
+        ok: Boolean(contract) && reflected && idempotent && multi && removed
+          && clearvision !== "failed" && attacksBlocked === 3,
+        stage: "set_enabled",
+        id: turnedOff && typeof turnedOff.id === "string" ? turnedOff.id : "",
+        enabled: Boolean(turnedOff && turnedOff.enabled),
+        attacks_blocked: attacksBlocked,
+        reflected: reflected,
+        multi: multi,
+        clearvision: clearvision,
         error: null,
       });
     } catch (error) {
@@ -1801,6 +1928,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_theme_import_smoke {
         println!("[Themes][ImportSmoke] theme import smoke probe enabled");
     }
+    let diagnostic_theme_set_enabled_smoke =
+        std::env::var(THEME_SET_ENABLED_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_theme_set_enabled_smoke {
+        println!("[Themes][SetEnabledSmoke] theme enable smoke probe enabled");
+    }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
         println!("[Folders][Smoke] folder opening smoke probe enabled");
@@ -2555,6 +2687,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_theme_import_smoke {
                             if let Err(error) = webview.evaluate_script(THEME_IMPORT_SMOKE_SCRIPT) {
                                 eprintln!("[Themes][ImportSmoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_theme_set_enabled_smoke {
+                            if let Err(error) =
+                                webview.evaluate_script(THEME_SET_ENABLED_SMOKE_SCRIPT)
+                            {
+                                eprintln!("[Themes][SetEnabledSmoke] probe failed: {error}");
                             }
                         }
                     }
@@ -3462,6 +3601,60 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::ThemeSetEnabled(payload) => {
+                            // Flip one theme's flag: the id is validated
+                            // (never sanitized), the manifest path is
+                            // host-derived, and only `enabled` changes. The
+                            // existing live watcher observes the rewrite and
+                            // drives the managed CSS lifecycle; nothing here
+                            // touches styles directly.
+                            let request_id = request.request_id;
+                            match set_theme_enabled(&profile_path, &payload.id, payload.enabled) {
+                                Ok(flipped) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::ThemeEnabled(
+                                            ThemeEnabledResponse {
+                                                id: flipped.id.clone(),
+                                                enabled: flipped.enabled,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Themes][SetEnabled] id={} enabled={} request_latency_ms={:.3}",
+                                        flipped.id,
+                                        flipped.enabled,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Themes][SetEnabled:{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::ModGetBundle(payload) => {                            let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
                                 let response = BridgeResponse {
@@ -4125,6 +4318,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[Themes][ImportSmoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::ThemeSetEnabledProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Themes][SetEnabledSmoke] ok=true stage={} id={} enabled={} attacks_blocked={} reflected={} multi={} clearvision={}",
+                                payload.stage,
+                                payload.id,
+                                payload.enabled,
+                                payload.attacks_blocked,
+                                payload.reflected,
+                                payload.multi,
+                                payload.clearvision
+                            );
+                        } else {
+                            eprintln!(
+                                "[Themes][SetEnabledSmoke] ok=false stage={} error={}",
                                 payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
@@ -4892,15 +5105,17 @@ mod tests {
     fn boot_snapshot_grants_no_theme_capability() {
         // Theme injection is a host push: the renderer never requests theme
         // CSS, so no theme-CSS pull capability may exist. `folders.open_theme`,
-        // `themes.install_code`, `themes.write_css`, and `themes.import_files`
-        // are explicitly allowed: the first names the themes ROOT for folder
-        // opening, the others write theme files the host then pushes itself —
-        // none reads theme CSS back to the renderer.
+        // `themes.install_code`, `themes.write_css`, `themes.import_files`,
+        // and `themes.set_enabled` are explicitly allowed: the first names
+        // the themes ROOT for folder opening, the others write theme files
+        // the host then pushes itself — none reads theme CSS back to the
+        // renderer.
         for capability in super::BOOT_SNAPSHOT.capabilities {
             if *capability == "folders.open_theme"
                 || *capability == "themes.install_code"
                 || *capability == "themes.write_css"
                 || *capability == "themes.import_files"
+                || *capability == "themes.set_enabled"
             {
                 continue;
             }
@@ -5263,5 +5478,60 @@ mod tests {
         assert!(!super::THEME_IMPORT_SMOKE_SCRIPT.contains("installBDTheme"));
         assert!(!super::THEME_IMPORT_SMOKE_SCRIPT.contains("fetch("));
         assert!(!super::THEME_IMPORT_SMOKE_SCRIPT.contains("sendSync"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_theme_enable_without_generic_surface() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"themes.set_enabled"));
+        // Flip-only: no list, uninstall, editor, URL install, or generic
+        // filesystem/settings capability may exist alongside it.
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert_ne!(*capability, "themes.set");
+            assert_ne!(*capability, "themes.list");
+            assert_ne!(*capability, "themes.uninstall");
+            assert_ne!(*capability, "filesystem.write");
+        }
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"network"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"shell"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_theme_enable_facade() {
+        let script = initialization_script(&[]).unwrap();
+        assert!(script.contains("theme_set_enabled"));
+        assert!(script.contains("themes.set_enabled"));
+        assert!(script.contains("setEnabled"));
+        // Id plus boolean only: no path, filename, manifest, CSS, URL,
+        // untyped set surface, editor launch, fetch, or synchronous IPC.
+        // ("themes.set_enabled" never contains "themes.set(", so the
+        // untyped-send guard below stays exact.)
+        assert!(!script.contains("themes.set("));
+        assert!(!script.contains("openCssEditor"));
+        assert!(!script.contains("installBDTheme"));
+        assert!(!script.contains("fetch("));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn theme_set_enabled_smoke_probe_flips_through_the_capability() {
+        assert_eq!(
+            super::THEME_SET_ENABLED_SMOKE_ENV,
+            "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE"
+        );
+        assert!(super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("setEnabled"));
+        assert!(super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("theme_set_enabled_probe"));
+        assert!(super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("getComputedStyle"));
+        assert!(super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("clearvision"));
+        // The probe flips flags and observes managed nodes; it never takes
+        // a path, edits CSS, launches an editor, or uses sync IPC. (The
+        // single `themes.set` mention is the must-not-exist absence check.)
+        assert!(!super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("installBDTheme"));
+        assert!(!super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("openCssEditor"));
+        assert!(!super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("fetch("));
+        assert!(!super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("sendSync"));
     }
 }

@@ -56,6 +56,7 @@ pub enum BridgeCommand {
     ThemeInstallCode(ThemeInstallCodeRequest),
     ThemeWriteCss(ThemeWriteCssRequest),
     ThemeImportFiles(ThemeImportFilesRequest),
+    ThemeSetEnabled(ThemeSetEnabledRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,6 +209,19 @@ pub struct ThemeWriteCssRequest {
 #[serde(deny_unknown_fields)]
 pub struct ThemeImportFilesRequest {}
 
+/// Flip request for the `themes.set_enabled` capability: exactly one
+/// validated theme id plus the new boolean state. There is deliberately NO
+/// path, filename, manifest path, CSS filename, destination, or arbitrary
+/// filesystem selector: the host derives the manifest path from the
+/// validated id under its own themes root. Charset and length are re-checked
+/// at dispatch; manifest and containment rules live in `themes`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeSetEnabledRequest {
+    pub id: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -271,6 +285,10 @@ pub enum BridgeEvent {
     /// (`LEGCORD_NATIVE_THEME_IMPORT_SMOKE=1`). Never sent by shipped
     /// code.
     ThemeImportProbe(ThemeImportProbe),
+    /// DEV-only diagnostic posted by the theme enable smoke probe
+    /// (`LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE=1`). Never sent by shipped
+    /// code.
+    ThemeSetEnabledProbe(ThemeSetEnabledProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -499,6 +517,30 @@ pub struct ThemeImportProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the theme enable smoke probe. `stage` is
+/// `"set_enabled"` (flip a disposable theme's flag through the real
+/// capability, prove the managed style node appears with the exact CSS
+/// bytes, prove a same-state flip is a no-op, unflip and prove removal,
+/// then block three attack shapes). `reflected` reports whether the managed
+/// node carried the exact installed bytes; `multi` reports whether a second
+/// enabled disposable theme coexisted (no mutual exclusion). `clearvision`
+/// reports the observed-problem fixture when present (`"reflected"`),
+/// `"absent"` when its directory does not exist, or `"failed"`. The probe
+/// never carries CSS contents or host paths.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeSetEnabledProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub id: String,
+    pub enabled: bool,
+    pub attacks_blocked: u8,
+    pub reflected: bool,
+    pub multi: bool,
+    pub clearvision: String,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
@@ -532,6 +574,7 @@ pub enum BridgeResponsePayload {
     ThemeInstalled(ThemeInstalledResponse),
     ThemeWritten(ThemeWrittenResponse),
     ThemeImported(ThemeImportedResponse),
+    ThemeEnabled(ThemeEnabledResponse),
 }
 
 #[derive(Serialize)]
@@ -701,6 +744,15 @@ pub struct ThemeImportedResponse {
     pub failed: u32,
 }
 
+/// Flip response for the `themes.set_enabled` capability: the validated id
+/// echo plus the persisted state (which equals the request, including the
+/// idempotent same-state no-op). No path crosses the boundary.
+#[derive(Serialize)]
+pub struct ThemeEnabledResponse {
+    pub id: String,
+    pub enabled: bool,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -859,6 +911,14 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // is needed. The picker configuration and the ingestion
                 // bounds live in `theme_import` and are enforced at dispatch.
                 BridgeCommand::ThemeImportFiles(_) => {}
+                BridgeCommand::ThemeSetEnabled(payload) => {
+                    // Shape check only (id presence/cap; the boolean is
+                    // typed by serde); charset, manifest, and containment
+                    // rules live in `themes` and are re-enforced at dispatch.
+                    if payload.id.is_empty() || payload.id.len() > MAX_FOLDER_THEME_ID_BYTES {
+                        return Err("invalid theme enable flip".to_owned());
+                    }
+                }
             }
         }
         BridgeMessage::Event(event) => {
@@ -1142,6 +1202,30 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                             && (payload.imported != 0 || payload.failed != 0))
                     {
                         return Err("invalid theme import probe result".to_owned());
+                    }
+                }
+                BridgeEvent::ThemeSetEnabledProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "set_enabled")
+                        || (payload.ok && payload.id.is_empty())
+                        || payload.id.len() > MAX_FOLDER_THEME_ID_BYTES
+                        || payload.attacks_blocked > 8
+                        || !matches!(
+                            payload.clearvision.as_str(),
+                            "absent" | "reflected" | "failed"
+                        )
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok
+                            && (payload.enabled
+                                || !payload.reflected
+                                || !payload.multi
+                                || payload.clearvision == "failed"
+                                || payload.attacks_blocked != 3))
+                    {
+                        return Err("invalid theme enable probe result".to_owned());
                     }
                 }
             }
@@ -1731,6 +1815,87 @@ mod tests {
         assert!(parse_bridge_message(inconsistent).is_err());
         assert!(parse_bridge_message(negative).is_err());
         assert!(parse_bridge_message(with_path).is_err());
+    }
+
+    #[test]
+    fn accepts_theme_set_enabled_with_id_and_boolean_only() {
+        let request = r#"{"version":1,"request_id":"enable-1","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No path, filename, manifest, CSS, URL, or arbitrary member may
+        // ride along; the host derives the manifest path from the id.
+        let with_path = r#"{"version":1,"request_id":"enable-2","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true,"path":"C:\\x"}}}"#;
+        let with_file = r#"{"version":1,"request_id":"enable-3","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true,"filename":"x.css"}}}"#;
+        let with_manifest = r#"{"version":1,"request_id":"enable-4","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true,"manifest":{}}}}"#;
+        let with_css = r#"{"version":1,"request_id":"enable-5","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true,"css":":root {}"}}}"#;
+        let with_url = r#"{"version":1,"request_id":"enable-6","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true,"url":"https://attacker.invalid/x.css"}}}"#;
+        let missing_id = r#"{"version":1,"request_id":"enable-7","command":{"type":"theme_set_enabled","payload":{"enabled":true}}}"#;
+        let missing_flag = r#"{"version":1,"request_id":"enable-8","command":{"type":"theme_set_enabled","payload":{"id":"my-theme"}}}}"#;
+        let string_flag = r#"{"version":1,"request_id":"enable-9","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":"yes"}}}"#;
+        let numeric_id = r#"{"version":1,"request_id":"enable-10","command":{"type":"theme_set_enabled","payload":{"id":42,"enabled":true}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_file).is_err());
+        assert!(parse_bridge_message(with_manifest).is_err());
+        assert!(parse_bridge_message(with_css).is_err());
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(missing_id).is_err());
+        assert!(parse_bridge_message(missing_flag).is_err());
+        assert!(parse_bridge_message(string_flag).is_err());
+        assert!(parse_bridge_message(numeric_id).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_theme_enable_response() {
+        use super::ThemeEnabledResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "enable-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::ThemeEnabled(ThemeEnabledResponse {
+                id: "my-theme".to_owned(),
+                enabled: true,
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "theme_enabled");
+        assert_eq!(value["payload"]["payload"]["id"], "my-theme");
+        assert_eq!(value["payload"]["payload"]["enabled"], true);
+        assert_eq!(
+            value["payload"]["payload"]
+                .as_object()
+                .map(|object| object.len()),
+            Some(2)
+        );
+        // Id echo only: no path, CSS, or manifest echo.
+        assert!(value["payload"]["payload"].get("path").is_none());
+        assert!(value["payload"]["payload"].get("css").is_none());
+        assert!(value["payload"]["payload"].get("manifest").is_none());
+    }
+
+    #[test]
+    fn validates_theme_set_enabled_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"set_enabled","id":"Probe-BD","enabled":false,"attacks_blocked":3,"reflected":true,"multi":true,"clearvision":"reflected","error":null}}}"#;
+        let absent = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"set_enabled","id":"Probe-BD","enabled":false,"attacks_blocked":3,"reflected":true,"multi":true,"clearvision":"absent","error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":false,"stage":"set_enabled","id":"","enabled":false,"attacks_blocked":0,"reflected":false,"multi":false,"clearvision":"failed","error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"write","id":"Probe-BD","enabled":false,"attacks_blocked":3,"reflected":true,"multi":true,"clearvision":"reflected","error":null}}}"#;
+        let enabled = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"set_enabled","id":"Probe-BD","enabled":true,"attacks_blocked":3,"reflected":true,"multi":true,"clearvision":"reflected","error":null}}}"#;
+        let unreflected = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"set_enabled","id":"Probe-BD","enabled":false,"attacks_blocked":3,"reflected":false,"multi":true,"clearvision":"reflected","error":null}}}"#;
+        let exclusive = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"set_enabled","id":"Probe-BD","enabled":false,"attacks_blocked":3,"reflected":true,"multi":false,"clearvision":"reflected","error":null}}}"#;
+        let cv_failed = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"set_enabled","id":"Probe-BD","enabled":false,"attacks_blocked":3,"reflected":true,"multi":true,"clearvision":"failed","error":null}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"theme_set_enabled_probe","payload":{"ok":true,"stage":"set_enabled","id":"Probe-BD","enabled":false,"attacks_blocked":2,"reflected":true,"multi":true,"clearvision":"reflected","error":null}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(absent).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(enabled).is_err());
+        assert!(parse_bridge_message(unreflected).is_err());
+        assert!(parse_bridge_message(exclusive).is_err());
+        assert!(parse_bridge_message(cv_failed).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
     }
 
     #[test]

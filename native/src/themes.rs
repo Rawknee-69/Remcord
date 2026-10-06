@@ -515,18 +515,14 @@ fn write_file_atomic_unique(path: &Path, bytes: &[u8]) -> Result<(), ThemeInstal
     Ok(())
 }
 
-/// Resolve the CSS file a theme id selects, without writing anything.
+/// Resolve one validated theme directory to its canonical path without
+/// creating or reading anything else.
 ///
-/// The id is validated (never sanitized); the theme directory must already
-/// exist (never created here — a missing directory is `UNKNOWN_THEME`);
-/// the bounded manifest selects the filename, which must pass the same
-/// allowlist the loader enforces; the resolved file must stay under the
-/// canonical themes root. A symlink/junction at the destination that
-/// resolves outside is refused instead of followed.
-fn resolve_theme_css(
-    profile_dir: &Path,
-    theme_id: &str,
-) -> Result<(PathBuf, bool), ThemeInstallFailure> {
+/// Shared by the CSS-write path and the enable-flip path: the id is
+/// validated (never sanitized); a missing directory is `UNKNOWN_THEME`
+/// (never created); a link resolving outside the canonical themes root is
+/// `OUTSIDE_ROOT` (never followed outward).
+fn resolve_theme_dir(profile_dir: &Path, theme_id: &str) -> Result<PathBuf, ThemeInstallFailure> {
     if theme_id.is_empty() || theme_id.len() > MAX_THEME_ID_BYTES {
         return Err(install_failure("INVALID_THEME_ID", "theme id is invalid"));
     }
@@ -556,23 +552,45 @@ fn resolve_theme_css(
             "theme target is outside the approved root",
         ));
     }
-    // The manifest selects the file — exactly what Electron edits — but
-    // through the native filename allowlist instead of raw interpolation.
-    let manifest_path = theme_canonical.join("manifest.json");
-    let manifest_len = std::fs::symlink_metadata(&manifest_path)
+    Ok(theme_canonical)
+}
+
+/// Read one manifest file as text through the no-follow bounded policy
+/// shared by every manifest consumer: symlinks/junctions are refused by the
+/// metadata check (never followed), oversized files fail closed, and every
+/// failure is a typed `INVALID_MANIFEST` with no path.
+fn read_manifest_text(manifest_path: &Path) -> Result<String, ThemeInstallFailure> {
+    let manifest_len = std::fs::symlink_metadata(manifest_path)
         .ok()
         .filter(|metadata| metadata.is_file())
         .map(|metadata| metadata.len());
-    let manifest_text = match manifest_len {
-        Some(len) if len <= MAX_MANIFEST_BYTES as u64 => std::fs::read_to_string(&manifest_path)
-            .map_err(|_| install_failure("INVALID_MANIFEST", "theme manifest is invalid"))?,
-        _ => {
-            return Err(install_failure(
-                "INVALID_MANIFEST",
-                "theme manifest is invalid",
-            ));
-        }
-    };
+    match manifest_len {
+        Some(len) if len <= MAX_MANIFEST_BYTES as u64 => std::fs::read_to_string(manifest_path)
+            .map_err(|_| install_failure("INVALID_MANIFEST", "theme manifest is invalid")),
+        _ => Err(install_failure(
+            "INVALID_MANIFEST",
+            "theme manifest is invalid",
+        )),
+    }
+}
+
+/// Resolve the CSS file a theme id selects, without writing anything.
+///
+/// The id is validated (never sanitized); the theme directory must already
+/// exist (never created here — a missing directory is `UNKNOWN_THEME`);
+/// the bounded manifest selects the filename, which must pass the same
+/// allowlist the loader enforces; the resolved file must stay under the
+/// canonical themes root. A symlink/junction at the destination that
+/// resolves outside is refused instead of followed.
+fn resolve_theme_css(
+    profile_dir: &Path,
+    theme_id: &str,
+) -> Result<(PathBuf, bool), ThemeInstallFailure> {
+    let theme_canonical = resolve_theme_dir(profile_dir, theme_id)?;
+    // The manifest selects the file — exactly what Electron edits — but
+    // through the native filename allowlist instead of raw interpolation.
+    let manifest_path = theme_canonical.join("manifest.json");
+    let manifest_text = read_manifest_text(&manifest_path)?;
     let manifest: ThemeManifestFile = serde_json::from_str(&manifest_text)
         .map_err(|_| install_failure("INVALID_MANIFEST", "theme manifest is invalid"))?;
     if validate_theme_css_filename(&manifest.theme).is_err() {
@@ -585,6 +603,8 @@ fn resolve_theme_css(
     // lexically unable to escape. A pre-planted link AT the destination is
     // refused outright instead of written through or followed — the strict
     // bundles convention, not the follow-then-contain one.
+    let root_canonical = std::fs::canonicalize(themes_dir(profile_dir))
+        .map_err(|_| install_failure("THEME_UNAVAILABLE", "theme storage is unavailable"))?;
     let target = theme_canonical.join(&manifest.theme);
     if !target.starts_with(&root_canonical) {
         return Err(install_failure(
@@ -630,6 +650,75 @@ pub fn write_theme_css(
         id: theme_id.to_owned(),
         enabled,
         css_bytes: css.len(),
+    })
+}
+
+/// Successful enable-flip report: the validated id echo plus the persisted
+/// state. No path crosses this boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ThemeEnabledResult {
+    /// The validated theme id, echoed so the caller can confirm the target.
+    pub id: String,
+    /// The persisted `enabled` state (equals the request, including the
+    /// idempotent same-state no-op).
+    pub enabled: bool,
+}
+
+/// Flip one theme's `enabled` flag.
+///
+/// The renderer supplies only the id and the new state: the manifest path is
+/// derived from the validated id under the host-controlled themes root, and
+/// ONLY the `enabled` field changes. Every other field — known or unknown —
+/// is preserved by editing the parsed JSON document in place (never
+/// reconstructed from a reduced struct), mirroring Electron's whole-manifest
+/// rewrite without its in-place write.
+///
+/// Electron parity on work: when the persisted state already equals the
+/// request, nothing is rewritten, so the watcher sees no mutation and the
+/// managed CSS lifecycle stays quiet. Multiple themes stay independently
+/// enabled: this touches exactly one id, never any other theme. The existing
+/// live watcher observes the rewrite and drives the managed CSS lifecycle;
+/// nothing here touches the renderer or any style element directly.
+pub fn set_theme_enabled(
+    profile_dir: &Path,
+    theme_id: &str,
+    enabled: bool,
+) -> Result<ThemeEnabledResult, ThemeInstallFailure> {
+    let theme_canonical = resolve_theme_dir(profile_dir, theme_id)?;
+    let manifest_path = theme_canonical.join("manifest.json");
+    let manifest_text = read_manifest_text(&manifest_path)?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&manifest_text)
+        .map_err(|_| install_failure("INVALID_MANIFEST", "theme manifest is invalid"))?;
+    let document = manifest
+        .as_object_mut()
+        .ok_or_else(|| install_failure("INVALID_MANIFEST", "theme manifest is invalid"))?;
+    match document.get("enabled") {
+        // Absent is a legitimate stored state (the loader defaults it to
+        // enabled); only a wrong-typed value is malformed.
+        None => {}
+        Some(serde_json::Value::Bool(current)) if *current == enabled => {
+            // Idempotent same-state request: return without rewriting so no
+            // watcher event fires and no CSS work follows.
+            return Ok(ThemeEnabledResult {
+                id: theme_id.to_owned(),
+                enabled,
+            });
+        }
+        Some(serde_json::Value::Bool(_)) => {}
+        Some(_) => {
+            return Err(install_failure(
+                "INVALID_MANIFEST",
+                "theme manifest is invalid",
+            ));
+        }
+    }
+    document.insert("enabled".to_owned(), serde_json::Value::Bool(enabled));
+    let serialized = serde_json::to_string(&manifest)
+        .map_err(|_| install_failure("THEME_WRITE_FAILED", "theme files cannot be written"))?;
+    write_file_atomic_unique(&manifest_path, serialized.as_bytes())?;
+    Ok(ThemeEnabledResult {
+        id: theme_id.to_owned(),
+        enabled,
     })
 }
 
@@ -858,9 +947,9 @@ pub fn load_enabled_themes(profile_dir: &Path) -> ThemeLoadReport {
 #[cfg(test)]
 mod tests {
     use super::{
-        install_theme_from_code, load_enabled_themes, parse_bd_manifest, theme_style_id,
-        validate_theme_css_filename, validate_theme_id, write_theme_css, MAX_THEME_CSS_BYTES,
-        THEME_STYLE_ID_PREFIX,
+        install_theme_from_code, load_enabled_themes, parse_bd_manifest, set_theme_enabled,
+        theme_style_id, validate_theme_css_filename, validate_theme_id, write_theme_css,
+        MAX_THEME_CSS_BYTES, THEME_STYLE_ID_PREFIX,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1529,6 +1618,248 @@ mod tests {
             .expect("outside must list")
             .next()
             .is_none());
+        fs::remove_dir_all(&profile).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    fn manifest_of(profile: &Path, id: &str) -> serde_json::Value {
+        serde_json::from_str(
+            &fs::read_to_string(profile.join("themes").join(id).join("manifest.json"))
+                .expect("manifest must read"),
+        )
+        .expect("manifest must be JSON")
+    }
+
+    #[test]
+    fn enable_flips_false_to_true_and_back_preserving_every_other_field() {
+        let profile = temp_profile();
+        // Unknown/future fields on purpose: the flip must preserve them.
+        let manifest = r#"{"theme":"src.css","name":"Flip","author":"A","enabled":false,"future":{"x":[1,2]},"note":"keep me"}"#;
+        write_theme(
+            &profile,
+            "flip",
+            manifest,
+            Some(("src.css", ":root{--v:1;}\n")),
+        );
+        let flipped = set_theme_enabled(&profile, "flip", true).expect("false->true must succeed");
+        assert_eq!(flipped.id, "flip");
+        assert!(flipped.enabled);
+        let after = manifest_of(&profile, "flip");
+        assert_eq!(after["enabled"], true);
+        assert_eq!(after["name"], "Flip");
+        assert_eq!(after["author"], "A");
+        assert_eq!(after["theme"], "src.css");
+        assert_eq!(after["note"], "keep me");
+        assert_eq!(after["future"]["x"], serde_json::json!([1, 2]));
+
+        let back = set_theme_enabled(&profile, "flip", false).expect("true->false must succeed");
+        assert_eq!(back.id, "flip");
+        assert!(!back.enabled);
+        let restored = manifest_of(&profile, "flip");
+        assert_eq!(restored["enabled"], false);
+        assert_eq!(restored["note"], "keep me");
+        // The CSS file is untouched by an enable flip.
+        assert_eq!(
+            fs::read_to_string(profile.join("themes").join("flip").join("src.css"))
+                .expect("css must read"),
+            ":root{--v:1;}\n"
+        );
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn same_state_requests_rewrite_nothing() {
+        let profile = temp_profile();
+        for (id, enabled) in [("stays-off", false), ("stays-on", true)] {
+            let manifest = format!(r#"{{"theme":"src.css","name":"S","enabled":{enabled}}}"#);
+            write_theme(&profile, id, &manifest, Some(("src.css", ":root{}\n")));
+            let path = profile.join("themes").join(id).join("manifest.json");
+            let before_bytes = fs::read(&path).expect("manifest must read");
+            let before_mtime = fs::metadata(&path)
+                .expect("manifest must stat")
+                .modified()
+                .expect("mtime must read");
+            let result = set_theme_enabled(&profile, id, enabled).expect("same-state must succeed");
+            assert_eq!(result.id, id);
+            assert_eq!(result.enabled, enabled);
+            // No rewrite: identical bytes and identical mtime, so the
+            // watcher sees no mutation and the CSS lifecycle stays quiet.
+            assert_eq!(fs::read(&path).expect("manifest must read"), before_bytes);
+            assert_eq!(
+                fs::metadata(&path)
+                    .expect("manifest must stat")
+                    .modified()
+                    .expect("mtime must read"),
+                before_mtime
+            );
+        }
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn enable_rejects_unknown_invalid_and_evil_ids_without_paths() {
+        let profile = temp_profile();
+        // Unknown theme: never created.
+        let missing =
+            set_theme_enabled(&profile, "no-such-theme", true).expect_err("missing dir must fail");
+        assert_eq!(missing.code, "UNKNOWN_THEME");
+        assert!(!profile.join("themes").join("no-such-theme").exists());
+        assert!(!missing
+            .message
+            .contains(&profile.to_string_lossy().into_owned()));
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "..\\escape",
+            "a/b",
+            "a\\b",
+            "/absolute",
+            "C:\\x",
+            "\\\\server\\share",
+            "has space",
+        ] {
+            let failure = set_theme_enabled(&profile, bad, true).expect_err("evil id must fail");
+            assert_eq!(failure.code, "INVALID_THEME_ID", "{bad:?} must be rejected");
+            assert!(!failure
+                .message
+                .contains(&profile.to_string_lossy().into_owned()));
+        }
+        let oversized = "t".repeat(super::MAX_THEME_ID_BYTES + 1);
+        assert_eq!(
+            set_theme_enabled(&profile, &oversized, true)
+                .expect_err("oversized id must fail")
+                .code,
+            "INVALID_THEME_ID"
+        );
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn enable_rejects_missing_malformed_and_oversized_manifests() {
+        let profile = temp_profile();
+        // Directory without a manifest.
+        fs::create_dir_all(profile.join("themes").join("nomanifest")).expect("dir must create");
+        assert_eq!(
+            set_theme_enabled(&profile, "nomanifest", true)
+                .expect_err("missing manifest must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // Malformed JSON.
+        write_theme(
+            &profile,
+            "badjson",
+            "{not json",
+            Some(("src.css", ":root{}\n")),
+        );
+        assert_eq!(
+            set_theme_enabled(&profile, "badjson", true)
+                .expect_err("malformed manifest must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // Valid JSON but not an object.
+        write_theme(&profile, "array", "[1,2]", Some(("src.css", ":root{}\n")));
+        assert_eq!(
+            set_theme_enabled(&profile, "array", true)
+                .expect_err("non-object manifest must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // Wrong-typed enabled value.
+        write_theme(
+            &profile,
+            "wrongtype",
+            r#"{"theme":"src.css","name":"W","enabled":"yes"}"#,
+            Some(("src.css", ":root{}\n")),
+        );
+        assert_eq!(
+            set_theme_enabled(&profile, "wrongtype", true)
+                .expect_err("non-boolean enabled must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // Oversized manifest.
+        let big_manifest = format!(
+            r#"{{"theme":"src.css","name":"B","enabled":false,"pad":"{}"}}"#,
+            "x".repeat(super::MAX_MANIFEST_BYTES)
+        );
+        write_theme(
+            &profile,
+            "big",
+            &big_manifest,
+            Some(("src.css", ":root{}\n")),
+        );
+        assert_eq!(
+            set_theme_enabled(&profile, "big", true)
+                .expect_err("oversized manifest must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        // A failed flip writes nothing.
+        assert_eq!(
+            manifest_of(&profile, "big")["enabled"],
+            false,
+            "failed flips must not mutate"
+        );
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn enable_refuses_links_at_every_level() {
+        let profile = temp_profile();
+        let outside = temp_profile();
+        let manifest = r#"{"theme":"src.css","name":"Linked","enabled":false}"#;
+        write_theme(&profile, "linked", manifest, Some(("src.css", ":root{}\n")));
+        // Symlinked manifest inside a real directory: refused by the
+        // no-follow metadata check, never read through.
+        let real_manifest = outside.join("manifest.json");
+        fs::write(&real_manifest, manifest).expect("outside manifest must write");
+        fs::remove_file(profile.join("themes").join("linked").join("manifest.json"))
+            .expect("fixture manifest must remove");
+        #[cfg(windows)]
+        let manifest_link = std::os::windows::fs::symlink_file(
+            &real_manifest,
+            profile.join("themes").join("linked").join("manifest.json"),
+        );
+        #[cfg(not(windows))]
+        let manifest_link = std::os::unix::fs::symlink(
+            &real_manifest,
+            profile.join("themes").join("linked").join("manifest.json"),
+        );
+        // Directory symlink at the theme id pointing outside: refused.
+        #[cfg(windows)]
+        let dir_link = std::os::windows::fs::symlink_dir(
+            outside.as_path(),
+            profile.join("themes").join("dirlinked"),
+        );
+        #[cfg(not(windows))]
+        let dir_link =
+            std::os::unix::fs::symlink(outside.as_path(), profile.join("themes").join("dirlinked"));
+        if manifest_link.is_err() || dir_link.is_err() {
+            eprintln!("SKIP: link creation needs privileges in this environment; lexical safety still holds");
+            fs::remove_dir_all(&profile).ok();
+            fs::remove_dir_all(&outside).ok();
+            return;
+        }
+        // The link itself must fail rather than resolve outward.
+        assert_eq!(
+            set_theme_enabled(&profile, "linked", true)
+                .expect_err("manifest link must fail")
+                .code,
+            "INVALID_MANIFEST"
+        );
+        assert_eq!(
+            set_theme_enabled(&profile, "dirlinked", true)
+                .expect_err("dir link must fail")
+                .code,
+            "OUTSIDE_ROOT"
+        );
+        assert!(fs::read_dir(&outside)
+            .expect("outside must list")
+            .all(|entry| entry.expect("entry must read").file_name() == "manifest.json"));
         fs::remove_dir_all(&profile).ok();
         fs::remove_dir_all(&outside).ok();
     }

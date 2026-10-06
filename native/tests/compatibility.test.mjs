@@ -2524,6 +2524,164 @@ test("theme import requests stay inert off the trusted origin", async () => {
     assert.equal(window.legcord, undefined);
 });
 
+function createEnableRuntime(capabilities = ["bridge.ping", "themes.set_enabled"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondThemeEnabled(window, request, payload = { id: "my-theme", enabled: true }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "theme_enabled", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a typed themes.set_enabled flip and no generic set", () => {
+    const { window } = createEnableRuntime();
+    assert.equal(typeof window.legcord.themes.setEnabled, "function");
+    assert.equal(window.legcord.native.supports("themes.set_enabled"), true);
+    // No untyped set, list, filesystem, or path surface may exist.
+    assert.equal(window.legcord.themes.set, undefined);
+    assert.equal(window.legcord.themes.listThemes, undefined);
+    assert.equal(window.legcord.fs, undefined);
+});
+
+test("themes.set_enabled sends id plus boolean and resolves the echo", async () => {
+    const { window } = createEnableRuntime();
+    const pending = window.legcord.themes.setEnabled("my-theme", true);
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "theme_set_enabled", payload: { id: "my-theme", enabled: true } });
+
+    respondThemeEnabled(window, message, { id: "my-theme", enabled: true });
+    assert.deepEqual(await pending, { id: "my-theme", enabled: true });
+});
+
+test("themes.set_enabled throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createEnableRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("themes.set_enabled"), false);
+    assert.throws(
+        () => window.legcord.themes.setEnabled("my-theme", true),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "theme_set_enabled"),
+        false,
+    );
+});
+
+test("themes.set_enabled rejects hostile ids and non-boolean flags without sending", async () => {
+    const { window } = createEnableRuntime();
+    for (const id of ["", ".", "..", "../escape", "..\\escape", "a/b", "C:\\x", "has space"]) {
+        await assert.rejects(window.legcord.themes.setEnabled(id, true), /id must match/);
+    }
+    const oversized = "t".repeat(65);
+    await assert.rejects(window.legcord.themes.setEnabled(oversized, true), /id must match/);
+    await assert.rejects(window.legcord.themes.setEnabled("my-theme", 42), /enabled must be a boolean/);
+    await assert.rejects(window.legcord.themes.setEnabled("my-theme", "yes"), /enabled must be a boolean/);
+    await assert.rejects(window.legcord.themes.setEnabled("my-theme", null), /enabled must be a boolean/);
+    await assert.rejects(window.legcord.themes.setEnabled(42, true), /id must match/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "theme_set_enabled"),
+        false,
+    );
+});
+
+test("themes.set_enabled rejects echo mismatches and path ridealongs", async () => {
+    // Id echo must equal the request: another theme's flip can never
+    // resolve this call.
+    const mismatched = createEnableRuntime();
+    const pendingMismatch = mismatched.window.legcord.themes.setEnabled("my-theme", true);
+    const messageMismatch = mismatched.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
+    respondThemeEnabled(mismatched.window, messageMismatch, { id: "other-theme", enabled: true });
+    await assert.rejects(pendingMismatch, /theme enable response schema is invalid/);
+
+    // Enabled echo must equal the request.
+    const flipped = createEnableRuntime();
+    const pendingFlipped = flipped.window.legcord.themes.setEnabled("my-theme", true);
+    const messageFlipped = flipped.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
+    respondThemeEnabled(flipped.window, messageFlipped, { id: "my-theme", enabled: false });
+    await assert.rejects(pendingFlipped, /theme enable response schema is invalid/);
+
+    // No path, CSS, manifest, or extra member may ride along.
+    const withPath = createEnableRuntime();
+    const pendingPath = withPath.window.legcord.themes.setEnabled("my-theme", true);
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
+    withPath.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messagePath.request_id,
+                ok: true,
+                payload: {
+                    type: "theme_enabled",
+                    payload: { id: "my-theme", enabled: true, path: "C:\\themes\\x" },
+                },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(pendingPath, /theme enable response schema is invalid/);
+});
+
+test("themes.set_enabled maps host failures to typed errors", async () => {
+    const { window } = createEnableRuntime();
+    const pending = window.legcord.themes.setEnabled("my-theme", true);
+    const message = window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "UNKNOWN_THEME", message: "theme folder is unknown" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /theme folder is unknown/);
+});
+
+test("themes.set_enabled rejects after its timeout", async () => {
+    const { window } = createEnableRuntime();
+    await assert.rejects(window.legcord.themes.setEnabled("my-theme", true, 50), /timed out/);
+});
+
+test("themes.set_enabled rejects pending requests when the document is disposed", async () => {
+    const { window } = createEnableRuntime();
+    const pending = window.legcord.themes.setEnabled("my-theme", true);
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh theme enable facade with no stale promises", async () => {
+    const firstDocument = createEnableRuntime();
+    const stale = firstDocument.window.legcord.themes.setEnabled("my-theme", true);
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createEnableRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.themes.setEnabled("my-theme", false);
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
+    respondThemeEnabled(nextDocument.window, message, { id: "my-theme", enabled: false });
+    assert.deepEqual(await pending, { id: "my-theme", enabled: false });
+});
+
+test("theme enable requests stay inert off the trusted origin", async () => {
+    const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.set_enabled"]);
+    assert.equal(window.legcord, undefined);
+});
+
 function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {
     return createRuntime("https://discord.com", capabilities);
 }

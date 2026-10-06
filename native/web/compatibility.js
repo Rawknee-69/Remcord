@@ -331,6 +331,35 @@
         });
     }
 
+    function setThemeEnabled(id, enabled, timeoutMs = 5000) {
+        requireCapability("themes.set_enabled");
+        if (typeof id !== "string" || !THEME_ID_PATTERN.test(id) || id === "." || id === "..") {
+            return Promise.reject(new TypeError("id must match [A-Za-z0-9._-]{1,64} and not be . or .."));
+        }
+        if (typeof enabled !== "boolean") {
+            return Promise.reject(new TypeError("enabled must be a boolean"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Id plus boolean only: the host derives the manifest path from
+        // the validated id and flips only the `enabled` field. No path,
+        // filename, manifest, CSS, URL, or destination may be supplied.
+        // The existing host lifecycle observes the rewrite and applies the
+        // managed CSS; this call never touches styles directly.
+        return request({ type: "theme_set_enabled", payload: { id, enabled } }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                payload.id !== id ||
+                payload.enabled !== enabled
+            ) {
+                throw new Error("Native theme enable response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
     function importFiles(timeoutMs = 120_000) {
         requireCapability("themes.import_files");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -616,6 +645,24 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "theme_enabled") {
+            const payload = response.payload.payload;
+            // Id echo plus persisted state only. The echo must equal the
+            // request so one theme's flip can never resolve another's call.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                typeof payload.id !== "string" ||
+                !THEME_ID_PATTERN.test(payload.id) ||
+                payload.id === "." ||
+                payload.id === ".." ||
+                textEncoder.encode(payload.id).length > 64 ||
+                typeof payload.enabled !== "boolean"
+            ) {
+                request.reject(new Error("Native theme enable response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -691,7 +738,11 @@
     // Theme file import only: an exact empty payload in, a bounded
     // cancellation/counts summary out. No path, URL, filter, dialog-option,
     // picker, or filesystem surface.
-    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss, importFiles });
+    // Theme enable flip only: validated id plus boolean in, id echo plus
+    // persisted state out. No path, filename, manifest, CSS, URL, or
+    // destination surface. The host applies the change through its own
+    // existing lifecycle.
+    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss, importFiles, setEnabled: setThemeEnabled });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,

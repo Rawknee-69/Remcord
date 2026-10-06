@@ -54,6 +54,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request (theme install) | `{"version":1,"request_id":"...","command":{"type":"theme_install_code","payload":{"css":"/** @name Midnight Harbor */ :root {}"}}}` |
 | Renderer request (theme CSS write) | `{"version":1,"request_id":"...","command":{"type":"theme_write_css","payload":{"id":"my-theme","css":":root {}"}}}` |
 | Renderer request (theme file import) | `{"version":1,"request_id":"...","command":{"type":"theme_import_files","payload":{}}}` |
+| Renderer request (theme enable flip) | `{"version":1,"request_id":"...","command":{"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Mod bundle response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"mod_bundle","payload":{"mod_id":"vencord","bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
@@ -68,9 +69,10 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Theme install response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_installed","payload":{"id":"Midnight-Harbor-BD","enabled":false,"css_bytes":128}},"error":null}` |
 | Theme CSS write response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_written","payload":{"id":"my-theme","enabled":true,"css_bytes":32}},"error":null}` |
 | Theme import response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_imported","payload":{"canceled":false,"imported":1,"failed":0}},"error":null}` |
+| Theme enable response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_enabled","payload":{"id":"my-theme","enabled":true}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, `folders_open_theme`, `theme_install_code`, `theme_write_css`, and `theme_import_files`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, `folders_open_theme`, `theme_install_code`, `theme_write_css`, `theme_import_files`, and `theme_set_enabled`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -340,6 +342,33 @@ renderer await window.legcord.themes.importFiles()
 The dialog is the Windows Common Item Dialog (`IFileOpenDialog` with `SetTitle`/`SetOkButtonLabel`/`SetFileTypes`/`FOS_ALLOWMULTISELECT` + `GetResults`), never the legacy `GetOpenFileNameW` path and never a third-party dialog dependency — entirely host-side on a named worker (`legcord-theme-import-sta`) so the WebView/UI thread never blocks. The renderer sends exactly `{}`. The bounded summary `{ canceled, imported, failed }` carries counts only: no ids, arrays, paths, or OS error text. Cancellation (dismissed dialog or empty result) resolves `{ canceled: true }` — never a rejection, toast, or console error.
 
 Deliberate Electron differences: sequential in-order processing instead of un-awaited dispatch (deterministic, bounded memory; documented); symlinks/junctions/reparse points refused outright instead of followed; 1 MiB + UTF-8 + race re-check instead of unbounded reads; no remote URL fetch and no network surface; theme id exclusively from `@name` through `validate_theme_id` (the source filename never becomes the id). Watcher composition is unchanged: the existing live watcher observes the atomic writes and drives the managed CSS lifecycle (a disabled fresh install correctly yields zero renderer work).
+
+## Theme enable flip capability (Phase D Step 3d-1)
+
+`themes.set_enabled` (wire `theme_set_enabled`, facade `window.legcord.themes.setEnabled(id, enabled)`) flips one theme's `manifest.enabled` flag. The renderer supplies only the id and the boolean: the manifest path is derived from the validated id under the host-controlled themes root, and ONLY `enabled` changes — every other field, known or unknown, is preserved by editing the parsed JSON document in place. No `src/` caller is branched.
+
+### Electron toggle chain (unchanged)
+
+`ThemesCard.toggleTheme` → bridge `themes.set(id, state)` (`ipcRenderer.send("setThemeEnabled")`, fire-and-forget) → `setThemeEnabled(id, enabled)`: re-reads the manifest, and only when the state differs pushes `addTheme(id, css)` / `removeTheme(id)` per window; persists ONLY `manifest.enabled`; then the UI re-reads the list via sync `getThemes`. Switches are per-theme and independent: multiple themes may be enabled simultaneously, nothing disables another theme, and no reload occurs. `native/tests/electron-compat.test.mjs` asserts all of this is byte-identical.
+
+### Native chain
+
+```text
+renderer await window.legcord.themes.setEnabled("my-theme", true)
+  → requireCapability("themes.set_enabled") or sync UNSUPPORTED_CAPABILITY throw
+  → client id/boolean checks (TypeError before dispatch)
+  → {"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true}}
+     (path/filename/manifest/css/url/destination members host-rejected)
+  → Rust themes::set_theme_enabled (validate id → dir must exist →
+     canonical containment → bounded no-follow manifest read → object with
+     bool-or-absent enabled → no-op when already equal → else flip only
+     `enabled` + atomic unique-temp replace)
+  → validated theme_enabled { id, enabled } (echo must equal the request)
+```
+
+The flip never touches styles directly: the existing live watcher observes the manifest rewrite, re-reads the snapshot, and the managed CSS lifecycle injects/updates/removes the theme's style node (exactly one per theme) with cascade order repair. Same-state requests return without rewriting, so no watcher event fires and no CSS work follows. Manifest links are refused by the no-follow read; directory links resolving outside fail closed; unknown themes and malformed/oversized manifests are typed path-free errors.
+
+Deliberate Electron differences (hardening, not regressions): validated ids instead of raw interpolation; canonical containment with planted links failing closed; 64 KiB manifest cap; atomic unique-temp replacement instead of in-place write; typed errors instead of silent/throwing behavior; a wrong-typed stored `enabled` is rejected rather than trusted.
 
 ## Reusable mod substrate (Phase B)
 
