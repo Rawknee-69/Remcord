@@ -45,7 +45,7 @@ use protocol::{
     LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
     PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
     ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse,
-    ThemeWrittenResponse, PROTOCOL_VERSION,
+    ThemeWrittenResponse, ThemesListResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -61,7 +61,8 @@ use theme_import::{
     ThemeImportSummary,
 };
 use themes::{
-    install_theme_from_code, load_enabled_themes, set_theme_enabled, write_theme_css, LoadedTheme,
+    install_theme_from_code, list_themes, load_enabled_themes, set_theme_enabled, write_theme_css,
+    LoadedTheme,
 };
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -247,6 +248,7 @@ const THEME_INSTALL_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_INSTALL_SMOKE";
 const THEME_WRITE_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_WRITE_SMOKE";
 const THEME_IMPORT_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_IMPORT_SMOKE";
 const THEME_SET_ENABLED_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
+const THEME_LIST_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_LIST_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -272,6 +274,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "themes.write_css",
         "themes.import_files",
         "themes.set_enabled",
+        "themes.list",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -1078,6 +1081,63 @@ const THEME_SET_ENABLED_SMOKE_SCRIPT: &str = r#"
       });
     } catch (error) {
       fail(error);
+    }
+  })();
+})();
+"#;
+
+/// DEV-only theme list smoke probe (`LEGCORD_NATIVE_THEME_LIST_SMOKE=1`).
+/// Inventories the host themes root through the real `themes.list`
+/// capability and verifies the bounded display shape (array, entry keys,
+/// id pattern, string bounds, boolean state), then reports the count plus
+/// the observed-problem fixture state (`present-enabled`/`present-disabled`/
+/// `absent`) as one typed `theme_list_probe` event per document with
+/// `stage: "list"`. The probe never carries CSS contents or host paths.
+const THEME_LIST_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const CLEARVISION_ID = "ClearVision-BD";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "theme_list_probe", payload } })
+  );
+  const fail = (clearvision, error) => probe({
+    ok: false, stage: "list", count: 0, clearvision: clearvision,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  (async () => {
+    try {
+      const themes = window.legcord?.themes;
+      if (typeof themes?.listThemes !== "function") {
+        fail("failed", "theme list facade missing");
+        return;
+      }
+      // The inventory is metadata-only: no list/getter surface for CSS,
+      // paths, or the filesystem may exist alongside the capability.
+      if (typeof themes.getThemes === "function" || typeof themes.getCSS === "function") {
+        fail("failed", "metadata-only surface exceeded");
+        return;
+      }
+      const listed = await themes.listThemes();
+      if (!Array.isArray(listed)) {
+        fail("failed", "inventory is not an array");
+        return;
+      }
+      const entry = listed.find((item) => item && item.id === CLEARVISION_ID);
+      const clearvision = !entry
+        ? "absent"
+        : entry.enabled === true
+          ? "present-enabled"
+          : entry.enabled === false
+            ? "present-disabled"
+            : "failed";
+      probe({
+        ok: clearvision !== "failed",
+        stage: "list",
+        count: listed.length,
+        clearvision: clearvision,
+        error: null,
+      });
+    } catch (error) {
+      fail("failed", error);
     }
   })();
 })();
@@ -1933,6 +1993,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_theme_set_enabled_smoke {
         println!("[Themes][SetEnabledSmoke] theme enable smoke probe enabled");
     }
+    let diagnostic_theme_list_smoke =
+        std::env::var(THEME_LIST_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_theme_list_smoke {
+        println!("[Themes][ListSmoke] theme list smoke probe enabled");
+    }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
         println!("[Folders][Smoke] folder opening smoke probe enabled");
@@ -2694,6 +2759,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 webview.evaluate_script(THEME_SET_ENABLED_SMOKE_SCRIPT)
                             {
                                 eprintln!("[Themes][SetEnabledSmoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_theme_list_smoke {
+                            if let Err(error) = webview.evaluate_script(THEME_LIST_SMOKE_SCRIPT) {
+                                eprintln!("[Themes][ListSmoke] probe failed: {error}");
                             }
                         }
                     }
@@ -3655,6 +3725,42 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::ThemesList(_) => {
+                            // Read-only inventory: the request carries no
+                            // parameters by protocol. The host owns the root,
+                            // enumeration, ordering, and bounds; the renderer
+                            // receives bounded display metadata only.
+                            let request_id = request.request_id;
+                            let report = list_themes(&profile_path);
+                            for skipped in &report.skipped {
+                                println!(
+                                    "[Themes][ListSkip] id={} reason={}",
+                                    skipped.id, skipped.reason
+                                );
+                            }
+                            let response = BridgeResponse {
+                                version: PROTOCOL_VERSION,
+                                request_id: request_id.clone(),
+                                ok: true,
+                                payload: Some(BridgeResponsePayload::ThemesList(
+                                    ThemesListResponse {
+                                        themes: report.listed.clone(),
+                                    },
+                                )),
+                                error: None,
+                            };
+                            send_bridge_response(&webview, &response);
+                            if let Err(error) = request_tracker.complete(&request_id) {
+                                eprintln!("[Bridge] correlation failure after response: {error}");
+                            }
+                            response_count += 1;
+                            println!(
+                                "[Themes][List] listed={} skipped={} request_latency_ms={:.3}",
+                                report.listed.len(),
+                                report.skipped.len(),
+                                received_at.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
                         BridgeCommand::ModGetBundle(payload) => {                            let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
                                 let response = BridgeResponse {
@@ -4338,6 +4444,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[Themes][SetEnabledSmoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::ThemeListProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Themes][ListSmoke] ok=true stage={} count={} clearvision={}",
+                                payload.stage, payload.count, payload.clearvision
+                            );
+                        } else {
+                            eprintln!(
+                                "[Themes][ListSmoke] ok=false stage={} error={}",
                                 payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
@@ -5106,16 +5226,17 @@ mod tests {
         // Theme injection is a host push: the renderer never requests theme
         // CSS, so no theme-CSS pull capability may exist. `folders.open_theme`,
         // `themes.install_code`, `themes.write_css`, `themes.import_files`,
-        // and `themes.set_enabled` are explicitly allowed: the first names
-        // the themes ROOT for folder opening, the others write theme files
-        // the host then pushes itself — none reads theme CSS back to the
-        // renderer.
+        // `themes.set_enabled`, and `themes.list` are explicitly allowed: the
+        // first names the themes ROOT for folder opening, the rest write or
+        // inventory theme files the host then pushes itself — none reads
+        // theme CSS back to the renderer.
         for capability in super::BOOT_SNAPSHOT.capabilities {
             if *capability == "folders.open_theme"
                 || *capability == "themes.install_code"
                 || *capability == "themes.write_css"
                 || *capability == "themes.import_files"
                 || *capability == "themes.set_enabled"
+                || *capability == "themes.list"
             {
                 continue;
             }
@@ -5485,11 +5606,11 @@ mod tests {
         assert!(super::BOOT_SNAPSHOT
             .capabilities
             .contains(&"themes.set_enabled"));
-        // Flip-only: no list, uninstall, editor, URL install, or generic
+        // Flip-only: no uninstall, editor, URL install, or generic
         // filesystem/settings capability may exist alongside it.
+        // (`themes.list` is the separate read-only inventory slice.)
         for capability in super::BOOT_SNAPSHOT.capabilities {
             assert_ne!(*capability, "themes.set");
-            assert_ne!(*capability, "themes.list");
             assert_ne!(*capability, "themes.uninstall");
             assert_ne!(*capability, "filesystem.write");
         }
@@ -5533,5 +5654,55 @@ mod tests {
         assert!(!super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("openCssEditor"));
         assert!(!super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("fetch("));
         assert!(!super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("sendSync"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_theme_list_without_generic_surface() {
+        assert!(super::BOOT_SNAPSHOT.capabilities.contains(&"themes.list"));
+        // Metadata-only inventory: no CSS pull, no paths, no update URLs,
+        // and no generic filesystem/listing capability alongside it.
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert_ne!(*capability, "themes.get_css");
+            assert_ne!(*capability, "filesystem.list");
+            assert_ne!(*capability, "directory.list");
+        }
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"network"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_theme_list_facade() {
+        let script = initialization_script(&[]).unwrap();
+        assert!(script.contains("themes_list"));
+        assert!(script.contains("themes.list"));
+        assert!(script.contains("listThemes"));
+        // Metadata in, nothing out to the filesystem: no CSS contents, no
+        // paths, no URL/update surface, no generic listing, no sync IPC.
+        // ("themes.list" never contains "themes.get", so the pull-surface
+        // guards below stay exact.)
+        assert!(!script.contains("getCSS"));
+        assert!(!script.contains("getCss"));
+        assert!(!script.contains("updateSrc"));
+        assert!(!script.contains("legcord.fs"));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn theme_list_smoke_probe_inventories_through_the_capability() {
+        assert_eq!(
+            super::THEME_LIST_SMOKE_ENV,
+            "LEGCORD_NATIVE_THEME_LIST_SMOKE"
+        );
+        assert!(super::THEME_LIST_SMOKE_SCRIPT.contains("listThemes"));
+        assert!(super::THEME_LIST_SMOKE_SCRIPT.contains("theme_list_probe"));
+        assert!(super::THEME_LIST_SMOKE_SCRIPT.contains("clearvision"));
+        // The probe inventories metadata and checks the display shape; it
+        // never reads CSS, paths, or the filesystem, and never uses sync
+        // IPC. (The `getThemes`/`getCSS` mentions are must-not-exist
+        // absence checks.)
+        assert!(!super::THEME_LIST_SMOKE_SCRIPT.contains("installBDTheme"));
+        assert!(!super::THEME_LIST_SMOKE_SCRIPT.contains("fetch("));
+        assert!(!super::THEME_LIST_SMOKE_SCRIPT.contains("sendSync"));
     }
 }

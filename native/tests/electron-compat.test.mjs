@@ -907,6 +907,66 @@ test("native theme enable flips only the manifest flag with no CSS machinery", (
     assert.doesNotMatch(enableFacade, /fetch\(|showOpenDialog|openPath|"path"|"filename"|"url"|path:|url:/);
 });
 
+test("Electron keeps the metadata-only theme inventory contract", () => {
+    // getThemes returns one manifest-metadata entry per directory WITH a
+    // readable manifest (id = directory name spread onto the manifest):
+    // no CSS is read, disabled themes are included, missing/malformed
+    // manifests are silently skipped, and ordering is filesystem discovery
+    // order. refresh only invalidates the list cache and re-reads.
+    const themesMain = readFileSync(new URL("../../src/common/themes.ts", import.meta.url), "utf8");
+    assert.match(themesMain, /themes\.push\(\{\s*\.\.\.manifest,\s*id:\s*entry\s*\}\);/);
+    assert.match(themesMain, /if \(manifest\) \{\s*themes\.push/);
+    assert.doesNotMatch(themesMain, /getCachedThemeList[\s\S]{0,400}readFileSync\(`\$\{themePath\}\/\$\{themeFile\.theme\}`/);
+    assert.match(ipc, /ipcMain\.on\("getThemes", \(event\) => \{/);
+    assert.match(ipc, /event\.returnValue = getCachedThemeList\(\);/);
+    assert.match(ipc, /ipcMain\.on\("refreshThemesCache", \(event\) => \{/);
+    assert.match(bridge, /getThemes:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getThemes"\)/);
+    assert.match(bridge, /refresh:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("refreshThemesCache"\)/);
+});
+
+test("no src caller uses the native theme list path yet", () => {
+    // The list capability ships before UI wiring: a native branch in src/
+    // would be fabrication. The themes UI keeps calling the sync getters.
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [bridge, ipc, types, themesPage]) {
+        assert.doesNotMatch(source, /themes\.listThemes/);
+        assert.doesNotMatch(source, /themes\.list\b/);
+        assert.doesNotMatch(source, /themes_list/);
+    }
+    assert.match(themesPage, /window\.legcord\.themes\.refresh\(\)/);
+});
+
+test("native theme list is metadata-only with bounded entries", () => {
+    // The host enumerates its own root in sorted-id order and returns the
+    // UI-consumed display subset: no CSS contents, no paths, no update
+    // URLs, no filesystem surface.
+    const nativeThemes = readFileSync(new URL("../src/themes.rs", import.meta.url), "utf8");
+    assert.match(nativeThemes, /pub fn list_themes/);
+    assert.match(nativeThemes, /pub const MAX_LISTED_THEMES: usize = 256/);
+    assert.match(nativeThemes, /pub const MAX_LIST_FIELD_BYTES: usize = 4096/);
+    const shippedThemes = nativeThemes.slice(0, nativeThemes.indexOf("#[cfg(test)]"));
+    const listBody = shippedThemes.slice(
+        shippedThemes.indexOf("pub fn list_themes"),
+        shippedThemes.indexOf("/// Deterministic DOM id"),
+    );
+    assert.ok(listBody.length > 0);
+    assert.doesNotMatch(listBody, /read_to_string\(&css|css_bytes|updateSrc/);
+    assert.doesNotMatch(listBody, /evaluate_script|fetch\(|ureq|openPath|ShellExecute/);
+    // The facade sends an exact empty payload and validates the bounded
+    // display array: no path, root, selector, URL, or filter member.
+    const listFacade = nativeFacade.slice(
+        nativeFacade.indexOf("function listThemes"),
+        nativeFacade.indexOf("function listBundles"),
+    );
+    assert.ok(listFacade.length > 0);
+    assert.match(listFacade, /requireCapability\("themes\.list"\)/);
+    assert.match(listFacade, /\{\s*type:\s*"themes_list",\s*payload:\s*\{\s*\}\s*\}/);
+    assert.doesNotMatch(listFacade, /fetch\(|showOpenDialog|openPath|"path"|"url"|path:|url:/);
+});
+
 test("settings UI reveals the storage folder natively and sends otherwise", () => {
     const settingsPage = readFileSync(
         new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),

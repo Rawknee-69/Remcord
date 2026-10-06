@@ -388,6 +388,23 @@
         });
     }
 
+    // Maximum inventoried themes per response and maximum single display
+    // string, mirroring the host bounds. A hostile themes directory cannot
+    // widen the bridge response past these.
+    const MAX_THEME_LIST_ENTRIES = 256;
+    const MAX_THEME_LIST_FIELD_BYTES = 4096;
+
+    function listThemes(timeoutMs = 5000) {
+        requireCapability("themes.list");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host owns the root, enumeration,
+        // ordering, and bounds. No path, root, selector, URL, or filter may
+        // be supplied. The host returns bounded display metadata only.
+        return request({ type: "themes_list", payload: {} }, timeoutMs).then((payload) => payload.themes);
+    }
+
     function listBundles(timeoutMs = 5000) {
         requireCapability("backup.list_bundles");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -663,6 +680,39 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "themes_list") {
+            const payload = response.payload.payload;
+            // Bounded display metadata only: an array of exact-shape
+            // entries. No paths, no CSS contents, no URLs, no extra
+            // members anywhere in the envelope.
+            const entries = payload?.themes;
+            const shapesValid =
+                Array.isArray(entries) &&
+                entries.length <= MAX_THEME_LIST_ENTRIES &&
+                entries.every(
+                    (entry) =>
+                        entry &&
+                        Object.keys(entry).length === 6 &&
+                        typeof entry.id === "string" &&
+                        THEME_ID_PATTERN.test(entry.id) &&
+                        entry.id !== "." &&
+                        entry.id !== ".." &&
+                        textEncoder.encode(entry.id).length <= 64 &&
+                        typeof entry.name === "string" &&
+                        textEncoder.encode(entry.name).length <= MAX_THEME_LIST_FIELD_BYTES &&
+                        typeof entry.author === "string" &&
+                        textEncoder.encode(entry.author).length <= MAX_THEME_LIST_FIELD_BYTES &&
+                        typeof entry.description === "string" &&
+                        textEncoder.encode(entry.description).length <= MAX_THEME_LIST_FIELD_BYTES &&
+                        typeof entry.version === "string" &&
+                        textEncoder.encode(entry.version).length <= MAX_THEME_LIST_FIELD_BYTES &&
+                        typeof entry.enabled === "boolean",
+                );
+            if (!payload || !shapesValid) {
+                request.reject(new Error("Native theme list response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -742,7 +792,10 @@
     // persisted state out. No path, filename, manifest, CSS, URL, or
     // destination surface. The host applies the change through its own
     // existing lifecycle.
-    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss, importFiles, setEnabled: setThemeEnabled });
+    // Theme inventory only: an exact empty payload in, a bounded display
+    // array out. No path, root, selector, URL, filter, CSS, or filesystem
+    // surface.
+    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss, importFiles, setEnabled: setThemeEnabled, listThemes });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,

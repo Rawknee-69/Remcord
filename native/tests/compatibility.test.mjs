@@ -2546,9 +2546,9 @@ test("the facade exposes a typed themes.set_enabled flip and no generic set", ()
     const { window } = createEnableRuntime();
     assert.equal(typeof window.legcord.themes.setEnabled, "function");
     assert.equal(window.legcord.native.supports("themes.set_enabled"), true);
-    // No untyped set, list, filesystem, or path surface may exist.
+    // No untyped set surface may exist. (The read-only `listThemes`
+    // inventory is a separate slice with its own capability and tests.)
     assert.equal(window.legcord.themes.set, undefined);
-    assert.equal(window.legcord.themes.listThemes, undefined);
     assert.equal(window.legcord.fs, undefined);
 });
 
@@ -2679,6 +2679,139 @@ test("a reloaded document gets a fresh theme enable facade with no stale promise
 
 test("theme enable requests stay inert off the trusted origin", async () => {
     const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.set_enabled"]);
+    assert.equal(window.legcord, undefined);
+});
+
+function createListRuntime(capabilities = ["bridge.ping", "themes.list"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const LIST_FIXTURE = [
+    { id: "alpha-BD", name: "Alpha", author: "A", description: "First", version: "1", enabled: false },
+    { id: "zulu-BD", name: "Zulu", author: "", description: "", version: "", enabled: true },
+];
+
+function respondThemesList(window, request, themes = LIST_FIXTURE) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "themes_list", payload: { themes } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a parameter-free themes.list inventory", () => {
+    const { window } = createListRuntime();
+    assert.equal(typeof window.legcord.themes.listThemes, "function");
+    assert.equal(window.legcord.native.supports("themes.list"), true);
+    // No CSS pull, filesystem, path, or URL surface may exist.
+    assert.equal(window.legcord.themes.getThemes, undefined);
+    assert.equal(window.legcord.themes.getCSS, undefined);
+    assert.equal(window.legcord.fs, undefined);
+});
+
+test("themes.list sends an exact empty payload and resolves the display array", async () => {
+    const { window } = createListRuntime();
+    const pending = window.legcord.themes.listThemes();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "themes_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "themes_list", payload: {} });
+
+    respondThemesList(window, message);
+    assert.deepEqual(await pending, LIST_FIXTURE);
+});
+
+test("themes.list throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createListRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("themes.list"), false);
+    assert.throws(
+        () => window.legcord.themes.listThemes(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "themes_list"),
+        false,
+    );
+});
+
+test("themes.list rejects malformed inventories without path leakage", async () => {
+    // Non-array inventory.
+    const nonArray = createListRuntime();
+    const pendingArray = nonArray.window.legcord.themes.listThemes();
+    const messageArray = nonArray.window.messages.find((entry) => entry.command?.type === "themes_list");
+    respondThemesList(nonArray.window, messageArray, { themes: "nope" });
+    await assert.rejects(pendingArray, /theme list response schema is invalid/);
+
+    // Entry with a path member, a wrong-typed field, and an oversized id.
+    for (const themes of [
+        [{ ...LIST_FIXTURE[0], path: "C:\\themes\\x" }],
+        [{ ...LIST_FIXTURE[0], enabled: "yes" }],
+        [{ ...LIST_FIXTURE[0], id: "t".repeat(65) }],
+        [{ ...LIST_FIXTURE[0], extra: 1 }],
+        "not-an-array",
+    ]) {
+        const runtime = createListRuntime();
+        const pending = runtime.window.legcord.themes.listThemes();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "themes_list");
+        respondThemesList(runtime.window, message, themes);
+        await assert.rejects(pending, /theme list response schema is invalid/);
+    }
+
+    // Over-long display string.
+    const long = createListRuntime();
+    const pendingLong = long.window.legcord.themes.listThemes();
+    const messageLong = long.window.messages.find((entry) => entry.command?.type === "themes_list");
+    respondThemesList(long.window, messageLong, [{ ...LIST_FIXTURE[0], description: "x".repeat(4097) }]);
+    await assert.rejects(pendingLong, /theme list response schema is invalid/);
+
+    // Excessive entry count.
+    const many = createListRuntime();
+    const pendingMany = many.window.legcord.themes.listThemes();
+    const messageMany = many.window.messages.find((entry) => entry.command?.type === "themes_list");
+    respondThemesList(
+        many.window,
+        messageMany,
+        Array.from({ length: 257 }, (_, index) => ({ ...LIST_FIXTURE[0], id: `t-${index}-BD` })),
+    );
+    await assert.rejects(pendingMany, /theme list response schema is invalid/);
+});
+
+test("themes.list rejects after its timeout", async () => {
+    const { window } = createListRuntime();
+    await assert.rejects(window.legcord.themes.listThemes(50), /timed out/);
+});
+
+test("themes.list rejects pending requests when the document is disposed", async () => {
+    const { window } = createListRuntime();
+    const pending = window.legcord.themes.listThemes();
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh theme list facade with no stale promises", async () => {
+    const firstDocument = createListRuntime();
+    const stale = firstDocument.window.legcord.themes.listThemes();
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createListRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.themes.listThemes();
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "themes_list");
+    respondThemesList(nextDocument.window, message, []);
+    assert.deepEqual(await pending, []);
+});
+
+test("theme list requests stay inert off the trusted origin", async () => {
+    const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.list"]);
     assert.equal(window.legcord, undefined);
 });
 

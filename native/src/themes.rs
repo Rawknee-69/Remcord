@@ -722,6 +722,165 @@ pub fn set_theme_enabled(
     })
 }
 
+/// Maximum inventoried themes in one list response. Theme directories are
+/// a handful in practice; the cap keeps a hostile directory from building
+/// an unbounded bridge response. Entries are sorted by id and the first
+/// `MAX_LISTED_THEMES` are reported.
+pub const MAX_LISTED_THEMES: usize = 256;
+/// Maximum single display string in the list response in UTF-8 bytes.
+/// Native-installed themes already cap header fields at 4 KiB; only a
+/// foreign hand-placed manifest can exceed this, and such a theme is
+/// skipped with a logged reason instead of widening the response.
+pub const MAX_LIST_FIELD_BYTES: usize = 4096;
+
+/// One inventoried theme for the read-only list: bounded display metadata
+/// only. No paths, no CSS contents, no update URLs. The renderer-facing
+/// subset of Electron's `getThemes()` entries actually consumed by the
+/// themes UI (`id`, `name`, `author`, `description`, `version`, `enabled`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ThemeListEntry {
+    /// Directory id (validated, never sanitized).
+    pub id: String,
+    /// Display name (`""` when the manifest omits it, as Electron renders).
+    pub name: String,
+    /// Display author (`""` when absent).
+    pub author: String,
+    /// Display description (`""` when absent).
+    pub description: String,
+    /// Display version (`""` when absent).
+    pub version: String,
+    /// Persisted state (`manifest.enabled != Some(false)`, matching the
+    /// native loader default for a missing field).
+    pub enabled: bool,
+}
+
+/// Aggregate report for one host-side theme inventory pass.
+#[derive(Debug, Clone, Default)]
+pub struct ThemeListReport {
+    /// Bounded display entries in sorted-id order.
+    pub listed: Vec<ThemeListEntry>,
+    /// Per-theme skip reasons. One bad theme never blocks others.
+    pub skipped: Vec<SkippedTheme>,
+}
+
+/// Read one display string for the inventory: present strings pass through,
+/// absent or wrong-typed values become `""` (Electron renders those blank
+/// too). Over-long values fail the entry closed instead of widening the
+/// bridge response.
+fn list_display_string(
+    document: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    match document.get(key) {
+        None => Some(String::new()),
+        Some(serde_json::Value::String(value)) if value.len() <= MAX_LIST_FIELD_BYTES => {
+            Some(value.clone())
+        }
+        Some(serde_json::Value::String(_)) => None,
+        Some(_) => Some(String::new()),
+    }
+}
+
+/// Inventory the host-controlled themes root for display metadata.
+///
+/// Mirrors Electron's `getCachedThemeList` shape (one entry per directory
+/// with a readable manifest, disabled themes included, missing CSS
+/// irrelevant — the list never reads CSS) with deliberate hardening:
+/// invalid ids skipped, directory links resolving outside fail closed,
+/// manifests read through the shared no-follow bound, over-long display
+/// fields skip exactly one theme, output sorted by id (Electron uses
+/// filesystem discovery order), and at most `MAX_LISTED_THEMES` entries.
+pub fn list_themes(profile_dir: &Path) -> ThemeListReport {
+    let mut report = ThemeListReport::default();
+    let root = themes_dir(profile_dir);
+    if !root.exists() {
+        return report;
+    }
+    let mut entries: Vec<String> = Vec::new();
+    let listing = match std::fs::read_dir(&root) {
+        Ok(listing) => listing,
+        Err(_) => return report,
+    };
+    for entry in listing.flatten() {
+        entries.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    entries.sort();
+    report.listed.reserve(entries.len().min(MAX_LISTED_THEMES));
+
+    for id in entries {
+        if report.listed.len() >= MAX_LISTED_THEMES {
+            break;
+        }
+        let skip = |report: &mut ThemeListReport, reason: &'static str| {
+            report.skipped.push(SkippedTheme {
+                id: id.clone(),
+                reason,
+            });
+        };
+        if validate_theme_id(&id).is_err() {
+            skip(&mut report, "invalid_id");
+            continue;
+        }
+        let theme_canonical = match resolve_theme_dir(profile_dir, &id) {
+            Ok(dir) => dir,
+            Err(failure) if failure.code == "UNKNOWN_THEME" => {
+                // Cannot happen for a just-enumerated entry, but a removal
+                // racing the inventory must skip, never fail, the pass.
+                skip(&mut report, "missing_manifest");
+                continue;
+            }
+            Err(_) => {
+                skip(&mut report, "outside_root");
+                continue;
+            }
+        };
+        let manifest_text = match read_manifest_text(&theme_canonical.join("manifest.json")) {
+            Ok(text) => text,
+            Err(_) => {
+                skip(&mut report, "invalid_manifest");
+                continue;
+            }
+        };
+        let manifest: serde_json::Value = match serde_json::from_str(&manifest_text) {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                skip(&mut report, "invalid_manifest");
+                continue;
+            }
+        };
+        let document = match manifest.as_object() {
+            Some(document) => document,
+            None => {
+                skip(&mut report, "invalid_manifest");
+                continue;
+            }
+        };
+        let (Some(name), Some(author), Some(description), Some(version)) = (
+            list_display_string(document, "name"),
+            list_display_string(document, "author"),
+            list_display_string(document, "description"),
+            list_display_string(document, "version"),
+        ) else {
+            skip(&mut report, "metadata_too_large");
+            continue;
+        };
+        let enabled = !matches!(
+            document.get("enabled"),
+            Some(serde_json::Value::Bool(false))
+        );
+        report.listed.push(ThemeListEntry {
+            id,
+            name,
+            author,
+            description,
+            version,
+            enabled,
+        });
+    }
+
+    report
+}
+
 /// Deterministic DOM id for one theme's managed style element.
 pub fn theme_style_id(theme_id: &str) -> String {
     format!("{THEME_STYLE_ID_PREFIX}{theme_id}")
@@ -1862,5 +2021,183 @@ mod tests {
             .all(|entry| entry.expect("entry must read").file_name() == "manifest.json"));
         fs::remove_dir_all(&profile).ok();
         fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn inventory_lists_valid_themes_sorted_with_loader_parity_enablement() {
+        let profile = temp_profile();
+        write_theme(
+            &profile,
+            "zulu-BD",
+            r#"{"theme":"src.css","name":"Zulu","author":"Z","description":"Last","version":"2","enabled":true}"#,
+            Some(("src.css", ":root{--z:1;}")),
+        );
+        write_theme(
+            &profile,
+            "alpha-BD",
+            r#"{"theme":"src.css","name":"Alpha","enabled":false}"#,
+            Some(("src.css", ":root{--a:1;}")),
+        );
+        // Missing `enabled` defaults to enabled, matching the loader.
+        write_theme(
+            &profile,
+            "middle-BD",
+            r#"{"theme":"src.css","name":"Middle"}"#,
+            Some(("src.css", ":root{--m:1;}")),
+        );
+        // Missing CSS is irrelevant to the inventory (Electron parity).
+        write_theme(
+            &profile,
+            "nocss-BD",
+            r#"{"theme":"src.css","name":"NoCss"}"#,
+            None,
+        );
+        let report = super::list_themes(&profile);
+        assert_eq!(report.listed.len(), 4);
+        let ids: Vec<&str> = report
+            .listed
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["alpha-BD", "middle-BD", "nocss-BD", "zulu-BD"]);
+        assert!(report.skipped.is_empty());
+        let zulu = &report.listed[3];
+        assert_eq!(zulu.name, "Zulu");
+        assert_eq!(zulu.author, "Z");
+        assert_eq!(zulu.description, "Last");
+        assert_eq!(zulu.version, "2");
+        assert!(zulu.enabled);
+        assert!(!report.listed[0].enabled);
+        assert!(report.listed[1].enabled);
+        assert!(report.listed[2].enabled);
+        // Wrong-typed display fields render blank instead of failing.
+        write_theme(
+            &profile,
+            "odd-BD",
+            r#"{"theme":"src.css","name":42,"author":null,"enabled":true}"#,
+            Some(("src.css", ":root{}\n")),
+        );
+        let again = super::list_themes(&profile);
+        let odd = again
+            .listed
+            .iter()
+            .find(|entry| entry.id == "odd-BD")
+            .expect("odd theme must list");
+        assert_eq!(odd.name, "");
+        assert_eq!(odd.author, "");
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn inventory_skips_broken_themes_without_blocking_siblings() {
+        let profile = temp_profile();
+        write_theme(
+            &profile,
+            "good-BD",
+            r#"{"theme":"src.css","name":"Good","enabled":true}"#,
+            Some(("src.css", ":root{}\n")),
+        );
+        write_theme(&profile, "nomanifest-BD", r#"{"theme":"src.css"}"#, None);
+        fs::remove_file(
+            profile
+                .join("themes")
+                .join("nomanifest-BD")
+                .join("manifest.json"),
+        )
+        .expect("fixture manifest must remove");
+        write_theme(
+            &profile,
+            "badjson-BD",
+            "{not json",
+            Some(("src.css", ":root{}\n")),
+        );
+        write_theme(
+            &profile,
+            "array-BD",
+            "[1,2]",
+            Some(("src.css", ":root{}\n")),
+        );
+        // Invalid id directory: skipped, never validated further.
+        fs::create_dir_all(profile.join("themes").join("has space")).expect("dir must create");
+        // Oversized manifest: skipped.
+        let big = format!(
+            r#"{{"theme":"src.css","name":"B","pad":"{}"}}"#,
+            "x".repeat(super::MAX_MANIFEST_BYTES)
+        );
+        write_theme(&profile, "big-BD", &big, Some(("src.css", ":root{}\n")));
+        // Over-long single display field: skipped exactly once.
+        let long = format!(r#"{{"theme":"src.css","name":"{}"}}"#, "y".repeat(5000));
+        write_theme(&profile, "long-BD", &long, Some(("src.css", ":root{}\n")));
+        let report = super::list_themes(&profile);
+        assert_eq!(report.listed.len(), 1);
+        assert_eq!(report.listed[0].id, "good-BD");
+        let reasons: Vec<&str> = report.skipped.iter().map(|entry| entry.reason).collect();
+        assert!(reasons.contains(&"invalid_manifest"));
+        assert!(reasons.contains(&"invalid_id"));
+        assert!(reasons.contains(&"metadata_too_large"));
+        assert_eq!(report.skipped.len(), 6);
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn inventory_refuses_planted_links_and_bounds_total_entries() {
+        let profile = temp_profile();
+        let outside = temp_profile();
+        fs::write(
+            outside.join("manifest.json"),
+            r#"{"theme":"src.css","name":"Out"}"#,
+        )
+        .expect("outside manifest must write");
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_dir(
+            outside.as_path(),
+            profile.join("themes").join("linked-BD"),
+        );
+        #[cfg(not(windows))]
+        let link_result =
+            std::os::unix::fs::symlink(outside.as_path(), profile.join("themes").join("linked-BD"));
+        if link_result.is_err() {
+            eprintln!("SKIP: link creation needs privileges in this environment; lexical safety still holds");
+        } else {
+            let report = super::list_themes(&profile);
+            assert!(report.listed.is_empty());
+            assert!(report
+                .skipped
+                .iter()
+                .any(|entry| entry.reason == "outside_root"));
+            fs::remove_dir_all(profile.join("themes").join("linked-BD")).ok();
+        }
+        // Entry cap: a pathological directory cannot widen the response.
+        for index in 0..(super::MAX_LISTED_THEMES + 10) {
+            let id = format!("t-{index:04}-BD");
+            write_theme(
+                &profile,
+                &id,
+                r#"{"theme":"src.css","name":"T"}"#,
+                Some(("src.css", ":root{}\n")),
+            );
+        }
+        let capped = super::list_themes(&profile);
+        assert_eq!(capped.listed.len(), super::MAX_LISTED_THEMES);
+        assert_eq!(
+            capped.listed.first().expect("first must exist").id,
+            "t-0000-BD"
+        );
+        assert_eq!(
+            capped.listed.last().expect("last must exist").id,
+            format!("t-{:04}-BD", super::MAX_LISTED_THEMES - 1)
+        );
+        fs::remove_dir_all(&profile).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn inventory_of_missing_root_lists_nothing() {
+        let profile = temp_profile();
+        fs::remove_dir_all(profile.join("themes")).ok();
+        let report = super::list_themes(&profile);
+        assert!(report.listed.is_empty());
+        assert!(report.skipped.is_empty());
+        fs::remove_dir_all(&profile).ok();
     }
 }

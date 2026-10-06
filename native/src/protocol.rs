@@ -57,6 +57,7 @@ pub enum BridgeCommand {
     ThemeWriteCss(ThemeWriteCssRequest),
     ThemeImportFiles(ThemeImportFilesRequest),
     ThemeSetEnabled(ThemeSetEnabledRequest),
+    ThemesList(ThemesListRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +223,14 @@ pub struct ThemeSetEnabledRequest {
     pub enabled: bool,
 }
 
+/// Empty request for the read-only `themes.list` inventory capability. There
+/// is deliberately NO path, root, selector, URL, or filter: the host owns
+/// the themes root, enumeration, manifest reads, ordering, and bounds. Any
+/// extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemesListRequest {}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -289,6 +298,9 @@ pub enum BridgeEvent {
     /// (`LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE=1`). Never sent by shipped
     /// code.
     ThemeSetEnabledProbe(ThemeSetEnabledProbe),
+    /// DEV-only diagnostic posted by the theme list smoke probe
+    /// (`LEGCORD_NATIVE_THEME_LIST_SMOKE=1`). Never sent by shipped code.
+    ThemeListProbe(ThemeListProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -541,6 +553,23 @@ pub struct ThemeSetEnabledProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the theme list smoke probe. `stage` is `"list"`
+/// (inventory the host themes root through the real capability and verify
+/// the bounded display shape). `count` is the inventoried entry count;
+/// `clearvision` reports the observed-problem fixture when present
+/// (`"present-enabled"` / `"present-disabled"`), `"absent"` when its
+/// directory does not exist, or `"failed"`. The probe never carries CSS
+/// contents or host paths.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeListProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub count: u32,
+    pub clearvision: String,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
@@ -575,6 +604,7 @@ pub enum BridgeResponsePayload {
     ThemeWritten(ThemeWrittenResponse),
     ThemeImported(ThemeImportedResponse),
     ThemeEnabled(ThemeEnabledResponse),
+    ThemesList(ThemesListResponse),
 }
 
 #[derive(Serialize)]
@@ -753,6 +783,15 @@ pub struct ThemeEnabledResponse {
     pub enabled: bool,
 }
 
+/// Read-only inventory response for the `themes.list` capability: bounded
+/// display metadata only, in sorted-id order. No ids beyond the validated
+/// set, no arrays beyond the entry cap, no paths, no CSS contents, no
+/// update URLs, no filesystem error text.
+#[derive(Serialize)]
+pub struct ThemesListResponse {
+    pub themes: Vec<crate::themes::ThemeListEntry>,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -919,6 +958,11 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid theme enable flip".to_owned());
                     }
                 }
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
+                // is needed. Enumeration, bounds, and ordering live in
+                // `themes` and are enforced at dispatch.
+                BridgeCommand::ThemesList(_) => {}
             }
         }
         BridgeMessage::Event(event) => {
@@ -1226,6 +1270,22 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                                 || payload.attacks_blocked != 3))
                     {
                         return Err("invalid theme enable probe result".to_owned());
+                    }
+                }
+                BridgeEvent::ThemeListProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "list")
+                        || !matches!(
+                            payload.clearvision.as_str(),
+                            "absent" | "present-enabled" | "present-disabled" | "failed"
+                        )
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok && payload.clearvision == "failed")
+                    {
+                        return Err("invalid theme list probe result".to_owned());
                     }
                 }
             }
@@ -1896,6 +1956,79 @@ mod tests {
         assert!(parse_bridge_message(exclusive).is_err());
         assert!(parse_bridge_message(cv_failed).is_err());
         assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn accepts_themes_list_with_an_exact_empty_payload() {
+        let request =
+            r#"{"version":1,"request_id":"list-1","command":{"type":"themes_list","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No path, root, selector, URL, or filter may ride along; the host
+        // owns enumeration, ordering, and bounds.
+        let with_path = r#"{"version":1,"request_id":"list-2","command":{"type":"themes_list","payload":{"path":"C:\\x"}}}"#;
+        let with_root = r#"{"version":1,"request_id":"list-3","command":{"type":"themes_list","payload":{"root":"themes"}}}"#;
+        let with_url = r#"{"version":1,"request_id":"list-4","command":{"type":"themes_list","payload":{"url":"https://attacker.invalid/"}}}"#;
+        let with_filter = r#"{"version":1,"request_id":"list-5","command":{"type":"themes_list","payload":{"filter":"dark"}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_root).is_err());
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(with_filter).is_err());
+    }
+
+    #[test]
+    fn serializes_a_bounded_themes_list_response() {
+        use super::ThemesListResponse;
+        use crate::themes::ThemeListEntry;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "list-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::ThemesList(ThemesListResponse {
+                themes: vec![ThemeListEntry {
+                    id: "Midnight-Harbor-BD".to_owned(),
+                    name: "Midnight Harbor".to_owned(),
+                    author: "Harbor Line".to_owned(),
+                    description: "A dark harbor theme.".to_owned(),
+                    version: "1.2.0".to_owned(),
+                    enabled: false,
+                }],
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "themes_list");
+        let entry = &value["payload"]["payload"]["themes"][0];
+        assert_eq!(entry["id"], "Midnight-Harbor-BD");
+        assert_eq!(entry["name"], "Midnight Harbor");
+        assert_eq!(entry["enabled"], false);
+        assert_eq!(entry.as_object().map(|object| object.len()), Some(6));
+        // Display metadata only: no paths, CSS, URLs, or manifests.
+        assert!(entry.get("path").is_none());
+        assert!(entry.get("css").is_none());
+        assert!(entry.get("url").is_none());
+        assert!(entry.get("theme").is_none());
+        assert!(entry.get("updateSrc").is_none());
+        assert!(value["payload"]["payload"].get("profile").is_none());
+    }
+
+    #[test]
+    fn validates_theme_list_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"theme_list_probe","payload":{"ok":true,"stage":"list","count":1,"clearvision":"present-disabled","error":null}}}"#;
+        let absent = r#"{"version":1,"event":{"type":"theme_list_probe","payload":{"ok":true,"stage":"list","count":0,"clearvision":"absent","error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"theme_list_probe","payload":{"ok":false,"stage":"list","count":0,"clearvision":"failed","error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"theme_list_probe","payload":{"ok":true,"stage":"inventory","count":1,"clearvision":"present-disabled","error":null}}}"#;
+        let cv_failed = r#"{"version":1,"event":{"type":"theme_list_probe","payload":{"ok":true,"stage":"list","count":1,"clearvision":"failed","error":null}}}"#;
+        let with_path = r#"{"version":1,"event":{"type":"theme_list_probe","payload":{"ok":true,"stage":"list","count":1,"clearvision":"present-disabled","path":"C:\\x","error":null}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(absent).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(cv_failed).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
     }
 
     #[test]
