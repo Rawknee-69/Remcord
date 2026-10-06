@@ -55,6 +55,7 @@ pub enum BridgeCommand {
     FoldersOpenTheme(FoldersOpenThemeRequest),
     ThemeInstallCode(ThemeInstallCodeRequest),
     ThemeWriteCss(ThemeWriteCssRequest),
+    ThemeImportFiles(ThemeImportFilesRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +199,15 @@ pub struct ThemeWriteCssRequest {
     pub css: String,
 }
 
+/// Empty request for the `themes.import_files` capability: the host-owned
+/// file picker plus bounded local ingestion. There is deliberately NO path,
+/// filename, URL, directory, filter, or dialog option: the host defines the
+/// entire picker configuration. Any extra field is rejected, so a renderer
+/// cannot select, narrow, or redirect what the host reads.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeImportFilesRequest {}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -257,6 +267,10 @@ pub enum BridgeEvent {
     /// (`LEGCORD_NATIVE_THEME_WRITE_SMOKE=1`). Never sent by shipped
     /// code.
     ThemeWriteProbe(ThemeWriteProbe),
+    /// DEV-only diagnostic posted by the theme import smoke probe
+    /// (`LEGCORD_NATIVE_THEME_IMPORT_SMOKE=1`). Never sent by shipped
+    /// code.
+    ThemeImportProbe(ThemeImportProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,6 +482,23 @@ pub struct ThemeWriteProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the theme import smoke probe. `stage` is `"import"`
+/// (open the real host picker through the capability; user completion or
+/// dismissal resolves the bounded summary). Unlike the install/write probes
+/// there is no `attacks_blocked`: the facade takes no input, so there is no
+/// client-side attack shape to block. The probe never carries CSS contents,
+/// theme ids, or host paths.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeImportProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub canceled: bool,
+    pub imported: u32,
+    pub failed: u32,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum BridgeMessage {
@@ -500,6 +531,7 @@ pub enum BridgeResponsePayload {
     ThemeFolderOpened(ThemeFolderOpenedResponse),
     ThemeInstalled(ThemeInstalledResponse),
     ThemeWritten(ThemeWrittenResponse),
+    ThemeImported(ThemeImportedResponse),
 }
 
 #[derive(Serialize)]
@@ -655,6 +687,20 @@ pub struct ThemeWrittenResponse {
     pub css_bytes: usize,
 }
 
+/// Bounded summary response for the `themes.import_files` capability:
+/// cancellation plus counts only. No theme ids (a future list refresh owns
+/// those), no arrays, no paths, no filesystem error text.
+#[derive(Serialize)]
+pub struct ThemeImportedResponse {
+    /// True when the user dismissed the picker (or it returned nothing).
+    /// `imported` and `failed` are then both zero.
+    pub canceled: bool,
+    /// Files installed through the shared installer.
+    pub imported: u32,
+    /// Files skipped with a typed host-side code.
+    pub failed: u32,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -808,6 +854,11 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid theme CSS write".to_owned());
                     }
                 }
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
+                // is needed. The picker configuration and the ingestion
+                // bounds live in `theme_import` and are enforced at dispatch.
+                BridgeCommand::ThemeImportFiles(_) => {}
             }
         }
         BridgeMessage::Event(event) => {
@@ -1074,6 +1125,23 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                                 || payload.attacks_blocked != 3))
                     {
                         return Err("invalid theme write probe result".to_owned());
+                    }
+                }
+                BridgeEvent::ThemeImportProbe(payload) => {
+                    // Cancellation is a successful probe outcome (the silent
+                    // path), so it must still carry zero counts; a failed
+                    // probe carries the typed renderer error instead.
+                    if !matches!(payload.stage.as_str(), "import")
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok
+                            && payload.canceled
+                            && (payload.imported != 0 || payload.failed != 0))
+                    {
+                        return Err("invalid theme import probe result".to_owned());
                     }
                 }
             }
@@ -1645,6 +1713,86 @@ mod tests {
         assert!(parse_bridge_message(disabled).is_err());
         assert!(parse_bridge_message(unreflected).is_err());
         assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn validates_theme_import_probe_diagnostics() {
+        let imported = r#"{"version":1,"event":{"type":"theme_import_probe","payload":{"ok":true,"stage":"import","canceled":false,"imported":1,"failed":0,"error":null}}}"#;
+        let canceled = r#"{"version":1,"event":{"type":"theme_import_probe","payload":{"ok":true,"stage":"import","canceled":true,"imported":0,"failed":0,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"theme_import_probe","payload":{"ok":false,"stage":"import","canceled":false,"imported":0,"failed":0,"error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"theme_import_probe","payload":{"ok":true,"stage":"install","canceled":false,"imported":1,"failed":0,"error":null}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"theme_import_probe","payload":{"ok":true,"stage":"import","canceled":true,"imported":1,"failed":0,"error":null}}}"#;
+        let negative = r#"{"version":1,"event":{"type":"theme_import_probe","payload":{"ok":true,"stage":"import","canceled":false,"imported":-1,"failed":0,"error":null}}}"#;
+        let with_path = r#"{"version":1,"event":{"type":"theme_import_probe","payload":{"ok":true,"stage":"import","canceled":false,"imported":1,"failed":0,"path":"C:\\x","error":null}}}"#;
+        assert!(parse_bridge_message(imported).is_ok());
+        assert!(parse_bridge_message(canceled).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
+        assert!(parse_bridge_message(negative).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+    }
+
+    #[test]
+    fn accepts_theme_import_files_with_an_exact_empty_payload() {
+        let request = r#"{"version":1,"request_id":"import-1","command":{"type":"theme_import_files","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No path, filename, URL, directory, filter, or dialog option may
+        // ride along; the host defines the entire picker configuration.
+        let with_path = r#"{"version":1,"request_id":"import-2","command":{"type":"theme_import_files","payload":{"path":"C:\\x"}}}"#;
+        let with_url = r#"{"version":1,"request_id":"import-3","command":{"type":"theme_import_files","payload":{"url":"https://attacker.invalid/x.css"}}}"#;
+        let with_file = r#"{"version":1,"request_id":"import-4","command":{"type":"theme_import_files","payload":{"filename":"x.css"}}}"#;
+        let with_dir = r#"{"version":1,"request_id":"import-5","command":{"type":"theme_import_files","payload":{"directory":"C:\\themes"}}}"#;
+        let with_filters = r#"{"version":1,"request_id":"import-6","command":{"type":"theme_import_files","payload":{"filters":[]}}}"#;
+        let with_options = r#"{"version":1,"request_id":"import-7","command":{"type":"theme_import_files","payload":{"options":{}}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(with_file).is_err());
+        assert!(parse_bridge_message(with_dir).is_err());
+        assert!(parse_bridge_message(with_filters).is_err());
+        assert!(parse_bridge_message(with_options).is_err());
+    }
+
+    #[test]
+    fn serializes_a_bounded_theme_import_summary() {
+        use super::ThemeImportedResponse;
+        for (canceled, imported, failed) in [(true, 0, 0), (false, 2, 1), (false, 0, 3)] {
+            let response = BridgeResponse {
+                version: PROTOCOL_VERSION,
+                request_id: "import-1".to_owned(),
+                ok: true,
+                payload: Some(BridgeResponsePayload::ThemeImported(
+                    ThemeImportedResponse {
+                        canceled,
+                        imported,
+                        failed,
+                    },
+                )),
+                error: None,
+            };
+            let value = serde_json::to_value(response).unwrap();
+            assert_eq!(value["payload"]["type"], "theme_imported");
+            assert_eq!(value["payload"]["payload"]["canceled"], canceled);
+            assert_eq!(value["payload"]["payload"]["imported"], imported);
+            assert_eq!(value["payload"]["payload"]["failed"], failed);
+            // Counts only: no ids, arrays, paths, URLs, or source echo.
+            assert_eq!(
+                value["payload"]["payload"]
+                    .as_object()
+                    .map(|object| object.len()),
+                Some(3)
+            );
+            assert!(value["payload"]["payload"].get("id").is_none());
+            assert!(value["payload"]["payload"].get("ids").is_none());
+            assert!(value["payload"]["payload"].get("path").is_none());
+            assert!(value["payload"]["payload"].get("url").is_none());
+            assert!(value["payload"]["payload"].get("css").is_none());
+            assert!(value["payload"]["payload"].get("error").is_none());
+        }
     }
 
     #[test]

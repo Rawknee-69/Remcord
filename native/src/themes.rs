@@ -333,20 +333,19 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), ThemeInstallFailur
     Ok(())
 }
 
-/// Install one BetterDiscord theme from CSS text under the host-controlled
+/// Install one already-parsed BetterDiscord theme under the host-controlled
 /// themes root.
 ///
-/// The renderer supplies only the source text: the id is derived from
-/// `@name` (validated, never sanitized), the CSS filename is the fixed
-/// `src.css`, and `enabled` is always `false` (Electron parity — a fresh BD
-/// install starts disabled; the native loader skips it until an enable path
-/// exists). Overwriting an existing id directory is deterministic (same
-/// inputs, same files), matching Electron's silent overwrite. The existing
-/// live watcher observes the written files and drives the managed CSS
-/// lifecycle; nothing here touches the renderer.
-pub fn install_theme_from_code(
+/// This is the SINGLE installation implementation underneath both
+/// [`install_theme_from_code`] (CSS text from the renderer) and the native
+/// file-import path (CSS text read from host-picked files): manifest
+/// generation, id validation, bounds, and atomic writes live here exactly
+/// once. Callers bound and parse the CSS text first; the size is re-checked
+/// here defensively so no caller can bypass the bound.
+pub fn install_parsed_theme(
     profile_dir: &Path,
     css: &str,
+    parsed: ParsedBdManifest,
 ) -> Result<ThemeInstallResult, ThemeInstallFailure> {
     if css.len() > MAX_THEME_CSS_BYTES {
         return Err(install_failure(
@@ -354,7 +353,6 @@ pub fn install_theme_from_code(
             "theme CSS exceeds the size limit",
         ));
     }
-    let parsed = parse_bd_manifest(css)?;
     let titlebar = css.contains(".titlebar");
     // Electron-identical manifest shape (key order normalized —
     // JSON semantics are order-insensitive and both loaders ignore order),
@@ -426,6 +424,34 @@ pub fn install_theme_from_code(
         enabled: false,
         css_bytes: css.len(),
     })
+}
+
+/// Install one BetterDiscord theme from CSS text under the host-controlled
+/// themes root.
+///
+/// The renderer supplies only the source text: the id is derived from
+/// `@name` (validated, never sanitized), the CSS filename is the fixed
+/// `src.css`, and `enabled` is always `false` (Electron parity — a fresh BD
+/// install starts disabled; the native loader skips it until an enable path
+/// exists). Overwriting an existing id directory is deterministic (same
+/// inputs, same files), matching Electron's silent overwrite. The existing
+/// live watcher observes the written files and drives the managed CSS
+/// lifecycle; nothing here touches the renderer.
+///
+/// The parse and the install converge with the file-import path on
+/// [`install_parsed_theme`]: behavior here is unchanged by that sharing.
+pub fn install_theme_from_code(
+    profile_dir: &Path,
+    css: &str,
+) -> Result<ThemeInstallResult, ThemeInstallFailure> {
+    if css.len() > MAX_THEME_CSS_BYTES {
+        return Err(install_failure(
+            "THEME_TOO_LARGE",
+            "theme CSS exceeds the size limit",
+        ));
+    }
+    let parsed = parse_bd_manifest(css)?;
+    install_parsed_theme(profile_dir, css, parsed)
 }
 
 /// Successful CSS-write report: the validated id, the preserved enablement

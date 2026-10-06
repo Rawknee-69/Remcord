@@ -53,6 +53,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request (theme folder open) | `{"version":1,"request_id":"...","command":{"type":"folders_open_theme","payload":{"id":"my-theme"}}}` |
 | Renderer request (theme install) | `{"version":1,"request_id":"...","command":{"type":"theme_install_code","payload":{"css":"/** @name Midnight Harbor */ :root {}"}}}` |
 | Renderer request (theme CSS write) | `{"version":1,"request_id":"...","command":{"type":"theme_write_css","payload":{"id":"my-theme","css":":root {}"}}}` |
+| Renderer request (theme file import) | `{"version":1,"request_id":"...","command":{"type":"theme_import_files","payload":{}}}` |
 | Ping response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"ping","payload":{"nonce":"...","message":"pong"}},"error":null}` |
 | Mod bundle response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"mod_bundle","payload":{"mod_id":"vencord","bundle_version":"...","bundle_bytes":1,"css_bytes":1,"request_latency_ms":1.0,"retrieval_ms":1.0,"execution_ms":1.0,"css_injection_ms":1.0,"marker":"vencord-bootstrap-executed","document_execution_count":1}},"error":null}` |
 | Settings response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"settings_config","payload":{"settings":{...},"source":"file","payload_bytes":2048}},"error":null}` |
@@ -66,9 +67,10 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Theme folder open response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_folder_opened","payload":{"id":"my-theme"}},"error":null}` |
 | Theme install response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_installed","payload":{"id":"Midnight-Harbor-BD","enabled":false,"css_bytes":128}},"error":null}` |
 | Theme CSS write response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_written","payload":{"id":"my-theme","enabled":true,"css_bytes":32}},"error":null}` |
+| Theme import response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_imported","payload":{"canceled":false,"imported":1,"failed":0}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, `folders_open_theme`, `theme_install_code`, and `theme_write_css`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, `folders_open_theme`, `theme_install_code`, `theme_write_css`, and `theme_import_files`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -310,6 +312,34 @@ renderer await window.legcord.themes.writeCss("my-theme", css)
 The write goes through the canonical directory plus one validated component; a pre-planted link at the destination is refused outright (stricter than follow-then-contain); the temp file is uniquely named with create-new semantics so it cannot be pre-planted either. A missing directory is `UNKNOWN_THEME` (never created); a missing/malformed/oversized manifest is `INVALID_MANIFEST`; an evil manifest filename is `INVALID_FILENAME`. The existing live watcher observes the replacement and drives the managed CSS lifecycle in place (no re-append, no duplication). The bounded-CSS transport exception covers this second code-carrying command (comment updated, bound unchanged).
 
 Deliberate Electron differences (hardening, not regressions): validated ids instead of raw interpolation; manifest filenames allowlisted instead of followed raw (Electron's `../planted.css` equivalent is rejected); 1 MiB cap; atomic unique-temp replacement instead of in-place write; typed path-free errors instead of silent/throwing behavior.
+
+## Theme import picker capability (Phase D Step 3c)
+
+`themes.import_files` (wire `theme_import_files`, facade `window.legcord.themes.importFiles()`) opens the host-owned native file picker and installs every selected file through the SAME shared installer as `themes.install_code` (`themes::install_parsed_theme` — exactly one installation implementation underneath both; no parser/manifest/validation/bound/write logic duplicated). No `src/` caller is branched.
+
+### Electron picker chain (unchanged)
+
+`ipcMain.on("openImportPicker")` (`src/discord/ipc.ts:162`): `dialog.showOpenDialog` with no `defaultPath`, translated `title`/`buttonLabel`/`filters[].name` (`dialog-importTheme-title/button/discordStyles/allFiles`), `properties: ["openFile", "multiSelections"]`, filters `scss`/`css` then `*`; on success `for (const file of result.filePaths) { installTheme(file); }` — each file dispatched WITHOUT awaiting the previous one; cancellation returns silently; `installTheme` reads local files unbounded as UTF-8 (or fetches arbitrary remote URLs). `native/tests/electron-compat.test.mjs` asserts all of this is byte-identical.
+
+### Native chain
+
+```text
+renderer await window.legcord.themes.importFiles()
+  → requireCapability("themes.import_files") or sync UNSUPPORTED_CAPABILITY throw
+  → no client checks possible (no input); 120 s long-operation timeout
+  → {"type":"theme_import_files","payload":{}}
+     (path/filename/url/directory/filter/option members host-rejected)
+  → dedicated STA worker (COM once per thread): IFileOpenDialog
+     (translated title + Import label, styles filter first, all-files
+     second, multi-select, no default path) → GetResults in order
+  → per file: link refusal → 1 MiB pre-check → capped read + post re-check
+     → UTF-8 → parse_bd_manifest → install_parsed_theme (sequential,
+     continue-after-failure) → validated theme_imported summary
+```
+
+The dialog is the Windows Common Item Dialog (`IFileOpenDialog` with `SetTitle`/`SetOkButtonLabel`/`SetFileTypes`/`FOS_ALLOWMULTISELECT` + `GetResults`), never the legacy `GetOpenFileNameW` path and never a third-party dialog dependency — entirely host-side on a named worker (`legcord-theme-import-sta`) so the WebView/UI thread never blocks. The renderer sends exactly `{}`. The bounded summary `{ canceled, imported, failed }` carries counts only: no ids, arrays, paths, or OS error text. Cancellation (dismissed dialog or empty result) resolves `{ canceled: true }` — never a rejection, toast, or console error.
+
+Deliberate Electron differences: sequential in-order processing instead of un-awaited dispatch (deterministic, bounded memory; documented); symlinks/junctions/reparse points refused outright instead of followed; 1 MiB + UTF-8 + race re-check instead of unbounded reads; no remote URL fetch and no network surface; theme id exclusively from `@name` through `validate_theme_id` (the source filename never becomes the id). Watcher composition is unchanged: the existing live watcher observes the atomic writes and drives the managed CSS lifecycle (a disabled fresh install correctly yields zero renderer work).
 
 ## Reusable mod substrate (Phase B)
 

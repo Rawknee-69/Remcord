@@ -8,6 +8,7 @@ mod plugin_storage;
 mod protocol;
 mod quick_css;
 mod settings;
+mod theme_import;
 mod themes;
 
 use std::{
@@ -43,7 +44,8 @@ use protocol::{
     BridgeResponsePayload, BundleFileEntry, BundlesListResponse, FoldersOpenedResponse,
     LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
     PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
-    ThemeFolderOpenedResponse, ThemeInstalledResponse, ThemeWrittenResponse, PROTOCOL_VERSION,
+    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
+    PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -53,6 +55,10 @@ use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
+};
+use theme_import::{
+    import_from_paths, show_import_picker, FileImportOutcome, PickerOutcome, ThemeImportFailure,
+    ThemeImportSummary,
 };
 use themes::{install_theme_from_code, load_enabled_themes, write_theme_css, LoadedTheme};
 #[cfg(target_os = "windows")]
@@ -237,6 +243,7 @@ const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
 const THEME_INSTALL_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_INSTALL_SMOKE";
 const THEME_WRITE_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_WRITE_SMOKE";
+const THEME_IMPORT_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_IMPORT_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -260,6 +267,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "folders.open_theme",
         "themes.install_code",
         "themes.write_css",
+        "themes.import_files",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -894,6 +902,60 @@ const THEME_WRITE_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
+/// DEV-only theme import smoke probe (`LEGCORD_NATIVE_THEME_IMPORT_SMOKE=1`).
+/// Opens the REAL host picker through the `themes.import_files` capability
+/// and reports the bounded summary as one typed `theme_import_probe` event
+/// per document with `stage: "import"`. Completion installs through the
+/// shared installer (the existing watcher observes the files); dismissal
+/// resolves `{ canceled: true }` and the probe reports the silent path.
+/// Unlike the install/write probes there is no `attacks_blocked`: the facade
+/// takes no input, so there is no client-side attack shape to block. Any
+/// installed fixture directory is removed by hand after validation
+/// (uninstall is a deferred slice).
+const THEME_IMPORT_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "theme_import_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "import", canceled: false, imported: 0, failed: 0,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  (async () => {
+    try {
+      const themes = window.legcord?.themes;
+      if (typeof themes?.importFiles !== "function") {
+        fail("theme import facade missing");
+        return;
+      }
+      // The picker is host-owned: no picker-send, path, URL, filter, or
+      // dialog-option surface may exist alongside the capability.
+      if (typeof themes.openImportPicker === "function") {
+        fail("picker send must not exist");
+        return;
+      }
+      // Opens the real host picker; user completion or dismissal resolves.
+      // Cancellation is control flow ({ canceled: true }), never a reject.
+      const summary = await themes.importFiles();
+      const contract = summary
+        && typeof summary.canceled === "boolean"
+        && Number.isSafeInteger(summary.imported) && summary.imported >= 0
+        && Number.isSafeInteger(summary.failed) && summary.failed >= 0;
+      probe({
+        ok: Boolean(contract),
+        stage: "import",
+        canceled: Boolean(summary && summary.canceled),
+        imported: summary && Number.isSafeInteger(summary.imported) ? summary.imported : 0,
+        failed: summary && Number.isSafeInteger(summary.failed) ? summary.failed : 0,
+        error: null,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  })();
+})();
+"#;
+
 /// DEV-only managed-styles observation (`LEGCORD_NATIVE_THEMES_SMOKE=1` or
 /// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
 /// pushes: the renderer never requests their CSS, so this probe only observes
@@ -1103,6 +1165,15 @@ enum NativeEvent {
         retrieval_ms: f64,
         result: Result<mod_substrate::ModBundle, String>,
     },
+    /// Completed theme file import from the dedicated STA picker worker.
+    /// The worker owns the modal dialog plus the sequential bounded
+    /// ingestion, so the WebView/UI thread never blocks; the response is
+    /// always delivered here, on the event loop.
+    ThemeImportReady {
+        request_id: String,
+        received_at: Instant,
+        result: Result<ThemeImportSummary, ThemeImportFailure>,
+    },
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -1163,6 +1234,24 @@ where
     if let Err(error) = proxy.send_event(event) {
         eprintln!("[Native] Could not queue event: {error}");
     }
+}
+
+/// Name of the dedicated STA worker thread that owns the theme import
+/// picker dialog plus the sequential bounded ingestion. The modal dialog
+/// must never run on the WebView/UI thread: COM is initialized exactly once
+/// for this thread (STA, as the Common Item Dialog requires — never once per
+/// request), and picker jobs are processed sequentially for determinism and
+/// bounded memory.
+const THEME_IMPORT_WORKER_NAME: &str = "legcord-theme-import-sta";
+
+/// One theme-import picker job for the dedicated STA worker thread. The
+/// renderer supplies nothing: the picker configuration is host-owned and the
+/// profile path is host-built.
+struct ThemeImportJob {
+    request_id: String,
+    received_at: Instant,
+    profile: PathBuf,
+    proxy: EventLoopProxy<NativeEvent>,
 }
 
 fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
@@ -1558,6 +1647,95 @@ fn main() -> Result<(), Box<dyn Error>> {
     let bundle_cache = Arc::new(Mutex::new(ModCache::default()));
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
+    // Dedicated STA worker for the theme import picker. The Common Item
+    // Dialog is modal, so it must never run on the WebView/UI thread; COM is
+    // initialized exactly once for this thread (STA, as the dialog
+    // requires), and picker jobs are processed sequentially for
+    // determinism and bounded memory.
+    let (import_tx, import_rx) = std::sync::mpsc::channel::<ThemeImportJob>();
+    if let Err(error) = thread::Builder::new()
+        .name(THEME_IMPORT_WORKER_NAME.to_owned())
+        .spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                let com_init = unsafe {
+                    windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                    )
+                };
+                if com_init.is_err() {
+                    eprintln!("[Themes][Import] STA COM initialization failed; picker jobs will fail closed");
+                }
+                let com_owned = com_init == windows::core::HRESULT(0);
+                while let Ok(job) = import_rx.recv() {
+                    let result = match show_import_picker(&job.profile) {
+                        PickerOutcome::Canceled => {
+                            println!("[Themes][Import] picker dismissed by the user");
+                            Ok(ThemeImportSummary {
+                                canceled: true,
+                                imported: 0,
+                                failed: 0,
+                            })
+                        }
+                        PickerOutcome::Selected(paths) => {
+                            let selected = paths.len();
+                            let (summary, outcomes) = import_from_paths(&job.profile, &paths);
+                            // Codes only, never paths: the selection is
+                            // host-side and stays host-side.
+                            let codes: Vec<&str> = outcomes
+                                .iter()
+                                .filter_map(|outcome| match outcome {
+                                    FileImportOutcome::Failed(code) => Some(*code),
+                                    FileImportOutcome::Imported(_) => None,
+                                })
+                                .collect();
+                            println!(
+                                "[Themes][Import] selected={selected} imported={} failed={} codes={codes:?}",
+                                summary.imported, summary.failed
+                            );
+                            Ok(summary)
+                        }
+                        PickerOutcome::Failed(failure) => {
+                            eprintln!("[Themes][Import:{}] {}", failure.code, failure.message);
+                            Err(failure)
+                        }
+                    };
+                    queue_event(
+                        &job.proxy,
+                        NativeEvent::ThemeImportReady {
+                            request_id: job.request_id,
+                            received_at: job.received_at,
+                            result,
+                        },
+                    );
+                }
+                if com_owned {
+                    unsafe {
+                        windows::Win32::System::Com::CoUninitialize();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                while let Ok(job) = import_rx.recv() {
+                    queue_event(
+                        &job.proxy,
+                        NativeEvent::ThemeImportReady {
+                            request_id: job.request_id,
+                            received_at: job.received_at,
+                            result: Err(ThemeImportFailure {
+                                code: "IMPORT_UNSUPPORTED_PLATFORM",
+                                message: "theme import is not supported on this platform".to_owned(),
+                            }),
+                        },
+                    );
+                }
+            }
+        })
+    {
+        eprintln!("[Themes][Import] could not start the picker worker: {error}");
+    }
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
@@ -1617,6 +1795,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(THEME_WRITE_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_theme_write_smoke {
         println!("[Themes][WriteSmoke] theme write smoke probe enabled");
+    }
+    let diagnostic_theme_import_smoke =
+        std::env::var(THEME_IMPORT_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_theme_import_smoke {
+        println!("[Themes][ImportSmoke] theme import smoke probe enabled");
     }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
@@ -2367,6 +2550,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_theme_write_smoke {
                             if let Err(error) = webview.evaluate_script(THEME_WRITE_SMOKE_SCRIPT) {
                                 eprintln!("[Themes][WriteSmoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_theme_import_smoke {
+                            if let Err(error) = webview.evaluate_script(THEME_IMPORT_SMOKE_SCRIPT) {
+                                eprintln!("[Themes][ImportSmoke] probe failed: {error}");
                             }
                         }
                     }
@@ -3232,6 +3420,48 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::ThemeImportFiles(_) => {
+                            // Host-owned picker: the request carries no
+                            // parameters by protocol. The modal dialog plus
+                            // the sequential bounded ingestion run on the
+                            // dedicated STA worker; the typed summary comes
+                            // back as ThemeImportReady on the event loop, so
+                            // the WebView/UI thread never blocks. The
+                            // renderer waits with the long-operation timeout
+                            // (picker stays open as long as the user needs).
+                            let import_request_id = request.request_id.clone();
+                            let job = ThemeImportJob {
+                                request_id: import_request_id.clone(),
+                                received_at,
+                                profile: profile_path.clone(),
+                                proxy: proxy.clone(),
+                            };
+                            match import_tx.send(job) {
+                                Ok(()) => {
+                                    println!("[Themes][Import] picker request accepted");
+                                }
+                                Err(_) => {
+                                    eprintln!("[Themes][Import:IMPORT_UNAVAILABLE] picker worker is unavailable");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: import_request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "IMPORT_UNAVAILABLE",
+                                            message: "theme import is unavailable".to_owned(),
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) =
+                                        request_tracker.complete(&import_request_id)
+                                    {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::ModGetBundle(payload) => {                            let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
                                 let response = BridgeResponse {
@@ -3523,6 +3753,62 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                             response_count += 1;
                         }
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::ThemeImportReady {
+                request_id,
+                received_at,
+                result,
+            }) => {
+                // Cancellation is normal control flow: it resolves the
+                // bounded canceled summary, never a bridge rejection, so no
+                // error toast and no unhandled rejection can follow.
+                match result {
+                    Ok(summary) => {
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: true,
+                            payload: Some(BridgeResponsePayload::ThemeImported(
+                                ThemeImportedResponse {
+                                    canceled: summary.canceled,
+                                    imported: summary.imported,
+                                    failed: summary.failed,
+                                },
+                            )),
+                            error: None,
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                        println!(
+                            "[Themes][Import] canceled={} imported={} failed={} request_latency_ms={:.3}",
+                            summary.canceled,
+                            summary.imported,
+                            summary.failed,
+                            received_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    Err(failure) => {
+                        eprintln!("[Themes][Import:{}] {}", failure.code, failure.message);
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: false,
+                            payload: None,
+                            error: Some(BridgeError {
+                                code: failure.code,
+                                message: failure.message,
+                            }),
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
                     }
                 }
             }
@@ -3822,6 +4108,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[Themes][WriteSmoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::ThemeImportProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Themes][ImportSmoke] ok=true stage={} canceled={} imported={} failed={}",
+                                payload.stage,
+                                payload.canceled,
+                                payload.imported,
+                                payload.failed
+                            );
+                        } else {
+                            eprintln!(
+                                "[Themes][ImportSmoke] ok=false stage={} error={}",
                                 payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
@@ -4589,14 +4892,15 @@ mod tests {
     fn boot_snapshot_grants_no_theme_capability() {
         // Theme injection is a host push: the renderer never requests theme
         // CSS, so no theme-CSS pull capability may exist. `folders.open_theme`,
-        // `themes.install_code`, and `themes.write_css` are explicitly
-        // allowed: the first names the themes ROOT for folder opening, the
-        // others write theme files the host then pushes itself — none reads
-        // theme CSS back to the renderer.
+        // `themes.install_code`, `themes.write_css`, and `themes.import_files`
+        // are explicitly allowed: the first names the themes ROOT for folder
+        // opening, the others write theme files the host then pushes itself —
+        // none reads theme CSS back to the renderer.
         for capability in super::BOOT_SNAPSHOT.capabilities {
             if *capability == "folders.open_theme"
                 || *capability == "themes.install_code"
                 || *capability == "themes.write_css"
+                || *capability == "themes.import_files"
             {
                 continue;
             }
@@ -4894,5 +5198,70 @@ mod tests {
         assert!(!super::THEME_WRITE_SMOKE_SCRIPT.contains("openCssEditor"));
         assert!(!super::THEME_WRITE_SMOKE_SCRIPT.contains("installBDTheme"));
         assert!(!super::THEME_WRITE_SMOKE_SCRIPT.contains("sendSync"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_theme_import_without_generic_surface() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"themes.import_files"));
+        // Theme-specific only: no generic dialog, filesystem, path, URL, or
+        // handle capability may exist alongside the picker.
+        for capability in super::BOOT_SNAPSHOT.capabilities {
+            assert_ne!(*capability, "dialog.openFile");
+            assert_ne!(*capability, "dialog");
+            assert_ne!(*capability, "filesystem.read");
+            assert_ne!(*capability, "filesystem.write");
+            assert_ne!(*capability, "themes.import");
+        }
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"network"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"shell"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_theme_import_facade() {
+        let script = initialization_script(&[]).unwrap();
+        assert!(script.contains("theme_import_files"));
+        assert!(script.contains("themes.import_files"));
+        assert!(script.contains("importFiles"));
+        // Host-owned picker only: the facade sends an exact empty payload
+        // with a modal-picker timeout. No path, URL, filter, dialog-option,
+        // legacy dialog API, fetch, or synchronous IPC anywhere near it.
+        assert!(!script.contains("dialog.openFile"));
+        assert!(!script.contains("showOpenDialog"));
+        assert!(!script.contains("GetOpenFileName"));
+        assert!(!script.contains("installBDTheme"));
+        assert!(!script.contains("fetch("));
+        assert!(!script.contains("sendSync"));
+    }
+
+    #[test]
+    fn theme_import_runs_on_a_dedicated_named_worker() {
+        // The modal picker must never run on the WebView/UI thread: one
+        // named worker owns the dialog plus the sequential ingestion. The
+        // name is pinned so logs stay greppable; the single-COM-init STA
+        // contract lives on THEME_IMPORT_WORKER_NAME's documented worker.
+        assert_eq!(super::THEME_IMPORT_WORKER_NAME, "legcord-theme-import-sta");
+    }
+
+    #[test]
+    fn theme_import_smoke_probe_opens_the_real_picker_through_the_capability() {
+        assert_eq!(
+            super::THEME_IMPORT_SMOKE_ENV,
+            "LEGCORD_NATIVE_THEME_IMPORT_SMOKE"
+        );
+        assert!(super::THEME_IMPORT_SMOKE_SCRIPT.contains("importFiles"));
+        assert!(super::THEME_IMPORT_SMOKE_SCRIPT.contains("theme_import_probe"));
+        assert!(super::THEME_IMPORT_SMOKE_SCRIPT.contains("canceled"));
+        // The probe opens the picker and reports the bounded summary; it
+        // never passes a path/URL/filter, fetches code, or uses sync IPC.
+        // (The single `openImportPicker` mention is the must-not-exist
+        // absence check, mirroring the install probe's `install` guard.)
+        assert!(super::THEME_IMPORT_SMOKE_SCRIPT.contains("stage"));
+        assert!(!super::THEME_IMPORT_SMOKE_SCRIPT.contains("installBDTheme"));
+        assert!(!super::THEME_IMPORT_SMOKE_SCRIPT.contains("fetch("));
+        assert!(!super::THEME_IMPORT_SMOKE_SCRIPT.contains("sendSync"));
     }
 }

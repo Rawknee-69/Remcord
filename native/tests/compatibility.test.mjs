@@ -2361,6 +2361,169 @@ test("theme requests stay inert off the trusted origin", async () => {
     assert.equal(window.legcord, undefined);
 });
 
+function createImportRuntime(capabilities = ["bridge.ping", "themes.import_files"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondThemeImported(window, request, payload = { canceled: false, imported: 1, failed: 0 }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "theme_imported", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a parameter-free themes.import_files capability", () => {
+    const { window } = createImportRuntime();
+    assert.equal(typeof window.legcord.themes.importFiles, "function");
+    assert.equal(Object.isFrozen(window.legcord.themes), true);
+    assert.equal(window.legcord.native.supports("themes.import_files"), true);
+    // No generic dialog, filesystem, path, or URL surface may exist.
+    assert.equal(window.legcord.themes.openImportPicker, undefined);
+    assert.equal(window.legcord.dialog, undefined);
+    assert.equal(window.legcord.fs, undefined);
+    assert.equal(window.legcord.themes.openFile, undefined);
+    assert.equal(window.legcord.themes.readFile, undefined);
+});
+
+test("themes.import_files sends an exact empty payload and resolves the bounded summary", async () => {
+    const { window } = createImportRuntime();
+    const pending = window.legcord.themes.importFiles();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "theme_import_files");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "theme_import_files", payload: {} });
+
+    respondThemeImported(window, message, { canceled: false, imported: 2, failed: 1 });
+    assert.deepEqual(await pending, { canceled: false, imported: 2, failed: 1 });
+});
+
+test("themes.import_files resolves cancellation as control flow, never a rejection", async () => {
+    const { window } = createImportRuntime();
+    const pending = window.legcord.themes.importFiles();
+    const message = window.messages.find((entry) => entry.command?.type === "theme_import_files");
+    // A dismissed picker resolves { canceled: true }: no rejection, so no
+    // unhandled rejection, error toast, or console error can follow.
+    respondThemeImported(window, message, { canceled: true, imported: 0, failed: 0 });
+    assert.deepEqual(await pending, { canceled: true, imported: 0, failed: 0 });
+});
+
+test("themes.import_files throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createImportRuntime(["bridge.ping"]);
+    assert.equal(window.legcord.native.supports("themes.import_files"), false);
+    assert.throws(
+        () => window.legcord.themes.importFiles(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "theme_import_files"),
+        false,
+    );
+});
+
+test("themes.import_files rejects malformed summaries without path leakage", async () => {
+    // Non-boolean cancellation flag.
+    const noBool = createImportRuntime();
+    const pendingBool = noBool.window.legcord.themes.importFiles();
+    const messageBool = noBool.window.messages.find((entry) => entry.command?.type === "theme_import_files");
+    respondThemeImported(noBool.window, messageBool, { canceled: 0, imported: 1, failed: 0 });
+    await assert.rejects(pendingBool, /theme import response schema is invalid/);
+
+    // Negative and non-integer counts.
+    for (const payload of [
+        { canceled: false, imported: -1, failed: 0 },
+        { canceled: false, imported: 1.5, failed: 0 },
+        { canceled: false, imported: 0, failed: -2 },
+    ]) {
+        const runtime = createImportRuntime();
+        const pending = runtime.window.legcord.themes.importFiles();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "theme_import_files");
+        respondThemeImported(runtime.window, message, payload);
+        await assert.rejects(pending, /theme import response schema is invalid/);
+    }
+
+    // No path, URL, id, or extra member may ride along with the summary.
+    const withPath = createImportRuntime();
+    const pendingPath = withPath.window.legcord.themes.importFiles();
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_import_files");
+    withPath.window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: messagePath.request_id,
+                ok: true,
+                payload: {
+                    type: "theme_imported",
+                    payload: { canceled: false, imported: 1, failed: 0, path: "C:\\themes\\x" },
+                },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(pendingPath, /theme import response schema is invalid/);
+});
+
+test("themes.import_files maps host failures to typed errors", async () => {
+    const { window } = createImportRuntime();
+    const pending = window.legcord.themes.importFiles();
+    const message = window.messages.find((entry) => entry.command?.type === "theme_import_files");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "IMPORT_FAILED", message: "theme import picker cannot be shown" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /theme import picker cannot be shown/);
+});
+
+test("themes.import_files waits with the long-operation picker timeout", async () => {
+    // A modal picker stays open as long as the user needs: the default is
+    // the 120-second long-operation timeout (like the mod bundle retrieval),
+    // never the ordinary 5-second command timeout.
+    assert.match(bootstrapTemplate, /function importFiles\(timeoutMs = 120_000\)/);
+    const { window } = createImportRuntime();
+    await assert.rejects(window.legcord.themes.importFiles(50), /timed out/);
+});
+
+test("themes.import_files rejects pending requests when the document is disposed", async () => {
+    const { window } = createImportRuntime();
+    const pending = window.legcord.themes.importFiles();
+    const rejection = assert.rejects(pending, /document was disposed/);
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+test("a reloaded document gets a fresh theme import facade with no stale promises", async () => {
+    const firstDocument = createImportRuntime();
+    const stale = firstDocument.window.legcord.themes.importFiles();
+    const staleRejection = assert.rejects(stale, /document was disposed/);
+    firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await staleRejection;
+
+    const nextDocument = createImportRuntime();
+    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
+    const pending = nextDocument.window.legcord.themes.importFiles();
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_import_files");
+    respondThemeImported(nextDocument.window, message, { canceled: true, imported: 0, failed: 0 });
+    assert.deepEqual(await pending, { canceled: true, imported: 0, failed: 0 });
+});
+
+test("theme import requests stay inert off the trusted origin", async () => {
+    const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.import_files"]);
+    assert.equal(window.legcord, undefined);
+});
+
 function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {
     return createRuntime("https://discord.com", capabilities);
 }

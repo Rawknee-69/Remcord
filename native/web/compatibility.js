@@ -331,6 +331,34 @@
         });
     }
 
+    function importFiles(timeoutMs = 120_000) {
+        requireCapability("themes.import_files");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host owns the entire picker
+        // configuration (translated title, Import action label, filters,
+        // multi-selection). No path, URL, filter, or dialog option may be
+        // supplied. The modal picker stays open as long as the user needs,
+        // so this uses the long-operation timeout like the mod bundle
+        // retrieval rather than the ordinary 5-second command timeout.
+        // Cancellation resolves { canceled: true }, never a rejection.
+        return request({ type: "theme_import_files", payload: {} }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                typeof payload.canceled !== "boolean" ||
+                !Number.isSafeInteger(payload.imported) ||
+                payload.imported < 0 ||
+                !Number.isSafeInteger(payload.failed) ||
+                payload.failed < 0
+            ) {
+                throw new Error("Native theme import response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
     function listBundles(timeoutMs = 5000) {
         requireCapability("backup.list_bundles");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -571,6 +599,23 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "theme_imported") {
+            const payload = response.payload.payload;
+            // Bounded summary only: cancellation plus counts. No ids,
+            // arrays, paths, URLs, or source echo may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                typeof payload.canceled !== "boolean" ||
+                !Number.isSafeInteger(payload.imported) ||
+                payload.imported < 0 ||
+                !Number.isSafeInteger(payload.failed) ||
+                payload.failed < 0
+            ) {
+                request.reject(new Error("Native theme import response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -643,7 +688,10 @@
     // path, dialog, picker, editor, or list surface.
     // Theme CSS replacement only: validated id plus CSS text in, bounded
     // metadata out. No path, filename, URL, destination, or enablement flag.
-    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss });
+    // Theme file import only: an exact empty payload in, a bounded
+    // cancellation/counts summary out. No path, URL, filter, dialog-option,
+    // picker, or filesystem surface.
+    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss, importFiles });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,

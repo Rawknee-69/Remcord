@@ -748,6 +748,95 @@ test("native theme write resolves the manifest file with no editor surface", () 
     assert.doesNotMatch(writeFacade, /fetch\(|installBDTheme|showOpenDialog|openPath/);
 });
 
+test("Electron keeps the import picker dialog configuration", () => {
+    // The picker is a host file dialog with no defaultPath, translated
+    // title/button/filter names, open-file multi-selection, the SCSS/CSS
+    // filter first and the all-files filter second. Cancellation returns
+    // silently; each selected file dispatches WITHOUT awaiting the previous
+    // one; installTheme reads local files unbounded as UTF-8.
+    assert.match(ipc, /ipcMain\.on\("openImportPicker"/);
+    assert.match(ipc, /title: getLang\("dialog-importTheme-title"\)/);
+    assert.match(ipc, /buttonLabel: getLang\("dialog-importTheme-button"\)/);
+    assert.match(ipc, /properties: \["openFile", "multiSelections"\]/);
+    assert.match(ipc, /name: getLang\("dialog-importTheme-discordStyles"\)/);
+    assert.match(ipc, /extensions: \["scss", "css"\]/);
+    assert.match(ipc, /name: getLang\("dialog-importTheme-allFiles"\)/);
+    assert.match(ipc, /if \(result\.canceled\) return;/);
+    assert.match(ipc, /for \(const file of result\.filePaths\) \{\s*installTheme\(file\);\s*\}/);
+    assert.match(bridge, /openImportPicker: \(\) => ipcRenderer\.send\("openImportPicker"\)/);
+    const lang = readFileSync(new URL("../../assets/lang/en-US.json", import.meta.url), "utf8");
+    assert.match(lang, /"dialog-importTheme-title": "Select a theme you want to import"/);
+    assert.match(lang, /"dialog-importTheme-button": "Import"/);
+    assert.match(lang, /"dialog-importTheme-discordStyles": "Discord styles"/);
+    assert.match(lang, /"dialog-importTheme-allFiles": "All Files"/);
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(themesPage, /onClick=\{window\.legcord\.themes\.openImportPicker\}/);
+});
+
+test("no src caller uses the native theme import path", () => {
+    // Step 3c ships the capability without UI wiring: a native branch in
+    // src/ would be fabrication. The Electron theme UI keeps calling the
+    // picker send, and nothing references the native import surface.
+    const themesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    const themesCard = readFileSync(
+        new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
+        "utf8",
+    );
+    for (const source of [bridge, ipc, types, themesPage, themesCard]) {
+        assert.doesNotMatch(source, /importFiles/);
+        assert.doesNotMatch(source, /themes\.import_files/);
+        assert.doesNotMatch(source, /theme_import_files/);
+    }
+    assert.match(themesPage, /window\.legcord\.themes\.openImportPicker/);
+});
+
+test("native theme import shares the installer with a Common Item Dialog and no generic surface", () => {
+    // Exactly one installation implementation lives underneath both
+    // install_code and import_files: the import path parses with the native
+    // BD parser and installs through the shared helper.
+    const nativeThemes = readFileSync(new URL("../src/themes.rs", import.meta.url), "utf8");
+    assert.match(nativeThemes, /pub fn install_parsed_theme/);
+    const nativeImport = readFileSync(new URL("../src/theme_import.rs", import.meta.url), "utf8");
+    assert.match(nativeImport, /install_parsed_theme\(profile_dir, &css, parsed\)/);
+    assert.match(nativeImport, /parse_bd_manifest\(&css\)/);
+    // Modern dialog path with multi-select, translated title/button, and
+    // file-type filters — never the legacy GetOpenFileNameW API and never
+    // a third-party dialog dependency.
+    assert.match(nativeImport, /IFileOpenDialog/);
+    assert.match(nativeImport, /SetOkButtonLabel/);
+    assert.match(nativeImport, /SetTitle/);
+    assert.match(nativeImport, /SetFileTypes/);
+    assert.match(nativeImport, /FOS_ALLOWMULTISELECT/);
+    assert.match(nativeImport, /GetResults/);
+    // The module docs name the legacy API only to reject it: assert the
+    // call site itself never appears (with paren), not the bare word.
+    assert.doesNotMatch(nativeImport, /GetOpenFileNameW?\(/);
+    assert.doesNotMatch(nativeImport, /\brfd\b/);
+    // Theme-specific only: no network fetch, no remote URL, no generic
+    // dialog/filesystem/read/write primitive, no shell execution.
+    const shippedImport = nativeImport.slice(0, nativeImport.indexOf("#[cfg(test)]"));
+    assert.doesNotMatch(shippedImport, /fetch\(|ureq|https?:\/\//);
+    assert.doesNotMatch(shippedImport, /dialog\.openFile|filesystem\.(read|write)/);
+    assert.doesNotMatch(shippedImport, /ShellExecute|openPath|Command::new|showOpenDialog/);
+    // The facade sends an exact empty payload with the long-operation
+    // timeout and validates the bounded summary: no path/URL/filter member.
+    const importFacade = nativeFacade.slice(
+        nativeFacade.indexOf("function importFiles"),
+        nativeFacade.indexOf("function listBundles"),
+    );
+    assert.ok(importFacade.length > 0);
+    assert.match(importFacade, /requireCapability\("themes\.import_files"\)/);
+    assert.match(importFacade, /function importFiles\(timeoutMs = 120_000\)/);
+    assert.match(importFacade, /\{\s*type:\s*"theme_import_files",\s*payload:\s*\{\s*\}\s*\}/);
+    assert.doesNotMatch(importFacade, /fetch\(|showOpenDialog|openPath|path:|url:/);
+});
+
 test("settings UI reveals the storage folder natively and sends otherwise", () => {
     const settingsPage = readFileSync(
         new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
