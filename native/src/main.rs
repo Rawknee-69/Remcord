@@ -8,6 +8,7 @@ mod plugin_storage;
 mod protocol;
 mod quick_css;
 mod settings;
+mod settings_boot;
 mod settings_plugin;
 mod theme_import;
 mod themes;
@@ -251,6 +252,7 @@ const THEME_IMPORT_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_IMPORT_SMOKE";
 const THEME_SET_ENABLED_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
 const THEME_LIST_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_LIST_SMOKE";
 const SHELTER_LOADER_PROBE_ENV: &str = "LEGCORD_NATIVE_LOADER_PROBE";
+const SETTINGS_BOOT_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -1257,6 +1259,71 @@ const SHELTER_LOADER_PROBE_SCRIPT: &str = r#"
 })();
 "#;
 
+/// DEV-only settings boot snapshot probe (`LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`).
+/// Observes the live `window.legcord.settingsBoot` surface in the document:
+/// exactly the seven approved members, the `settingsSource` enum consistent
+/// with a null/non-null config, array/object shapes, both narrow functions
+/// present, and deep-frozen state. One typed `settings_boot_probe` event per
+/// evaluation; counts and byte lengths only, never settings values, theme
+/// manifests, translations, paths, or URLs.
+///
+/// This probe runs at page load, so it proves presence and shape in the live
+/// document — not the before-plugin ordering. Ordering is proven by
+/// construction (the snapshot is spliced into the same document-start script
+/// BEFORE the mod adapters; see `initialization_script` and its ordering
+/// unit test): anything the closed loader could execute already runs after
+/// the snapshot exists.
+const SETTINGS_BOOT_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "settings_boot_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, settings_source: "unavailable", settings_bytes: 0,
+    themes_count: 0, i18n_keys: 0, lang: "", frozen: false,
+    keys_exact: false, snapshot_bytes: 0,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const boot = window.legcord?.settingsBoot;
+    if (!boot || typeof boot !== "object") {
+      fail("settingsBoot surface missing");
+      return;
+    }
+    const keys_exact = Object.keys(boot).sort().join(",")
+      === "i18n,lang,restart,setLang,settings,settingsSource,themes";
+    const settings_ok = (boot.settingsSource === "unavailable" && boot.settings === null)
+      || ((boot.settingsSource === "file" || boot.settingsSource === "defaults")
+        && boot.settings !== null && typeof boot.settings === "object");
+    const themes_ok = Array.isArray(boot.themes);
+    const i18n_ok = boot.i18n !== null && typeof boot.i18n === "object";
+    const fns_ok = typeof boot.setLang === "function" && typeof boot.restart === "function";
+    const lang_ok = typeof boot.lang === "string" && boot.lang.length > 0;
+    if (!keys_exact || !settings_ok || !themes_ok || !i18n_ok || !fns_ok || !lang_ok) {
+      fail("settingsBoot shape mismatch");
+      return;
+    }
+    const frozen = Object.isFrozen(boot)
+      && (boot.settings === null || Object.isFrozen(boot.settings))
+      && Object.isFrozen(boot.themes) && Object.isFrozen(boot.i18n);
+    if (!frozen) {
+      fail("settingsBoot is not frozen");
+      return;
+    }
+    const settings_text = JSON.stringify(boot.settings) || "";
+    const snapshot_text = JSON.stringify({ s: boot.settings, t: boot.themes, i: boot.i18n }) || "";
+    probe({
+      ok: true, settings_source: boot.settingsSource, settings_bytes: settings_text.length,
+      themes_count: boot.themes.length, i18n_keys: Object.keys(boot.i18n).length,
+      lang: String(boot.lang).slice(0, 32), frozen: true, keys_exact: true,
+      snapshot_bytes: snapshot_text.length, error: null,
+    });
+  } catch (error) {
+    fail(error);
+  }
+})();
+"#;
+
 /// DEV-only managed-styles observation (`LEGCORD_NATIVE_THEMES_SMOKE=1` or
 /// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
 /// pushes: the renderer never requests their CSS, so this probe only observes
@@ -1509,9 +1576,22 @@ fn is_allowed_navigation(url: &str) -> bool {
 /// absent adapter, not a disabled one.
 fn initialization_script(
     active_mods: &[&'static ModDescriptor],
+    settings_boot_json: &str,
 ) -> Result<String, serde_json::Error> {
     let snapshot = serde_json::to_string(&BOOT_SNAPSHOT)?;
-    let compatibility = COMPATIBILITY_SCRIPT.replace("__LEGCORD_BOOT_SNAPSHOT__", &snapshot);
+    // Fail fast on a malformed snapshot: it would otherwise ship a broken
+    // boot surface to every document of the run.
+    let _: serde_json::Value = serde_json::from_str(settings_boot_json)?;
+    let compatibility = COMPATIBILITY_SCRIPT
+        .replace("__LEGCORD_BOOT_SNAPSHOT__", &snapshot)
+        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", settings_boot_json);
+    if compatibility.contains("__LEGCORD_BOOT_SNAPSHOT__")
+        || compatibility.contains("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__")
+    {
+        return Err(serde::de::Error::custom(
+            "document-start facade is missing a boot snapshot splice",
+        ));
+    }
     let base =
         format!("{STORAGE_START_DIAGNOSTIC_SCRIPT}\n{compatibility}\n{MOD_SUBSTRATE_SCRIPT}");
     let mut script = base;
@@ -2144,6 +2224,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_shelter_loader_probe {
         println!("[ShelterLoader][Probe] shelter loader probe enabled");
     }
+    let diagnostic_settings_boot_smoke =
+        std::env::var(SETTINGS_BOOT_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_settings_boot_smoke {
+        println!("[SettingsBoot][Smoke] settings boot snapshot smoke probe enabled");
+    }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
         println!("[Folders][Smoke] folder opening smoke probe enabled");
@@ -2212,11 +2297,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect::<std::collections::BTreeMap<_, _>>(),
     )?;
     let mod_smoke_script = mod_smoke_observation_script(&mod_smoke_specs)?;
+    // Synchronous settings boot snapshot (3d-2 prerequisite B): built once
+    // per launch from the authoritative owners and spliced into the
+    // document-start script BEFORE the mod adapters, so it exists before the
+    // settings plugin could execute. Every document receives its own frozen
+    // instance; values reflect launch-time state (see settings_boot.rs).
+    let settings_boot_json = settings_boot::build_settings_boot_json(&profile_path);
+    println!("[SettingsBoot] snapshot bytes={}", settings_boot_json.len());
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
     } else {
-        initialization_script(&active_mods)?
+        initialization_script(&active_mods, &settings_boot_json)?
     };
     println!(
         "[Native] Document-start script: {} bytes",
@@ -2915,6 +3007,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_shelter_loader_probe {
                             if let Err(error) = webview.evaluate_script(SHELTER_LOADER_PROBE_SCRIPT) {
                                 eprintln!("[ShelterLoader][Probe] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_settings_boot_smoke {
+                            if let Err(error) = webview.evaluate_script(SETTINGS_BOOT_SMOKE_SCRIPT) {
+                                eprintln!("[SettingsBoot][Smoke] probe failed: {error}");
                             }
                         }
                     }
@@ -4631,6 +4728,48 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     }
+                    BridgeEvent::SettingsBootSetLang(payload) => {
+                        // Narrow fire-and-forget write, mirroring Electron's
+                        // `send("setLang", lang)`: the charset/length rule is
+                        // re-checked by the localization owner before any
+                        // write, and no response is ever sent.
+                        match crate::localization::apply_lang(&profile_path, &payload.locale) {
+                            Ok(()) => println!(
+                                "[SettingsBoot] setLang locale={} persisted",
+                                payload.locale
+                            ),
+                            Err(error) => eprintln!("[SettingsBoot] setLang failed: {error}"),
+                        }
+                    }
+                    BridgeEvent::SettingsBootRestart(_) => {
+                        // Documented boundary: Electron relaunches the
+                        // application (`app.relaunch()` + `app.exit()`); the
+                        // native shell has no relauncher yet, so restart
+                        // currently means a document reload.
+                        println!("[SettingsBoot] restart requested; reloading document");
+                        if let Err(error) = webview.evaluate_script("window.location.reload();") {
+                            eprintln!("[SettingsBoot] restart reload failed: {error}");
+                        }
+                    }
+                    BridgeEvent::SettingsBootProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[SettingsBoot][Probe] ok=true settings_source={} settings_bytes={} themes_count={} i18n_keys={} lang={} frozen={} snapshot_bytes={}",
+                                payload.settings_source,
+                                payload.settings_bytes,
+                                payload.themes_count,
+                                payload.i18n_keys,
+                                payload.lang,
+                                payload.frozen,
+                                payload.snapshot_bytes
+                            );
+                        } else {
+                            eprintln!(
+                                "[SettingsBoot][Probe] ok=false error={}",
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
                 }
             }
             _ => {
@@ -4672,9 +4811,63 @@ mod tests {
     }
 
     #[test]
+    fn settings_boot_snapshot_is_spliced_before_every_adapter() {
+        // The snapshot must exist before the settings plugin could execute:
+        // the serialized snapshot precedes every mod adapter in the same
+        // document-start script, and no splice placeholder may remain.
+        for id in ["vencord", "shelter", "equicord"] {
+            let script = initialization_script(
+                &adapters_for(&[id]),
+                crate::settings_boot::test_fixture_json(),
+            )
+            .unwrap();
+            assert!(
+                !script.contains("__LEGCORD_BOOT_SNAPSHOT__"),
+                "boot placeholder must be spliced"
+            );
+            assert!(
+                !script.contains("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__"),
+                "settings boot placeholder must be spliced"
+            );
+            let snapshot_at = script
+                .find("\"settingsSource\"")
+                .expect("snapshot must be embedded");
+            let adapter_at = script
+                .find("createModAdapter")
+                .expect("adapter factory use must be present");
+            assert!(
+                snapshot_at < adapter_at,
+                "{id}: snapshot must precede adapter execution"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_boot_snapshot_exposes_the_closed_surface() {
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        assert!(script.contains("settingsBoot"));
+        assert!(script.contains("settings_boot_set_lang"));
+        assert!(script.contains("settings_boot_restart"));
+        // No generic invocation surface may appear alongside the snapshot.
+        assert!(!script.contains("sendSync"));
+        assert!(!script.contains("require(\"electron\")"));
+    }
+
+    #[test]
+    fn malformed_settings_boot_snapshot_fails_startup() {
+        assert!(initialization_script(&[], "{not json").is_err());
+        assert!(initialization_script(&[], "").is_err());
+    }
+
+    #[test]
     fn diagnostic_keeps_facade_and_substrate_but_omits_unselected_adapters() {
-        let with_adapter = initialization_script(&adapters_for(&["vencord"])).unwrap();
-        let without_adapter = initialization_script(&[]).unwrap();
+        let with_adapter = initialization_script(
+            &adapters_for(&["vencord"]),
+            crate::settings_boot::test_fixture_json(),
+        )
+        .unwrap();
+        let without_adapter =
+            initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(with_adapter.contains("native.getModBundle"));
         assert!(with_adapter.contains("__legcordNativeVencordAdapter"));
         assert!(with_adapter.contains("__legcordNativeModSubstrate"));
@@ -4694,7 +4887,11 @@ mod tests {
             ("equicord", "__legcordNativeEquicordAdapter"),
         ];
         for (id, own_flag) in expectations {
-            let script = initialization_script(&adapters_for(&[id])).unwrap();
+            let script = initialization_script(
+                &adapters_for(&[id]),
+                crate::settings_boot::test_fixture_json(),
+            )
+            .unwrap();
             assert!(script.contains(own_flag), "{id} adapter must be injected");
             for (_, other_flag) in expectations {
                 if other_flag != own_flag {
@@ -4713,15 +4910,17 @@ mod tests {
                 "{} must have an adapter",
                 descriptor.id
             );
-            assert!(!initialization_script(&[])
-                .unwrap()
-                .contains("getModBundle(\"shelter\""));
+            assert!(
+                !initialization_script(&[], crate::settings_boot::test_fixture_json())
+                    .unwrap()
+                    .contains("getModBundle(\"shelter\"")
+            );
         }
     }
 
     #[test]
     fn initialization_script_preserves_window_prototype_storage() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("__legcordNativeStorageAtDocumentStart"));
         assert!(script.contains("Window.prototype"));
         assert!(script.contains("defineProperty(Window.prototype, \"localStorage\""));
@@ -5226,7 +5425,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_settings_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("settings_get_config"));
         assert!(script.contains("settings_config"));
         assert!(script.contains("settings.get_config"));
@@ -5263,7 +5462,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_get_lang_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("localization_get_lang"));
         assert!(script.contains("localization_string"));
         assert!(script.contains("localization.get_lang"));
@@ -5291,7 +5490,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_mutation_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("settings_set_block_power_saving"));
         assert!(script.contains("settings_mutation"));
         assert!(script.contains("settings.set_block_power_saving_in_voice_chat"));
@@ -5333,7 +5532,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_app_version_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("app_get_version"));
         assert!(script.contains("app_version"));
         assert!(script.contains("app.get_version"));
@@ -5376,7 +5575,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_plugin_storage_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("plugin_storage_read"));
         assert!(script.contains("plugin_storage_write"));
         assert!(script.contains("plugin_storage.read"));
@@ -5424,7 +5623,7 @@ mod tests {
         // folder-opening location for the themes ROOT — validated id,
         // host-built path, OS shell — so the pull surface is guarded by the
         // specific CSS tokens below, not by the bare word.)
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(!script.contains("getCSS"));
         assert!(!script.contains("getCss"));
         assert!(!script.contains("addTheme"));
@@ -5466,7 +5665,7 @@ mod tests {
     fn initialization_script_exposes_no_quickcss_pull_surface() {
         // The renderer pull stays rejected: no quickCss.get() shape may be
         // introduced alongside the host push.
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(!script.contains("quickCss"));
         assert!(!script.contains("quickcss"));
         assert!(!script.contains("quick_css"));
@@ -5487,7 +5686,7 @@ mod tests {
             }
             assert!(!capability.contains("css"));
         }
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(!script.contains("watch"));
         assert!(!script.contains("LiveCss"));
         assert!(!script.contains("fs.watch"));
@@ -5532,7 +5731,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_backup_discovery_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("backup_list_bundles"));
         assert!(script.contains("backup.list_bundles"));
         assert!(script.contains("listBundles"));
@@ -5584,7 +5783,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_folder_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("folders_open"));
         assert!(script.contains("folders_open_theme"));
         assert!(script.contains("folders.open"));
@@ -5625,7 +5824,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_install_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("theme_install_code"));
         assert!(script.contains("themes.install_code"));
         assert!(script.contains("installFromCode"));
@@ -5674,7 +5873,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_write_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("theme_write_css"));
         assert!(script.contains("themes.write_css"));
         assert!(script.contains("writeCss"));
@@ -5726,7 +5925,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_import_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("theme_import_files"));
         assert!(script.contains("themes.import_files"));
         assert!(script.contains("importFiles"));
@@ -5790,7 +5989,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_enable_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("theme_set_enabled"));
         assert!(script.contains("themes.set_enabled"));
         assert!(script.contains("setEnabled"));
@@ -5841,7 +6040,7 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_list_facade() {
-        let script = initialization_script(&[]).unwrap();
+        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
         assert!(script.contains("themes_list"));
         assert!(script.contains("themes.list"));
         assert!(script.contains("listThemes"));

@@ -70,16 +70,29 @@ function stripComments(source) {
 const shelterAdapterCode = stripComments(shelterAdapter);
 const equicordAdapterCode = stripComments(equicordAdapter);
 
-function createBootstrap(capabilities) {
-    return bootstrapTemplate.replace(
-        "__LEGCORD_BOOT_SNAPSHOT__",
-        JSON.stringify({
-            runtime: "webview2",
-            platform: "win32",
-            protocol_version: 1,
-            capabilities,
-        }),
-    );
+function createBootstrap(capabilities, settingsBoot = defaultSettingsBoot()) {
+    return bootstrapTemplate
+        .replace(
+            "__LEGCORD_BOOT_SNAPSHOT__",
+            JSON.stringify({
+                runtime: "webview2",
+                platform: "win32",
+                protocol_version: 1,
+                capabilities,
+            }),
+        )
+        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", JSON.stringify(settingsBoot));
+}
+
+/** Minimal schema-valid settings boot snapshot, mirroring the host builder. */
+function defaultSettingsBoot() {
+    return {
+        settingsSource: "defaults",
+        settings: { mods: [], blockPowerSavingInVoiceChat: false },
+        themes: [],
+        lang: "en-US",
+        i18n: { "invite-goBackToApp": "Go back to the Discord app" },
+    };
 }
 
 class FakeCustomEvent {
@@ -116,7 +129,7 @@ class FakeWindow {
     }
 }
 
-function createRuntime(origin = "https://discord.com", capabilities = ["bridge.ping", "mod.get_bundle"]) {
+function createRuntime(origin = "https://discord.com", capabilities = ["bridge.ping", "mod.get_bundle"], settingsBoot) {
     const window = new FakeWindow(origin);
     const context = vm.createContext({
         window,
@@ -136,7 +149,7 @@ function createRuntime(origin = "https://discord.com", capabilities = ["bridge.p
         TypeError,
         String,
     });
-    vm.runInContext(createBootstrap(capabilities), context);
+    vm.runInContext(createBootstrap(capabilities, settingsBoot), context);
     vm.runInContext(modSubstrate, context);
     return { window, context };
 }
@@ -1717,9 +1730,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
     // Wrong name or order.
     const renamed = createBundlesRuntime();
     const pendingRenamed = renamed.window.legcord.backup.listBundles();
-    const messageRenamed = renamed.window.messages.find(
-        (entry) => entry.command?.type === "backup_list_bundles",
-    );
+    const messageRenamed = renamed.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
     respondBundlesList(renamed.window, messageRenamed, [
         ...BUNDLE_FIXTURE.slice(0, 5),
         { name: "custom.css", present: false, bytes: 0 },
@@ -1730,9 +1741,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
     // Absent entry carrying bytes.
     const absentBytes = createBundlesRuntime();
     const pendingAbsent = absentBytes.window.legcord.backup.listBundles();
-    const messageAbsent = absentBytes.window.messages.find(
-        (entry) => entry.command?.type === "backup_list_bundles",
-    );
+    const messageAbsent = absentBytes.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
     respondBundlesList(absentBytes.window, messageAbsent, [
         ...BUNDLE_FIXTURE.slice(0, 6),
         { name: "custom.css", present: false, bytes: 12 },
@@ -3442,4 +3451,109 @@ test("live updates keep Vencord first across reloads without duplication", () =>
         ["legcord-native-vencord-css", "legcord-quick-css", "legcord-native-theme-alpha"],
     );
     assert.equal(first.headChildren.length, 3);
+});
+
+test("the facade exposes a frozen settingsBoot surface with exactly the approved members", () => {
+    const { window } = createRuntime();
+    const boot = window.legcord.settingsBoot;
+    assert.ok(boot);
+    assert.deepEqual(Object.keys(boot).sort(), [
+        "i18n",
+        "lang",
+        "restart",
+        "setLang",
+        "settings",
+        "settingsSource",
+        "themes",
+    ]);
+    assert.equal(Object.isFrozen(window.legcord), true);
+    assert.equal(Object.isFrozen(boot), true);
+    assert.equal(Object.isFrozen(boot.settings), true);
+    assert.equal(Object.isFrozen(boot.themes), true);
+    assert.equal(Object.isFrozen(boot.i18n), true);
+    assert.equal(boot.settingsSource, "defaults");
+    assert.equal(boot.lang, "en-US");
+    assert.equal(boot.i18n["invite-goBackToApp"], "Go back to the Discord app");
+    assert.equal(typeof boot.setLang, "function");
+    assert.equal(typeof boot.restart, "function");
+});
+
+test("settingsBoot carries no path, URL, source, or renderer-supplied members", () => {
+    const { window } = createRuntime();
+    const boot = window.legcord.settingsBoot;
+    for (const key of ["path", "url", "source", "file", "pluginId", "plugin_id", "eval"]) {
+        assert.equal(key in boot, false, `settingsBoot must not carry ${key}`);
+        assert.equal(key in (boot.settings ?? {}), false);
+    }
+    const serialized = JSON.stringify({ settings: boot.settings, themes: boot.themes });
+    for (const forbidden of ["legcord://", "ts-out", "userData", "AppData"]) {
+        assert.equal(serialized.includes(forbidden), false);
+    }
+});
+
+test("settingsBoot.setLang sends one narrow fire-and-forget locale event", () => {
+    const { window } = createRuntime();
+    const result = window.legcord.settingsBoot.setLang("en-US");
+    assert.equal(result, undefined);
+    const events = window.messages.filter((message) => message.event?.type === "settings_boot_set_lang");
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0].event.payload, { locale: "en-US" });
+});
+
+test("settingsBoot.setLang rejects empty, oversized, and hostile locales without sending", () => {
+    const { window } = createRuntime();
+    for (const locale of ["", "en US", "en;US", "../escape", "a".repeat(33), 42, null, undefined, {}]) {
+        assert.throws(() => window.legcord.settingsBoot.setLang(locale), TypeError);
+    }
+    assert.equal(
+        window.messages.some((message) => message.event?.type === "settings_boot_set_lang"),
+        false,
+    );
+});
+
+test("settingsBoot.restart sends an empty fire-and-forget event", () => {
+    const { window } = createRuntime();
+    const result = window.legcord.settingsBoot.restart();
+    assert.equal(result, undefined);
+    const events = window.messages.filter((message) => message.event?.type === "settings_boot_restart");
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0].event.payload, {});
+});
+
+test("an unavailable settings source carries a null config with working narrow functions", () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "mod.get_bundle"], {
+        settingsSource: "unavailable",
+        settings: null,
+        themes: [],
+        lang: "en-US",
+        i18n: {},
+    });
+    const boot = window.legcord.settingsBoot;
+    assert.equal(boot.settingsSource, "unavailable");
+    assert.equal(boot.settings, null);
+    assert.equal(Object.isFrozen(boot), true);
+    window.legcord.settingsBoot.setLang("de");
+    window.legcord.settingsBoot.restart();
+    assert.equal(window.messages.filter((message) => message.event?.type === "settings_boot_set_lang").length, 1);
+    assert.equal(window.messages.filter((message) => message.event?.type === "settings_boot_restart").length, 1);
+});
+
+test("a reloaded document gets a fresh frozen settingsBoot with no shared identity", () => {
+    const first = createRuntime();
+    const next = createRuntime();
+    assert.ok(first.window.legcord.settingsBoot);
+    assert.ok(next.window.legcord.settingsBoot);
+    assert.equal(first.window.legcord.settingsBoot === next.window.legcord.settingsBoot, false);
+    assert.equal(first.window.legcord.settingsBoot.settings === next.window.legcord.settingsBoot.settings, false);
+    assert.equal(Object.isFrozen(next.window.legcord.settingsBoot), true);
+});
+
+test("the settingsBoot surface adds no generic sync bridge, eval, or invocation", () => {
+    const code = stripComments(bootstrapTemplate);
+    assert.equal(/sendSync/.test(code), false);
+    assert.equal(/[^a-zA-Z]eval\(/.test(code), false);
+    assert.equal(/new Function/.test(code), false);
+    assert.equal(/require\(["\x27]electron["\x27]\)/.test(code), false);
+    assert.equal(code.includes("settings_boot_set_lang"), true);
+    assert.equal(code.includes("settings_boot_restart"), true);
 });

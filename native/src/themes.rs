@@ -881,6 +881,70 @@ pub fn list_themes(profile_dir: &Path) -> ThemeListReport {
     report
 }
 
+/// One installed theme as Electron `getThemes()` serves it: the raw manifest
+/// document plus the directory id. No fields are added, renamed, or dropped,
+/// so the snapshot is shape-identical to
+/// `src/common/themes.ts::refreshThemeListCache` (`{ ...manifest, id }`).
+#[derive(Debug, Clone)]
+pub struct RawThemeManifest {
+    /// Directory id (the `entry` Electron spreads the manifest over).
+    pub id: String,
+    /// The raw `manifest.json` document.
+    pub manifest: serde_json::Value,
+}
+
+/// Enumerate installed themes as raw manifest documents for the settings boot
+/// snapshot, mirroring Electron `refreshThemeListCache()` discovery: every
+/// `<themes>/<id>/manifest.json` that parses as a JSON object is served as
+/// `{ ...manifest, id: entry }`, sorted by id for determinism (Electron uses
+/// filesystem order; the snapshot sorts). Entries are capped at
+/// [`MAX_LISTED_THEMES`]; unreadable, oversized, or non-object manifests are
+/// skipped exactly like Electron's `getThemeManifest()` returning `null`.
+///
+/// Deliberate Electron difference: `getCachedThemeList()` runs
+/// `importLooseThemeFiles()` (converting loose `.css` files into installed
+/// themes) on a cold cache. A boot snapshot is a read path and must have no
+/// write side effects, so loose files stay unlisted until imported through
+/// the native import picker. No path, URL, or CSS text crosses this boundary.
+pub fn raw_theme_manifests(profile_dir: &Path) -> Vec<RawThemeManifest> {
+    let root = themes_dir(profile_dir);
+    if !root.exists() {
+        return Vec::new();
+    }
+    let mut entries: Vec<String> = Vec::new();
+    let Ok(listing) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    for entry in listing.flatten() {
+        entries.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    entries.sort();
+
+    let mut manifests = Vec::new();
+    for id in entries {
+        if manifests.len() >= MAX_LISTED_THEMES {
+            break;
+        }
+        if validate_theme_id(&id).is_err() {
+            continue;
+        }
+        let Ok(theme_canonical) = resolve_theme_dir(profile_dir, &id) else {
+            continue;
+        };
+        let Ok(text) = read_manifest_text(&theme_canonical.join("manifest.json")) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if !manifest.is_object() {
+            continue;
+        }
+        manifests.push(RawThemeManifest { id, manifest });
+    }
+    manifests
+}
+
 /// Deterministic DOM id for one theme's managed style element.
 pub fn theme_style_id(theme_id: &str) -> String {
     format!("{THEME_STYLE_ID_PREFIX}{theme_id}")

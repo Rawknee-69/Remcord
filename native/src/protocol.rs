@@ -304,6 +304,23 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the Shelter loader probe
     /// (`LEGCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
     ShelterLoaderProbe(ShelterLoaderProbe),
+    /// Shipped one-way event posted by the `settingsBoot.setLang(locale)`
+    /// boot-surface function. Fire-and-forget like Electron's
+    /// `ipcRenderer.send("setLang", lang)`: no response is ever sent. The
+    /// locale is the only renderer-supplied value and is strictly validated
+    /// (non-empty, at most 32 bytes, `[A-Za-z0-9_-]`); no path, URL, file, or
+    /// catalog selector can cross this event.
+    SettingsBootSetLang(SettingsBootSetLang),
+    /// Shipped one-way event posted by the `settingsBoot.restart()` boot-surface
+    /// function. Empty payload (any member is rejected); the host reloads the
+    /// WebView document. Electron relaunch semantics (`app.relaunch()` +
+    /// `app.exit()`) are deliberately NOT claimed: the native shell has no
+    /// application updater/relauncher yet, so restart currently means a
+    /// document reload. This boundary is documented, not hidden.
+    SettingsBootRestart(SettingsBootRestart),
+    /// DEV-only diagnostic posted by the settings boot snapshot smoke probe
+    /// (`LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`). Never sent by shipped code.
+    SettingsBootProbe(SettingsBootProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,6 +611,43 @@ pub struct ShelterLoaderProbe {
     pub remove_plugin: bool,
     pub url_loader_absent: bool,
     pub synthetic: String,
+    pub error: Option<String>,
+}
+
+/// Narrow `setLang` event for the settings boot surface. Exactly one bounded
+/// locale string; structural validation (plus charset/length checks in the
+/// localization owner) rejects everything else before any write.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsBootSetLang {
+    pub locale: String,
+}
+
+/// Narrow `restart` event for the settings boot surface. The payload must be
+/// the exact empty object; any member is rejected by `deny_unknown_fields`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsBootRestart {}
+
+/// DEV-only report for the settings boot snapshot smoke probe.
+/// `settings_source` is the snapshot's own source enum; `settings_bytes` is
+/// the serialized config length (0 when unavailable); `themes_count` and
+/// `i18n_keys` are bounded counts (never contents); `frozen` reports whether
+/// the snapshot object is deeply frozen; `keys_exact` reports whether the
+/// surface carries exactly the seven approved members. The probe never
+/// carries settings values, theme manifests, translations, paths, or URLs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsBootProbe {
+    pub ok: bool,
+    pub settings_source: String,
+    pub settings_bytes: u32,
+    pub themes_count: u32,
+    pub i18n_keys: u32,
+    pub lang: String,
+    pub frozen: bool,
+    pub keys_exact: bool,
+    pub snapshot_bytes: u32,
     pub error: Option<String>,
 }
 
@@ -1335,6 +1389,36 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                                 || !payload.url_loader_absent))
                     {
                         return Err("invalid shelter loader probe result".to_owned());
+                    }
+                }
+                BridgeEvent::SettingsBootSetLang(payload) => {
+                    // Length only: the charset rule lives in the localization
+                    // owner (`validate_locale`) and is re-checked at handling.
+                    if payload.locale.is_empty()
+                        || payload.locale.len() > crate::localization::MAX_LANG_CODE_BYTES
+                    {
+                        return Err("invalid settings boot locale".to_owned());
+                    }
+                }
+                BridgeEvent::SettingsBootRestart(_) => {}
+                BridgeEvent::SettingsBootProbe(payload) => {
+                    if !matches!(
+                        payload.settings_source.as_str(),
+                        "file" | "defaults" | "unavailable"
+                    ) || payload.settings_bytes > 1024 * 1024
+                        || payload.themes_count > crate::themes::MAX_LISTED_THEMES as u32
+                        || payload.i18n_keys > crate::localization::MAX_BOOT_I18N_KEYS as u32
+                        || payload.lang.len() > crate::localization::MAX_LANG_CODE_BYTES
+                        || payload.snapshot_bytes
+                            > crate::settings_boot::MAX_BOOT_SNAPSHOT_BYTES as u32
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok && (!payload.frozen || !payload.keys_exact))
+                    {
+                        return Err("invalid settings boot probe result".to_owned());
                     }
                 }
             }
@@ -2417,6 +2501,58 @@ mod tests {
         assert!(parse_bridge_message(failed).is_ok());
         assert!(parse_bridge_message(&oversized).is_err());
         assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn accepts_the_narrow_settings_boot_events() {
+        let set_lang = r#"{"version":1,"event":{"type":"settings_boot_set_lang","payload":{"locale":"en-US"}}}"#;
+        let restart = r#"{"version":1,"event":{"type":"settings_boot_restart","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(set_lang),
+            Ok(BridgeMessage::Event(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(restart),
+            Ok(BridgeMessage::Event(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_boot_event_shapes_outside_the_closed_surface() {
+        // Empty/oversized locales, path/URL/file selectors, and any restart
+        // payload member are never valid members of these events.
+        let empty =
+            r#"{"version":1,"event":{"type":"settings_boot_set_lang","payload":{"locale":""}}}"#;
+        let oversized = format!(
+            r#"{{"version":1,"event":{{"type":"settings_boot_set_lang","payload":{{"locale":"{}"}}}}}}"#,
+            "a".repeat(33)
+        );
+        let with_path = r#"{"version":1,"event":{"type":"settings_boot_set_lang","payload":{"locale":"en-US","path":"C:\\secret"}}}"#;
+        let with_url = r#"{"version":1,"event":{"type":"settings_boot_set_lang","payload":{"locale":"en-US","url":"https://attacker.invalid"}}}"#;
+        let with_lang_file = r#"{"version":1,"event":{"type":"settings_boot_set_lang","payload":{"locale":"en-US","file":"lang.json"}}}"#;
+        let restart_with_arg = r#"{"version":1,"event":{"type":"settings_boot_restart","payload":{"reason":"update"}}}"#;
+        let generic_invoke = r#"{"version":1,"request_id":"boot-1","command":{"type":"invoke","payload":{"method":"settings.setLang"}}}"#;
+        assert!(parse_bridge_message(empty).is_err());
+        assert!(parse_bridge_message(&oversized).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_url).is_err());
+        assert!(parse_bridge_message(with_lang_file).is_err());
+        assert!(parse_bridge_message(restart_with_arg).is_err());
+        assert!(parse_bridge_message(generic_invoke).is_err());
+    }
+
+    #[test]
+    fn validates_settings_boot_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"settings_boot_probe","payload":{"ok":true,"settings_source":"file","settings_bytes":1666,"themes_count":0,"i18n_keys":200,"lang":"en-US","frozen":true,"keys_exact":true,"snapshot_bytes":30000,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"settings_boot_probe","payload":{"ok":false,"settings_source":"unavailable","settings_bytes":0,"themes_count":0,"i18n_keys":0,"lang":"en-US","frozen":false,"keys_exact":false,"snapshot_bytes":0,"error":"snapshot missing"}}}"#;
+        let unfrozen_ok = r#"{"version":1,"event":{"type":"settings_boot_probe","payload":{"ok":true,"settings_source":"file","settings_bytes":1666,"themes_count":0,"i18n_keys":200,"lang":"en-US","frozen":false,"keys_exact":true,"snapshot_bytes":30000,"error":null}}}"#;
+        let bad_source = r#"{"version":1,"event":{"type":"settings_boot_probe","payload":{"ok":true,"settings_source":"guessed","settings_bytes":1666,"themes_count":0,"i18n_keys":200,"lang":"en-US","frozen":true,"keys_exact":true,"snapshot_bytes":30000,"error":null}}}"#;
+        let too_many_themes = r#"{"version":1,"event":{"type":"settings_boot_probe","payload":{"ok":true,"settings_source":"file","settings_bytes":1666,"themes_count":257,"i18n_keys":200,"lang":"en-US","frozen":true,"keys_exact":true,"snapshot_bytes":30000,"error":null}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(unfrozen_ok).is_err());
+        assert!(parse_bridge_message(bad_source).is_err());
+        assert!(parse_bridge_message(too_many_themes).is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
     const startedAt = performance.now();
     const bootSnapshot = __LEGCORD_BOOT_SNAPSHOT__;
+    const settingsBootData = __LEGCORD_SETTINGS_BOOT_SNAPSHOT__;
     const protocolVersion = 1;
     const pending = new Map();
     const textEncoder = new TextEncoder();
@@ -348,12 +349,7 @@
         // The existing host lifecycle observes the rewrite and applies the
         // managed CSS; this call never touches styles directly.
         return request({ type: "theme_set_enabled", payload: { id, enabled } }, timeoutMs).then((payload) => {
-            if (
-                !payload ||
-                Object.keys(payload).length !== 2 ||
-                payload.id !== id ||
-                payload.enabled !== enabled
-            ) {
+            if (!payload || Object.keys(payload).length !== 2 || payload.id !== id || payload.enabled !== enabled) {
                 throw new Error("Native theme enable response schema is invalid");
             }
             return payload;
@@ -413,9 +409,7 @@
         // Parameter-free by protocol: no path, URL, include flag, or
         // selector may be supplied. The host inventories the fixed
         // allowlist only.
-        return request({ type: "backup_list_bundles", payload: {} }, timeoutMs).then(
-            (payload) => payload.bundles,
-        );
+        return request({ type: "backup_list_bundles", payload: {} }, timeoutMs).then((payload) => payload.bundles);
     }
 
     window.addEventListener("legcord-native:response", (event) => {
@@ -592,7 +586,8 @@
                 return;
             }
             request.resolve(payload);
-        } else if (response.ok === true && response.payload?.type === "theme_folder_opened") {            const payload = response.payload.payload;
+        } else if (response.ok === true && response.payload?.type === "theme_folder_opened") {
+            const payload = response.payload.payload;
             if (
                 !payload ||
                 Object.keys(payload).length !== 1 ||
@@ -795,12 +790,59 @@
     // Theme inventory only: an exact empty payload in, a bounded display
     // array out. No path, root, selector, URL, filter, CSS, or filesystem
     // surface.
-    const themes = Object.freeze({ installFromCode: installThemeFromCode, writeCss: writeThemeCss, importFiles, setEnabled: setThemeEnabled, listThemes });
+    const themes = Object.freeze({
+        installFromCode: installThemeFromCode,
+        writeCss: writeThemeCss,
+        importFiles,
+        setEnabled: setThemeEnabled,
+        listThemes,
+    });
+
+    // Synchronous settings boot snapshot (3d-2 prerequisite B). Host-created
+    // data, spliced per launch before the mod adapters and deeply frozen
+    // here, so it exists before the settings plugin could execute. The five
+    // data members are startup values only; the two functions are narrow
+    // fire-and-forget senders over closed one-way events (one bounded locale,
+    // one empty payload). No generic invocation, no eval, no renderer-supplied
+    // values, no paths, no URLs.
+    const LOCALE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+
+    function bootSetLang(locale) {
+        if (typeof locale !== "string" || !LOCALE_PATTERN.test(locale) || textEncoder.encode(locale).length > 32) {
+            throw new TypeError("locale must match [A-Za-z0-9_-]{1,32}");
+        }
+        sendEvent({ type: "settings_boot_set_lang", payload: { locale } });
+    }
+
+    function bootRestart() {
+        sendEvent({ type: "settings_boot_restart", payload: {} });
+    }
+
+    const settingsBootSnapshot = freezeDeep(settingsBootData);
+    const settingsBoot = Object.freeze({
+        settingsSource: settingsBootSnapshot.settingsSource,
+        settings: settingsBootSnapshot.settings,
+        themes: settingsBootSnapshot.themes,
+        lang: settingsBootSnapshot.lang,
+        i18n: settingsBootSnapshot.i18n,
+        setLang: bootSetLang,
+        restart: bootRestart,
+    });
 
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
-        value: Object.freeze({ boot: snapshot, native, settings, getLang, pluginStorage, backup, folders, themes }),
+        value: Object.freeze({
+            boot: snapshot,
+            native,
+            settings,
+            getLang,
+            pluginStorage,
+            backup,
+            folders,
+            themes,
+            settingsBoot,
+        }),
     });
 
     try {

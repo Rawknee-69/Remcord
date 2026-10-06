@@ -132,9 +132,118 @@ pub fn validate_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Maximum number of entries in a merged boot catalog. The real `en-US`
+/// catalog holds a few hundred keys; this is a safety rail, not a claim.
+pub const MAX_BOOT_I18N_KEYS: usize = 8192;
+
+/// Maximum serialized size of a merged boot catalog in bytes.
+pub const MAX_BOOT_I18N_BYTES: usize = 512 * 1024;
+
+/// The full merged translation catalog, mirroring Electron `loadLanguage()`.
+pub struct RawLang {
+    /// The resolved language selection (e.g. `"en-GB"` even when its catalog
+    /// is absent and `en-US` strings are served).
+    pub lang: String,
+    /// Selected catalog with missing keys filled from `en-US`.
+    pub entries: HashMap<String, String>,
+}
+
+/// Load the whole merged catalog exactly like Electron `loadLanguage()`
+/// (`src/common/lang.ts`): the selected locale's embedded catalog, with keys
+/// absent from it filled from the embedded `en-US` catalog. A selected locale
+/// with no catalog serves the whole `en-US` catalog (same two rules as
+/// [`lookup`]). The selection file is re-read on every call; there is no
+/// in-memory cache to invalidate.
+pub fn load_raw_lang(profile_dir: &Path) -> Result<RawLang, String> {
+    let lang = resolve_lang(profile_dir);
+    let catalogs = parsed_catalogs();
+    let fallback = catalogs
+        .get("en-US")
+        .expect("the en-US fallback catalog is embedded");
+    let mut entries = fallback.clone();
+    if lang != "en-US" {
+        if let Some(selected) = catalogs.get(lang.as_str()) {
+            for (key, value) in selected {
+                entries.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if entries.len() > MAX_BOOT_I18N_KEYS {
+        return Err("merged translation catalog exceeds the entry limit".to_owned());
+    }
+    let serialized_len = serde_json::to_string(&entries)
+        .map_err(|error| format!("translation catalog cannot be serialized: {error}"))?
+        .len();
+    if serialized_len > MAX_BOOT_I18N_BYTES {
+        return Err("merged translation catalog exceeds the size limit".to_owned());
+    }
+    Ok(RawLang { lang, entries })
+}
+
+/// Validate a renderer-supplied locale for `setLang`. Non-empty, bounded, and
+/// restricted to BCP 47 characters; the value is stored verbatim and
+/// normalized on read by [`resolve_lang`], exactly like Electron stores the
+/// raw Discord locale string and normalizes two-letter codes on read.
+pub fn validate_locale(locale: &str) -> Result<(), String> {
+    if locale.is_empty() {
+        return Err("locale must not be empty".to_owned());
+    }
+    if locale.len() > MAX_LANG_CODE_BYTES {
+        return Err("locale exceeds the size limit".to_owned());
+    }
+    if !locale
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("locale contains characters outside [A-Za-z0-9_-]".to_owned());
+    }
+    Ok(())
+}
+
+/// Host-constructed language selection path. The renderer cannot influence
+/// this: the profile directory is fixed and the remaining segments are
+/// constants.
+pub fn lang_file_path(profile_dir: &Path) -> std::path::PathBuf {
+    profile_dir.join("storage").join("lang.json")
+}
+
+/// Persist a language selection exactly like Electron `setLang()`
+/// (`src/common/lang.ts`): `<profile>/storage/lang.json` becomes
+/// `{"lang": locale}` (4-space JSON, the same formatting Electron writes),
+/// creating `storage/` when absent, via a same-directory temp file plus
+/// rename so readers never observe a truncated file. Electron additionally
+/// clears its in-memory `currentLanguage`/`languageCache`; the native owner
+/// holds no cache (the selection is re-read per call), so there is nothing to
+/// invalidate.
+pub fn apply_lang(profile_dir: &Path, locale: &str) -> Result<(), String> {
+    validate_locale(locale)?;
+    let path = lang_file_path(profile_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("language selection cannot be written: {error}"))?;
+    }
+    // Byte-identical layout to Electron's `JSON.stringify({ lang }, null, 4)`
+    // for this single-key document. Exactness is safe: `validate_locale`
+    // above restricts the value to characters that need no JSON escaping.
+    let serialized = format!("{{\n    \"lang\": \"{locale}\"\n}}");
+    let temp_path = path.with_extension("json.tmp");
+    if let Err(error) = std::fs::write(&temp_path, serialized.as_bytes()) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("language selection cannot be written: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("language selection cannot be written: {error}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{available_locales, lookup, resolve_lang, validate_key};
+    use super::{
+        apply_lang, available_locales, load_raw_lang, lookup, resolve_lang, validate_key,
+        validate_locale,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_profile_dir(tag: &str) -> std::path::PathBuf {
@@ -202,5 +311,57 @@ mod tests {
         assert!(validate_key("a").is_ok());
         assert!(validate_key(&"k".repeat(128)).is_ok());
         assert!(validate_key(&"k".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn raw_catalog_merges_selected_over_en_us_fallback() {
+        let profile = unique_profile_dir("raw-default");
+        let raw = load_raw_lang(&profile).expect("the default catalog must load");
+        assert_eq!(raw.lang, "en-US");
+        assert_eq!(
+            raw.entries.get("invite-goBackToApp").map(String::as_str),
+            Some("Go back to the Discord app")
+        );
+        assert!(!raw.entries.is_empty());
+    }
+
+    #[test]
+    fn raw_catalog_reports_selection_with_fallback_strings() {
+        let profile = unique_profile_dir("raw-engb");
+        seed_lang(&profile, r#"{"lang":"en-GB"}"#);
+        let raw = load_raw_lang(&profile).expect("the fallback catalog must load");
+        assert_eq!(raw.lang, "en-GB");
+        assert_eq!(
+            raw.entries.get("invite-goBackToApp").map(String::as_str),
+            Some("Go back to the Discord app")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_oversized_and_evil_locales() {
+        assert!(validate_locale("en-US").is_ok());
+        assert!(validate_locale("zh-Hans").is_ok());
+        assert!(validate_locale("").is_err());
+        assert!(validate_locale(&"a".repeat(32)).is_ok());
+        assert!(validate_locale(&"a".repeat(33)).is_err());
+        assert!(validate_locale("../escape").is_err());
+        assert!(validate_locale("en;US").is_err());
+        assert!(validate_locale("en US").is_err());
+    }
+
+    #[test]
+    fn apply_lang_round_trips_through_the_selection_file() {
+        let profile = unique_profile_dir("apply");
+        apply_lang(&profile, "de").expect("a valid locale must persist");
+        // Stored verbatim (Electron parity), normalized on read (`xx-XX`).
+        let body = std::fs::read_to_string(profile.join("storage").join("lang.json")).unwrap();
+        assert_eq!(body, "{\n    \"lang\": \"de\"\n}");
+        assert_eq!(resolve_lang(&profile), "de-DE");
+        assert!(
+            !profile.join("storage").join("lang.json.tmp").exists(),
+            "no temp file may be left behind"
+        );
+        assert!(apply_lang(&profile, "").is_err());
+        assert!(apply_lang(&profile, "../escape").is_err());
     }
 }

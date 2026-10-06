@@ -727,3 +727,39 @@ Candidate A: the existing JS build produces `ts-out` before cargo. `build.rs` de
 - Identity is a host-computed SHA-256 over the exact embedded bytes (the upstream artifact carries no build banner to pin). Any pipeline byte change yields a different identity and the same bytes always yield the same one.
 - The renderer cannot choose a plugin path, source file, URL, or plugin id through this module: `settings_plugin::artifact()` takes no input and resolves only the pinned artifact. Startup logs one identity line (`[SettingsPlugin] artifact name=... bytes=... sha256=...`).
 - The compiled bundle was verified to reference exactly the five traced boot members above, matching the source trace file-for-file. Full settings-plugin execution remains intentionally unwired (3d-2 prerequisite B, the synchronous boot snapshot, is still pending).
+
+## Settings boot snapshot (3d-2 prerequisite B)
+
+The native shell now provides the exact synchronous boot data the real
+settings plugin reads during onLoad(), as one host-created frozen surface:
+window.legcord.settingsBoot. Full settings-plugin execution stays
+intentionally unwired - this is the prerequisite, not the integration.
+
+### Traced boot contract (verified in source AND the compiled bundle)
+
+src/shelter/settings/index.ts:90-99 runs synchronously, no await:
+
+| Member | Source site | Electron mechanism | Return shape | Boot role |
+| --- | --- | --- | --- | --- |
+| getConfig | settings.ts:15, index.ts:62 (showExperimentalPluginMenu) | bridge.ts:58 sendSync(getEntireConfig) to ipc.ts:337 cached Settings | Readonly<Settings> (settings.d.ts:31-105) | whole config + experimental-menu flag |
+| getThemes | settings.ts:19 | bridge.ts:121 sendSync(getThemes) to ipc.ts:212 cached list | Readonly<ThemeManifest[]> (themeManifest.d.ts:1-18) | whole theme inventory |
+| translations | index.ts:94 | bridge.ts:83 preload-time sendSync(getTranslations) (zero IPC at onLoad) | runtime Record<string,string> (i18nStrings.d.ts:1; the as-string casts in bridge.ts:83 are inaccurate) | whole catalog into store.i18n |
+| setLang | index.ts:96 with storesFlat.LocaleStore.locale | bridge.ts:64 fire-and-forget send(setLang, lang) to ipc.ts:224 to lang.ts:55-66 writes storage/lang.json, clears caches | void | INVOKED at every boot (not mere existence) |
+| restart | index.ts:83, SettingsPage.tsx:59, AddDetectableModal.tsx:81 - modal/button callbacks only | bridge.ts:116 fire-and-forget send(restart) to ipc.ts:284 to main.ts:124-133 app.relaunch() + app.exit() | void | existence only at boot; never invoked during init |
+
+The compiled ts-out/plugins/settings/plugin.js (243,617 bytes) references exactly this surface (getConfig x2, getThemes/translations/setLang x1 each, window.legcord.restart x3).
+
+### Snapshot shape (exact, frozen, host-created)
+
+window.legcord.settingsBoot carries exactly seven members: settingsSource (file | defaults | unavailable), settings (the Settings object, or null only when unavailable), themes (Array of raw manifest-plus-id documents, the Electron getThemes() shape), lang (resolved selection), i18n (merged catalog record), setLang(locale) and restart() as narrow fire-and-forget senders.
+
+Sourced from the actual owners, never duplicated or invented: settings.rs load_settings (missing file maps to compiled-in defaults; corrupt maps to unavailable with null config, never fabricated defaults), themes.rs raw_theme_manifests (raw manifest-plus-id passthrough sorted by id, capped at 256, invalid manifests skipped; NO loose-file auto-import - a boot read must have no write side effects), localization.rs load_raw_lang (selected catalog over en-US fallback fill, the exact loadLanguage() rules). setLang persists via localization.rs apply_lang (4-space lang.json layout identical to Electron, atomic temp-plus-rename; no cache exists natively to invalidate). Caps: snapshot at most 1 MiB, catalog at most 8192 keys / 512 KiB, locale [A-Za-z0-9_-] at most 32 bytes.
+
+### Security and lifecycle boundaries
+
+- Host-created per launch, spliced into the document-start script BEFORE the mod adapters (initialization_script fails fast on malformed JSON or an unspliced placeholder; ordering is unit-tested). Every document executes the same script and receives its own frozen object identity - per-document isolation without cross-document leakage.
+- No renderer-supplied values, paths, URLs, filenames, plugin ids, or generic invocation: the two functions validate input (TypeError before dispatch) and post closed one-way events (settings_boot_set_lang with one bounded locale, settings_boot_restart with an exact empty payload; unknown members rejected by deny_unknown_fields at parse plus length/charset validation).
+- No generic synchronous IPC was added: the existing async capabilities are untouched, and settingsBoot is a separate surface (a future loader shim will map it onto the sync member names at plugin-eval time - that mapping is the remaining 3d-2 step, not this milestone).
+- restart currently reloads the document; Electron relaunch (app.relaunch() + app.exit()) is deliberately NOT claimed (no native relauncher exists yet).
+- Values reflect launch-time state; mid-run host writes (a setLang persist, a settings mutation, a theme install) are honored by the async capabilities immediately but appear in the boot snapshot on the next launch - consistent with the Electron restart-required model. This boundary is documented, not hidden.
+- DEV-only settings_boot_probe event (LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE=1) reports source/bytes/counts/frozen/keys-exact per document - counts and lengths only, never values, manifests, translations, paths, or URLs. The probe proves presence and shape in the live document; ordering is proven by construction plus the unit test.

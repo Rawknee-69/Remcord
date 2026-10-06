@@ -711,7 +711,7 @@ test("native theme install is CSS-text-only with no network or dialog surface", 
     // member, no install-from-URL shape.
     const installFacade = nativeFacade.slice(
         nativeFacade.indexOf("function installThemeFromCode"),
-        nativeFacade.indexOf("window.addEventListener(\"legcord-native:response\""),
+        nativeFacade.indexOf('window.addEventListener("legcord-native:response"'),
     );
     assert.ok(installFacade.length > 0);
     assert.match(installFacade, /requireCapability\("themes\.install_code"\)/);
@@ -876,7 +876,10 @@ test("Electron keeps the sync theme-list and fire-and-forget enable contracts", 
         new URL("../../src/shelter/settings/components/ThemesCard.tsx", import.meta.url),
         "utf8",
     );
-    assert.match(bridge, /set:\s*\(id:\s*string, state:\s*boolean\)\s*=>\s*ipcRenderer\.send\("setThemeEnabled", id, state\)/);
+    assert.match(
+        bridge,
+        /set:\s*\(id:\s*string, state:\s*boolean\)\s*=>\s*ipcRenderer\.send\("setThemeEnabled", id, state\)/,
+    );
     assert.match(ipc, /ipcMain\.on\("setThemeEnabled", \(_event, name: string, enabled: boolean\)/);
     assert.match(ipc, /setThemeEnabled\(name, enabled\)/);
     assert.match(themesMain, /manifest\.enabled = enabled;/);
@@ -949,7 +952,10 @@ test("Electron keeps the metadata-only theme inventory contract", () => {
     const themesMain = readFileSync(new URL("../../src/common/themes.ts", import.meta.url), "utf8");
     assert.match(themesMain, /themes\.push\(\{\s*\.\.\.manifest,\s*id:\s*entry\s*\}\);/);
     assert.match(themesMain, /if \(manifest\) \{\s*themes\.push/);
-    assert.doesNotMatch(themesMain, /getCachedThemeList[\s\S]{0,400}readFileSync\(`\$\{themePath\}\/\$\{themeFile\.theme\}`/);
+    assert.doesNotMatch(
+        themesMain,
+        /getCachedThemeList[\s\S]{0,400}readFileSync\(`\$\{themePath\}\/\$\{themeFile\.theme\}`/,
+    );
     assert.match(ipc, /ipcMain\.on\("getThemes", \(event\) => \{/);
     assert.match(ipc, /event\.returnValue = getCachedThemeList\(\);/);
     assert.match(ipc, /ipcMain\.on\("refreshThemesCache", \(event\) => \{/);
@@ -1050,10 +1056,7 @@ test("theme cards open the theme folder natively with the verbatim id", () => {
 });
 
 test("folder UI wiring introduces no generic filesystem surface", () => {
-    const settingsHelper = readFileSync(
-        new URL("../../src/shelter/settings/settings.ts", import.meta.url),
-        "utf8",
-    );
+    const settingsHelper = readFileSync(new URL("../../src/shelter/settings/settings.ts", import.meta.url), "utf8");
     const settingsPage = readFileSync(
         new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
         "utf8",
@@ -1080,4 +1083,55 @@ test("folder UI wiring introduces no generic filesystem surface", () => {
     for (const source of [settingsPage, themesPage, pluginsPage, themesCard]) {
         assert.doesNotMatch(source, /function isNativeWebView/);
     }
+});
+
+test("Electron keeps the synchronous settings-plugin boot contracts", () => {
+    // getConfig/getThemes are sendSync reads, translations is a preload-time
+    // sendSync value, setLang/restart are fire-and-forget sends.
+    assert.match(bridge, /getConfig:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getEntireConfig"\)/);
+    assert.match(bridge, /getThemes:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getThemes"\)/);
+    assert.match(bridge, /translations:\s*ipcRenderer\.sendSync\("getTranslations"\)/);
+    assert.match(bridge, /setLang:\s*\(lang:\s*string\)\s*=>\s*ipcRenderer\.send\("setLang", lang\)/);
+    assert.match(bridge, /restart:\s*\(\)\s*=>\s*ipcRenderer\.send\("restart"\)/);
+    assert.match(ipc, /ipcMain\.on\("getEntireConfig"/);
+    assert.match(ipc, /ipcMain\.on\("getThemes"/);
+    assert.match(ipc, /ipcMain\.on\("getTranslations"/);
+    assert.match(ipc, /ipcMain\.on\("setLang"/);
+    assert.match(ipc, /ipcMain\.on\("restart"/);
+    // The real plugin reads all five synchronously during onLoad.
+    const settingsIndex = readFileSync(new URL("../../src/shelter/settings/index.ts", import.meta.url), "utf8");
+    assert.match(settingsIndex, /export function onLoad\(\)/);
+    assert.match(settingsIndex, /refreshSettings\(\)/);
+    assert.match(settingsIndex, /refreshThemes\(\)/);
+    assert.match(settingsIndex, /store\.i18n = window\.legcord\.translations/);
+    assert.match(settingsIndex, /window\.legcord\.settings\.setLang\(storesFlat\.LocaleStore\.locale\)/);
+    assert.doesNotMatch(settingsIndex, /await/);
+});
+
+test("no src caller uses the native settingsBoot surface yet", () => {
+    // This milestone stops before full settings-plugin execution: no src/
+    // file may reference the native boot surface, and the Electron contracts
+    // above must be the only ones the plugin reads.
+    const settingsIndex = readFileSync(new URL("../../src/shelter/settings/index.ts", import.meta.url), "utf8");
+    for (const source of [bridge, ipc, types, shelterSettings, settingsIndex]) {
+        assert.doesNotMatch(source, /settingsBoot/);
+        assert.doesNotMatch(source, /settings_boot/);
+    }
+});
+
+test("native settingsBoot is host-built data plus two narrow senders", () => {
+    // The snapshot is built from the actual capability owners only.
+    const nativeBoot = readFileSync(new URL("../src/settings_boot.rs", import.meta.url), "utf8");
+    assert.match(nativeBoot, /crate::settings::load_settings/);
+    assert.match(nativeBoot, /crate::themes::raw_theme_manifests/);
+    assert.match(nativeBoot, /crate::localization::load_raw_lang/);
+    const shippedBoot = nativeBoot.slice(0, nativeBoot.indexOf("#[cfg(test)]"));
+    assert.doesNotMatch(shippedBoot, /sendSync|evaluate_script|fetch\(|ureq|openPath|ShellExecute/);
+    // The facade exposes exactly seven members: five data plus two
+    // fire-and-forget senders over closed one-way events.
+    const bootFacade = nativeFacade.slice(nativeFacade.indexOf("const LOCALE_PATTERN"));
+    assert.ok(bootFacade.length > 0);
+    assert.match(bootFacade, /\{\s*type:\s*"settings_boot_set_lang",\s*payload:\s*\{\s*locale\s*\}\s*\}/);
+    assert.match(bootFacade, /\{\s*type:\s*"settings_boot_restart",\s*payload:\s*\{\s*\}\s*\}/);
+    assert.doesNotMatch(bootFacade, /sendSync|new Function|[^a-zA-Z]eval\(|require\(/);
 });
