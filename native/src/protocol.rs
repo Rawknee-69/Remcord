@@ -301,6 +301,9 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the theme list smoke probe
     /// (`LEGCORD_NATIVE_THEME_LIST_SMOKE=1`). Never sent by shipped code.
     ThemeListProbe(ThemeListProbe),
+    /// DEV-only diagnostic posted by the Shelter loader probe
+    /// (`LEGCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
+    ShelterLoaderProbe(ShelterLoaderProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -567,6 +570,30 @@ pub struct ThemeListProbe {
     pub stage: String,
     pub count: u32,
     pub clearvision: String,
+    pub error: Option<String>,
+}
+
+/// DEV-only report for the Shelter plugin-loader probe. `stage` is one of
+/// `"presence"`, `"synthetic"`, or `"cleanup"`: the probe first verifies the
+/// upstream `shelter.plugins` loader surface exists (and that the URL-based
+/// `ensureLoaderPlugin` is NOT exposed), then round-trips one synthetic
+/// host-fixed plugin through add/start/stop/remove, then verifies no residue
+/// remains. `synthetic` is `"verified"` only on the full cycle, `"skipped"`
+/// otherwise. The probe never carries plugin source, paths, URLs, or
+/// filesystem surface — only fixed stage strings and booleans.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShelterLoaderProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub shelter: bool,
+    pub plugins: bool,
+    pub add_local_plugin: bool,
+    pub start_plugin: bool,
+    pub stop_plugin: bool,
+    pub remove_plugin: bool,
+    pub url_loader_absent: bool,
+    pub synthetic: String,
     pub error: Option<String>,
 }
 
@@ -1286,6 +1313,28 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || (payload.ok && payload.clearvision == "failed")
                     {
                         return Err("invalid theme list probe result".to_owned());
+                    }
+                }
+                BridgeEvent::ShelterLoaderProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "presence" | "synthetic" | "cleanup")
+                        || !matches!(payload.synthetic.as_str(), "verified" | "skipped")
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok
+                            && (payload.stage != "cleanup"
+                                || payload.synthetic != "verified"
+                                || !payload.shelter
+                                || !payload.plugins
+                                || !payload.add_local_plugin
+                                || !payload.start_plugin
+                                || !payload.stop_plugin
+                                || !payload.remove_plugin
+                                || !payload.url_loader_absent))
+                    {
+                        return Err("invalid shelter loader probe result".to_owned());
                     }
                 }
             }
@@ -2029,6 +2078,26 @@ mod tests {
         assert!(parse_bridge_message(bad_stage).is_err());
         assert!(parse_bridge_message(cv_failed).is_err());
         assert!(parse_bridge_message(with_path).is_err());
+    }
+
+    #[test]
+    fn validates_shelter_loader_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":true,"stage":"cleanup","shelter":true,"plugins":true,"add_local_plugin":true,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":true,"synthetic":"verified","error":null}}}"#;
+        let presence_failed = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":false,"stage":"presence","shelter":true,"plugins":true,"add_local_plugin":false,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":true,"synthetic":"skipped","error":"loader surface unavailable"}}}"#;
+        let synthetic_failed = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":false,"stage":"synthetic","shelter":true,"plugins":true,"add_local_plugin":true,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":true,"synthetic":"skipped","error":"synthetic plugin did not start"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":true,"stage":"loaded","shelter":true,"plugins":true,"add_local_plugin":true,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":true,"synthetic":"verified","error":null}}}"#;
+        let ok_unverified = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":true,"stage":"cleanup","shelter":true,"plugins":true,"add_local_plugin":true,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":true,"synthetic":"skipped","error":null}}}"#;
+        let ok_url_present = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":true,"stage":"cleanup","shelter":true,"plugins":true,"add_local_plugin":true,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":false,"synthetic":"verified","error":null}}}"#;
+        let with_path = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":true,"stage":"cleanup","shelter":true,"plugins":true,"add_local_plugin":true,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":true,"synthetic":"verified","path":"C:\\x","error":null}}}"#;
+        let with_source = r#"{"version":1,"event":{"type":"shelter_loader_probe","payload":{"ok":true,"stage":"cleanup","shelter":true,"plugins":true,"add_local_plugin":true,"start_plugin":true,"stop_plugin":true,"remove_plugin":true,"url_loader_absent":true,"synthetic":"verified","js":"({onLoad(){}})","error":null}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(presence_failed).is_ok());
+        assert!(parse_bridge_message(synthetic_failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(ok_unverified).is_err());
+        assert!(parse_bridge_message(ok_url_present).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_source).is_err());
     }
 
     #[test]

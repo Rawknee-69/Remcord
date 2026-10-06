@@ -249,6 +249,7 @@ const THEME_WRITE_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_WRITE_SMOKE";
 const THEME_IMPORT_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_IMPORT_SMOKE";
 const THEME_SET_ENABLED_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
 const THEME_LIST_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_LIST_SMOKE";
+const SHELTER_LOADER_PROBE_ENV: &str = "LEGCORD_NATIVE_LOADER_PROBE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -1143,6 +1144,118 @@ const THEME_LIST_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
+/// DEV-only Shelter plugin-loader probe (`LEGCORD_NATIVE_LOADER_PROBE=1`).
+/// Verifies the exact upstream `shelter.plugins` entry points a future
+/// native settings-plugin loader needs — `addLocalPlugin`, `startPlugin`,
+/// `stopPlugin`, `removePlugin` — and asserts the URL-based
+/// `ensureLoaderPlugin` is NOT exposed on the public plugins object (it is
+/// omitted upstream, so no URL-selected loading surface is reachable).
+/// It then round-trips one synthetic plugin with host-fixed id and source
+/// (`legcord-loader-probe`, `({onLoad(){}})`) through add/start/stop/remove
+/// and proves removal behaviorally (a clean registry rejects a fresh start).
+/// The throw-chain reads no reactive store: upstream throws on taken,
+/// missing, or already-running ids, so a zero-throw run verifies the cycle
+/// against live state without relying on the synchronous freshness of
+/// Shelter's deferred store getters. No settings code executes, no renderer
+/// input is accepted (id, source, and manifest are literals in this fixed
+/// script), nothing is fetched, and the payload carries only stage strings
+/// and booleans — never plugin source, paths, or URLs. The single eval in
+/// the chain is upstream Shelter's own plugin executor over these fixed
+/// bytes. One typed `shelter_loader_probe` event per evaluation: the probe runs
+/// at each trusted page load and again right after Shelter's own bootstrap
+/// marker (Shelter publishes its global asynchronously, so the page-load run
+/// may report presence-false while the post-marker run is authoritative).
+/// Both runs are fully synchronous and idempotent (a leftover probe id is
+/// removed first), so they can neither overlap nor duplicate the synthetic
+/// plugin.
+const SHELTER_LOADER_PROBE_SCRIPT: &str = r#"
+(() => {
+  const PROBE_ID = "legcord-loader-probe";
+  const PROBE_JS = "({onLoad(){}})";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "shelter_loader_probe", payload } })
+  );
+  // The throw-chain below is self-verifying and reads no reactive store:
+  // upstream throws when an id is taken (add), missing (start/stop/remove),
+  // or already running (start), so a zero-throw run proves the full cycle
+  // against live state. Store snapshots are deliberately NOT read: Shelter
+  // serves them through deferred reactive getters whose synchronous
+  // freshness inside one evaluation cannot be relied on.
+  const fail = (stage, flags, error) => probe({
+    ok: false, stage,
+    shelter: !!flags.shelter, plugins: !!flags.plugins,
+    add_local_plugin: !!flags.addLocalPlugin, start_plugin: !!flags.startPlugin,
+    stop_plugin: !!flags.stopPlugin, remove_plugin: !!flags.removePlugin,
+    url_loader_absent: !!flags.urlLoaderAbsent, synthetic: "skipped",
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const shelter = window.shelter;
+    const plugins = shelter && typeof shelter === "object" ? shelter.plugins : undefined;
+    const flags = {
+      shelter: !!shelter,
+      plugins: !!plugins,
+      addLocalPlugin: typeof plugins?.addLocalPlugin === "function",
+      startPlugin: typeof plugins?.startPlugin === "function",
+      stopPlugin: typeof plugins?.stopPlugin === "function",
+      removePlugin: typeof plugins?.removePlugin === "function",
+      urlLoaderAbsent: typeof plugins?.ensureLoaderPlugin === "undefined",
+    };
+    if (!flags.shelter || !flags.plugins || !flags.addLocalPlugin || !flags.startPlugin
+        || !flags.stopPlugin || !flags.removePlugin || !flags.urlLoaderAbsent) {
+      fail("presence", flags, "loader surface unavailable");
+      return;
+    }
+    try {
+      // Clear any leftover id first: remove throws only when absent.
+      try {
+        plugins.removePlugin(PROBE_ID);
+      } catch {
+        // Not present: nothing to clear.
+      }
+      plugins.addLocalPlugin(PROBE_ID, {
+        js: PROBE_JS, manifest: { name: "Legcord Loader Probe" }, update: false,
+      });
+      plugins.startPlugin(PROBE_ID);
+      plugins.stopPlugin(PROBE_ID);
+      plugins.removePlugin(PROBE_ID);
+      // Prove removal behaviorally: a truly clean registry rejects a fresh
+      // start, while a resident entry would restart cleanly (restored right
+      // after, best effort).
+      let residue = false;
+      try {
+        plugins.startPlugin(PROBE_ID);
+        residue = true;
+        try {
+          plugins.stopPlugin(PROBE_ID);
+        } catch {
+          // Best effort: leave no running instance behind.
+        }
+        try {
+          plugins.removePlugin(PROBE_ID);
+        } catch {
+          // Best effort: leave no registry entry behind.
+        }
+      } catch {
+        residue = false;
+      }
+      if (residue) throw new Error("synthetic plugin residue remains");
+    } catch (error) {
+      fail("synthetic", flags, error);
+      return;
+    }
+    probe({
+      ok: true, stage: "cleanup",
+      shelter: true, plugins: true,
+      add_local_plugin: true, start_plugin: true, stop_plugin: true, remove_plugin: true,
+      url_loader_absent: true, synthetic: "verified", error: null,
+    });
+  } catch (error) {
+    fail("presence", {}, error);
+  }
+})();
+"#;
+
 /// DEV-only managed-styles observation (`LEGCORD_NATIVE_THEMES_SMOKE=1` or
 /// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
 /// pushes: the renderer never requests their CSS, so this probe only observes
@@ -1653,6 +1766,7 @@ fn handle_mod_bootstrap_result(
     smoke_reload_request_id: &mut Option<String>,
     response_count: &mut u64,
     observe_after_marker: Option<&str>,
+    loader_probe_after_marker: Option<&str>,
 ) {
     let Some(pending) = pending_mods.remove(&request_id) else {
         eprintln!(
@@ -1741,6 +1855,20 @@ fn handle_mod_bootstrap_result(
             println!("[Mods][Smoke][after-marker] mod='{descriptor_id}' {result}");
         }) {
             eprintln!("[Mods][Smoke] post-marker observation failed: {error}");
+        }
+    }
+    // Shelter publishes its page-world global asynchronously (after
+    // `#app-mount` has children), so a page-load probe runs too early to see
+    // `window.shelter.plugins`. Re-run the loader probe once Shelter's own
+    // marker proves the global exists. Gated to Shelter: other mods' markers
+    // must not duplicate the probe. The script is fully synchronous and
+    // removes a leftover probe id first, so a page-load run and this run can
+    // never overlap or duplicate the synthetic plugin.
+    if let Some(script) = loader_probe_after_marker {
+        if descriptor.id == SHELTER_MOD.id {
+            if let Err(error) = webview.evaluate_script(script) {
+                eprintln!("[ShelterLoader][Probe] post-marker probe failed: {error}");
+            }
         }
     }
     if *smoke_reloads_remaining > 0 {
@@ -1997,6 +2125,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(THEME_LIST_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_theme_list_smoke {
         println!("[Themes][ListSmoke] theme list smoke probe enabled");
+    }
+    let diagnostic_shelter_loader_probe =
+        std::env::var(SHELTER_LOADER_PROBE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_shelter_loader_probe {
+        println!("[ShelterLoader][Probe] shelter loader probe enabled");
     }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
@@ -2764,6 +2897,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_theme_list_smoke {
                             if let Err(error) = webview.evaluate_script(THEME_LIST_SMOKE_SCRIPT) {
                                 eprintln!("[Themes][ListSmoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_shelter_loader_probe {
+                            if let Err(error) = webview.evaluate_script(SHELTER_LOADER_PROBE_SCRIPT) {
+                                eprintln!("[ShelterLoader][Probe] probe failed: {error}");
                             }
                         }
                     }
@@ -4176,6 +4314,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 &mut smoke_reload_request_id,
                                 &mut response_count,
                                 diagnostic_mod_smoke.then_some(mod_smoke_script.as_str()),
+                                diagnostic_shelter_loader_probe
+                                    .then_some(SHELTER_LOADER_PROBE_SCRIPT),
                             );
                         } else {
                             eprintln!(
@@ -4243,6 +4383,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut smoke_reloads_remaining,
                             &mut smoke_reload_request_id,
                             &mut response_count,
+                            None,
                             None,
                         );
                     }
@@ -4458,6 +4599,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[Themes][ListSmoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::ShelterLoaderProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[ShelterLoader][Probe] ok=true stage={} synthetic={}",
+                                payload.stage, payload.synthetic
+                            );
+                        } else {
+                            eprintln!(
+                                "[ShelterLoader][Probe] ok=false stage={} error={}",
                                 payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
@@ -5704,5 +5859,40 @@ mod tests {
         assert!(!super::THEME_LIST_SMOKE_SCRIPT.contains("installBDTheme"));
         assert!(!super::THEME_LIST_SMOKE_SCRIPT.contains("fetch("));
         assert!(!super::THEME_LIST_SMOKE_SCRIPT.contains("sendSync"));
+    }
+
+    #[test]
+    fn shelter_loader_probe_covers_only_the_public_loader_surface() {
+        assert_eq!(
+            super::SHELTER_LOADER_PROBE_ENV,
+            "LEGCORD_NATIVE_LOADER_PROBE"
+        );
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("shelter_loader_probe"));
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("addLocalPlugin"));
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("startPlugin"));
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("stopPlugin"));
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("removePlugin"));
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("legcord-loader-probe"));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("installedPlugins"));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("loadedPlugins"));
+        // The throw-chain reads no reactive store: Shelter serves registry
+        // snapshots through deferred getters whose synchronous freshness
+        // inside one evaluation cannot be relied on, so the probe verifies
+        // the cycle purely through upstream throw behavior (taken, missing,
+        // already-running).
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("ensureLoaderPlugin"));
+        // The probe asserts the URL-based loader is ABSENT (property check
+        // only) and round-trips one synthetic host-fixed plugin: it never
+        // fetches, never evals itself, never touches sync IPC, a custom
+        // protocol, or the filesystem, and carries no source in its report.
+        // (`ensureLoaderPlugin` appears only in the absence check, never as
+        // a call.)
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("ensureLoaderPlugin("));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("fetch("));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("eval("));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("Function("));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("sendSync"));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("legcord://"));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("plugin.js"));
     }
 }

@@ -179,6 +179,29 @@ test("no src caller is migrated to a native plugin-storage path in this mileston
 const themesMain = readFileSync(new URL("../../src/common/themes.ts", import.meta.url), "utf8");
 const themesPreload = readFileSync(new URL("../../src/discord/preload/themes.ts", import.meta.url), "utf8");
 const nativeFacade = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+const nativeMain = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+
+test("the loader probe adds no renderer-facing loader API", () => {
+    // The Shelter loader probe is host DEV-only: no shipped renderer code
+    // sends or handles it, and the frozen bridge facade gains no plugin
+    // loading surface (no addLocalPlugin/startPlugin passthrough, no eval,
+    // no URL/path/source input).
+    for (const source of [bridge, ipc, types]) {
+        assert.doesNotMatch(source, /shelter_loader_probe/);
+        assert.doesNotMatch(source, /SHELTER_LOADER_PROBE/);
+        assert.doesNotMatch(source, /addLocalPlugin|ensureLoaderPlugin/);
+    }
+    assert.doesNotMatch(nativeFacade, /addLocalPlugin|startPlugin|stopPlugin|removePlugin/);
+    assert.doesNotMatch(nativeFacade, /shelter_loader_probe/);
+    // The probe script itself is a fixed host string: the only id, source,
+    // and manifest in the chain are literals, never renderer input.
+    assert.match(nativeMain, /SHELTER_LOADER_PROBE_SCRIPT/);
+    assert.match(nativeMain, /legcord-loader-probe/);
+    // The probe re-runs after Shelter's own bootstrap marker (its global is
+    // async), gated to Shelter so other mods never duplicate it.
+    assert.match(nativeMain, /loader_probe_after_marker/);
+    assert.match(nativeMain, /descriptor\.id == SHELTER_MOD\.id/);
+});
 
 test("Electron keeps the host-push theme injection pipeline", () => {
     // Startup: discover manifests, resolve manifest.theme, cache CSS, push on

@@ -398,6 +398,10 @@ Initial mount loads asynchronously (`onMount` + a synchronous `refreshThemes()` 
 
 Edit, system/Monaco editor, uninstall, remote URL install/update, Quick CSS management, `updateSrc` carriage. The UI hides/disables these in native mode instead of inventing RPCs for them.
 
+## Shelter loader probe (3d-2 unblock probe)
+
+A DEV-only probe (`LEGCORD_NATIVE_LOADER_PROBE=1`, typed `shelter_loader_probe` event) verifies the exact upstream `shelter.plugins` entry points a future native settings-plugin loader needs: `addLocalPlugin`, `startPlugin`, `stopPlugin`, `removePlugin` must exist as functions, and the URL-based `ensureLoaderPlugin` must be absent (it is omitted from upstream's public plugins object, so no URL-selected loading surface is reachable). The probe then round-trips one synthetic plugin with host-fixed id/source/manifest through add/start/stop/remove and verifies no residue remains, so document reloads never duplicate it (a leftover id is removed first). No settings code executes, nothing is fetched, no renderer input is accepted anywhere in the chain, and the report carries only stage strings and booleans. The single eval in the chain is upstream Shelter's own plugin executor over the fixed bytes. This probe deliberately does NOT load the real settings plugin: executing it still requires the sync boot snapshot (`getConfig`/`getThemes`/translations) plus the `ts-out` build artifact, which remain scoped future work (see the 3d-2 runtime-blocker record).
+
 ## Reusable mod substrate (Phase B)
 
 `native/src/mod_substrate.rs` owns every behavior identical for all client mods; it names no mod. The typed adapter contract is `ModDescriptor`: stable `id`, boot `capability`, fixed JS URL and cache file, an `Option<ModCssSource>` stylesheet contract, allowed redirect hosts, JS byte limit, `ModArtifactIdentity`, page-world global name and required member, `PageGlobalReadiness`, `ModEnabling`, success marker, an `Option<&str>` settings key, bootstrap DOM event name, storage-context global name, and log tag. `main.rs` registers `VENCORD_MOD`, `SHELTER_MOD`, and `EQUICORD_MOD` in `KNOWN_MODS`; lookup is by exact id only.
