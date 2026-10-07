@@ -321,6 +321,14 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the settings boot snapshot smoke probe
     /// (`LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`). Never sent by shipped code.
     SettingsBootProbe(SettingsBootProbe),
+    /// DEV-only staged report from the settings UI workflow probe
+    /// (`LEGCORD_NATIVE_SETTINGS_UI_SMOKE=1`). Never sent by shipped code.
+    /// `stage` names the workflow step reached (`begin`, `gear`, `open`,
+    /// `themes`, `cards`, `enable`, `second`, `disable`, `import`, `folder`,
+    /// `reload`, `verify`, `restore`, `done`); `detail` carries small
+    /// counts/flags only — never settings values, manifests, translations,
+    /// paths, or URLs.
+    SettingsUiProbe(SettingsUiProbe),
 }
 
 #[derive(Debug, Deserialize)]
@@ -648,6 +656,18 @@ pub struct SettingsBootProbe {
     pub frozen: bool,
     pub keys_exact: bool,
     pub snapshot_bytes: u32,
+    pub error: Option<String>,
+}
+
+/// DEV-only staged report from the settings UI workflow probe. Bounded
+/// stage/detail strings plus one success flag; inconsistency between `ok`
+/// and `error` is rejected like every other probe.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsUiProbe {
+    pub stage: String,
+    pub ok: bool,
+    pub detail: String,
     pub error: Option<String>,
 }
 
@@ -1419,6 +1439,19 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || (payload.ok && (!payload.frozen || !payload.keys_exact))
                     {
                         return Err("invalid settings boot probe result".to_owned());
+                    }
+                }
+                BridgeEvent::SettingsUiProbe(payload) => {
+                    if payload.stage.is_empty()
+                        || payload.stage.len() > 64
+                        || payload.detail.len() > 512
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid settings UI probe result".to_owned());
                     }
                 }
             }
@@ -2553,6 +2586,23 @@ mod tests {
         assert!(parse_bridge_message(unfrozen_ok).is_err());
         assert!(parse_bridge_message(bad_source).is_err());
         assert!(parse_bridge_message(too_many_themes).is_err());
+    }
+
+    #[test]
+    fn validates_settings_ui_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"settings_ui_probe","payload":{"stage":"enable","ok":true,"detail":"nodes=1 checked=true","error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"settings_ui_probe","payload":{"stage":"gear","ok":false,"detail":"","error":"gear missing"}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"settings_ui_probe","payload":{"stage":"open","ok":true,"detail":"","error":"extra"}}}"#;
+        let oversized = format!(
+            r#"{{"version":1,"event":{{"type":"settings_ui_probe","payload":{{"stage":"open","ok":true,"detail":"{}","error":null}}}}}}"#,
+            "d".repeat(513)
+        );
+        let extra = r#"{"version":1,"event":{"type":"settings_ui_probe","payload":{"stage":"open","ok":true,"detail":"","error":null,"path":"C:\\x"}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(inconsistent).is_err());
+        assert!(parse_bridge_message(&oversized).is_err());
+        assert!(parse_bridge_message(extra).is_err());
     }
 
     #[test]

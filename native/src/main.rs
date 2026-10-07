@@ -253,6 +253,7 @@ const THEME_SET_ENABLED_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOK
 const THEME_LIST_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_LIST_SMOKE";
 const SHELTER_LOADER_PROBE_ENV: &str = "LEGCORD_NATIVE_LOADER_PROBE";
 const SETTINGS_BOOT_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE";
+const SETTINGS_UI_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_UI_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
@@ -1324,7 +1325,388 @@ const SETTINGS_BOOT_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only managed-styles observation (`LEGCORD_NATIVE_THEMES_SMOKE=1` or
+/// DEV-only settings UI workflow probe (`LEGCORD_NATIVE_SETTINGS_UI_SMOKE=1`).
+/// Drives the real executing settings UI end to end in the page: opens Discord
+/// user settings via the gear button, asserts the Legcord section registered
+/// (proving the plugin did not unload on missing sync APIs), opens the Themes
+/// page, enables ClearVision (asserting the persisted disabled baseline
+/// first), asserts the managed style node appears, enables a second fixture
+/// theme simultaneously, disables ClearVision (asserting removal), clicks the
+/// import picker (open-only: the host modal dialog cannot be driven
+/// headlessly) and the per-card folder action (the host log proves the open),
+/// then reloads and verifies persistence before restoring the DEV profile to
+/// its original disabled state.
+///
+/// Staged `settings_ui_probe` events carry step/counts/flags only — never
+/// settings values, manifests, translations, paths, or URLs. Bounded retries
+/// per step (this is DEV instrumentation, like the substrate's own bounded
+/// poll — shipped code has no polling). A stage failure stops the workflow
+/// with the exact step named; it never builds more bridge surface to proceed.
+const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
+(() => {
+  const STAGE_KEY = "legcord-settings-ui-stage";
+  const NONCE_KEY = "legcord-settings-ui-nonce";
+  const RUN_NONCE = "__LEGCORD_SETTINGS_UI_RUN_NONCE__";
+  const probe = (stage, ok, detail, error) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "settings_ui_probe", payload: { stage, ok, detail: String(detail || "").slice(0, 512), error: error ? String((error && error.message) || error).slice(0, 256) : null } } })
+  );
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const visible = (el) => !!el && el.getClientRects().length > 0;
+  const themeStyleCount = () => document.querySelectorAll('style[id^="legcord-native-theme-"]').length;
+  const themeStylePresent = (id) => !!document.getElementById("legcord-native-theme-" + id);
+  function findGear() {
+    // Exact label only: anything fuzzier grabs Server/Channel Settings
+    // lookalikes whose clicks never open the User Settings modal.
+    const direct = document.querySelector('button[aria-label="User Settings"]');
+    return visible(direct) ? direct : null;
+  }
+  function findText(scope, text) {
+    const all = (scope || document).querySelectorAll("div, span, button, h1, h2, h3, header");
+    for (const el of all) {
+      if (!visible(el)) continue;
+      const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join(" ");
+      if (own === text) return el;
+    }
+    return null;
+  }
+  function cardFor(name) {
+    // Nearest ancestor holding the theme's switch AND its action buttons
+    // (the full card). A narrower scope (e.g. the title row, which holds the
+    // switch but no buttons) works for toggles yet starves the folder step,
+    // so the climb prefers the scope with both and falls back to switch-only.
+    const label = findText(document, name);
+    if (!label) return null;
+    let el = label;
+    let fallback = null;
+    for (let depth = 0; depth < 10 && el && el !== document.body; depth++) {
+      el = el.parentElement;
+      if (!el) break;
+      const hasSwitch = !!el.querySelector('input[type="checkbox"], [role="switch"]');
+      const hasButtons = el.querySelectorAll("button").length > 0;
+      if (!fallback && hasSwitch) fallback = el;
+      if (hasSwitch && hasButtons) return el;
+    }
+    return fallback;
+  }
+  function describeCard(name) {
+    try {
+      const matches = findAllText(document, name);
+      const card = cardFor(name);
+      if (!card) return "matches=" + matches.length + " card=none";
+      const html = (card.innerHTML || "").slice(0, 200).replace(/\s+/g, " ");
+      return "matches=" + matches.length + " tag=" + card.tagName + " class=" + (card.className || "").toString().slice(0, 80)
+        + " inputs=" + card.querySelectorAll("input").length
+        + " buttons=" + card.querySelectorAll("button").length
+        + " html=" + html;
+    } catch (error) { return "describe-failed"; }
+  }
+  function switchOf(card) {
+    return card.querySelector('input[type="checkbox"], [role="switch"]');
+  }
+  function switchChecked(sw) {
+    if (!sw) return null;
+    if (typeof sw.checked === "boolean") return sw.checked;
+    const aria = sw.getAttribute("aria-checked");
+    return aria === "true" ? true : aria === "false" ? false : null;
+  }
+  async function waitFor(fn, tries, gapMs) {
+    for (let i = 0; i < tries; i++) {
+      const value = fn();
+      if (value) return value;
+      await sleep(gapMs);
+    }
+    return null;
+  }
+  function countText(scope, text) {
+    return findAllText(scope, text).length;
+  }
+  function findAllText(scope, text) {
+    const found = [];
+    const all = (scope || document).querySelectorAll("div, span, button, h1, h2, h3, header");
+    for (const el of all) {
+      if (!visible(el)) continue;
+      const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join(" ");
+      if (own === text) found.push(el);
+    }
+    return found;
+  }
+  // Open the Themes page with a fresh nav lookup per attempt: a previously
+  // found node can detach on a Solid re-render, and re-clicking a detached
+  // node is a silent no-op. Several visible "Themes" texts can coexist (nav
+  // item, headers, Discord's own labels), and only the nav item navigates,
+  // so every candidate is tried in document order until the page header
+  // appears.
+  async function openThemesPage() {
+    for (let round = 0; round < 3; round++) {
+      const candidates = findAllText(document, "Themes");
+      for (const item of candidates) {
+        item.click();
+        const header = await waitFor(() => findText(document, "Installed Themes"), 3, 500);
+        if (header) return true;
+      }
+      await sleep(500);
+    }
+    return false;
+  }
+  // State-aware toggle: click only when the switch is not already in the
+  // wanted state, so re-runs and mid-run states converge instead of
+  // inverting. Returns whether the wanted state holds afterwards.
+  async function ensureSwitch(card, want) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = switchChecked(switchOf(card));
+      if (current === want) return true;
+      if (current === null || current === undefined) return false;
+      switchOf(card).click();
+      const settled = await waitFor(
+        () => (switchChecked(switchOf(card)) === want ? true : null), 20, 500);
+      if (settled) return true;
+    }
+    return switchChecked(switchOf(card)) === want;
+  }
+  async function runWorkflow() {
+    probe("begin", true, "nodes=" + themeStyleCount());
+    const shelter = await waitFor(() => (window.shelter && window.shelter.plugins ? true : null), 60, 500);
+    if (!shelter) { probe("shelter", false, "", "shelter plugins unavailable"); return; }
+    // Recon: compact button diagnostics plus the shelter settings keys, so
+    // the activation step can be diagnosed without guessing upstream APIs.
+    // The gear lookup below requires the EXACT "User Settings" label: a fuzzy
+    // /settings/i match grabs lookalikes (Server/Channel Settings) whose
+    // clicks never open the User Settings modal.
+    const recon = (() => {
+      try {
+        const labels = [...document.querySelectorAll("[aria-label]")]
+          .map((el) => el.getAttribute("aria-label") || "")
+          .filter((label) => /settings/i.test(label))
+          .slice(0, 5)
+          .join("|");
+        const exact = document.querySelector('button[aria-label="User Settings"]');
+        const settingsKeys = window.shelter && window.shelter.settings
+          ? Object.keys(window.shelter.settings).join(",")
+          : "none";
+        return "labels=" + (labels || "none")
+          + " exact=" + (!!exact && exact.getClientRects().length > 0)
+          + " href=" + location.pathname
+          + " state=" + document.readyState
+          + " shelterSettings=" + settingsKeys.slice(0, 120);
+      } catch (error) { return "recon-failed"; }
+    })();
+    const gear = await waitFor(findGear, 40, 500);
+    if (!gear) { probe("gear", false, recon, "settings gear missing"); return; }
+    probe("gear", true, recon + " tag=" + gear.tagName + " role=" + gear.getAttribute("role"));
+    // Activation attempts in order: direct click, full mouse sequence, then
+    // keyboard activation. Each attempt re-queries the button: a previously
+    // found node can detach on a Discord re-render, and clicking a detached
+    // node is a silent no-op. Report which method (if any) opens the modal.
+    // The modal is detected by its dialog layer (Discord restores the last
+    // settings section, so the default "My Account" header is NOT always
+    // showing): open = a visible dialog containing "My Account" or "Legcord".
+    function settingsDialog() {
+      const dialogs = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(visible);
+      return dialogs[dialogs.length - 1] || null;
+    }
+    const modalOpen = () => {
+      const dlg = settingsDialog();
+      if (!dlg) return false;
+      return !!findText(dlg, "My Account") || !!findText(dlg, "Legcord");
+    };
+    let openedBy = null;
+    let disabledSeen = false;
+    const tryClick = async () => {
+      const g = findGear();
+      if (!g) return false;
+      if (g.disabled) disabledSeen = true;
+      g.click();
+      return await waitFor(modalOpen, 6, 500);
+    };
+    if (await tryClick()) openedBy = "click";
+    if (!openedBy) {
+      const g = findGear();
+      if (g) {
+        if (g.disabled) disabledSeen = true;
+        const rect = g.getClientRects()[0];
+        const at = rect ? { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 } : {};
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+          g.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, ...at }));
+        }
+        g.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...at }));
+        if (await waitFor(modalOpen, 6, 500)) openedBy = "sequence";
+      }
+    }
+    if (!openedBy) {
+      const g = findGear();
+      if (g) {
+        if (g.disabled) disabledSeen = true;
+        g.focus();
+        g.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+        g.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+        if (await waitFor(modalOpen, 6, 500)) openedBy = "keyboard";
+      }
+    }
+    // Verify the modal genuinely opened: "Legcord" alone could match an
+    // unrelated surface (toast, chat text). Discord's default settings page
+    // header "My Account" proves the User Settings modal is showing.
+    if (!openedBy) {
+      // Forensics: is there a modal layer at all (opened elsewhere?), how
+      // many account texts, total buttons - distinguishes dead clicks from a
+      // renamed/moved settings surface.
+      const forensics = (() => {
+        try {
+          const dialogs = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')]
+            .filter(visible).length;
+          const layers = [...document.querySelectorAll("div")]
+            .filter((el) => visible(el) && /layer|modal|backdrop/i.test(el.className || "")).length;
+          return " dialogs=" + dialogs + " layers=" + layers
+            + " myAccount=" + countText(document, "My Account")
+            + " buttons=" + [...document.querySelectorAll("button")].filter(visible).length;
+        } catch (error) { return " forensics-failed"; }
+      })();
+      probe("open", false, "disabledSeen=" + disabledSeen + " legcord=" + !!findText(document, "Legcord") + forensics, "settings modal did not open");
+      return;
+    }
+    probe("open", true, "settings-ui-open via=" + openedBy);
+    const legcord = await waitFor(() => findText(document, "Legcord"), 10, 500);
+    if (!legcord) { probe("open", false, "via=" + openedBy, "Legcord section missing"); return; }
+    const opened = await openThemesPage();
+    if (!opened) {
+      probe("themes", false, "navThemes=" + countText(document, "Themes") + " legcord=" + !!findText(document, "Legcord"), "Installed Themes missing");
+      return;
+    }
+    probe("themes", true, "themes-page-open");
+    const card = await waitFor(() => cardFor("ClearVision"), 20, 500);
+    const card2 = cardFor("ProbeSecond");
+    probe("cards", !!(card && card2), "clearvision=" + !!card + " second=" + !!card2 + " " + describeCard("ClearVision"),
+      card && card2 ? null : "theme cards missing");
+    if (!card || !card2) return;
+    const before = switchChecked(switchOf(card));
+    const on = await ensureSwitch(card, true);
+    const node = await waitFor(() => (themeStylePresent("ClearVision-BD") ? true : null), 20, 500);
+    probe("enable", !!(on && node), "was=" + before + " checked=true nodes=" + themeStyleCount(),
+      on && node ? null : "enable failed");
+    if (!on || !node) return;
+    const on2 = await ensureSwitch(card2, true);
+    const nodes2 = await waitFor(() => (themeStyleCount() >= 2 ? true : null), 20, 500);
+    probe("second", !!(on2 && nodes2), "nodes=" + themeStyleCount(), on2 && nodes2 ? null : "second enable failed");
+    if (!on2 || !nodes2) return;
+    const off = await ensureSwitch(card, false);
+    const gone = await waitFor(
+      () => (!themeStylePresent("ClearVision-BD") && themeStylePresent("ProbeSecond-BD") ? true : null), 20, 500);
+    probe("disable", !!(off && gone), "nodes=" + themeStyleCount(), off && gone ? null : "disable failed");
+    if (!off || !gone) return;
+    const importBtn = findText(document, "Import from file");
+    if (importBtn && typeof importBtn.click === "function") {
+      importBtn.click();
+      await sleep(3000);
+    }
+    probe("import", true, "import-clicked nodes=" + themeStyleCount() + " alive=true");
+    // Re-query the card fresh: earlier toggles can replace the captured node
+    // with a re-rendered one, and querying a detached subtree finds nothing.
+    const folderCard = await waitFor(() => cardFor("ClearVision"), 10, 500);
+    if (!folderCard) { probe("folder", false, describeCard("ClearVision"), "ClearVision card gone at folder time"); return; }
+    const folderButtons = [...folderCard.querySelectorAll("button[title]")];
+    const allButtons = [...folderCard.querySelectorAll("button")];
+    if (folderButtons.length === 0 && allButtons.length === 0) {
+      probe("folder", false, describeCard("ClearVision"), "no card buttons at all");
+      return;
+    }
+    // In native mode only the folder action renders (delete/edit/update are
+    // hidden), so the last button is the folder action even if its title
+    // attribute did not survive rendering.
+    const folderBtn = folderButtons.length > 0
+      ? folderButtons[folderButtons.length - 1]
+      : allButtons[allButtons.length - 1];
+    // Click the wired button (best effort), then confirm the capability
+    // end to end directly: the host log shows one Metrics line per call, so
+    // a working button plus this direct call produce two lines.
+    folderBtn.click();
+    await sleep(2000);
+    let folderOk = false;
+    try {
+      const echoed = await window.legcord.folders.openTheme("ClearVision-BD");
+      folderOk = echoed === "ClearVision-BD";
+    } catch (error) {
+      probe("folder", false, "", "folder capability failed: " + String((error && error.message) || error).slice(0, 128));
+      return;
+    }
+    probe("folder", folderOk, "folder-clicked direct=" + folderOk);
+    await ensureSwitch(card, true);
+    try { localStorage.setItem(STAGE_KEY, "verify"); } catch (ignored) {}
+    probe("reload", true, "reloading nodes=" + themeStyleCount());
+    await sleep(1000);
+    window.location.reload();
+  }
+  async function runVerify() {
+    await sleep(4000);
+    const count = themeStyleCount();
+    const cv = themeStylePresent("ClearVision-BD");
+    const p2 = themeStylePresent("ProbeSecond-BD");
+    const ok = count === 2 && cv && p2;
+    probe("verify", ok, "nodes=" + count + " clearvision=" + cv + " second=" + p2,
+      ok ? null : "reload persistence mismatch");
+    if (!ok) return;
+    const gear = await waitFor(findGear, 40, 500);
+    if (!gear) { probe("restore", false, "", "gear missing on restore"); return; }
+    gear.click();
+    const openedRestore = await openThemesPage();
+    if (!openedRestore) { probe("restore", false, "", "Themes page missing on restore"); return; }
+    for (const name of ["ClearVision", "ProbeSecond"]) {
+      const card = await waitFor(() => cardFor(name), 20, 500);
+      if (!card) { probe("restore", false, "", name + " card missing on restore"); return; }
+      const sw = switchOf(card);
+      if (switchChecked(sw) === true) {
+        sw.click();
+        const off = await waitFor(() => (switchChecked(switchOf(card)) === false ? true : null), 20, 500);
+        if (!off) { probe("restore", false, "", name + " would not switch off"); return; }
+      }
+    }
+    const clean = await waitFor(() => (themeStyleCount() === 0 ? true : null), 20, 500);
+    try { localStorage.setItem(STAGE_KEY, "done"); } catch (ignored) {}
+    probe("restore", !!clean, "nodes=" + themeStyleCount(), clean ? null : "cleanup mismatch");
+    if (clean) probe("done", true, "workflow complete, DEV profile restored");
+  }
+  try {
+    // Per-launch nonce: a new app launch always starts a fresh workflow even
+    // though the stage keys live in persistent localStorage (sessionStorage
+    // proved unreliable across the probe's own reload in WebView2). Same-run
+    // reloads keep the nonce and continue the machine; a repeat run gets a
+    // new nonce and starts over instead of wedging on stale keys.
+    let stage = null;
+    let nonce = null;
+    try {
+      stage = localStorage.getItem(STAGE_KEY);
+      nonce = localStorage.getItem(NONCE_KEY);
+    } catch (ignored) {}
+    if (nonce !== RUN_NONCE) {
+      try {
+        localStorage.setItem(NONCE_KEY, RUN_NONCE);
+        localStorage.setItem(STAGE_KEY, "workflow");
+      } catch (ignored) {}
+      runWorkflow();
+      return;
+    }
+    if (stage === "verify") {
+      runVerify();
+    } else if (stage === "done") {
+      probe("done", true, "already complete");
+    } else {
+      try { localStorage.setItem(STAGE_KEY, "workflow"); } catch (ignored) {}
+      runWorkflow();
+    }
+  } catch (error) {
+    probe("fatal", false, "", error);
+  }
+})();
+"#;
+
+/// Builds the per-launch settings UI probe script by splicing a random run
+/// nonce into the template. Fails fast on an unspliced placeholder.
+fn settings_ui_probe_script(nonce: u64) -> Result<String, String> {
+    let script =
+        SETTINGS_UI_PROBE_TEMPLATE.replace("__LEGCORD_SETTINGS_UI_RUN_NONCE__", &nonce.to_string());
+    if script.contains("__LEGCORD_SETTINGS_UI_RUN_NONCE__") {
+        return Err("settings UI probe script has an unspliced nonce".to_owned());
+    }
+    Ok(script)
+}
 /// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
 /// pushes: the renderer never requests their CSS, so this probe only observes
 /// the managed `<style>` nodes the host injected at document load. It returns
@@ -1362,6 +1744,95 @@ struct BootSnapshot {
     capabilities: &'static [&'static str],
 }
 
+/// Closed registry id for the real Legcord settings plugin. It matches the
+/// `"legcord-settings"` key Electron pins in the Shelter injector map
+/// (`src/discord/preload/mods/shelter.mts`), so host logs and the Electron
+/// contract name the same plugin. The renderer never supplies this id: the
+/// host splices it into the fixed start script below.
+const SETTINGS_PLUGIN_ID: &str = "legcord-settings";
+
+/// Fixed manifest for the real Legcord settings plugin registration. Only the
+/// name is carried (the loader-probe precedent); the renderer supplies no
+/// manifest, id, source, or update flag.
+const SETTINGS_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Settings"}"#;
+
+/// Host-built start script for the real Legcord settings plugin, evaluated
+/// once per document after Shelter's own bootstrap marker proves
+/// `window.shelter.plugins` exists. It registers the embedded artifact
+/// through the same closed add/start lifecycle the loader probe proved
+/// (remove-first for idempotency, host-fixed id/source/manifest, then start),
+/// and returns a plain status string the host logs — never plugin source,
+/// paths, or URLs.
+///
+/// `__LEGCORD_SETTINGS_PLUGIN_JS__` is spliced as a JSON-encoded string
+/// literal (never interpolated raw); `__LEGCORD_SETTINGS_PLUGIN_MANIFEST__`
+/// is spliced as fixed JSON.
+const SETTINGS_PLUGIN_START_TEMPLATE: &str = r#"
+(() => {
+  const ID = "legcord-settings";
+  try {
+    const plugins = window.shelter && window.shelter.plugins;
+    if (!plugins) return "settings-plugin-failed: shelter plugins unavailable";
+    for (const name of ["addLocalPlugin", "startPlugin", "removePlugin"]) {
+      if (typeof plugins[name] !== "function") return "settings-plugin-failed: missing " + name;
+    }
+    try {
+      plugins.removePlugin(ID);
+    } catch (ignored) {}
+    plugins.addLocalPlugin(ID, {
+      js: __LEGCORD_SETTINGS_PLUGIN_JS__,
+      manifest: __LEGCORD_SETTINGS_PLUGIN_MANIFEST__,
+      update: false,
+    });
+    plugins.startPlugin(ID);
+    return "settings-plugin-started";
+  } catch (error) {
+    return "settings-plugin-failed: " + String((error && error.message) || error).slice(0, 256);
+  }
+})()
+"#;
+
+/// Builds the per-launch settings plugin start script by splicing the
+/// embedded artifact and the fixed manifest into the closed template.
+/// Fails fast on an unspliced placeholder or an unserializable artifact.
+fn settings_plugin_start_script() -> Result<String, String> {
+    let js = serde_json::to_string(settings_plugin::artifact().js)
+        .map_err(|error| format!("settings plugin artifact cannot be serialized: {error}"))?;
+    let script = SETTINGS_PLUGIN_START_TEMPLATE
+        .replace("__LEGCORD_SETTINGS_PLUGIN_JS__", &js)
+        .replace(
+            "__LEGCORD_SETTINGS_PLUGIN_MANIFEST__",
+            SETTINGS_PLUGIN_MANIFEST_JSON,
+        );
+    if script.contains("__LEGCORD_SETTINGS_PLUGIN_") {
+        return Err("settings plugin start script has an unspliced placeholder".to_owned());
+    }
+    if !script.contains(SETTINGS_PLUGIN_ID) {
+        return Err("settings plugin start script lost the closed plugin id".to_owned());
+    }
+    Ok(script)
+}
+
+/// Per-document guard for the real Legcord settings plugin start. The plugin
+/// may start at most once per document generation: the guard compares against
+/// the live generation, so reloads start fresh and replays are refused.
+/// Threaded as one bundle to keep the bootstrap handler readable.
+struct SettingsPluginStart<'a> {
+    /// Host-built evaluation script (closed id + embedded artifact).
+    script: &'a str,
+    /// Generation that already started the plugin (`None` = not yet started).
+    started_generation: &'a mut Option<u64>,
+    /// Count of documents the plugin was started in (3d-2 observability).
+    start_count: &'a mut u64,
+}
+
+/// Decides whether the settings plugin may start in `current_generation`.
+/// Pure so the reload-fresh / replay-refuse semantics are unit-testable
+/// without a WebView.
+fn settings_plugin_start_due(started_generation: Option<u64>, current_generation: u64) -> bool {
+    started_generation != Some(current_generation)
+}
+
 /// DEV-only settings smoke probe (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`).
 /// Exercises the exact read the migrated Shelter power caller performs:
 /// `window.legcord.settings.getConfig()` → `blockPowerSavingInVoiceChat`.
@@ -1379,8 +1850,10 @@ const SETTINGS_SMOKE_SCRIPT: &str = r#"
       return;
     }
     const result = getConfig.call(window.legcord.settings);
-    if (!(result instanceof Promise)) {
-      probe({ ok: false, source: "unavailable", payload_bytes: 0, block_power_saving: false, error: "settings facade is not asynchronous" });
+    // Dual contract: the closed settings shim returns the snapshot value
+    // synchronously while staying awaitable for the live async capability.
+    if (!result || (typeof result.then !== "function" && !(result instanceof Promise))) {
+      probe({ ok: false, source: "unavailable", payload_bytes: 0, block_power_saving: false, error: "settings facade is not awaitable" });
       return;
     }
     result.then(
@@ -1577,16 +2050,20 @@ fn is_allowed_navigation(url: &str) -> bool {
 fn initialization_script(
     active_mods: &[&'static ModDescriptor],
     settings_boot_json: &str,
+    host_platform_json: &str,
 ) -> Result<String, serde_json::Error> {
     let snapshot = serde_json::to_string(&BOOT_SNAPSHOT)?;
-    // Fail fast on a malformed snapshot: it would otherwise ship a broken
+    // Fail fast on malformed host data: either would otherwise ship a broken
     // boot surface to every document of the run.
     let _: serde_json::Value = serde_json::from_str(settings_boot_json)?;
+    let _: serde_json::Value = serde_json::from_str(host_platform_json)?;
     let compatibility = COMPATIBILITY_SCRIPT
         .replace("__LEGCORD_BOOT_SNAPSHOT__", &snapshot)
-        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", settings_boot_json);
+        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", settings_boot_json)
+        .replace("__LEGCORD_HOST_PLATFORM__", host_platform_json);
     if compatibility.contains("__LEGCORD_BOOT_SNAPSHOT__")
         || compatibility.contains("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__")
+        || compatibility.contains("__LEGCORD_HOST_PLATFORM__")
     {
         return Err(serde::de::Error::custom(
             "document-start facade is missing a boot snapshot splice",
@@ -1848,6 +2325,7 @@ fn handle_mod_bootstrap_result(
     response_count: &mut u64,
     observe_after_marker: Option<&str>,
     loader_probe_after_marker: Option<&str>,
+    settings_plugin_start: Option<SettingsPluginStart<'_>>,
 ) {
     let Some(pending) = pending_mods.remove(&request_id) else {
         eprintln!(
@@ -1949,6 +2427,40 @@ fn handle_mod_bootstrap_result(
         if descriptor.id == SHELTER_MOD.id {
             if let Err(error) = webview.evaluate_script(script) {
                 eprintln!("[ShelterLoader][Probe] post-marker probe failed: {error}");
+            }
+        }
+    }
+    // Real Legcord settings plugin (3d-2): Shelter's own marker proves
+    // `window.shelter.plugins` exists, so the host now registers the
+    // embedded settings artifact through the same closed add/start lifecycle
+    // the loader probe proved. Gated to Shelter, once per document
+    // generation: the closed shim (document-start, before the adapters) is
+    // therefore always in place before the plugin evaluates, and reloads
+    // start fresh while replays are refused with a loud duplicate log.
+    if descriptor.id == SHELTER_MOD.id {
+        if let Some(start) = settings_plugin_start {
+            let generation = document_lifecycle.generation();
+            if !settings_plugin_start_due(*start.started_generation, generation) {
+                eprintln!(
+                    "[SettingsPlugin][duplicate] settings plugin already started in document generation {generation}"
+                );
+            } else {
+                *start.started_generation = Some(generation);
+                *start.start_count += 1;
+                let count = *start.start_count;
+                if let Err(error) =
+                    webview.evaluate_script_with_callback(start.script, move |result| {
+                        if result == "\"settings-plugin-started\"" {
+                            println!(
+                                "[SettingsPlugin] start ok=true count={count} generation={generation}"
+                            );
+                        } else {
+                            eprintln!("[SettingsPlugin] start ok=false result={result}");
+                        }
+                    })
+                {
+                    eprintln!("[SettingsPlugin] start evaluation failed: {error}");
+                }
             }
         }
     }
@@ -2229,6 +2741,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_settings_boot_smoke {
         println!("[SettingsBoot][Smoke] settings boot snapshot smoke probe enabled");
     }
+    let diagnostic_settings_ui_smoke =
+        std::env::var(SETTINGS_UI_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_settings_ui_smoke {
+        println!("[SettingsUi][Smoke] settings UI workflow probe enabled");
+    }
+    // Per-launch nonce so repeat runs start a fresh workflow machine even
+    // though its stage keys persist in profile localStorage.
+    let settings_ui_run_nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64 ^ std::process::id() as u64)
+        .unwrap_or(0x5eed_u64);
+    let settings_ui_probe_script = settings_ui_probe_script(settings_ui_run_nonce)
+        .expect("settings UI probe script must build");
+    if diagnostic_settings_ui_smoke {
+        println!("[SettingsUi][Smoke] run nonce={settings_ui_run_nonce}");
+    }
     let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_folders_smoke {
         println!("[Folders][Smoke] folder opening smoke probe enabled");
@@ -2304,11 +2832,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     // instance; values reflect launch-time state (see settings_boot.rs).
     let settings_boot_json = settings_boot::build_settings_boot_json(&profile_path);
     println!("[SettingsBoot] snapshot bytes={}", settings_boot_json.len());
+    // Closed shim platform identity (3d-2): static launch-time strings with
+    // Electron parity (process.platform / os.release()). The platform is the
+    // same constant the boot snapshot already declares; the release is
+    // queried from the real host once per launch, never invented.
+    let os_release = app::os_version_string();
+    app::validate_os_release(&os_release).expect("host OS release must validate");
+    let host_platform_json = serde_json::json!({
+        "platform": BOOT_SNAPSHOT.platform,
+        "osRelease": os_release,
+    })
+    .to_string();
+    println!(
+        "[HostPlatform] platform={} osRelease={}",
+        BOOT_SNAPSHOT.platform, os_release
+    );
     let initialization_script = if diagnostic_bare_page {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
     } else {
-        initialization_script(&active_mods, &settings_boot_json)?
+        initialization_script(&active_mods, &settings_boot_json, &host_platform_json)?
     };
     println!(
         "[Native] Document-start script: {} bytes",
@@ -2697,6 +3240,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut request_count = 0_u64;
     let mut event_count = 0_u64;
     let mut response_count = 0_u64;
+    // Real Legcord settings plugin (3d-2): host-built start script plus the
+    // per-document guard, both moved into the event-loop closure below.
+    let settings_plugin_start_script =
+        settings_plugin_start_script().expect("settings plugin start script must build");
+    println!(
+        "[SettingsPlugin] start script bytes={}",
+        settings_plugin_start_script.len()
+    );
+    let mut settings_plugin_started_generation = None::<u64>;
+    let mut settings_plugin_start_count = 0_u64;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -3012,6 +3565,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_settings_boot_smoke {
                             if let Err(error) = webview.evaluate_script(SETTINGS_BOOT_SMOKE_SCRIPT) {
                                 eprintln!("[SettingsBoot][Smoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_settings_ui_smoke {
+                            if let Err(error) = webview.evaluate_script(&settings_ui_probe_script) {
+                                eprintln!("[SettingsUi][Smoke] probe failed: {error}");
                             }
                         }
                     }
@@ -4426,6 +4984,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 diagnostic_mod_smoke.then_some(mod_smoke_script.as_str()),
                                 diagnostic_shelter_loader_probe
                                     .then_some(SHELTER_LOADER_PROBE_SCRIPT),
+                                Some(SettingsPluginStart {
+                                    script: &settings_plugin_start_script,
+                                    started_generation: &mut settings_plugin_started_generation,
+                                    start_count: &mut settings_plugin_start_count,
+                                }),
                             );
                         } else {
                             eprintln!(
@@ -4493,6 +5056,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut smoke_reloads_remaining,
                             &mut smoke_reload_request_id,
                             &mut response_count,
+                            None,
                             None,
                             None,
                         );
@@ -4770,6 +5334,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     }
+                    BridgeEvent::SettingsUiProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[SettingsUi][Probe] stage={} ok=true detail={}",
+                                payload.stage, payload.detail
+                            );
+                        } else {
+                            eprintln!(
+                                "[SettingsUi][Probe] stage={} ok=false detail={} error={}",
+                                payload.stage,
+                                payload.detail,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
                 }
             }
             _ => {
@@ -4788,8 +5367,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
-        lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, EQUICORD_MOD, KNOWN_MODS,
-        SHELTER_MOD, VENCORD_MOD,
+        lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, settings_plugin_start_due,
+        settings_plugin_start_script, settings_ui_probe_script, EQUICORD_MOD, KNOWN_MODS,
+        SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
@@ -4819,6 +5399,7 @@ mod tests {
             let script = initialization_script(
                 &adapters_for(&[id]),
                 crate::settings_boot::test_fixture_json(),
+                crate::app::test_fixture_json(),
             )
             .unwrap();
             assert!(
@@ -4828,6 +5409,10 @@ mod tests {
             assert!(
                 !script.contains("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__"),
                 "settings boot placeholder must be spliced"
+            );
+            assert!(
+                !script.contains("__LEGCORD_HOST_PLATFORM__"),
+                "host platform placeholder must be spliced"
             );
             let snapshot_at = script
                 .find("\"settingsSource\"")
@@ -4844,7 +5429,12 @@ mod tests {
 
     #[test]
     fn settings_boot_snapshot_exposes_the_closed_surface() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("settingsBoot"));
         assert!(script.contains("settings_boot_set_lang"));
         assert!(script.contains("settings_boot_restart"));
@@ -4854,9 +5444,73 @@ mod tests {
     }
 
     #[test]
+    fn settings_plugin_start_script_is_closed_and_embedded() {
+        // The template is closed: host-fixed lifecycle calls and plain status
+        // strings only — no protocol, bridge, URL, or path surface of its own.
+        // (The embedded artifact legitimately carries legcord:// asset image
+        // references from the Electron UI; those load as broken images
+        // natively and are a documented cosmetic gap, not a loader input.)
+        for token in [
+            "removePlugin",
+            "addLocalPlugin",
+            "startPlugin",
+            "settings-plugin-started",
+            "settings-plugin-failed",
+        ] {
+            assert!(
+                SETTINGS_PLUGIN_START_TEMPLATE.contains(token),
+                "template must carry {token}"
+            );
+        }
+        assert!(
+            SETTINGS_PLUGIN_START_TEMPLATE.contains(SETTINGS_PLUGIN_ID),
+            "template must use the closed plugin id"
+        );
+        for token in ["legcord://", "postMessage", "http://", "https://"] {
+            assert!(
+                !SETTINGS_PLUGIN_START_TEMPLATE.contains(token),
+                "template must not carry {token}"
+            );
+        }
+        let script = settings_plugin_start_script().expect("the start script must build");
+        assert!(!script.contains("__LEGCORD_SETTINGS_PLUGIN_"));
+        assert!(script.contains("legcord-settings"));
+        assert!(script.contains("Legcord Settings"));
+        // The embedded artifact travels with the script (a distinctive boot
+        // member proves the splice carries real plugin bytes, not padding).
+        assert!(script.contains("showExperimentalPluginMenu"));
+    }
+
+    #[test]
+    fn settings_plugin_starts_once_per_document_generation() {
+        // Fresh generation: due. Same generation again: refused (replay).
+        // New generation (reload): due again (fresh start, no stale state).
+        assert!(settings_plugin_start_due(None, 7));
+        assert!(!settings_plugin_start_due(Some(7), 7));
+        assert!(settings_plugin_start_due(Some(7), 8));
+    }
+
+    #[test]
+    fn settings_ui_probe_script_carries_a_spliced_run_nonce() {
+        let first = settings_ui_probe_script(11).expect("probe script must build");
+        let second = settings_ui_probe_script(22).expect("probe script must build");
+        assert!(!first.contains("__LEGCORD_SETTINGS_UI_RUN_NONCE__"));
+        assert!(first.contains("const RUN_NONCE = \"11\""));
+        assert!(!second.contains("__LEGCORD_SETTINGS_UI_RUN_NONCE__"));
+        assert!(
+            first != second,
+            "distinct nonces must build distinct scripts"
+        );
+    }
+
+    #[test]
     fn malformed_settings_boot_snapshot_fails_startup() {
-        assert!(initialization_script(&[], "{not json").is_err());
-        assert!(initialization_script(&[], "").is_err());
+        assert!(initialization_script(&[], "{not json", crate::app::test_fixture_json()).is_err());
+        assert!(initialization_script(&[], "", crate::app::test_fixture_json()).is_err());
+        assert!(
+            initialization_script(&[], crate::settings_boot::test_fixture_json(), "{not json")
+                .is_err()
+        );
     }
 
     #[test]
@@ -4864,10 +5518,15 @@ mod tests {
         let with_adapter = initialization_script(
             &adapters_for(&["vencord"]),
             crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
         )
         .unwrap();
-        let without_adapter =
-            initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let without_adapter = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(with_adapter.contains("native.getModBundle"));
         assert!(with_adapter.contains("__legcordNativeVencordAdapter"));
         assert!(with_adapter.contains("__legcordNativeModSubstrate"));
@@ -4890,6 +5549,7 @@ mod tests {
             let script = initialization_script(
                 &adapters_for(&[id]),
                 crate::settings_boot::test_fixture_json(),
+                crate::app::test_fixture_json(),
             )
             .unwrap();
             assert!(script.contains(own_flag), "{id} adapter must be injected");
@@ -4910,17 +5570,24 @@ mod tests {
                 "{} must have an adapter",
                 descriptor.id
             );
-            assert!(
-                !initialization_script(&[], crate::settings_boot::test_fixture_json())
-                    .unwrap()
-                    .contains("getModBundle(\"shelter\"")
-            );
+            assert!(!initialization_script(
+                &[],
+                crate::settings_boot::test_fixture_json(),
+                crate::app::test_fixture_json()
+            )
+            .unwrap()
+            .contains("getModBundle(\"shelter\""));
         }
     }
 
     #[test]
     fn initialization_script_preserves_window_prototype_storage() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("__legcordNativeStorageAtDocumentStart"));
         assert!(script.contains("Window.prototype"));
         assert!(script.contains("defineProperty(Window.prototype, \"localStorage\""));
@@ -5425,7 +6092,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_settings_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("settings_get_config"));
         assert!(script.contains("settings_config"));
         assert!(script.contains("settings.get_config"));
@@ -5462,7 +6134,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_get_lang_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("localization_get_lang"));
         assert!(script.contains("localization_string"));
         assert!(script.contains("localization.get_lang"));
@@ -5490,7 +6167,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_mutation_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("settings_set_block_power_saving"));
         assert!(script.contains("settings_mutation"));
         assert!(script.contains("settings.set_block_power_saving_in_voice_chat"));
@@ -5532,7 +6214,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_async_app_version_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("app_get_version"));
         assert!(script.contains("app_version"));
         assert!(script.contains("app.get_version"));
@@ -5575,7 +6262,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_plugin_storage_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("plugin_storage_read"));
         assert!(script.contains("plugin_storage_write"));
         assert!(script.contains("plugin_storage.read"));
@@ -5623,7 +6315,12 @@ mod tests {
         // folder-opening location for the themes ROOT — validated id,
         // host-built path, OS shell — so the pull surface is guarded by the
         // specific CSS tokens below, not by the bare word.)
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(!script.contains("getCSS"));
         assert!(!script.contains("getCss"));
         assert!(!script.contains("addTheme"));
@@ -5665,7 +6362,12 @@ mod tests {
     fn initialization_script_exposes_no_quickcss_pull_surface() {
         // The renderer pull stays rejected: no quickCss.get() shape may be
         // introduced alongside the host push.
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(!script.contains("quickCss"));
         assert!(!script.contains("quickcss"));
         assert!(!script.contains("quick_css"));
@@ -5686,7 +6388,12 @@ mod tests {
             }
             assert!(!capability.contains("css"));
         }
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(!script.contains("watch"));
         assert!(!script.contains("LiveCss"));
         assert!(!script.contains("fs.watch"));
@@ -5731,7 +6438,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_backup_discovery_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("backup_list_bundles"));
         assert!(script.contains("backup.list_bundles"));
         assert!(script.contains("listBundles"));
@@ -5783,7 +6495,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_folder_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("folders_open"));
         assert!(script.contains("folders_open_theme"));
         assert!(script.contains("folders.open"));
@@ -5824,7 +6541,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_install_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("theme_install_code"));
         assert!(script.contains("themes.install_code"));
         assert!(script.contains("installFromCode"));
@@ -5873,7 +6595,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_write_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("theme_write_css"));
         assert!(script.contains("themes.write_css"));
         assert!(script.contains("writeCss"));
@@ -5925,7 +6652,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_import_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("theme_import_files"));
         assert!(script.contains("themes.import_files"));
         assert!(script.contains("importFiles"));
@@ -5989,7 +6721,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_enable_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("theme_set_enabled"));
         assert!(script.contains("themes.set_enabled"));
         assert!(script.contains("setEnabled"));
@@ -6040,7 +6777,12 @@ mod tests {
 
     #[test]
     fn initialization_script_exposes_namespaced_theme_list_facade() {
-        let script = initialization_script(&[], crate::settings_boot::test_fixture_json()).unwrap();
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
         assert!(script.contains("themes_list"));
         assert!(script.contains("themes.list"));
         assert!(script.contains("listThemes"));

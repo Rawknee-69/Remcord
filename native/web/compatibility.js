@@ -5,6 +5,7 @@
     const startedAt = performance.now();
     const bootSnapshot = __LEGCORD_BOOT_SNAPSHOT__;
     const settingsBootData = __LEGCORD_SETTINGS_BOOT_SNAPSHOT__;
+    const hostPlatformData = __LEGCORD_HOST_PLATFORM__;
     const protocolVersion = 1;
     const pending = new Map();
     const textEncoder = new TextEncoder();
@@ -134,12 +135,56 @@
         );
     }
 
+    // Per-document mutable working copies for the closed settings shim (see
+    // below): same identity on every call of one document, fresh and
+    // independent on the next. Declared here because getConfig is defined
+    // alongside the other capabilities; assigned on first use after the
+    // frozen snapshot exists. Calls happen after full script evaluation, so
+    // there is no ordering hazard.
+    let settingsWorkingCopy;
+    let themesWorkingCopy;
+
     function getConfig(timeoutMs = 5000) {
         requireCapability("settings.get_config");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
             return Promise.reject(new TypeError("timeout must be a positive finite number"));
         }
-        return request({ type: "settings_get_config", payload: {} }, timeoutMs).then((payload) => payload.settings);
+        // Dual contract for the closed settings shim: synchronous callers
+        // (the real settings plugin) receive the launch-frozen snapshot as a
+        // per-document mutable working copy — the same identity on every call
+        // of this document, mirroring Electron's cached config object — while
+        // awaited callers keep the exact live async capability. The live
+        // request still fires eagerly, so async behavior, metrics, timeouts,
+        // disposal, and response-schema validation are unchanged.
+        if (settingsWorkingCopy === undefined) {
+            // A null snapshot (corrupt settings on disk) must still hand the
+            // plugin a working object: an empty one, honestly empty, so boot
+            // degrades instead of throwing on the first property read. Full
+            // execution stays gated on settingsSource upstream.
+            const clone = cloneJson(settingsBootSnapshot.settings, {});
+            settingsWorkingCopy = clone !== null && typeof clone === "object" ? clone : {};
+        }
+        const snapshot = settingsWorkingCopy;
+        const live = request({ type: "settings_get_config", payload: {} }, timeoutMs).then(
+            (payload) => payload.settings,
+        );
+        // Settle only this eager branch: awaited callers attach their own
+        // branch through `then` below and still observe host failures.
+        // Without this, a never-awaited synchronous call could surface an
+        // unhandled rejection when the host reports unavailable settings.
+        live.catch(() => {});
+        // Intentional thenable for the dual contract (see above): the
+        // snapshot value stays synchronously readable while awaited callers
+        // keep exact async behavior; sync callers ignore `then`.
+        // biome-ignore lint/suspicious/noThenProperty: intentional thenable for the closed settings shim
+        Object.defineProperty(snapshot, "then", {
+            configurable: true,
+            writable: true,
+            value: (resolve, reject) => {
+                live.then(resolve, reject);
+            },
+        });
+        return snapshot;
     }
 
     function getLang(key, timeoutMs = 5000) {
@@ -768,7 +813,9 @@
         },
         requireCapability,
     });
-    const settings = Object.freeze({ getConfig, setBlockPowerSavingInVoiceChat });
+    // (settingsShim/themesShim below replace these narrow namespaces with
+    // the shimmed versions; the originals are kept out of the surface so no
+    // duplicate member can drift.)
     const pluginStorage = Object.freeze({ readFile: readPluginFile, writeFile: writePluginFile });
     // Backup discovery only: save/restore (dialogs + zip) are deferred, so
     // no save/restore member may exist on this namespace.
@@ -789,14 +836,8 @@
     // existing lifecycle.
     // Theme inventory only: an exact empty payload in, a bounded display
     // array out. No path, root, selector, URL, filter, CSS, or filesystem
-    // surface.
-    const themes = Object.freeze({
-        installFromCode: installThemeFromCode,
-        writeCss: writeThemeCss,
-        importFiles,
-        setEnabled: setThemeEnabled,
-        listThemes,
-    });
+    // surface. (The frozen namespace is assembled as themesShim below, which
+    // additionally carries the closed synchronous getThemes.)
 
     // Synchronous settings boot snapshot (3d-2 prerequisite B). Host-created
     // data, spliced per launch before the mod adapters and deeply frozen
@@ -829,19 +870,92 @@
         restart: bootRestart,
     });
 
+    // Closed settings compatibility shim (3d-2): the exact synchronous names
+    // the real settings plugin reads during onLoad(), backed ONLY by the
+    // frozen snapshot above. No filesystem, no synchronous IPC, no fabricated
+    // values, no generic invocation. Per-document mutable working copies give
+    // the plugin Electron-faithful identity (the main-process cache object is
+    // equally shared and mutable) while the host snapshot stays frozen.
+    function cloneJson(value, fallback) {
+        try {
+            const text = JSON.stringify(value);
+            if (text === undefined) return fallback;
+            return JSON.parse(text);
+        } catch {
+            return fallback;
+        }
+    }
+
+    // Project one raw snapshot manifest onto the closed display shape. Only
+    // entries with a usable id/name/enabled survive; missing optional text
+    // becomes "" so every installed theme stays inventoried (Electron lists
+    // manifests with missing optionals too). Only the six display fields
+    // cross — never paths, stylesheets, remote references, or any other
+    // manifest property.
+    function toShimTheme(entry) {
+        if (!entry || typeof entry !== "object") return null;
+        if (typeof entry.id !== "string" || typeof entry.name !== "string") return null;
+        if (typeof entry.enabled !== "boolean") return null;
+        const text = (value) => (typeof value === "string" ? value : "");
+        return {
+            id: entry.id,
+            name: entry.name,
+            author: text(entry.author),
+            description: text(entry.description),
+            version: text(entry.version),
+            enabled: entry.enabled,
+        };
+    }
+
+    function getThemesSync() {
+        if (themesWorkingCopy === undefined) {
+            const raw = Array.isArray(settingsBootSnapshot.themes) ? settingsBootSnapshot.themes : [];
+            const projected = [];
+            for (const entry of raw) {
+                const theme = toShimTheme(entry);
+                if (theme) projected.push(theme);
+            }
+            themesWorkingCopy = projected;
+        }
+        return themesWorkingCopy;
+    }
+
+    // Host platform identity for the closed shim: static launch-time strings
+    // only (process.platform / os.release() parity), no capability, no
+    // request, no renderer input. `platform` renders section gates;
+    // `osRelease` keeps render-time version comparisons from throwing.
+    const hostPlatform = freezeDeep(hostPlatformData);
+    const settingsShim = Object.freeze({
+        getConfig,
+        setBlockPowerSavingInVoiceChat,
+        setLang: bootSetLang,
+    });
+    const themesShim = Object.freeze({
+        installFromCode: installThemeFromCode,
+        writeCss: writeThemeCss,
+        importFiles,
+        setEnabled: setThemeEnabled,
+        listThemes,
+        getThemes: getThemesSync,
+    });
+
     Object.defineProperty(window, "legcord", {
         configurable: false,
         enumerable: true,
         value: Object.freeze({
             boot: snapshot,
             native,
-            settings,
+            settings: settingsShim,
             getLang,
             pluginStorage,
             backup,
             folders,
-            themes,
+            themes: themesShim,
             settingsBoot,
+            translations: settingsBootSnapshot.i18n,
+            restart: bootRestart,
+            platform: hostPlatform.platform,
+            osRelease: hostPlatform.osRelease,
         }),
     });
 

@@ -708,14 +708,14 @@ No error was hidden: renderer `uncaught`, `unhandled_rejection`, and `console.er
 
 ## Settings plugin artifact (3d-2 prerequisite A)
 
-The exact Legcord settings Shelter plugin artifact (`ts-out/plugins/settings/plugin.js`, 243,617 bytes, SHA-256 `071d4acde61f4a2968654685b2161b91236eb1f6a75e06e1bf6e3ca98fee0399`) is now embedded at compile time by `native/build.rs` and exposed read-only through `native/src/settings_plugin.rs`. No execution is wired: the artifact is available to the host, not to the renderer.
+The exact Legcord settings Shelter plugin artifact (`ts-out/plugins/settings/plugin.js`, 252,541 bytes, SHA-256 `dcbfc8d9d75535209c40bc9a5817f4eb351ca66f947288ffc94681887f320491`) is now embedded at compile time by `native/build.rs` and exposed read-only through `native/src/settings_plugin.rs`. No execution is wired: the artifact is available to the host, not to the renderer.
 
 ### Provenance (traced, not assumed)
 
 - Authored in `src/shelter/settings/` (`index.ts` entrypoint, `plugin.json` name `"Legcord Settings"`, lune per-directory convention).
 - Compiled by the existing JS pipeline: `pnpm build:plugins` ? `lune ci --repoSubDir src/shelter --to ts-out/plugins` (`package.json:11`, chained by `package.json:12` `build`, ordered before packaging in `.github/workflows/package.yml`, packaged via `electron-builder.ts` `files: [..., "ts-out", ...]`).
 - Electron serves it as `legcord://plugins/settings/*`, which resolves to `<bundle-dir>/plugins/settings/*` (`src/protocol.ts:22-31` maps the scheme onto `import.meta.dirname`, i.e. `ts-out/` at runtime). The Shelter preload pins it as `"legcord-settings"` (`src/discord/preload/mods/shelter.mts:8`).
-- `ts-out/` is gitignored (`.gitignore:4`); nothing is committed and no binary blob was added. Rebuild determinism could NOT be re-verified in this environment (the `node_modules/@uwu/lune` entry points are broken symlinks under the bun-shimmed `pnpm`); the recorded identity is from the existing pipeline output and CI rebuilds it via `pnpm build`.
+- `ts-out/` is gitignored (`.gitignore:4`); nothing is committed and no binary blob was added. Rebuild determinism could NOT be re-verified in this environment (the `node_modules/@uwu/lune` entry points are broken symlinks under the bun-shimmed `pnpm`); the recorded identity is from the existing pipeline output and CI rebuilds it via `pnpm build`. NOTE (shim milestone): the artifact was rebuilt here by invoking the lune bundle directly (`node node_modules/@uwu/lune/dist/clibundle.cjs ci --repoSubDir src/shelter --to ts-out/plugins`, pnpm itself being broken) because the previous output predated all native WebView2 branches (`isNativeWebView`, `refreshNativeThemes`, `setNativeThemeEnabled`, `importNativeThemes`, folder helpers). New identity 252,541 bytes / SHA-256 `dcbfc8d9d75535209c40bc9a5817f4eb351ca66f947288ffc94681887f320491`; the five boot markers still validate and the bundle now carries the native theme/folder/version branches the runtime validation depends on.
 
 ### Build-pipeline decision
 
@@ -723,7 +723,7 @@ Candidate A: the existing JS build produces `ts-out` before cargo. `build.rs` de
 
 ### Validation and boundary
 
-- `build.rs` rejects a missing file (actionable panic), empty output, output over 2 MiB, non-UTF-8 output, output missing any of the five synchronous boot members (`getConfig`, `getThemes`, `translations`, `setLang`, `restart` — the exact surface `src/shelter/settings/index.ts:90-99` + `settings.ts:14-20` reads during `onLoad()`, confirmed present in the compiled bundle: `getConfig` x2, `getThemes`/`translations`/`setLang` x1 each, `window.legcord.restart` x3), and a `plugin.json` whose `name` is not `"Legcord Settings"`.
+- `build.rs` rejects a missing file (actionable panic), empty output, output over 2 MiB, non-UTF-8 output, output missing any of the five synchronous boot members (`getConfig`, `getThemes`, `translations`, `setLang`, `restart` ï¿½ the exact surface `src/shelter/settings/index.ts:90-99` + `settings.ts:14-20` reads during `onLoad()`, confirmed present in the compiled bundle: `getConfig` x2, `getThemes`/`translations`/`setLang` x1 each, `window.legcord.restart` x3), and a `plugin.json` whose `name` is not `"Legcord Settings"`.
 - Identity is a host-computed SHA-256 over the exact embedded bytes (the upstream artifact carries no build banner to pin). Any pipeline byte change yields a different identity and the same bytes always yield the same one.
 - The renderer cannot choose a plugin path, source file, URL, or plugin id through this module: `settings_plugin::artifact()` takes no input and resolves only the pinned artifact. Startup logs one identity line (`[SettingsPlugin] artifact name=... bytes=... sha256=...`).
 - The compiled bundle was verified to reference exactly the five traced boot members above, matching the source trace file-for-file. Full settings-plugin execution remains intentionally unwired (3d-2 prerequisite B, the synchronous boot snapshot, is still pending).
@@ -747,7 +747,7 @@ src/shelter/settings/index.ts:90-99 runs synchronously, no await:
 | setLang | index.ts:96 with storesFlat.LocaleStore.locale | bridge.ts:64 fire-and-forget send(setLang, lang) to ipc.ts:224 to lang.ts:55-66 writes storage/lang.json, clears caches | void | INVOKED at every boot (not mere existence) |
 | restart | index.ts:83, SettingsPage.tsx:59, AddDetectableModal.tsx:81 - modal/button callbacks only | bridge.ts:116 fire-and-forget send(restart) to ipc.ts:284 to main.ts:124-133 app.relaunch() + app.exit() | void | existence only at boot; never invoked during init |
 
-The compiled ts-out/plugins/settings/plugin.js (243,617 bytes) references exactly this surface (getConfig x2, getThemes/translations/setLang x1 each, window.legcord.restart x3).
+The compiled ts-out/plugins/settings/plugin.js (252,541 bytes after the rebuild below) references exactly this surface (getConfig x2, getThemes/translations/setLang x1 each, window.legcord.restart x3).
 
 ### Snapshot shape (exact, frozen, host-created)
 
@@ -763,3 +763,51 @@ Sourced from the actual owners, never duplicated or invented: settings.rs load_s
 - restart currently reloads the document; Electron relaunch (app.relaunch() + app.exit()) is deliberately NOT claimed (no native relauncher exists yet).
 - Values reflect launch-time state; mid-run host writes (a setLang persist, a settings mutation, a theme install) are honored by the async capabilities immediately but appear in the boot snapshot on the next launch - consistent with the Electron restart-required model. This boundary is documented, not hidden.
 - DEV-only settings_boot_probe event (LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE=1) reports source/bytes/counts/frozen/keys-exact per document - counts and lengths only, never values, manifests, translations, paths, or URLs. The probe proves presence and shape in the live document; ordering is proven by construction plus the unit test.
+
+## Deferred Phase F gap: remote-`@import` theme stylesheets (documented, no change)
+
+Native theme install, enable/disable, and managed style-node injection are functioning (runtime-proven: enabling a theme creates the `legcord-native-theme-<id>` node with the stored bytes; disabling removes it). What does NOT work natively is any theme whose CSS payload is a remote `@import`:
+
+- The concrete case is ClearVision: `ClearVision_v6.theme.css` (9,605 bytes) is almost entirely `@import url(https://clearvision.github.io/ClearVision-v6/main.css)`. Import parses and installs, the toggle flips the manifest, the style node is injected â€” but the browser must then fetch the remote stylesheet under the Discord document CSP.
+- Discord serves `style-src 'self' 'unsafe-inline' https://cdn.discordapp.com ...` (verified against the live header): `clearvision.github.io` is not allowlisted, so the fetch is refused and the theme has no visual effect.
+- Production Electron is unaffected by design: the default `csp: "none"` setting runs `setupNoCSP()` (`src/discord/extensions/csp.ts:39-54`), which strips the CSP header on the main frame.
+- The native shell only patches `connect-src` (badges fix); `style-src` is untouched, and no CSP change was made in the settings-shim milestone.
+- For CSS-application testing, use a disposable self-contained theme (local rules only) so CSP cannot contaminate the result. Remote-stylesheet loading stays deferred to Phase F network compatibility.
+
+## Closed settings compatibility shim (3d-2)
+
+The native shell now executes the real Legcord settings plugin. A closed host-controlled shim maps the frozen boot snapshot onto the exact synchronous names the plugin reads, and the host registers the embedded artifact through the proven add/start loader lifecycle once Shelter itself is up.
+
+### Why a shim (no generic sync IPC)
+
+The plugin reads five synchronous members during onLoad() (verified in source and in the compiled bundle: getConfig x2, getThemes/translations/setLang x1 each, restart x3 in later callbacks only, all direct window.legcord reads, never destructured). The native bridge is Promise-only by architecture. The shim backfills exactly those five names from the launch-frozen snapshot - plus two static platform strings (below) - and nothing else.
+
+### Shim members (exact)
+
+- settings.getConfig(): dual contract. Synchronous callers receive a per-document mutable working copy of the frozen snapshot (same identity on every call of the document, mirroring the Electron main-process cache object); the live settings_get_config request still fires eagerly, so awaited callers (power plugin, smoke) keep exact async behavior incl. timeouts, disposal, and response-schema validation. A non-enumerable then property carries the live branch; a settled noop branch prevents unhandled rejections from never-awaited sync calls.
+- themes.getThemes(): per-document mutable projection of the snapshot inventory onto exactly id/name/author/description/version/enabled (missing optional text becomes empty string; malformed entries skipped). No paths, stylesheets, remote references, or other manifest properties cross.
+- translations: the frozen snapshot catalog object as-is (reads only; the plugin never writes it).
+- settings.setLang(locale): the existing narrow settingsBoot sender (validated, fire-and-forget settings_boot_set_lang event, returns undefined - the plugin discards the return).
+- restart(): the existing narrow settingsBoot sender (empty settings_boot_restart event; the host reloads the document - Electron relaunch is deliberately not claimed).
+- platform / osRelease: static launch-time strings with Electron parity (process.platform / os.release()). REQUIRED, not optional: SettingsPage render calls isMinWindowsVersion() (osRelease.split, throws on undefined) and gates sections on platform comparisons. platform reuses the boot snapshot constant (win32); osRelease is queried once per launch via RtlGetVersion (app.rs, immune to compatibility-version lies) and validated as a dotted numeric triple. No capability, no request, no renderer input. version is deliberately NOT shimmed (AboutPopup reads it optional-chained with a fallback; HeroUpdater uses the async capability natively).
+
+### Mutability without weakening the snapshot
+
+The frozen snapshot is never unfrozen. Deep per-document clones give the plugin its mutable working copies (setConfig writes store.settings[key], keybind/detectable pushes - all of which throw on frozen objects in strict mode). Writes to a working copy never reach the frozen source (tested). No plugin code compares object identity (verified by source grep); the per-document shared clone additionally preserves Electron cache identity.
+
+### Host loader (closed add/start)
+
+After Shelter's own bootstrap marker proves window.shelter.plugins exists, the host evaluates one fixed script per document: remove-first (idempotent), addLocalPlugin with the host-fixed id legcord-settings + embedded artifact bytes (JSON-encoded splice) + fixed name-only manifest, then startPlugin. Plain status strings (settings-plugin-started / settings-plugin-failed) come back for host observability. Guarded once per document generation (reloads start fresh, replays log a loud duplicate and are refused). No renderer input at any step: id, source, and manifest are host literals.
+
+### Ordering
+
+document-start init script (facade + settingsBoot + shim clones, all before adapters) -> Shelter bundle evaluation (host ModBundleReady) -> shelter async init (#app-mount) -> bootstrap verdict -> settings add/start -> onLoad reads the shim. Proven by construction plus the splice-ordering unit test; the runtime smoke confirms presence/shape/frozen state per document.
+
+### What the shim does NOT do
+
+No sendSync, generic invoke, eval RPC, arbitrary source/plugin/filesystem/URL access, renderer-controlled ids, or snapshot construction input. The async capabilities are untouched. Theme operations reached by the executing UI are the already-implemented native capabilities (list/setEnabled/importFiles/folders), never duplicated. Deferred editor/URL/uninstall paths stay hidden via the existing isNativeThemesMode gates; legcord:// asset images have no native protocol and render broken (cosmetic, documented).
+
+### Runtime acceptance (DEV profile only, 11 items)
+
+1. Discord loads (health hasAppMount, no login redirect). 2. Shelter loads (bootstrap marker per document). 3. Real artifact loads (start ok=true, 252,541 bytes, once per generation). 4. Plugin does not unload (Legcord section found on both documents). 5. Settings UI appears (modal via plain click). 6. ThemesPage exists (Installed Themes header). 7. Themes list renders (both cards). 8. ClearVision appears (card found, persisted disabled baseline shown). 9. No getThemes failure (sync shim + native list path; zero such errors anywhere). 10. No new unhandled rejections (stderr holds only previously attributed diagnostics). 11. No duplicate execution (start count tracks generations 1:1, no duplicate logs, execution_count=1).
+Beyond the eleven: enable/disable drive real managed-node add/remove (host css_updates/css_removes), two themes simultaneously (2 nodes), import click keeps the page alive (file selection itself is inherently manual - host modal), folder action proven twice by host Metrics lines, reload persistence verified (2 nodes without opening UI), DEV profile restored (0 nodes, both manifests disabled). CSS proof uses a self-contained fixture theme, never ClearVision visuals (Phase F gap above). setLang proven live (locale persisted per document).

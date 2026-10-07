@@ -70,7 +70,7 @@ function stripComments(source) {
 const shelterAdapterCode = stripComments(shelterAdapter);
 const equicordAdapterCode = stripComments(equicordAdapter);
 
-function createBootstrap(capabilities, settingsBoot = defaultSettingsBoot()) {
+function createBootstrap(capabilities, settingsBoot = defaultSettingsBoot(), hostPlatform = defaultHostPlatform()) {
     return bootstrapTemplate
         .replace(
             "__LEGCORD_BOOT_SNAPSHOT__",
@@ -81,7 +81,13 @@ function createBootstrap(capabilities, settingsBoot = defaultSettingsBoot()) {
                 capabilities,
             }),
         )
-        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", JSON.stringify(settingsBoot));
+        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", JSON.stringify(settingsBoot))
+        .replace("__LEGCORD_HOST_PLATFORM__", JSON.stringify(hostPlatform));
+}
+
+/** Minimal host platform fixture, mirroring the host builder. */
+function defaultHostPlatform() {
+    return { platform: "win32", osRelease: "10.0.22631" };
 }
 
 /** Minimal schema-valid settings boot snapshot, mirroring the host builder. */
@@ -385,7 +391,10 @@ test("the facade exposes an asynchronous settings.getConfig capability", () => {
 test("settings.getConfig sends a parameter-free typed request and resolves the snapshot", async () => {
     const { window } = createSettingsRuntime();
     const pending = window.legcord.settings.getConfig();
-    assert.ok(pending instanceof Promise);
+    // Dual contract: a synchronous snapshot value that stays awaitable for
+    // the live async capability (thenable, not a Promise instance).
+    assert.equal(typeof pending?.then, "function");
+    assert.equal(pending.blockPowerSavingInVoiceChat, false);
     const message = window.messages.find((entry) => entry.command?.type === "settings_get_config");
     assert.ok(message);
     assert.deepEqual(message.command, { type: "settings_get_config", payload: {} });
@@ -414,7 +423,7 @@ test("settings.getConfig rejects malformed snapshots", async () => {
     const pending = window.legcord.settings.getConfig();
     const message = window.messages.find((entry) => entry.command?.type === "settings_get_config");
     respondSettings(window, message, { blockPowerSavingInVoiceChat: "yes" });
-    await assert.rejects(pending, /settings response schema is invalid/);
+    await assert.rejects(Promise.resolve(pending), /settings response schema is invalid/);
 });
 
 test("settings.getConfig rejects host failures without a snapshot", async () => {
@@ -432,18 +441,18 @@ test("settings.getConfig rejects host failures without a snapshot", async () => 
             },
         }),
     );
-    await assert.rejects(pending, /settings file is invalid/);
+    await assert.rejects(Promise.resolve(pending), /settings file is invalid/);
 });
 
 test("settings.getConfig rejects after its timeout", async () => {
     const { window } = createSettingsRuntime();
-    await assert.rejects(window.legcord.settings.getConfig(50), /timed out/);
+    await assert.rejects(Promise.resolve(window.legcord.settings.getConfig(50)), /timed out/);
 });
 
 test("settings.getConfig rejects pending requests when the document is disposed", async () => {
     const { window } = createSettingsRuntime();
     const pending = window.legcord.settings.getConfig();
-    const rejection = assert.rejects(pending, /document was disposed/);
+    const rejection = assert.rejects(Promise.resolve(pending), /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
 });
@@ -451,7 +460,7 @@ test("settings.getConfig rejects pending requests when the document is disposed"
 test("a reloaded document gets a fresh settings facade with no stale promises", async () => {
     const firstDocument = createSettingsRuntime();
     const stale = firstDocument.window.legcord.settings.getConfig();
-    const staleRejection = assert.rejects(stale, /document was disposed/);
+    const staleRejection = assert.rejects(Promise.resolve(stale), /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
@@ -2055,9 +2064,12 @@ test("the facade exposes a CSS-text-only themes.install_code capability", () => 
     assert.equal(Object.isFrozen(window.legcord.themes), true);
     assert.equal(window.legcord.native.supports("themes.install_code"), true);
     assert.equal(window.legcord.native.supports("themes.write_css"), true);
-    // No URL install, list, enable, edit, dialog, or picker surface may exist.
+    // No URL install, Electron sync setters, dialog, or picker surface may
+    // exist. getThemes is the one closed synchronous exception (settings
+    // shim): it returns only the frozen snapshot projection, never a host
+    // operation.
     assert.equal(window.legcord.themes.install, undefined);
-    assert.equal(window.legcord.themes.getThemes, undefined);
+    assert.equal(typeof window.legcord.themes.getThemes, "function");
     assert.equal(window.legcord.themes.set, undefined);
     assert.equal(window.legcord.themes.edit, undefined);
     assert.equal(window.legcord.themes.openImportPicker, undefined);
@@ -2718,8 +2730,10 @@ test("the facade exposes a parameter-free themes.list inventory", () => {
     const { window } = createListRuntime();
     assert.equal(typeof window.legcord.themes.listThemes, "function");
     assert.equal(window.legcord.native.supports("themes.list"), true);
-    // No CSS pull, filesystem, path, or URL surface may exist.
-    assert.equal(window.legcord.themes.getThemes, undefined);
+    // No CSS pull, filesystem, path, or URL surface may exist. getThemes is
+    // the one closed synchronous exception (settings shim snapshot
+    // projection, not a host operation).
+    assert.equal(typeof window.legcord.themes.getThemes, "function");
     assert.equal(window.legcord.themes.getCSS, undefined);
     assert.equal(window.legcord.fs, undefined);
 });
@@ -3556,4 +3570,184 @@ test("the settingsBoot surface adds no generic sync bridge, eval, or invocation"
     assert.equal(/require\(["\x27]electron["\x27]\)/.test(code), false);
     assert.equal(code.includes("settings_boot_set_lang"), true);
     assert.equal(code.includes("settings_boot_restart"), true);
+});
+
+/** Runtime with the settings capability granted, as the production boot snapshot grants it. */
+function createShimRuntime(origin = "https://discord.com", settingsBoot) {
+    return createRuntime(origin, ["bridge.ping", "settings.get_config"], settingsBoot);
+}
+
+test("the closed shim exposes exactly the seven sync members plus two platform strings", () => {
+    const { window } = createShimRuntime();
+    const legcord = window.legcord;
+    assert.equal(typeof legcord.settings.getConfig, "function");
+    assert.equal(typeof legcord.settings.setLang, "function");
+    assert.equal(typeof legcord.themes.getThemes, "function");
+    assert.equal(typeof legcord.translations, "object");
+    assert.equal(typeof legcord.restart, "function");
+    assert.equal(legcord.platform, "win32");
+    assert.equal(legcord.osRelease, "10.0.22631");
+    assert.equal(Object.isFrozen(legcord), true);
+    assert.equal(Object.isFrozen(legcord.settings), true);
+    assert.equal(Object.isFrozen(legcord.themes), true);
+});
+
+test("the shim exposes no generic sync API beyond the closed members", () => {
+    const { window } = createRuntime();
+    const legcord = window.legcord;
+    assert.equal(legcord.settings.setConfig, undefined);
+    assert.equal(legcord.themes.install, undefined);
+    assert.equal(legcord.themes.set, undefined);
+    assert.equal(legcord.themes.edit, undefined);
+    assert.equal(legcord.themes.refresh, undefined);
+    assert.equal(legcord.themes.folder, undefined);
+    assert.equal(legcord.version, undefined);
+    assert.equal(legcord.fs, undefined);
+    assert.equal(legcord.plugins, undefined);
+    assert.equal(legcord.backup.save, undefined);
+    assert.equal(typeof legcord.translations, "object");
+});
+
+test("shim getConfig returns the mutable snapshot synchronously with no throw", () => {
+    const { window } = createShimRuntime();
+    const first = window.legcord.settings.getConfig();
+    assert.equal(first.blockPowerSavingInVoiceChat, false);
+    assert.equal(JSON.stringify(first.mods), JSON.stringify([]));
+    // The plugin mutates the working copy (setConfig writes, keybind push):
+    // frozen-source throws would break it, so writes must succeed.
+    first.blockPowerSavingInVoiceChat = true;
+    assert.equal(first.blockPowerSavingInVoiceChat, true);
+    first.mods.push("shelter");
+    assert.equal(JSON.stringify(first.mods), JSON.stringify(["shelter"]));
+    // ...while the host snapshot stays frozen and unchanged.
+    assert.equal(window.legcord.settingsBoot.settings.blockPowerSavingInVoiceChat, false);
+    assert.equal(Object.isFrozen(window.legcord.settingsBoot.settings), true);
+});
+
+test("shim getConfig preserves identity within a document and isolates across documents", () => {
+    const first = createShimRuntime();
+    const again = first.window.legcord.settings.getConfig();
+    assert.equal(first.window.legcord.settings.getConfig() === again, true);
+    again.blockPowerSavingInVoiceChat = true;
+    assert.equal(first.window.legcord.settings.getConfig().blockPowerSavingInVoiceChat, true);
+
+    const next = createShimRuntime();
+    assert.equal(next.window.legcord.settings.getConfig() === again, false);
+    assert.equal(next.window.legcord.settings.getConfig().blockPowerSavingInVoiceChat, false);
+});
+
+test("shim getThemes returns the closed six-field projection", () => {
+    const snapshot = {
+        settingsSource: "file",
+        settings: { mods: [] },
+        themes: [
+            {
+                name: "Full",
+                author: "a",
+                description: "d",
+                version: "1",
+                enabled: true,
+                theme: "src.css",
+                updateSrc: "https://x",
+                id: "full",
+            },
+            { name: "Sparse", enabled: false, id: "sparse" },
+            { name: 42, enabled: true, id: "bad" },
+        ],
+        lang: "en-US",
+        i18n: {},
+    };
+    const { window } = createRuntime("https://discord.com", ["bridge.ping"], snapshot);
+    const themes = window.legcord.themes.getThemes();
+    assert.equal(themes.length, 2);
+    // JSON-compared: the projection lives in the document realm, so its
+    // prototype differs from test-realm literals.
+    assert.equal(
+        JSON.stringify(themes[0]),
+        JSON.stringify({
+            id: "full",
+            name: "Full",
+            author: "a",
+            description: "d",
+            version: "1",
+            enabled: true,
+        }),
+    );
+    assert.equal(
+        JSON.stringify(themes[1]),
+        JSON.stringify({
+            id: "sparse",
+            name: "Sparse",
+            author: "",
+            description: "",
+            version: "",
+            enabled: false,
+        }),
+    );
+    assert.equal(window.legcord.themes.getThemes() === themes, true);
+});
+
+test("shim translations exposes the frozen snapshot object as-is", () => {
+    const { window } = createRuntime();
+    assert.equal(window.legcord.translations === window.legcord.settingsBoot.i18n, true);
+    assert.equal(Object.isFrozen(window.legcord.translations), true);
+    assert.equal(window.legcord.translations["invite-goBackToApp"], "Go back to the Discord app");
+});
+
+test("shim setLang posts the narrow locale event and restart posts the empty event", () => {
+    const { window } = createRuntime();
+    assert.equal(window.legcord.settings.setLang("de"), undefined);
+    assert.equal(window.legcord.restart(), undefined);
+    assert.deepEqual(
+        window.messages
+            .filter((message) => message.event?.type === "settings_boot_set_lang")
+            .map((message) => message.event.payload),
+        [{ locale: "de" }],
+    );
+    assert.deepEqual(
+        window.messages
+            .filter((message) => message.event?.type === "settings_boot_restart")
+            .map((message) => message.event.payload),
+        [{}],
+    );
+    // No synchronous forbidden work: the only outbound traffic from both
+    // calls is the two closed one-way events (no commands, no responses).
+    assert.equal(
+        window.messages.some((message) => message.command),
+        false,
+    );
+    assert.throws(() => window.legcord.settings.setLang("../escape"), TypeError);
+    assert.throws(() => window.legcord.settings.setLang(""), TypeError);
+});
+
+test("the shim replays the real plugin onLoad reads without sync-member failures", () => {
+    // Mirrors src/shelter/settings/index.ts:90-99 + settings.ts:14-20:
+    // refreshSettings, refreshThemes, translations, setLang,
+    // registerSections flag - twice-called getConfig included.
+    const { window } = createShimRuntime();
+    const store = {};
+    store.settings = window.legcord.settings.getConfig();
+    store.themes = window.legcord.themes.getThemes();
+    store.i18n = window.legcord.translations;
+    window.legcord.settings.setLang("en-US");
+    const sections = ["legcord-settings", "legcord-themes"];
+    if (window.legcord.settings.getConfig().showExperimentalPluginMenu) sections.push("legcord-plugins");
+    assert.deepEqual(sections, ["legcord-settings", "legcord-themes"]);
+    assert.equal(store.settings.blockPowerSavingInVoiceChat, false);
+    assert.equal(store.themes.length, 0);
+    assert.equal(store.i18n["invite-goBackToApp"], "Go back to the Discord app");
+});
+
+test("the renderer cannot replace the host snapshot or shim before plugin execution", () => {
+    const { window } = createRuntime();
+    assert.throws(() => {
+        window.legcord.settingsBoot = {};
+    }, TypeError);
+    assert.throws(() => {
+        window.legcord.translations = {};
+    }, TypeError);
+    assert.throws(() => {
+        window.legcord.platform = "darwin";
+    }, TypeError);
+    assert.equal(window.legcord.platform, "win32");
 });

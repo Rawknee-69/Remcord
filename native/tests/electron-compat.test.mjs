@@ -1135,3 +1135,55 @@ test("native settingsBoot is host-built data plus two narrow senders", () => {
     assert.match(bootFacade, /\{\s*type:\s*"settings_boot_restart",\s*payload:\s*\{\s*\}\s*\}/);
     assert.doesNotMatch(bootFacade, /sendSync|new Function|[^a-zA-Z]eval\(|require\(/);
 });
+
+test("Electron keeps the synchronous platform and release bridges", () => {
+    assert.match(bridge, /platform:\s*ipcRenderer\.sendSync\("getOS"\)/);
+    assert.match(bridge, /osRelease:\s*ipcRenderer\.sendSync\("getOSRelease"\)/);
+    assert.match(ipc, /ipcMain\.on\("getOS"/);
+    assert.match(ipc, /event\.returnValue\s*=\s*process\.platform/);
+    assert.match(ipc, /ipcMain\.on\("getOSRelease"/);
+    assert.match(ipc, /event\.returnValue\s*=\s*os\.release\(\)/);
+});
+
+test("Electron keeps the optional version read for the about popup", () => {
+    const aboutPopup = readFileSync(
+        new URL("../../src/shelter/settings/components/AboutPopup.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(aboutPopup, /window\.legcord\?\.version/);
+});
+
+test("no src caller uses the native shim surface", () => {
+    const settingsIndex = readFileSync(new URL("../../src/shelter/settings/index.ts", import.meta.url), "utf8");
+    for (const source of [bridge, ipc, types, shelterSettings, settingsIndex]) {
+        assert.doesNotMatch(source, /settingsBoot/);
+        assert.doesNotMatch(source, /settings_boot/);
+        assert.doesNotMatch(source, /hostPlatform/);
+        assert.doesNotMatch(source, /getThemesSync/);
+    }
+});
+
+test("native shim is static data plus closed narrow senders", () => {
+    // platform/osRelease are spliced launch-time strings (process.platform /
+    // os.release() parity), never capabilities, requests, or reads.
+    const platformFacade = nativeFacade.slice(
+        nativeFacade.indexOf("const hostPlatform = freezeDeep"),
+        nativeFacade.indexOf("Object.defineProperty(window"),
+    );
+    assert.ok(platformFacade.length > 0);
+    // The top-level assignments carry the frozen host strings (asserted on
+    // the whole facade: the slice above ends where window.legcord is built).
+    assert.match(nativeFacade, /platform:\s*hostPlatform\.platform/);
+    assert.match(nativeFacade, /osRelease:\s*hostPlatform\.osRelease/);
+    assert.doesNotMatch(platformFacade, /requireCapability|request\(|sendSync|fetch\(/);
+    // The dual getConfig keeps the capability gate and the live request for
+    // awaited callers; the synchronous value is a snapshot working copy.
+    const dualGetConfig = nativeFacade.slice(
+        nativeFacade.indexOf("function getConfig"),
+        nativeFacade.indexOf("function getLang"),
+    );
+    assert.match(dualGetConfig, /requireCapability\("settings\.get_config"\)/);
+    assert.match(dualGetConfig, /\{\s*type:\s*"settings_get_config",\s*payload:\s*\{\s*\}\s*\}/);
+    assert.match(dualGetConfig, /settingsWorkingCopy/);
+    assert.doesNotMatch(dualGetConfig, /sendSync|new Function|[^a-zA-Z]eval\(/);
+});
