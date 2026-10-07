@@ -1,4 +1,4 @@
-import { setConfig } from "../settings.js";
+import { isNativeSettingsSetAvailable, setConfig, setNativeSetting } from "../settings.js";
 import { AboutPopup } from "./AboutPopup.jsx";
 import { InfoIcon } from "./icons/InfoIcon.jsx";
 import { DonateIcon, XIcon } from "./icons/QuickActionIcons.jsx";
@@ -19,7 +19,17 @@ export function SupportBanner() {
             <button
                 type="button"
                 class={classes.dismissButton}
-                onClick={() => setConfig("supportBannerDismissed", true)}
+                onClick={() => {
+                    // Native WebView2 persists through the closed async allowlist;
+                    // Electron keeps the original synchronous setConfig.
+                    if (isNativeSettingsSetAvailable()) {
+                        void setNativeSetting("supportBannerDismissed", true).catch(() =>
+                            console.warn("[Legcord] Could not dismiss the banner in the native shell."),
+                        );
+                    } else {
+                        setConfig("supportBannerDismissed", true);
+                    }
+                }}
             >
                 <XIcon />
             </button>

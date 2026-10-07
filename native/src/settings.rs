@@ -303,63 +303,166 @@ pub struct SettingsMutation {
     pub payload_bytes: usize,
 }
 
-/// Apply the ONE allowlisted native settings mutation.
+/// Closed allowlist of renderer-mutable settings keys for the generic
+/// `settings.set` capability.
 ///
-/// This is the write half of the read-only [`load_settings`] capability and
-/// deliberately NOT a generic `setConfig(key, value)`:
-/// - The field is fixed at compile time (`blockPowerSavingInVoiceChat`).
-///   There is no key, path, JSON-patch, or object parameter anywhere.
-/// - The value is a plain `bool`, already type-checked by the protocol
-///   parser before this function runs.
-/// - The current settings are loaded authoritatively first: a missing file
-///   starts from compiled-in defaults, while a corrupt file (bad JSON or
-///   wrong field types) is an error and is NEVER overwritten with defaults.
-/// - Unknown future keys are preserved: the write merges the single field
-///   into the existing JSON document instead of re-serializing the snapshot.
-/// - Persistence is atomic: the new document is written to a sibling
-///   temporary file in the same directory and then renamed over
-///   `settings.json`, so a crash cannot leave a truncated file.
+/// This enum IS the allowlist: serde rejects any other key string at parse
+/// time, before any filesystem work. Every other `Settings` field is
+/// deliberately absent:
+/// - window chrome / tray / startup (`windowStyle`, `transparency`,
+///   `windowMaterial`, `tray`, `minimizeToTray`, `startMinimized`,
+///   `skipSplash`, `mobileMode`, `autoHideMenuBar`, `overlayButtonColor`,
+///   `bounceOnPing`, `popoutPiP`, `sleepInBackground`): ELECTRON-ONLY, no
+///   native window shell consumes them yet.
+/// - network / process surface (`proxyMode`, `proxyRules`,
+///   `proxyBypassRules`, `proxyPacScript`, `customJsBundle`,
+///   `customCssBundle`, `additionalArguments`, `customIcon`,
+///   `automaticUpdates`, `disableHttpCache`): UNSAFE to accept from the
+///   renderer (URL / path / CLI-switch / proxy injection).
+/// - voice / capture (`audio`, `useMacSystemPicker`, `disableAutogain`,
+///   `sdpH264BaselineRewrite`, `vaapi`, `hardwareAcceleration`,
+///   `performanceMode`, `smoothScroll`, `autoScroll`, `spellcheck`,
+///   `spellcheckLanguage`): DEFERRED with the media/voice milestone.
+/// - RPC / scanning (`inviteWebsocket`, `processScanning`,
+///   `windowsLegacyScanning`, `scanInterval`, `keybinds`): DEFERRED with
+///   arRPC; `keybinds` additionally carries arbitrary renderer JS and is
+///   UNSAFE as a value.
+/// - themes / QuickCSS (`quickCss`, `csp`): owned by their own native
+///   capabilities (themes list/toggle/import, Quick CSS host push); the
+///   QuickCSS switch is disabled in the native Themes UI, so it has no
+///   native caller.
+/// - opaque host state (`modCache`, `noBundleUpdates`, `doneSetup`,
+///   `channel`, `multiInstance`, `useSystemCssEditor`): DEFERRED.
 ///
-/// Returns [`SettingsMutation`] carrying the applied value for the renderer
-/// to update its local state (Electron's synchronous setter returns
-/// `undefined` after persisting; the async native caller needs the applied
-/// value back to avoid holding stale state).
-pub fn apply_block_power_saving(
-    profile_dir: &Path,
-    value: bool,
-) -> Result<SettingsMutation, String> {
-    // Authoritative load: validates JSON shape and every known field type.
-    let load = load_settings(profile_dir)?;
-    let path = settings_file_path(profile_dir);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsSetKey {
+    /// Client-mod enablement (`ValidMods[]`). Native consumer: the mod
+    /// registry resolves adapters from `settings.mods` at startup; the
+    /// Settings UI mod toggles are enabled natively and would otherwise
+    /// throw. Takes effect on next launch (restart-required model).
+    Mods,
+    /// Support-banner dismissal flag. Pure renderer UI state; the banner
+    /// is rendered natively and its dismiss button would otherwise throw.
+    SupportBannerDismissed,
+    /// Experimental plugin-menu flag. Read by the settings plugin at
+    /// registration from the boot snapshot; takes effect on next launch.
+    ShowExperimentalPluginMenu,
+    /// Extended plugin-abilities flag. Persisted for Electron parity (it
+    /// gates `pluginWriteFile`/`pluginReadFile` there); the native
+    /// plugin-storage capabilities are already capability-gated, so this
+    /// carries no host side effect beyond persistence.
+    ExtendedPluginAbilities,
+}
 
-    let document = match load.source {
-        SettingsSource::Defaults => {
-            let mut snapshot = load.snapshot;
-            snapshot.block_power_saving_in_voice_chat = value;
-            serde_json::to_value(&snapshot)
-                .map_err(|error| format!("settings snapshot cannot be serialized: {error}"))?
+impl SettingsSetKey {
+    /// Exact `settings.json` document field this key mutates.
+    pub fn storage_key(self) -> &'static str {
+        match self {
+            SettingsSetKey::Mods => "mods",
+            SettingsSetKey::SupportBannerDismissed => "supportBannerDismissed",
+            SettingsSetKey::ShowExperimentalPluginMenu => "showExperimentalPluginMenu",
+            SettingsSetKey::ExtendedPluginAbilities => "extendedPluginAbilities",
         }
+    }
+}
+
+/// Bounded value union for the allowlist. The key selects which variant is
+/// legal; anything else is a type error. There is deliberately no string,
+/// number, object, or null variant: no allowlisted key needs one.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum SettingsSetValue {
+    Bool(bool),
+    Mods(Vec<String>),
+}
+
+/// Maximum accepted mod-enablement entries. Electron's `ValidMods` has four
+/// members; this bound leaves headroom without accepting a spam array.
+pub const MAX_MODS_ENTRIES: usize = 8;
+
+/// Exact `ValidMods` union from `src/@types/settings.d.ts`. The renderer
+/// cannot invent a mod id through this capability.
+pub const VALID_MODS: &[&str] = &["vencord", "equicord", "custom", "shelter"];
+
+/// Validate one allowlisted mutation before any filesystem work: the value
+/// variant must match the key, and `mods` entries must be exact `ValidMods`
+/// members within the length bound.
+pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> Result<(), String> {
+    match (key, value) {
+        (SettingsSetKey::Mods, SettingsSetValue::Mods(entries)) => {
+            if entries.len() > MAX_MODS_ENTRIES {
+                return Err("mods list exceeds the size limit".to_owned());
+            }
+            for entry in entries {
+                if !VALID_MODS.contains(&entry.as_str()) {
+                    return Err("mods list carries an unknown mod id".to_owned());
+                }
+            }
+            Ok(())
+        }
+        (
+            SettingsSetKey::SupportBannerDismissed
+            | SettingsSetKey::ShowExperimentalPluginMenu
+            | SettingsSetKey::ExtendedPluginAbilities,
+            SettingsSetValue::Bool(_),
+        ) => Ok(()),
+        _ => Err("settings value does not match the allowlisted key".to_owned()),
+    }
+}
+
+/// Result of one allowlisted `settings.set` mutation. `value` is the
+/// normalized applied value (the exact `mods` array or bool the host
+/// persisted) so the renderer can update local state instead of holding
+/// stale data. `source` is always [`SettingsSource::File`].
+#[derive(Debug)]
+pub struct SettingsSetMutation {
+    pub key: SettingsSetKey,
+    pub value: SettingsSetValue,
+    pub source: SettingsSource,
+    pub payload_bytes: usize,
+}
+
+/// Load the authoritative JSON document for a write.
+///
+/// Returns the document to mutate: the parsed live file when settings came
+/// from disk, or the defaults snapshot serialized to a document when no file
+/// exists. A corrupt/unreadable file is an error and is NEVER converted into
+/// defaults here: overwriting corruption with a fresh document would destroy
+/// evidence and (via the Electron corrupt-cache fallback) persist a
+/// near-empty file.
+fn load_document_for_write(
+    profile_dir: &Path,
+    load: SettingsLoad,
+) -> Result<serde_json::Value, String> {
+    match load.source {
+        SettingsSource::Defaults => serde_json::to_value(&load.snapshot)
+            .map_err(|error| format!("settings snapshot cannot be serialized: {error}")),
         SettingsSource::File => {
+            let path = settings_file_path(profile_dir);
             let raw = std::fs::read(&path)
                 .map_err(|error| format!("settings file is unreadable: {error}"))?;
-            let mut document: serde_json::Value = serde_json::from_slice(&raw)
+            let document: serde_json::Value = serde_json::from_slice(&raw)
                 .map_err(|error| format!("settings file is invalid: {error}"))?;
-            let object = document.as_object_mut().ok_or_else(|| {
-                "settings file is invalid: top-level JSON must be an object".to_owned()
-            })?;
-            // ONLY the allowlisted field is touched; every other key
-            // (including unknown future keys) is preserved byte-for-value.
-            object.insert(
-                "blockPowerSavingInVoiceChat".to_owned(),
-                serde_json::Value::Bool(value),
-            );
-            document
+            if !document.is_object() {
+                return Err("settings file is invalid: top-level JSON must be an object".to_owned());
+            }
+            Ok(document)
         }
-    };
+    }
+}
 
-    let serialized = serde_json::to_string_pretty(&document)
+/// Persist a mutated settings document atomically: same-directory sibling
+/// temp file plus rename, so readers never observe a truncated
+/// `settings.json`. Returns the serialized byte length. A temp file is never
+/// left behind on failure.
+fn persist_settings_document(
+    profile_dir: &Path,
+    document: &serde_json::Value,
+) -> Result<usize, String> {
+    let serialized = serde_json::to_string_pretty(document)
         .map_err(|error| format!("settings snapshot cannot be serialized: {error}"))?;
-
+    let path = settings_file_path(profile_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("settings file cannot be written: {error}"))?;
@@ -375,11 +478,96 @@ pub fn apply_block_power_saving(
         let _ = std::fs::remove_file(&temp_path);
         return Err(format!("settings file cannot be written: {error}"));
     }
+    Ok(serialized.len())
+}
+
+/// Apply the ONE allowlisted native settings mutation.
+///
+/// This is the write half of the read-only [`load_settings`] capability and
+/// deliberately NOT a generic `setConfig(key, value)`:
+/// - The field is fixed at compile time (`blockPowerSavingInVoiceChat`).
+///   There is no key, path, JSON-patch, or object parameter anywhere.
+/// - The value is a plain `bool`, already type-checked by the protocol
+///   parser before this function runs.
+/// - The current settings are loaded authoritatively first: a missing file
+///   starts from compiled-in defaults, while a corrupt file (bad JSON or
+///   wrong field types) is an error and is NEVER overwritten with defaults.
+/// - Unknown future keys are preserved: the write merges the single field
+///   into the existing JSON document instead of re-serializing the snapshot.
+/// - Persistence is atomic via [`persist_settings_document`].
+///
+/// Returns [`SettingsMutation`] carrying the applied value for the renderer
+/// to update its local state (Electron's synchronous setter returns
+/// `undefined` after persisting; the async native caller needs the applied
+/// value back to avoid holding stale state).
+pub fn apply_block_power_saving(
+    profile_dir: &Path,
+    value: bool,
+) -> Result<SettingsMutation, String> {
+    // Authoritative load: validates JSON shape and every known field type.
+    let load = load_settings(profile_dir)?;
+    let mut document = load_document_for_write(profile_dir, load)?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| "settings file is invalid: top-level JSON must be an object".to_owned())?;
+    // ONLY the allowlisted field is touched; every other key
+    // (including unknown future keys) is preserved byte-for-value.
+    object.insert(
+        "blockPowerSavingInVoiceChat".to_owned(),
+        serde_json::Value::Bool(value),
+    );
+    let payload_bytes = persist_settings_document(profile_dir, &document)?;
 
     Ok(SettingsMutation {
         block_power_saving_in_voice_chat: value,
         source: SettingsSource::File,
-        payload_bytes: serialized.len(),
+        payload_bytes,
+    })
+}
+
+/// Apply one allowlisted `settings.set` mutation.
+///
+/// Closed twin of [`apply_block_power_saving`] for the [`SettingsSetKey`]
+/// allowlist: the key is an enum (unknown keys never parse) and the value
+/// union is validated by [`validate_settings_set`] before any filesystem
+/// work. Same ownership semantics: authoritative load first, missing file
+/// starts from defaults, corrupt file is an error that is never overwritten,
+/// unknown future keys preserved, atomic temp+rename persistence.
+///
+/// Returns [`SettingsSetMutation`] carrying the normalized applied value so
+/// the renderer can update its local state from host-confirmed data.
+pub fn apply_settings_set(
+    profile_dir: &Path,
+    key: SettingsSetKey,
+    value: &SettingsSetValue,
+) -> Result<SettingsSetMutation, String> {
+    validate_settings_set(key, value)?;
+    // Authoritative load: validates JSON shape and every known field type.
+    let load = load_settings(profile_dir)?;
+    let mut document = load_document_for_write(profile_dir, load)?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| "settings file is invalid: top-level JSON must be an object".to_owned())?;
+    let stored = match (key, value) {
+        (SettingsSetKey::Mods, SettingsSetValue::Mods(entries)) => serde_json::Value::Array(
+            entries
+                .iter()
+                .map(|entry| serde_json::Value::String(entry.clone()))
+                .collect(),
+        ),
+        (_, SettingsSetValue::Bool(flag)) => serde_json::Value::Bool(*flag),
+        _ => return Err("settings value does not match the allowlisted key".to_owned()),
+    };
+    // ONLY the allowlisted field is touched; every other key
+    // (including unknown future keys) is preserved byte-for-value.
+    object.insert(key.storage_key().to_owned(), stored);
+    let payload_bytes = persist_settings_document(profile_dir, &document)?;
+
+    Ok(SettingsSetMutation {
+        key,
+        value: value.clone(),
+        source: SettingsSource::File,
+        payload_bytes,
     })
 }
 
@@ -427,7 +615,10 @@ pub fn load_settings(profile_dir: &Path) -> Result<SettingsLoad, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_block_power_saving, load_settings, SettingsSnapshot, SettingsSource};
+    use super::{
+        apply_block_power_saving, apply_settings_set, load_settings, validate_settings_set,
+        SettingsSetKey, SettingsSetValue, SettingsSnapshot, SettingsSource,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_profile_dir(tag: &str) -> std::path::PathBuf {
@@ -642,5 +833,157 @@ mod tests {
                 .snapshot
                 .block_power_saving_in_voice_chat
         );
+    }
+
+    #[test]
+    fn set_applies_each_bool_key_and_persists() {
+        for (key, field) in [
+            (
+                SettingsSetKey::SupportBannerDismissed,
+                "supportBannerDismissed",
+            ),
+            (
+                SettingsSetKey::ShowExperimentalPluginMenu,
+                "showExperimentalPluginMenu",
+            ),
+            (
+                SettingsSetKey::ExtendedPluginAbilities,
+                "extendedPluginAbilities",
+            ),
+        ] {
+            let profile = unique_profile_dir("set-bool");
+            std::fs::create_dir_all(profile.join("storage")).unwrap();
+            let path = profile.join("storage").join("settings.json");
+            std::fs::write(&path, r#"{"windowStyle":"overlay"}"#).unwrap();
+            let mutation = apply_settings_set(&profile, key, &SettingsSetValue::Bool(true))
+                .expect("an allowlisted bool mutation must persist");
+            assert_eq!(mutation.key, key);
+            assert_eq!(mutation.value, SettingsSetValue::Bool(true));
+            assert_eq!(mutation.source, SettingsSource::File);
+            assert!(mutation.payload_bytes > 0);
+            assert!(!profile.join("storage").join("settings.json.tmp").exists());
+            let document: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(document[field], true);
+            // Sibling keys survive the merge.
+            assert_eq!(document["windowStyle"], "overlay");
+        }
+    }
+
+    #[test]
+    fn set_applies_mods_and_round_trips() {
+        let profile = unique_profile_dir("set-mods");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(&path, r#"{"mods":[]}"#).unwrap();
+        let mutation = apply_settings_set(
+            &profile,
+            SettingsSetKey::Mods,
+            &SettingsSetValue::Mods(vec!["vencord".to_owned()]),
+        )
+        .expect("an allowlisted mods mutation must persist");
+        assert_eq!(mutation.key, SettingsSetKey::Mods);
+        let reread = load_settings(&profile).expect("the mutated file must load");
+        assert_eq!(reread.snapshot.mods, vec!["vencord".to_owned()]);
+        // Electron's mutual-exclusion shape (exactly what toggleMod builds)
+        // persists verbatim.
+        apply_settings_set(
+            &profile,
+            SettingsSetKey::Mods,
+            &SettingsSetValue::Mods(vec!["equicord".to_owned()]),
+        )
+        .expect("replacing the mods array must persist");
+        let reread = load_settings(&profile).expect("the replaced file must load");
+        assert_eq!(reread.snapshot.mods, vec!["equicord".to_owned()]);
+    }
+
+    #[test]
+    fn set_on_a_missing_file_starts_from_defaults() {
+        let profile = unique_profile_dir("set-missing");
+        let mutation = apply_settings_set(
+            &profile,
+            SettingsSetKey::SupportBannerDismissed,
+            &SettingsSetValue::Bool(true),
+        )
+        .expect("a missing file must start from defaults");
+        assert_eq!(mutation.value, SettingsSetValue::Bool(true));
+        let reread = load_settings(&profile).expect("the created file must load");
+        assert_eq!(reread.source, SettingsSource::File);
+        assert_eq!(reread.snapshot.window_style, "overlay");
+    }
+
+    #[test]
+    fn set_rejects_a_corrupt_file_without_overwriting_it() {
+        let profile = unique_profile_dir("set-corrupt");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        let error = apply_settings_set(
+            &profile,
+            SettingsSetKey::Mods,
+            &SettingsSetValue::Mods(vec!["vencord".to_owned()]),
+        )
+        .expect_err("a corrupt file must fail");
+        assert!(error.contains("invalid"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn set_rejects_mismatched_value_types() {
+        // Bool keys refuse the mods array; the mods key refuses a bool.
+        assert!(validate_settings_set(
+            SettingsSetKey::SupportBannerDismissed,
+            &SettingsSetValue::Mods(vec!["vencord".to_owned()]),
+        )
+        .is_err());
+        assert!(
+            validate_settings_set(SettingsSetKey::Mods, &SettingsSetValue::Bool(true)).is_err()
+        );
+    }
+
+    #[test]
+    fn set_rejects_unknown_mod_ids_and_oversized_lists() {
+        assert!(validate_settings_set(
+            SettingsSetKey::Mods,
+            &SettingsSetValue::Mods(vec!["../escape".to_owned()]),
+        )
+        .is_err());
+        assert!(validate_settings_set(
+            SettingsSetKey::Mods,
+            &SettingsSetValue::Mods(vec!["https://attacker.invalid".to_owned()]),
+        )
+        .is_err());
+        assert!(validate_settings_set(
+            SettingsSetKey::Mods,
+            &SettingsSetValue::Mods(vec!["Vencord".to_owned()]),
+        )
+        .is_err());
+        let oversized = vec!["vencord".to_owned(); super::MAX_MODS_ENTRIES + 1];
+        assert!(
+            validate_settings_set(SettingsSetKey::Mods, &SettingsSetValue::Mods(oversized),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn set_preserves_unknown_future_keys() {
+        let profile = unique_profile_dir("set-unknown");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"supportBannerDismissed":false,"someFutureElectronKey":{"nested":1}}"#,
+        )
+        .unwrap();
+        apply_settings_set(
+            &profile,
+            SettingsSetKey::SupportBannerDismissed,
+            &SettingsSetValue::Bool(true),
+        )
+        .expect("unknown keys must survive a set mutation");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["supportBannerDismissed"], true);
+        assert_eq!(document["someFutureElectronKey"]["nested"], 1);
     }
 }

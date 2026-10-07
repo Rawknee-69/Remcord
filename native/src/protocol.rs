@@ -8,7 +8,7 @@ use crate::localization::MAX_LANG_KEY_BYTES;
 use crate::plugin_storage::{
     MAX_PLUGIN_FILE_BYTES, MAX_PLUGIN_ID_BYTES, MAX_PLUGIN_REL_PATH_BYTES,
 };
-use crate::settings::SettingsSnapshot;
+use crate::settings::{SettingsSetKey, SettingsSetValue, SettingsSnapshot};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_IPC_MESSAGE_BYTES: usize = 8 * 1024;
@@ -60,6 +60,7 @@ pub enum BridgeCommand {
     ModGetBundle(ModGetBundleRequest),
     SettingsGetConfig(SettingsGetConfigRequest),
     SettingsSetBlockPowerSaving(SettingsSetBlockPowerSavingRequest),
+    SettingsSet(SettingsSetRequest),
     LocalizationGetLang(LocalizationGetLangRequest),
     AppGetVersion(AppGetVersionRequest),
     PluginStorageRead(PluginStorageReadRequest),
@@ -129,6 +130,19 @@ pub struct SettingsGetConfigRequest {}
 #[serde(deny_unknown_fields)]
 pub struct SettingsSetBlockPowerSavingRequest {
     pub value: bool,
+}
+
+/// The closed `settings.set` mutation: exactly one allowlisted key plus its
+/// bounded value. The key is an enum (unknown keys fail deserialization
+/// before dispatch); the value union plus [`crate::settings::validate_settings_set`]
+/// enforces the key↔variant pairing and per-key rules (bool-only flags,
+/// `ValidMods`-only arrays). There is deliberately NO path, JSON patch,
+/// object, string, number, or null variant: no allowlisted key needs one.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsSetRequest {
+    pub key: SettingsSetKey,
+    pub value: SettingsSetValue,
 }
 
 /// The single allowed `localization.get_lang` parameter: one catalog key.
@@ -311,6 +325,13 @@ pub enum BridgeEvent {
     /// (`LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1`). Never sent by shipped
     /// adapters.
     SettingsMutationProbe(SettingsMutationProbe),
+    /// DEV-only diagnostic posted by the settings set smoke probe
+    /// (`LEGCORD_NATIVE_SETTINGS_SET_SMOKE=1`). Never sent by shipped
+    /// adapters. `key` is the allowlisted wire key exercised
+    /// (`support_banner_dismissed`); `attacks_blocked` counts the
+    /// unknown-key / wrong-type / extra-member attempts the facade or host
+    /// rejected. The probe never carries settings values or host paths.
+    SettingsSetProbe(SettingsSetProbe),
     /// DEV-only diagnostic posted by the localization smoke probe
     /// (`LEGCORD_NATIVE_GETLANG_SMOKE=1`). Never sent by shipped adapters.
     GetLangProbe(GetLangProbe),
@@ -506,6 +527,26 @@ pub struct SettingsMutationProbe {
     pub before: bool,
     pub value: bool,
     pub reread_matches: bool,
+    pub error: Option<String>,
+}
+
+/// DEV-only report for one stage of the settings set smoke sequence:
+/// `stage` is `"mutated"` (flip the allowlisted flag, re-read, verify, and
+/// block three attack shapes) or `"restored"` (write the original value
+/// back, re-read, verify). `key` is the wire key exercised; `before` is the
+/// value read before the stage's write; `reread_matches` whether a fresh
+/// `getConfig` confirmed the write; `attacks_blocked` counts the
+/// unknown-key / wrong-type / extra-member attempts rejected (exactly 3 on
+/// success). The probe never carries host paths.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsSetProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub key: String,
+    pub before: bool,
+    pub reread_matches: bool,
+    pub attacks_blocked: u8,
     pub error: Option<String>,
 }
 
@@ -773,6 +814,7 @@ pub enum BridgeResponsePayload {
     ModBundle(ModBundleResponse),
     SettingsConfig(Box<SettingsConfigResponse>),
     SettingsMutation(SettingsMutationResponse),
+    SettingsSet(SettingsSetResponse),
     LocalizationString(LocalizationStringResponse),
     AppVersion(AppVersionResponse),
     PluginStorageRead(PluginStorageReadResponse),
@@ -852,6 +894,18 @@ pub struct SettingsConfigResponse {
 #[derive(Serialize)]
 pub struct SettingsMutationResponse {
     pub block_power_saving_in_voice_chat: bool,
+    pub source: &'static str,
+    pub payload_bytes: usize,
+}
+
+/// Validated response for one allowlisted `settings.set` mutation: the
+/// applied key echo (so one key's write can never resolve another key's
+/// call), the normalized applied value, the persistence source (always
+/// `"file"` after a successful write), and the persisted file size.
+#[derive(Serialize)]
+pub struct SettingsSetResponse {
+    pub key: SettingsSetKey,
+    pub value: SettingsSetValue,
     pub source: &'static str,
     pub payload_bytes: usize,
 }
@@ -1088,6 +1142,17 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // non-boolean, missing, or extra payload members via
                 // `deny_unknown_fields`, so no further shape check is needed.
                 BridgeCommand::SettingsSetBlockPowerSaving(_) => {}
+                // The key is a closed enum (unknown keys fail deserialization
+                // before dispatch) and the value union is typed; the
+                // key↔variant pairing plus per-key rules (bool-only flags,
+                // ValidMods-only arrays) are re-enforced by the settings
+                // owner here (parse) and at dispatch.
+                BridgeCommand::SettingsSet(payload) => {
+                    if crate::settings::validate_settings_set(payload.key, &payload.value).is_err()
+                    {
+                        return Err("invalid settings set mutation".to_owned());
+                    }
+                }
                 BridgeCommand::LocalizationGetLang(payload) => {
                     if payload.key.is_empty() || payload.key.len() > MAX_LANG_KEY_BYTES {
                         return Err("invalid localization key".to_owned());
@@ -1399,6 +1464,26 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || payload.ok == payload.error.is_some()
                     {
                         return Err("invalid settings mutation probe result".to_owned());
+                    }
+                }
+                BridgeEvent::SettingsSetProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "mutated" | "restored")
+                        || !matches!(
+                            payload.key.as_str(),
+                            "mods"
+                                | "support_banner_dismissed"
+                                | "show_experimental_plugin_menu"
+                                | "extended_plugin_abilities"
+                        )
+                        || payload.attacks_blocked > 8
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || (payload.ok && (!payload.reread_matches || payload.attacks_blocked != 3))
+                    {
+                        return Err("invalid settings set probe result".to_owned());
                     }
                 }
                 BridgeEvent::GetLangProbe(payload) => {
@@ -2680,6 +2765,96 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_the_allowlisted_settings_set_keys() {
+        let mods = r#"{"version":1,"request_id":"settings-1","command":{"type":"settings_set","payload":{"key":"mods","value":["vencord"]}}}"#;
+        let dismissed = r#"{"version":1,"request_id":"settings-2","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":true}}}"#;
+        let experimental = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set","payload":{"key":"show_experimental_plugin_menu","value":false}}}"#;
+        let abilities = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set","payload":{"key":"extended_plugin_abilities","value":true}}}"#;
+        assert!(matches!(
+            parse_bridge_message(mods),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(dismissed),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(experimental),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(abilities),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // Unknown keys never parse: the allowlist is the enum.
+        let unknown = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"minimizeToTray","value":true}}}"#;
+        let tray = r#"{"version":1,"request_id":"settings-6","command":{"type":"settings_set","payload":{"key":"tray","value":"disabled"}}}"#;
+        let proxy = r#"{"version":1,"request_id":"settings-7","command":{"type":"settings_set","payload":{"key":"proxyRules","value":"http://127.0.0.1:8080"}}}"#;
+        let icon = r#"{"version":1,"request_id":"settings-8","command":{"type":"settings_set","payload":{"key":"customIcon","value":"C:\\secret.png"}}}"#;
+        assert!(parse_bridge_message(unknown).is_err());
+        assert!(parse_bridge_message(tray).is_err());
+        assert!(parse_bridge_message(proxy).is_err());
+        assert!(parse_bridge_message(icon).is_err());
+    }
+
+    #[test]
+    fn rejects_mismatched_and_hostile_settings_set_values() {
+        // Bool keys refuse arrays; the mods key refuses a bool.
+        let mods_bool = r#"{"version":1,"request_id":"settings-1","command":{"type":"settings_set","payload":{"key":"mods","value":true}}}"#;
+        let bool_mods = r#"{"version":1,"request_id":"settings-2","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":["vencord"]}}}"#;
+        // Strings, numbers, null, and objects are never valid values.
+        let string_value = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":"yes"}}}"#;
+        let null_value = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set","payload":{"key":"mods","value":null}}}"#;
+        let object_value = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"mods","value":{"vencord":true}}}}"#;
+        // Unknown mod ids, traversal shapes, and oversized lists are refused.
+        let unknown_mod = r#"{"version":1,"request_id":"settings-6","command":{"type":"settings_set","payload":{"key":"mods","value":["Vencord"]}}}"#;
+        let traversal = r#"{"version":1,"request_id":"settings-7","command":{"type":"settings_set","payload":{"key":"mods","value":["../escape"]}}}"#;
+        let missing_key = r#"{"version":1,"request_id":"settings-8","command":{"type":"settings_set","payload":{"value":true}}}"#;
+        // Arbitrary key/value, path, and URL members are rejected.
+        let generic = r#"{"version":1,"request_id":"settings-9","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":true,"path":"C:\\secret"}}}"#;
+        assert!(parse_bridge_message(mods_bool).is_err());
+        assert!(parse_bridge_message(bool_mods).is_err());
+        assert!(parse_bridge_message(string_value).is_err());
+        assert!(parse_bridge_message(null_value).is_err());
+        assert!(parse_bridge_message(object_value).is_err());
+        assert!(parse_bridge_message(unknown_mod).is_err());
+        assert!(parse_bridge_message(traversal).is_err());
+        assert!(parse_bridge_message(missing_key).is_err());
+        assert!(parse_bridge_message(generic).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_settings_set_response() {
+        use super::{SettingsSetKey, SettingsSetResponse, SettingsSetValue};
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "settings-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::SettingsSet(SettingsSetResponse {
+                key: SettingsSetKey::Mods,
+                value: SettingsSetValue::Mods(vec!["vencord".to_owned()]),
+                source: "file",
+                payload_bytes: 2048,
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "settings_set");
+        assert_eq!(value["payload"]["payload"]["key"], "mods");
+        assert_eq!(
+            value["payload"]["payload"]["value"],
+            serde_json::json!(["vencord"])
+        );
+        assert_eq!(value["payload"]["payload"]["source"], "file");
+        // The response carries the key echo plus the applied value only:
+        // never a path, URL, or full snapshot.
+        assert!(value["payload"]["payload"].get("path").is_none());
+        assert!(value["payload"]["payload"].get("url").is_none());
+        assert!(value["payload"]["payload"].get("settings").is_none());
+    }
+
+    #[test]
     fn serializes_a_typed_settings_mutation_response() {
         use super::SettingsMutationResponse;
         let response = BridgeResponse {
@@ -2718,6 +2893,22 @@ mod tests {
         assert!(parse_bridge_message(restored).is_ok());
         assert!(parse_bridge_message(failed).is_ok());
         assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn validates_settings_set_probe_diagnostics() {
+        let mutated = r#"{"version":1,"event":{"type":"settings_set_probe","payload":{"ok":true,"stage":"mutated","key":"support_banner_dismissed","before":false,"reread_matches":true,"attacks_blocked":3,"error":null}}}"#;
+        let restored = r#"{"version":1,"event":{"type":"settings_set_probe","payload":{"ok":true,"stage":"restored","key":"support_banner_dismissed","before":true,"reread_matches":true,"attacks_blocked":3,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"settings_set_probe","payload":{"ok":false,"stage":"mutated","key":"support_banner_dismissed","before":false,"reread_matches":false,"attacks_blocked":1,"error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"settings_set_probe","payload":{"ok":true,"stage":"deleted","key":"support_banner_dismissed","before":false,"reread_matches":true,"attacks_blocked":3,"error":null}}}"#;
+        let bad_key = r#"{"version":1,"event":{"type":"settings_set_probe","payload":{"ok":true,"stage":"mutated","key":"tray","before":false,"reread_matches":true,"attacks_blocked":3,"error":null}}}"#;
+        let inconsistent = r#"{"version":1,"event":{"type":"settings_set_probe","payload":{"ok":true,"stage":"mutated","key":"support_banner_dismissed","before":false,"reread_matches":false,"attacks_blocked":3,"error":null}}}"#;
+        assert!(parse_bridge_message(mutated).is_ok());
+        assert!(parse_bridge_message(restored).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(bad_key).is_err());
         assert!(parse_bridge_message(inconsistent).is_err());
     }
 

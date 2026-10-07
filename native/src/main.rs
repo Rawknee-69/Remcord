@@ -52,13 +52,13 @@ use protocol::{
     BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry,
     BundlesListResponse, FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse,
     PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker,
-    SettingsConfigResponse, SettingsMutationResponse, ThemeEnabledResponse,
+    SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
     ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
     ThemesListResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
-use settings::{apply_block_power_saving, load_settings};
+use settings::{apply_block_power_saving, apply_settings_set, load_settings};
 use tao::{
     dpi::{LogicalSize, Size},
     event::{Event, WindowEvent},
@@ -250,6 +250,7 @@ const MOD_ADAPTER_OVERRIDE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_MODS";
 const MOD_SMOKE_ENV: &str = "LEGCORD_NATIVE_MOD_SMOKE";
 const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
 const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
+const SETTINGS_SET_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SET_SMOKE";
 const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
@@ -277,6 +278,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "mod.get_bundle",
         "settings.get_config",
         "settings.set_block_power_saving_in_voice_chat",
+        "settings.set",
         "localization.get_lang",
         "app.get_version",
         "plugin_storage.read",
@@ -2112,6 +2114,141 @@ const SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE: &str = r#"
 })();
 "#;
 
+/// DEV-only settings.set smoke probe (`LEGCORD_NATIVE_SETTINGS_SET_SMOKE=1`).
+/// Exercises the closed `settings.set` allowlist through the side-effect-free
+/// `support_banner_dismissed` flag: block three attack shapes (unknown key,
+/// wrong value type, key↔variant mismatch), flip the flag, re-read via
+/// `getConfig`, and verify. Reports one typed `settings_set_probe` event
+/// with `stage: "mutated"`. The host then reloads the document so the restore
+/// stage can verify the mutation survived the reload.
+const SETTINGS_SET_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const KEY = "support_banner_dismissed";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "settings_set_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "mutated", key: KEY, before: false, reread_matches: false,
+    attacks_blocked: 0, error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const settings = window.legcord?.settings;
+    if (typeof settings?.getConfig !== "function" || typeof settings?.set !== "function") {
+      fail("settings set facade missing");
+      return;
+    }
+    // Attack shapes the facade must reject before dispatch: an unknown key,
+    // a wrong value type for a bool key, and a key/variant mismatch. Each
+    // must reject; a resolution means the allowlist leaked.
+    let attacks = 0;
+    const expectReject = (pending) => pending.then(
+      () => { throw new Error("attack shape was not blocked"); },
+      () => { attacks += 1; },
+    );
+    Promise.all([
+      expectReject(settings.set("tray", true)),
+      expectReject(settings.set("support_banner_dismissed", "yes")),
+      expectReject(settings.set("mods", true)),
+    ]).then(
+      () => {
+        if (attacks !== 3) {
+          fail(`attack shapes not blocked: ${attacks}`);
+          return;
+        }
+        settings.getConfig().then(
+          (snapshot) => {
+            const before = snapshot.supportBannerDismissed === true;
+            const pending = settings.set(KEY, !before);
+            if (!(pending instanceof Promise)) {
+              fail("settings set facade is not asynchronous");
+              return;
+            }
+            pending.then(
+              (applied) => {
+                settings.getConfig().then(
+                  (reread) => probe({
+                    ok: applied.key === KEY && reread.supportBannerDismissed === applied.value
+                      && applied.value === !before,
+                    stage: "mutated",
+                    key: KEY,
+                    before,
+                    reread_matches: reread.supportBannerDismissed === applied.value,
+                    attacks_blocked: attacks,
+                    error: null,
+                  }),
+                  (error) => fail(error),
+                );
+              },
+              (error) => fail(error),
+            );
+          },
+          (error) => fail(error),
+        );
+      },
+      (error) => fail(error),
+    );
+  } catch (error) {
+    fail(error);
+  }
+})();
+"#;
+
+/// DEV-only restore stage of the settings.set smoke probe. The host formats
+/// `__LEGCORD_SETTINGS_SET_RESTORE_VALUE__` with the pre-mutation value
+/// before evaluating: read the post-reload value (proving the mutation
+/// survived), write the original back, re-read, and report `stage:
+/// "restored"`. The three attack shapes were proven blocked in the mutated
+/// stage, so this stage reports the same count.
+const SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE: &str = r#"
+(() => {
+  const RESTORE_TO = __LEGCORD_SETTINGS_SET_RESTORE_VALUE__;
+  const KEY = "support_banner_dismissed";
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "settings_set_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "restored", key: KEY, before: false, reread_matches: false,
+    attacks_blocked: 3, error: String(error?.message ?? error).slice(0, 256),
+  });
+  try {
+    const settings = window.legcord?.settings;
+    if (typeof settings?.getConfig !== "function" || typeof settings?.set !== "function") {
+      fail("settings set facade missing");
+      return;
+    }
+    settings.getConfig().then(
+      (snapshot) => {
+        const postReload = snapshot.supportBannerDismissed === true;
+        settings.set(KEY, RESTORE_TO).then(
+          (applied) => {
+            settings.getConfig().then(
+              (reread) => probe({
+                // postReload proves the mutated value survived the reload:
+                // it must still be the flipped value (!RESTORE_TO) before
+                // this stage writes the original back.
+                ok: postReload === !RESTORE_TO && applied.value === RESTORE_TO
+                  && reread.supportBannerDismissed === RESTORE_TO,
+                stage: "restored",
+                key: KEY,
+                before: postReload,
+                reread_matches: reread.supportBannerDismissed === applied.value,
+                attacks_blocked: 3,
+                error: null,
+              }),
+              (error) => fail(error),
+            );
+          },
+          (error) => fail(error),
+        );
+      },
+      (error) => fail(error),
+    );
+  } catch (error) {
+    fail(error);
+  }
+})();
+"#;
+
 enum NativeEvent {
     PageLoadStarted,
     PageLoadFinished(String),
@@ -3106,6 +3243,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_settings_mutation_smoke {
         println!("[Settings][MutationSmoke] settings mutation smoke probe enabled");
     }
+    let diagnostic_settings_set_smoke =
+        std::env::var(SETTINGS_SET_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_settings_set_smoke {
+        println!("[Settings][SetSmoke] settings set smoke probe enabled");
+    }
     let diagnostic_getlang_smoke = std::env::var(GETLANG_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_getlang_smoke {
         println!("[Localization][Smoke] localization capability smoke probe enabled");
@@ -3659,6 +3801,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut mutation_smoke_stage = 0_u8;
     let mut mutation_smoke_before = false;
     let mut mutation_smoke_value = false;
+    // Settings.set smoke stages: same mutate → reload → restore machine as
+    // the mutation smoke above, but exercising the closed `settings.set`
+    // allowlist through `support_banner_dismissed` (a side-effect-free flag).
+    let mut settings_set_smoke_stage = 0_u8;
+    let mut settings_set_smoke_before = false;
     let mut page_load_started_at = None;
     let mut incoming_messages = 0_u64;
     let mut request_count = 0_u64;
@@ -3936,6 +4083,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 );
                                 if let Err(error) = webview.evaluate_script(&restore) {
                                     eprintln!("[Settings][MutationSmoke] restore failed: {error}");
+                                }
+                            }
+                        }
+                        if diagnostic_settings_set_smoke {
+                            if settings_set_smoke_stage == 0 {
+                                if let Err(error) =
+                                    webview.evaluate_script(SETTINGS_SET_SMOKE_SCRIPT)
+                                {
+                                    eprintln!("[Settings][SetSmoke] probe failed: {error}");
+                                }
+                            } else if settings_set_smoke_stage == 1 {
+                                let restore = SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE.replace(
+                                    "__LEGCORD_SETTINGS_SET_RESTORE_VALUE__",
+                                    if settings_set_smoke_before {
+                                        "true"
+                                    } else {
+                                        "false"
+                                    },
+                                );
+                                if let Err(error) = webview.evaluate_script(&restore) {
+                                    eprintln!("[Settings][SetSmoke] restore failed: {error}");
                                 }
                             }
                         }
@@ -4377,6 +4545,85 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     response_count += 1;
                                     println!(
                                         "[Settings][Mutation] value={applied} source=file payload_bytes={payload_bytes} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("[Settings][settings_unavailable] {error}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "SETTINGS_UNAVAILABLE",
+                                            message: error,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::SettingsSet(payload) => {
+                            // Closed allowlist mutation: the key is an enum
+                            // and the value union is validated by the
+                            // settings owner (re-checked here defensively).
+                            // The settings path is built from the fixed host
+                            // profile only.
+                            let request_id = request.request_id;
+                            if let Err(error) = settings::validate_settings_set(
+                                payload.key,
+                                &payload.value,
+                            ) {
+                                eprintln!("[Settings][invalid_set] {error}");
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: request_id.clone(),
+                                    ok: false,
+                                    payload: None,
+                                    error: Some(BridgeError {
+                                        code: "INVALID_SETTINGS_SET",
+                                        message: error,
+                                    }),
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
+                                return;
+                            }
+                            match apply_settings_set(&profile_path, payload.key, &payload.value) {
+                                Ok(mutation) => {
+                                    let payload_bytes = mutation.payload_bytes;
+                                    let key = mutation.key;
+                                    let value = mutation.value.clone();
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::SettingsSet(
+                                            SettingsSetResponse {
+                                                key,
+                                                value,
+                                                source: mutation.source.as_str(),
+                                                payload_bytes,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Settings][Set] key={} source=file payload_bytes={payload_bytes} request_latency_ms={:.3}",
+                                        key.storage_key(),
                                         received_at.elapsed().as_secs_f64() * 1000.0
                                     );
                                 }
@@ -5824,6 +6071,61 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
                     }
+                    BridgeEvent::SettingsSetProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Settings][SetSmoke] ok=true stage={} key={} reread_matches={} attacks_blocked={}",
+                                payload.stage,
+                                payload.key,
+                                payload.reread_matches,
+                                payload.attacks_blocked
+                            );
+                        } else {
+                            eprintln!(
+                                "[Settings][SetSmoke] ok=false stage={} key={} error={}",
+                                payload.stage,
+                                payload.key,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                        if !diagnostic_settings_set_smoke {
+                            return;
+                        }
+                        if payload.stage == "mutated" && settings_set_smoke_stage == 0 {
+                            if payload.ok && payload.reread_matches {
+                                settings_set_smoke_before = payload.before;
+                                settings_set_smoke_stage = 1;
+                                println!(
+                                    "[Settings][SetSmoke] mutation persisted; reloading to verify reload survival"
+                                );
+                                if let Err(error) =
+                                    webview.evaluate_script("window.location.reload();")
+                                {
+                                    eprintln!(
+                                        "[Settings][SetSmoke] verification reload failed: {error}"
+                                    );
+                                }
+                            } else {
+                                eprintln!(
+                                    "[Settings][SetSmoke] mutate stage failed; not reloading"
+                                );
+                            }
+                        } else if payload.stage == "restored" && settings_set_smoke_stage == 1 {
+                            if payload.ok
+                                && payload.reread_matches
+                                && payload.before != settings_set_smoke_before
+                            {
+                                settings_set_smoke_stage = 2;
+                                println!(
+                                    "[Settings][SetSmoke] reload survival verified and original value restored"
+                                );
+                            } else {
+                                eprintln!(
+                                    "[Settings][SetSmoke] restore verification failed (post-reload read did not match the mutated value or restore did not persist)"
+                                );
+                            }
+                        }
+                    }
                     BridgeEvent::GetLangProbe(payload) => {
                         if payload.ok {
                             println!(
@@ -6896,6 +7198,61 @@ mod tests {
         let rendered = super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE
             .replace("__LEGCORD_MUTATION_RESTORE_VALUE__", "false");
         assert!(!rendered.contains("__LEGCORD_MUTATION_RESTORE_VALUE__"));
+        assert!(rendered.contains("const RESTORE_TO = false;"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_exactly_the_settings_set_capability() {
+        assert!(super::BOOT_SNAPSHOT.capabilities.contains(&"settings.set"));
+        // No generic settings surface may exist alongside the allowlist.
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.set_config"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.setConfig"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.write"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_async_settings_set_facade() {
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
+        assert!(script.contains("settings_set"));
+        assert!(script.contains("settings.set"));
+        assert!(!script.contains("sendSync"));
+        assert!(!script.contains("settings_set_config"));
+    }
+
+    #[test]
+    fn settings_set_smoke_template_stays_within_the_allowlist() {
+        // Both scripts exercise exactly one allowlisted wire key and the
+        // closed `set` facade; they cannot name a path, URL, second key, or
+        // generic config call.
+        for template in [
+            super::SETTINGS_SET_SMOKE_SCRIPT,
+            super::SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE,
+        ] {
+            assert!(template.contains("support_banner_dismissed"));
+            assert!(template.contains("settings.set("));
+            assert!(template.contains("settings_set_probe"));
+            assert!(!template.contains("setConfig("));
+            assert!(!template.contains("sendSync"));
+            assert!(!template.contains("localStorage"));
+        }
+        assert!(super::SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE
+            .contains("__LEGCORD_SETTINGS_SET_RESTORE_VALUE__"));
+        let rendered = super::SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE
+            .replace("__LEGCORD_SETTINGS_SET_RESTORE_VALUE__", "false");
+        assert!(!rendered.contains("__LEGCORD_SETTINGS_SET_RESTORE_VALUE__"));
         assert!(rendered.contains("const RESTORE_TO = false;"));
     }
 

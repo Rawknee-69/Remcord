@@ -158,6 +158,62 @@ export async function setBlockPowerSavingInVoiceChat(value: boolean): Promise<bo
     return applied;
 }
 
+/** CamelCase settings keys the closed native `settings.set` capability accepts. */
+export type NativeSettingsSetKey =
+    | "mods"
+    | "supportBannerDismissed"
+    | "showExperimentalPluginMenu"
+    | "extendedPluginAbilities";
+
+/** Wire keys for the closed native `settings.set` capability. */
+const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
+    mods: "mods",
+    supportBannerDismissed: "support_banner_dismissed",
+    showExperimentalPluginMenu: "show_experimental_plugin_menu",
+    extendedPluginAbilities: "extended_plugin_abilities",
+};
+
+/** Minimal native `settings.set` shape (closed allowlist, key echo + value). */
+interface NativeSettingsSet {
+    set: (key: string, value: boolean | string[]) => Promise<{ key: string; value: boolean | string[] }>;
+}
+
+/**
+ * True when the native closed `settings.set` capability is the active path.
+ * Gated on the existing `isNativeWebView` environment check AND function
+ * presence — exactly one path executes per mutation.
+ */
+export function isNativeSettingsSetAvailable(): boolean {
+    if (!isNativeWebView()) return false;
+    const settings = (window.legcord as unknown as { settings?: Partial<NativeSettingsSet> }).settings;
+    return typeof settings?.set === "function";
+}
+
+/**
+ * Native WebView2 path for the closed `settings.set` allowlist. Awaits the
+ * typed async capability and only then updates local store state from the
+ * host-confirmed value, so the renderer never holds stale state. A rejected
+ * mutation leaves local state untouched. The Electron path stays in
+ * `setConfig`/`toggleMod` above, unchanged.
+ */
+export async function setNativeSetting<K extends NativeSettingsSetKey>(
+    key: K,
+    value: Settings[K],
+    shouldRestart?: boolean,
+): Promise<Settings[K]> {
+    const nativeSet = (window.legcord as unknown as { settings: NativeSettingsSet }).settings.set;
+    const applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[]);
+    withPreservedSettingsScroll(() => {
+        // Mutate in place — do NOT replace store.settings (that remounts the page and jumps scroll).
+        (store.settings as Record<string, unknown>)[key] = applied.value;
+        console.log(key, ":", store.settings[key]);
+        if (shouldRestart) {
+            isRestartRequired = true;
+        }
+    });
+    return applied.value as Settings[K];
+}
+
 /** Closed folder locations the native `folders.open` capability reveals. */
 export type NativeFolderLocation = "storage" | "themes" | "plugins";
 
@@ -492,16 +548,28 @@ function removeMod(array: ValidMods[], filter: ValidMods) {
 }
 
 export function toggleMod(mod: ValidMods, enabled: boolean) {
-    isRestartRequired = true;
     const currentMods = store.settings.mods as ValidMods[];
+    // Native WebView2 persists through the closed async allowlist (the
+    // restart flag is set from the host-confirmed value); Electron keeps the
+    // original synchronous setConfig.
+    const writeMods = (next: ValidMods[]) => {
+        if (isNativeSettingsSetAvailable()) {
+            void setNativeSetting("mods", next, true).catch(() =>
+                console.warn("[Legcord] Could not update mods in the native shell."),
+            );
+        } else {
+            isRestartRequired = true;
+            setConfig("mods", next);
+        }
+    };
     if (enabled) {
         if (mod === "vencord") {
-            setConfig("mods", [...removeMod(currentMods, "equicord"), "vencord"]);
+            writeMods([...removeMod(currentMods, "equicord"), "vencord"]);
         } else if (mod === "equicord") {
-            setConfig("mods", [...removeMod(currentMods, "vencord"), "equicord"]);
+            writeMods([...removeMod(currentMods, "vencord"), "equicord"]);
         }
     } else {
-        setConfig("mods", removeMod(currentMods, mod));
+        writeMods(removeMod(currentMods, mod));
     }
 }
 

@@ -211,6 +211,67 @@
         );
     }
 
+    // Closed allowlist for the `settings.set` capability: the exact wire keys
+    // the host enum accepts. Anything else is rejected before dispatch, and
+    // the host re-validates the enum plus the key/value pairing.
+    const SETTINGS_SET_KEYS = [
+        "mods",
+        "support_banner_dismissed",
+        "show_experimental_plugin_menu",
+        "extended_plugin_abilities",
+    ];
+    // Exact ValidMods union (src/@types/settings.d.ts). The renderer cannot
+    // invent a mod id through this capability.
+    const SETTINGS_VALID_MODS = ["vencord", "equicord", "custom", "shelter"];
+    const MAX_SETTINGS_MODS_ENTRIES = 8;
+
+    function setSetting(key, value, timeoutMs = 5000) {
+        requireCapability("settings.set");
+        if (typeof key !== "string" || !SETTINGS_SET_KEYS.includes(key)) {
+            return Promise.reject(new TypeError("key must be one of the allowlisted settings keys"));
+        }
+        if (key === "mods") {
+            if (
+                !Array.isArray(value) ||
+                value.length > MAX_SETTINGS_MODS_ENTRIES ||
+                !value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
+            ) {
+                return Promise.reject(new TypeError("value must be an array of known mod ids"));
+            }
+        } else if (typeof value !== "boolean") {
+            return Promise.reject(new TypeError("value must be a boolean for this key"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Key plus bounded value only: the host owns the settings path,
+        // merges the single field, preserves unknown keys, and persists
+        // atomically. No path, URL, object, or second field may be supplied.
+        return request({ type: "settings_set", payload: { key, value } }, timeoutMs).then((payload) => {
+            const echoedValue =
+                key === "mods"
+                    ? Array.isArray(payload.value) &&
+                      payload.value.length <= MAX_SETTINGS_MODS_ENTRIES &&
+                      payload.value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
+                        ? payload.value
+                        : undefined
+                    : typeof payload.value === "boolean"
+                      ? payload.value
+                      : undefined;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 4 ||
+                payload.key !== key ||
+                echoedValue === undefined ||
+                payload.source !== "file" ||
+                !Number.isSafeInteger(payload.payload_bytes)
+            ) {
+                throw new Error("Native settings set response schema is invalid");
+            }
+            return { key: payload.key, value: echoedValue };
+        });
+    }
+
     function getVersion(timeoutMs = 5000) {
         requireCapability("app.get_version");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -688,6 +749,29 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "settings_set") {
+            const payload = response.payload.payload;
+            // Key echo plus normalized value only: the echo must be an
+            // allowlisted key, the value must match that key's shape, and no
+            // path, URL, snapshot, or extra member may ride along.
+            const valueValid =
+                payload?.key === "mods"
+                    ? Array.isArray(payload?.value) &&
+                      payload.value.length <= MAX_SETTINGS_MODS_ENTRIES &&
+                      payload.value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
+                    : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
+            if (
+                !payload ||
+                Object.keys(payload).length !== 4 ||
+                !SETTINGS_SET_KEYS.includes(payload.key) ||
+                !valueValid ||
+                payload.source !== "file" ||
+                !Number.isSafeInteger(payload.payload_bytes)
+            ) {
+                request.reject(new Error("Native settings set response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "localization_string") {
             const payload = response.payload.payload;
             if (
@@ -1118,6 +1202,7 @@
     const settingsShim = Object.freeze({
         getConfig,
         setBlockPowerSavingInVoiceChat,
+        set: setSetting,
         setLang: bootSetLang,
     });
     const themesShim = Object.freeze({

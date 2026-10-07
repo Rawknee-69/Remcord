@@ -638,6 +638,124 @@ test("the migrated caller updates local state only from the host-confirmed value
     assert.equal(store.blockPowerSavingInVoiceChat, true);
 });
 
+function createSettingsSetRuntime(capabilities = ["bridge.ping", "settings.get_config", "settings.set"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondSettingsSet(window, request, key, value, extra = {}) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "settings_set",
+                    payload: {
+                        key,
+                        value,
+                        source: "file",
+                        payload_bytes: 2048,
+                        ...extra,
+                    },
+                },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a closed settings.set and no generic writer", () => {
+    const { window } = createSettingsSetRuntime();
+    assert.equal(typeof window.legcord.settings.set, "function");
+    assert.equal(Object.isFrozen(window.legcord.settings), true);
+    assert.equal(window.legcord.native.supports("settings.set"), true);
+    // No generic key/value RPC may exist.
+    assert.equal(window.legcord.settings.setConfig, undefined);
+});
+
+test("settings.set sends key plus bounded value and resolves the key echo", async () => {
+    const { window } = createSettingsSetRuntime();
+    const pending = window.legcord.settings.set("support_banner_dismissed", true);
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_set");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "settings_set",
+        payload: { key: "support_banner_dismissed", value: true },
+    });
+    respondSettingsSet(window, message, "support_banner_dismissed", true);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        key: "support_banner_dismissed",
+        value: true,
+    });
+
+    const modsPending = window.legcord.settings.set("mods", ["vencord"]);
+    const modsMessage = window.messages.find(
+        (entry) => entry.command?.type === "settings_set" && entry.request_id !== message.request_id,
+    );
+    assert.deepEqual(modsMessage.command, {
+        type: "settings_set",
+        payload: { key: "mods", value: ["vencord"] },
+    });
+    respondSettingsSet(window, modsMessage, "mods", ["vencord"]);
+    assert.deepEqual(JSON.parse(JSON.stringify(await modsPending)), { key: "mods", value: ["vencord"] });
+});
+
+test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createSettingsSetRuntime(["bridge.ping", "settings.get_config"]);
+    assert.equal(window.legcord.native.supports("settings.set"), false);
+    assert.throws(
+        () => window.legcord.settings.set("support_banner_dismissed", true),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "settings_set"),
+        false,
+    );
+});
+
+test("settings.set rejects unknown keys and mismatched types without sending", async () => {
+    const { window } = createSettingsSetRuntime();
+    // Unknown keys: Electron-only or unsafe settings have no wire shape.
+    await assert.rejects(window.legcord.settings.set("tray", true), /allowlisted/);
+    await assert.rejects(window.legcord.settings.set("proxyRules", "http://127.0.0.1:8080"), /allowlisted/);
+    await assert.rejects(window.legcord.settings.set("customIcon", "C:\\secret.png"), /allowlisted/);
+    // Key/variant mismatches: bool keys refuse arrays, mods refuses a bool.
+    await assert.rejects(window.legcord.settings.set("support_banner_dismissed", ["vencord"]), /boolean/);
+    await assert.rejects(window.legcord.settings.set("mods", true), /known mod ids/);
+    // Strings are never valid values; unknown mod ids are refused.
+    await assert.rejects(window.legcord.settings.set("support_banner_dismissed", "yes"), /boolean/);
+    await assert.rejects(window.legcord.settings.set("mods", ["Vencord"]), /known mod ids/);
+    await assert.rejects(window.legcord.settings.set("mods", ["../escape"]), /known mod ids/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "settings_set"),
+        false,
+    );
+});
+
+test("settings.set rejects malformed set responses", async () => {
+    const { window } = createSettingsSetRuntime();
+    const pending = window.legcord.settings.set("support_banner_dismissed", true);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_set");
+    // Key echo must equal the request: one key's write can never resolve
+    // another key's call.
+    respondSettingsSet(window, message, "show_experimental_plugin_menu", true);
+    await assert.rejects(pending, /settings set response schema is invalid/);
+
+    const second = createSettingsSetRuntime();
+    const pending2 = second.window.legcord.settings.set("mods", ["vencord"]);
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "settings_set");
+    respondSettingsSet(second.window, message2, "mods", ["vencord"], { source: "defaults" });
+    await assert.rejects(pending2, /settings set response schema is invalid/);
+
+    const third = createSettingsSetRuntime();
+    const pending3 = third.window.legcord.settings.set("mods", ["vencord"]);
+    const message3 = third.window.messages.find((entry) => entry.command?.type === "settings_set");
+    respondSettingsSet(third.window, message3, "mods", ["vencord"], { leaked: "path" });
+    await assert.rejects(pending3, /settings set response schema is invalid/);
+});
+
 test("initializes a frozen compatibility facade with the boot snapshot", () => {
     const { window } = createRuntime();
     assert.ok(window.legcord);

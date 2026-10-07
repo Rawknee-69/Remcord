@@ -18,10 +18,12 @@ import { SupportBanner } from "../components/SupportBanner.jsx";
 import { TextBoxItem } from "../components/TextBoxItem.jsx";
 import {
     isMinWindowsVersion,
+    isNativeSettingsSetAvailable,
     isNativeWebView,
     revealFolderNative,
     setBlockPowerSavingInVoiceChat,
     setConfig,
+    setNativeSetting,
     toggleMod,
 } from "../settings.js";
 import classes from "./SettingsPage.module.css";
@@ -257,7 +259,17 @@ export function SettingsPage() {
                     <SwitchItem
                         note={t["settings-extendedPluginAbilities-desc"]}
                         value={settings.extendedPluginAbilities}
-                        onChange={(e: boolean) => setConfig("extendedPluginAbilities", e)}
+                        onChange={(e: boolean) => {
+                            // Native WebView2 uses the closed async allowlist;
+                            // Electron keeps the original synchronous setConfig.
+                            if (isNativeSettingsSetAvailable()) {
+                                void setNativeSetting("extendedPluginAbilities", e).catch(() =>
+                                    console.warn("[Legcord] Could not update the setting in the native shell."),
+                                );
+                            } else {
+                                setConfig("extendedPluginAbilities", e);
+                            }
+                        }}
                     >
                         {t["settings-extendedPluginAbilities"]}
                     </SwitchItem>
@@ -729,7 +741,17 @@ export function SettingsPage() {
                     <SwitchItem
                         note={t["settings-showExperimentalPluginMenu-desc"]}
                         value={settings.showExperimentalPluginMenu}
-                        onChange={(e: boolean) => setConfig("showExperimentalPluginMenu", e, true)}
+                        onChange={(e: boolean) => {
+                            // Native WebView2 uses the closed async allowlist;
+                            // Electron keeps the original synchronous setConfig.
+                            if (isNativeSettingsSetAvailable()) {
+                                void setNativeSetting("showExperimentalPluginMenu", e, true).catch(() =>
+                                    console.warn("[Legcord] Could not update the setting in the native shell."),
+                                );
+                            } else {
+                                setConfig("showExperimentalPluginMenu", e, true);
+                            }
+                        }}
                     >
                         {t["settings-showExperimentalPluginMenu"]}
                     </SwitchItem>

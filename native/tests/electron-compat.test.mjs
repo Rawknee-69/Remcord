@@ -114,6 +114,38 @@ test("the block-power-saving native mutation is a deliberate separate path", () 
     assert.doesNotMatch(shelterSettings, /setBlockPowerSavingInVoiceChat\([^)]*key/);
 });
 
+test("the closed settings.set allowlist is a deliberate separate path", () => {
+    // The gate reuses the existing environment check plus function presence.
+    assert.match(shelterSettings, /export function isNativeSettingsSetAvailable/);
+    assert.match(shelterSettings, /export async function setNativeSetting/);
+    // Exactly four wire keys: mods plus three side-effect-free flags.
+    assert.match(shelterSettings, /mods: "mods"/);
+    assert.match(shelterSettings, /supportBannerDismissed: "support_banner_dismissed"/);
+    assert.match(shelterSettings, /showExperimentalPluginMenu: "show_experimental_plugin_menu"/);
+    assert.match(shelterSettings, /extendedPluginAbilities: "extended_plugin_abilities"/);
+    // No Electron-only or unsafe key may enter the map.
+    assert.doesNotMatch(shelterSettings, /minimizeToTray|proxyRules|customIcon|additionalArguments|keybinds/);
+    // toggleMod keeps the mutual-exclusion shape and branches per shell.
+    assert.match(shelterSettings, /setNativeSetting\("mods", next, true\)/);
+    assert.match(shelterSettings, /setConfig\("mods", next\)/);
+    const supportBanner = readFileSync(
+        new URL("../../src/shelter/settings/components/SupportBanner.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(supportBanner, /setNativeSetting\("supportBannerDismissed", true\)/);
+    assert.match(supportBanner, /setConfig\("supportBannerDismissed", true\)/);
+    assert.match(settingsPage, /setNativeSetting\("showExperimentalPluginMenu", e, true\)/);
+    assert.match(settingsPage, /setNativeSetting\("extendedPluginAbilities", e\)/);
+    assert.match(settingsPage, /setConfig\("showExperimentalPluginMenu", e, true\)/);
+    assert.match(settingsPage, /setConfig\("extendedPluginAbilities", e\)/);
+    // The new path adds no generic surface: no key/path/URL members, no
+    // sync IPC, no eval, no dynamic execution.
+    for (const source of [shelterSettings, settingsPage, supportBanner]) {
+        assert.doesNotMatch(source, /settings_set_config/);
+        assert.doesNotMatch(source, /invoke\(|sendSync|eval\(|new Function/);
+    }
+});
+
 test("preload keeps the synchronous get-app-version bridge", () => {
     assert.match(bridge, /version:\s*ipcRenderer\.sendSync\("get-app-version", "app-version"\)/);
     assert.doesNotMatch(bridge, /invoke\("get-app-version"/);
