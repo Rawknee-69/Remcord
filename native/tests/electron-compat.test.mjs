@@ -522,7 +522,7 @@ test("no src caller uses the native bundle discovery path", () => {
         assert.doesNotMatch(source, /backup\.list_bundles/);
         assert.doesNotMatch(source, /backup_list_bundles/);
     }
-    assert.match(backupSection, /window\.legcord\.backup\.save\(JSON\.stringify\(payload\)\)/);
+    assert.match(backupSection, /saveBackup\(JSON\.stringify\(payload\)\)/);
     assert.match(backupSection, /window\.legcord\.backup\.restore\(\)/);
 });
 
@@ -650,6 +650,50 @@ test("the native backup restore preserves the Electron restore contract", () => 
     assert.doesNotMatch(backupSection, /backup_restore/);
     assert.doesNotMatch(backupSection, /isNativeWebView/);
     assert.match(backupSection, /window\.legcord\.backup\.restore\(\)/);
+});
+
+test("BackupSection dispatches native vs Electron backup without a generic surface", () => {
+    // D4-3 wiring: the existing section calls the shared save helper (one
+    // call site, exact payload preserved) and branches restore on the native
+    // capability gate — native object shape vs Electron JSON-string shape —
+    // with a busy guard against duplicate dialogs/operations. No generic
+    // filesystem, dialog, IPC, or ZIP surface may appear in either file, and
+    // the declared Electron contract stays untouched.
+    const backupSection = readFileSync(
+        new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
+        "utf8",
+    );
+    const settingsHelpers = readFileSync(new URL("../../src/shelter/settings/settings.ts", import.meta.url), "utf8");
+    // Save: one helper call site with the exact payload expression.
+    assert.match(backupSection, /saveBackup\(JSON\.stringify\(payload\)\)/);
+    // Restore: capability-gated branch, exactly one path per click.
+    assert.match(backupSection, /isNativeBackupAvailable\(\)/);
+    assert.match(backupSection, /normalizeNativeRestoreResult\(await restoreBackupNative\(\)\)/);
+    assert.match(backupSection, /parseElectronRestoreResult\(await window\.legcord\.backup\.restore\(\)\)/);
+    // The existing renderer clientMods path is preserved verbatim.
+    assert.match(backupSection, /applyClientModsFromRestore\(outcome\.clientMods\)/);
+    // Async UI state: busy guard on both buttons and every exit path.
+    assert.match(backupSection, /disabled=\{busy\(\)\}/);
+    assert.match(backupSection, /if \(busy\(\)\) return;/);
+    // Helpers: gate on environment + function presence, shared outcome, no
+    // generic surface. legcordWindow.d.ts keeps the Electron string shape.
+    assert.match(settingsHelpers, /export function isNativeBackupAvailable/);
+    assert.match(settingsHelpers, /export async function saveBackup/);
+    assert.match(settingsHelpers, /export async function restoreBackupNative/);
+    assert.match(settingsHelpers, /export function normalizeNativeRestoreResult/);
+    assert.match(settingsHelpers, /export function parseElectronRestoreResult/);
+    assert.match(types, /restore\(\): Promise<string>/);
+    for (const source of [backupSection, settingsHelpers]) {
+        assert.doesNotMatch(source, /backup_restore/);
+        assert.doesNotMatch(source, /showOpenDialog|showSaveDialog/);
+        assert.doesNotMatch(source, /AdmZip|readBackupZipToMap|buildBackupZipBuffer/);
+        assert.doesNotMatch(source, /fetch\(/);
+    }
+    // The new helpers add no storage/plugin execution of their own: applying
+    // clientMods stays exclusively inside the pre-existing
+    // applyClientModsFromRestore renderer path (asserted above).
+    assert.doesNotMatch(settingsHelpers, /localStorage\.setItem/);
+    assert.doesNotMatch(settingsHelpers, /addRemotePlugin/);
 });
 
 test("Electron keeps every folder and file-open IPC handler", () => {

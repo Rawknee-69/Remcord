@@ -376,6 +376,117 @@ export async function importNativeThemes(): Promise<NativeThemeImportResult | nu
     }
 }
 
+/** Bounded restore outcome shared by the native object shape and the parsed
+ * Electron string shape. `error` is `"CANCELLED"`, a typed host code,
+ * `"UNKNOWN"` (explicit failure without a message — the caller's generic
+ * error state), or `"INVALID"` (unparseable/misshapen result — the caller's
+ * invalid-file state). Never a path. */
+export type BackupRestoreOutcome = { ok: true; clientMods: unknown } | { ok: false; error: string };
+
+/**
+ * Minimal native backup namespace (Phase D4-3). `legcordWindow.d.ts` stays
+ * Electron-shaped (`restore(): Promise<string>`); the native object result
+ * is described only here, at the single restore call site that consumes it.
+ * No generic filesystem/dialog API.
+ */
+interface NativeBackupNamespace {
+    save: (data: string) => Promise<{ ok: boolean; error?: string }>;
+    restore?: () => Promise<unknown>;
+}
+
+/**
+ * Native backup namespace when the WebView2 shell grants it, `undefined`
+ * otherwise. Gated on BOTH the existing `isNativeWebView` environment check
+ * AND function presence: an Electron `window.legcord.backup` also carries
+ * `save`/`restore` functions (with the STRING restore shape), so the
+ * environment check is what selects the native OBJECT result shape. No
+ * second detection mechanism.
+ */
+function nativeBackup(): NativeBackupNamespace | undefined {
+    if (!isNativeWebView()) return undefined;
+    const backup = (window.legcord as unknown as { backup?: NativeBackupNamespace }).backup;
+    if (!backup || typeof backup.save !== "function" || typeof backup.restore !== "function") {
+        return undefined;
+    }
+    return backup;
+}
+
+/** True when the native backup capabilities are the active path. Save shares
+ * the Electron signature in both shells; restore needs the object shape, so
+ * the restore caller branches on this — exactly one path per click. */
+export function isNativeBackupAvailable(): boolean {
+    return nativeBackup() !== undefined;
+}
+
+/**
+ * Backup save for both shells. Exactly one call per invocation: the native
+ * facade preserves the Electron signature AND result shape (`{ok:true} |
+ * {ok:false, error}`), so no branch is needed — the method on
+ * `window.legcord.backup` is the native capability natively and the Electron
+ * IPC bridge otherwise. The payload is built by the caller (clientMods stay
+ * renderer-built, never move into Rust). Rejections propagate; the caller
+ * shows the error state so clicks never produce unhandled rejections.
+ */
+export async function saveBackup(payload: string): Promise<{ ok: boolean; error?: string }> {
+    const backup = (window.legcord as unknown as { backup: NativeBackupNamespace }).backup;
+    return await backup.save(payload);
+}
+
+/**
+ * Native backup restore. Gate with `isNativeBackupAvailable` first so
+ * exactly one path executes per restore: the native OBJECT result here, the
+ * Electron JSON-string path otherwise. Rejects when the capability is absent
+ * (caller falls back); host failures resolve into the result shape via the
+ * facade, transport rejections propagate to the caller's error state. The
+ * host owns picker/validation/staging/commit; the caller only feeds the
+ * returned clientMods into the existing renderer application path.
+ */
+export async function restoreBackupNative(): Promise<unknown> {
+    const restore = nativeBackup()?.restore;
+    if (typeof restore !== "function") throw new Error("[Legcord] Native backup restore is unavailable.");
+    return await restore();
+}
+
+/**
+ * Normalize the native object-shaped restore result. Never throws and never
+ * surfaces paths: misshapen results become `{ ok: false, error: "INVALID" }`
+ * for the caller's invalid-file state. `clientMods` passes through verbatim
+ * for the existing renderer application path (bounded host-side already).
+ */
+export function normalizeNativeRestoreResult(result: unknown): BackupRestoreOutcome {
+    if (!isRecord(result)) return { ok: false, error: "INVALID" };
+    if (result.ok === true) return { ok: true, clientMods: result.clientMods };
+    if (typeof result.error === "string" && result.error.length > 0) {
+        return { ok: false, error: result.error };
+    }
+    return { ok: false, error: "INVALID" };
+}
+
+/**
+ * Parse the Electron string-shaped restore result into the shared outcome.
+ * Never throws. Preserves the existing renderer-visible semantics exactly:
+ * unparseable input (or a misshapen document) becomes `"INVALID"` for the
+ * caller's invalid-file state; an explicit failure without a message becomes
+ * `"UNKNOWN"` for the generic error state; anything else carries its error
+ * (including `"CANCELLED"`) or its clientMods verbatim.
+ */
+export function parseElectronRestoreResult(raw: unknown): BackupRestoreOutcome {
+    if (typeof raw !== "string") return { ok: false, error: "INVALID" };
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw) as unknown;
+    } catch {
+        return { ok: false, error: "INVALID" };
+    }
+    if (!isRecord(parsed)) return { ok: false, error: "INVALID" };
+    if (parsed.ok === true) return { ok: true, clientMods: parsed.clientMods };
+    if (typeof parsed.error === "string" && parsed.error.length > 0) {
+        return { ok: false, error: parsed.error };
+    }
+    if (parsed.ok === false) return { ok: false, error: "UNKNOWN" };
+    return { ok: false, error: "INVALID" };
+}
+
 function removeMod(array: ValidMods[], filter: ValidMods) {
     return array.filter((i) => i !== filter);
 }

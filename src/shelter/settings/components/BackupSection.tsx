@@ -1,4 +1,11 @@
 import { createSignal, Show } from "solid-js";
+import {
+    isNativeBackupAvailable,
+    normalizeNativeRestoreResult,
+    parseElectronRestoreResult,
+    restoreBackupNative,
+    saveBackup,
+} from "../settings.js";
 import classes from "./BackupSection.module.css";
 
 const {
@@ -145,6 +152,10 @@ function applyClientModsFromRestore(raw: unknown): void {
 
 export function BackupSection(props: { embedded?: boolean }) {
     const t = store.i18n;
+    // Exactly one backup/restore operation at a time: guards double-click
+    // duplicate dialogs and overlapping host operations. Released on every
+    // completion, cancellation, and failure path below.
+    const [busy, setBusy] = createSignal(false);
 
     function buildClientMods(includes: IncludeOptions) {
         const vencordSettings = localStorage.getItem("VencordSettings");
@@ -162,33 +173,51 @@ export function BackupSection(props: { embedded?: boolean }) {
     }
 
     async function runBackup(includes: IncludeOptions) {
-        const payload = {
-            includes,
-            clientMods: buildClientMods(includes),
-        };
-        const result = await window.legcord.backup.save(JSON.stringify(payload));
-        if (result.ok) {
-            showToast({
-                title: t["backup-successTitle"],
-                content: t["backup-successBody"],
-                duration: 4000,
-            });
-        } else if (result.error === "CANCELLED") {
-            showToast({
-                title: t["backup-cancelledTitle"],
-                content: t["backup-cancelledBody"],
-                duration: 3000,
-            });
-        } else {
+        if (busy()) return;
+        setBusy(true);
+        try {
+            const payload = {
+                includes,
+                clientMods: buildClientMods(includes),
+            };
+            // One call site for both shells: the native facade preserves the
+            // Electron save signature and result shape exactly, so the
+            // payload construction and toast behavior below are identical in
+            // both. clientMods stay renderer-built; the output path is never
+            // exposed.
+            const result = await saveBackup(JSON.stringify(payload));
+            if (result.ok) {
+                showToast({
+                    title: t["backup-successTitle"],
+                    content: t["backup-successBody"],
+                    duration: 4000,
+                });
+            } else if (result.error === "CANCELLED") {
+                showToast({
+                    title: t["backup-cancelledTitle"],
+                    content: t["backup-cancelledBody"],
+                    duration: 3000,
+                });
+            } else {
+                showToast({
+                    title: t["backup-failedTitle"],
+                    content: result.error,
+                    duration: 5000,
+                });
+            }
+        } catch {
             showToast({
                 title: t["backup-failedTitle"],
-                content: result.error,
+                content: t["backup-unknownError"],
                 duration: 5000,
             });
+        } finally {
+            setBusy(false);
         }
     }
 
     function openBackupModal() {
+        if (busy()) return;
         openModal(({ close }: { close: () => void }) => (
             <BackupOptionsModal
                 close={close}
@@ -200,6 +229,8 @@ export function BackupSection(props: { embedded?: boolean }) {
     }
 
     function restoreFromBackup() {
+        if (busy()) return;
+        setBusy(true);
         openConfirmationModal({
             header: () => t["backup-restoreConfirmHeader"],
             body: () => t["backup-restoreConfirmBody"],
@@ -208,42 +239,57 @@ export function BackupSection(props: { embedded?: boolean }) {
             cancelText: t["backup-restoreCancel"],
         }).then(
             async () => {
-                const raw = await window.legcord.backup.restore();
-                let parsed: { ok?: boolean; error?: string; clientMods?: unknown };
                 try {
-                    parsed = JSON.parse(raw) as typeof parsed;
-                } catch {
-                    showToast({
-                        title: t["backup-failedTitle"],
-                        content: t["backup-invalidFile"],
-                        duration: 5000,
-                    });
-                    return;
-                }
-                if (parsed.ok === false) {
-                    if (parsed.error === "CANCELLED") {
+                    // Exactly one path per restore. Native: the host owns the
+                    // picker, validation, staging, commit, and rollback, and
+                    // returns the bounded clientMods OBJECT (never applied
+                    // host-side). Electron: the existing JSON-string path.
+                    // Both converge on the shared outcome below; the renderer
+                    // only feeds clientMods into the existing application
+                    // path, which it already owns.
+                    const outcome = isNativeBackupAvailable()
+                        ? normalizeNativeRestoreResult(await restoreBackupNative())
+                        : parseElectronRestoreResult(await window.legcord.backup.restore());
+                    if (!outcome.ok) {
+                        if (outcome.error === "CANCELLED") {
+                            showToast({
+                                title: t["backup-cancelledTitle"],
+                                content: t["backup-cancelledBody"],
+                                duration: 3000,
+                            });
+                            return;
+                        }
                         showToast({
-                            title: t["backup-cancelledTitle"],
-                            content: t["backup-cancelledBody"],
-                            duration: 3000,
+                            title: t["backup-failedTitle"],
+                            content:
+                                outcome.error === "INVALID"
+                                    ? t["backup-invalidFile"]
+                                    : outcome.error === "UNKNOWN"
+                                      ? t["backup-unknownError"]
+                                      : outcome.error,
+                            duration: 5000,
                         });
                         return;
                     }
+                    applyClientModsFromRestore(outcome.clientMods);
+                    showToast({
+                        title: t["backup-restoreDoneTitle"],
+                        content: t["backup-restoreDoneBody"],
+                        duration: 6000,
+                    });
+                } catch {
                     showToast({
                         title: t["backup-failedTitle"],
-                        content: parsed.error ?? t["backup-unknownError"],
+                        content: t["backup-unknownError"],
                         duration: 5000,
                     });
-                    return;
+                } finally {
+                    setBusy(false);
                 }
-                applyClientModsFromRestore(parsed.clientMods);
-                showToast({
-                    title: t["backup-restoreDoneTitle"],
-                    content: t["backup-restoreDoneBody"],
-                    duration: 6000,
-                });
             },
-            () => {},
+            () => {
+                setBusy(false);
+            },
         );
     }
 
@@ -256,10 +302,10 @@ export function BackupSection(props: { embedded?: boolean }) {
                 <div class={classes.note}>{t["backup-pageSubtitle"]}</div>
             </Show>
             <div class={classes.actions}>
-                <Button onClick={openBackupModal} size={ButtonSizes.LARGE}>
+                <Button onClick={openBackupModal} size={ButtonSizes.LARGE} disabled={busy()}>
                     {t["backup-createBackup"]}
                 </Button>
-                <Button onClick={restoreFromBackup} size={ButtonSizes.LARGE} type="danger">
+                <Button onClick={restoreFromBackup} size={ButtonSizes.LARGE} type="danger" disabled={busy()}>
                     {t["backup-restore"]}
                 </Button>
             </div>

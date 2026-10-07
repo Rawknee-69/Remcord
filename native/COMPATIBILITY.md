@@ -252,6 +252,8 @@ renderer await window.legcord.backup.save(jsonString)
 
 Response echo discipline differs from other capabilities by necessity: the renderer needs Electron's `{ok, error?}` shape, so the facade resolves (never rejects) all host outcomes into it. Transport/capability misuse still rejects or throws synchronously before dispatch.
 
+UI wiring (D4-3): `BackupSection.tsx` calls one shared `saveBackup(payloadString)` helper for both shells — the native facade preserves the Electron save signature AND result shape, so payload construction (`includes` + renderer-built `clientMods`), the success/cancelled/failed toasts, and the silent `CANCELLED` control flow are identical in both. A `busy` signal disables both buttons while an operation runs (no duplicate dialogs, no overlapping host operations) with try/finally release plus a catch → generic-error toast, closing the pre-existing unhandled-rejection hole on transport failure.
+
 Deliberate Electron differences (hardening, not regressions): typed includes + bounded clientMods (per-string ≤ 1 MiB, total ≤ 4 MiB, shelter ≤ 2 MiB with depth ≤ 32 / nodes ≤ 65536 — renderer input is never trusted); per-file ≤ 1 MiB except the bundle allowlist (≤ 32 MiB, the mod-substrate retrieval ceiling — real artifacts like `equicord.js` are multi-megabyte); total uncompressed ≤ 64 MiB; entries ≤ 4096; overflow fails closed as `BACKUP_TOO_LARGE`, never a truncated archive; links/junctions/non-regular files skipped, never followed; sorted traversal (deterministic archives; Electron uses filesystem order); nothing created for backup purposes (a missing `quickCss.css` is NOT created, unlike the Quick CSS loader); no `defaultPath` (the host sets the filename only); temp-file + rename write (Electron writes in place); typed path-free errors instead of raw messages; renderer receives `{canceled, bytes}` semantics only.
 
 Known issue (pre-existing, untouched): `compatibility.js` discovery sends `backup_list_bundles` while the protocol expects `bundles_list` (host rejects it; visible as `[Bridge] rejected invalid message` in DEV logs). D4-1 does not exercise listBundles and leaves the one-line fix out of scope.
@@ -307,6 +309,10 @@ Response echo discipline matches save by necessity: the renderer needs Electron'
 ### clientMods boundary
 
 The host NEVER applies clientMods: no `localStorage` manipulation, no `addRemotePlugin`, no fetching, no script execution. It returns the filtered, bounded envelope for the existing renderer mechanism. Oversized/malformed/wrong-typed envelopes fail the whole restore instead of crossing the bridge unbounded.
+
+### UI wiring (D4-3)
+
+`BackupSection.tsx` branches restore on `isNativeBackupAvailable()` (existing `isNativeWebView` environment check AND `backup.save`/`backup.restore` function presence — an Electron `window.legcord.backup` also carries those names, so the environment check selects the shape): native takes the OBJECT result through `normalizeNativeRestoreResult`, Electron takes the existing JSON-string path through `parseElectronRestoreResult`, and both converge on one shared outcome (`{ok:true, clientMods}` | `{ok:false, error}`) with the pre-existing toasts — success + restart-required message, silent `CANCELLED`, `INVALID` → invalid-file toast, `UNKNOWN`/typed code → failed toast. The existing `applyClientModsFromRestore` (localStorage writes + `addRemotePlugin`) is untouched and stays the renderer's job; the new helpers add no storage/plugin/fetch surface of their own (asserted). One degenerate-input difference from the old inline parse: `{}` (or another truthy-shaped non-`ok:true` document, which neither host ever sends) now reports invalid-file instead of an erroneous success toast. The confirmation modal and restart message are unchanged; no reload is forced (the existing UI never reloaded).
 
 ### Intentional Electron/native differences (hardening, not regressions)
 
