@@ -73,6 +73,7 @@ pub enum BridgeCommand {
     ThemeSetEnabled(ThemeSetEnabledRequest),
     ThemesList(ThemesListRequest),
     BackupSave(BackupSaveRequest),
+    BackupRestore(BackupRestoreRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +260,16 @@ pub struct BackupSaveRequest {
     pub client_mods: crate::backup::BackupClientMods,
 }
 
+/// Empty request for the `backup.restore` capability: the host-owned open
+/// dialog plus bounded validation, staging, and commit. There is deliberately
+/// NO archive path, filename, URL, filter, or dialog option: the host owns
+/// the entire picker configuration and reads only the host-selected file.
+/// Any extra field is rejected, so a renderer cannot select, narrow, or
+/// redirect what the host reads.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupRestoreRequest {}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -332,6 +343,10 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the backup save probe
     /// (`LEGCORD_NATIVE_BACKUP_SAVE_SMOKE=1`). Never sent by shipped code.
     BackupSaveProbe(BackupSaveProbe),
+    /// DEV-only diagnostic posted by the backup restore probe
+    /// (`LEGCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`). Never sent by shipped
+    /// code.
+    BackupRestoreProbe(BackupRestoreProbe),
     /// DEV-only diagnostic posted by the Shelter loader probe
     /// (`LEGCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
     ShelterLoaderProbe(ShelterLoaderProbe),
@@ -645,6 +660,23 @@ pub struct BackupSaveProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the backup restore probe. `stage` is `"restore"`
+/// (open the real host picker through the capability; user completion or
+/// dismissal resolves the bounded outcome). Unlike the install/write probes
+/// there is no `attacks_blocked`: the facade takes no input, so there is no
+/// client-side attack shape to block. `client_mods_bytes` is the serialized
+/// envelope size (0 when canceled); the probe never carries settings,
+/// themes, paths, URLs, or client-mod contents — only counts and flags.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupRestoreProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub canceled: bool,
+    pub client_mods_bytes: u64,
+    pub error: Option<String>,
+}
+
 /// DEV-only report for the Shelter plugin-loader probe. `stage` is one of
 /// `"presence"`, `"synthetic"`, or `"cleanup"`: the probe first verifies the
 /// upstream `shelter.plugins` loader surface exists (and that the URL-based
@@ -754,6 +786,7 @@ pub enum BridgeResponsePayload {
     ThemeEnabled(ThemeEnabledResponse),
     ThemesList(ThemesListResponse),
     BackupSaved(BackupSavedResponse),
+    BackupRestored(BackupRestoredResponse),
 }
 
 #[derive(Serialize)]
@@ -953,6 +986,19 @@ pub struct BackupSavedResponse {
     pub bytes: u64,
 }
 
+/// Bounded restore response for the `backup.restore` capability:
+/// cancellation plus the filtered clientMods envelope for the renderer to
+/// apply through the existing mechanism. No archive path, profile path,
+/// filename, or filesystem error text — the host never applies clientMods
+/// itself (no localStorage, no remote-plugin fetch, no script execution).
+#[derive(Serialize)]
+pub struct BackupRestoredResponse {
+    /// True when the user dismissed the picker. `client_mods` is then null.
+    pub canceled: bool,
+    /// Filtered `clientMods` envelope (null when canceled).
+    pub client_mods: serde_json::Value,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -1127,6 +1173,12 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // is needed. Enumeration, bounds, and ordering live in
                 // `themes` and are enforced at dispatch.
                 BridgeCommand::ThemesList(_) => {}
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
+                // is needed. The picker configuration plus the archive,
+                // manifest, path, size, and clientMods bounds live in
+                // `backup` and are enforced at dispatch.
+                BridgeCommand::BackupRestore(_) => {}
                 BridgeCommand::BackupSave(payload) => {
                     // The seven include flags are typed booleans by serde
                     // (`deny_unknown_fields` rejected anything else); the
@@ -1494,6 +1546,18 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || payload.ok == payload.error.is_some()
                     {
                         return Err("invalid backup save probe result".to_owned());
+                    }
+                }
+                BridgeEvent::BackupRestoreProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "restore")
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                        || payload.client_mods_bytes > MAX_CLIENT_MODS_BYTES as u64
+                    {
+                        return Err("invalid backup restore probe result".to_owned());
                     }
                 }
                 BridgeEvent::ShelterLoaderProbe(payload) => {
@@ -1865,16 +1929,83 @@ mod tests {
     }
 
     #[test]
-    fn rejects_backup_save_restore_and_generic_invocation_as_unknown_commands() {
+    fn rejects_backup_save_shape_errors_and_generic_invocation() {
         // Save (D4-1) requires the exact `{ includes, clientMods }` shape, so
-        // an empty payload is rejected; restore (D4-2+) stays deferred, so its
-        // Electron channel name must not parse as a command.
+        // an empty payload is rejected; restore (D4-2) is parameter-free, so
+        // its exact empty payload parses while any member is rejected.
         let save = r#"{"version":1,"request_id":"bundles-1","command":{"type":"backup_save","payload":{}}}"#;
         let restore = r#"{"version":1,"request_id":"bundles-2","command":{"type":"backup_restore","payload":{}}}"#;
         let invoke = r#"{"version":1,"request_id":"bundles-3","command":{"type":"invoke","payload":{"method":"backup.save"}}}"#;
         assert!(parse_bridge_message(save).is_err());
-        assert!(parse_bridge_message(restore).is_err());
+        assert!(matches!(
+            parse_bridge_message(restore),
+            Ok(BridgeMessage::Request(_))
+        ));
         assert!(parse_bridge_message(invoke).is_err());
+        // The restore request carries no archive path, filename, URL,
+        // filter, or dialog option: any member is rejected.
+        for payload in [
+            r#"{"path":"C:\\x.zip"}"#,
+            r#"{"filename":"x.zip"}"#,
+            r#"{"url":"https://attacker.invalid/x.zip"}"#,
+            r#"{"archive":"e30="}"#,
+        ] {
+            let request = format!(
+                "{{\"version\":1,\"request_id\":\"restore-x\",\"command\":{{\"type\":\"backup_restore\",\"payload\":{payload}}}}}"
+            );
+            assert!(
+                parse_bridge_message(&request).is_err(),
+                "{payload} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn serializes_a_typed_backup_restored_response() {
+        use super::BackupRestoredResponse;
+
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "restore-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::BackupRestored(
+                BackupRestoredResponse {
+                    canceled: false,
+                    client_mods: serde_json::json!({"vencordLocalStorage": "x"}),
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["payload"]["type"], "backup_restored");
+        assert_eq!(value["payload"]["payload"]["canceled"], false);
+        assert_eq!(
+            value["payload"]["payload"]["client_mods"]["vencordLocalStorage"],
+            "x"
+        );
+    }
+
+    #[test]
+    fn validates_backup_restore_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"backup_restore_probe","payload":{"ok":true,"stage":"restore","canceled":false,"client_mods_bytes":88,"error":null}}}"#;
+        let canceled = r#"{"version":1,"event":{"type":"backup_restore_probe","payload":{"ok":true,"stage":"restore","canceled":true,"client_mods_bytes":0,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"backup_restore_probe","payload":{"ok":false,"stage":"restore","canceled":false,"client_mods_bytes":0,"error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"backup_restore_probe","payload":{"ok":true,"stage":"export","canceled":false,"client_mods_bytes":1,"error":null}}}"#;
+        let with_path = r#"{"version":1,"event":{"type":"backup_restore_probe","payload":{"ok":true,"stage":"restore","canceled":false,"client_mods_bytes":1,"path":"C:\\x","error":null}}}"#;
+        assert!(matches!(
+            parse_bridge_message(ok),
+            Ok(BridgeMessage::Event(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(canceled),
+            Ok(BridgeMessage::Event(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(failed),
+            Ok(BridgeMessage::Event(_))
+        ));
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
     }
 
     #[test]

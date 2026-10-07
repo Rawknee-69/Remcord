@@ -1,10 +1,92 @@
-//! Native backup-save (export) for Phase D (D4-1): `backup.save` ONLY.
+//! Native backup save (export) + secure restore (import) for Phase D (D4-1/D4-2):
+//! `backup.save` AND `backup.restore`.
 //!
-//! This module is the native counterpart of the save half of the Electron
-//! backup handlers in `src/common/backup.ts` (`buildBackupZipBuffer` as
-//! invoked from `src/discord/ipc.ts` `backupSave`, exposed as
-//! `window.legcord.backup.save` via `src/discord/preload/bridge.ts`).
-//! Restore (`backup.restore` / `applyBackupFromMap`) is NOT migrated here.
+//! This module is the native counterpart of the Electron backup handlers in
+//! `src/common/backup.ts` (`buildBackupZipBuffer` / `applyBackupFromMap` as
+//! invoked from `src/discord/ipc.ts` `backupSave` / `backupRestore`, exposed
+//! as `window.legcord.backup.save` / `.restore` via
+//! `src/discord/preload/bridge.ts`).
+//!
+//! Traced Electron SAVE behavior (actual implementation, not declarations):
+//! - Request: one JSON string `{ includes, clientMods }` — no path, no
+//!   filename, no dialog options. `clientMods` is renderer-built (localStorage
+//!   snapshots + Shelter plugin maps) and never touches host files.
+//! - Manifest: `{ version: 1, createdAt: new Date().toISOString(),
+//!   appVersion: app.getVersion(), includes, clientMods }`, where `clientMods`
+//!   carries ONLY the flagged keys (absent flags stay absent; present-but-null
+//!   values serialize as `null`). Written as the FIRST zip entry, 2-space
+//!   pretty JSON.
+//! - Entries: `data/storage/settings.json` (config file, only when present),
+//!   `data/quickCss.css` + `data/themes/**` (themes flag), `data/plugins/**` +
+//!   `data/runtime-plugins/**` + `data/plugin-storage/**` (extensions flag),
+//!   `bundles/<name>` for the 7 fixed `BUNDLE_FILES` (bundles flag). Missing
+//!   files/directories are silently skipped; filesystem order is used.
+//! - Dialog: `showSaveDialog` with translated title, no `defaultPath` beyond
+//!   `Documents/legcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter;
+//!   cancellation returns `{ ok: false, error: "CANCELLED" }`; `.zip` is
+//!   appended when missing; the buffer is written with `writeFileSync`.
+//!
+//! Traced Electron RESTORE behavior (actual implementation, not declarations):
+//! - Request: none — `backupRestore` takes no arguments; the host shows
+//!   `showOpenDialog` (translated `backup-dialogOpen-title`, one `ZIP/.zip`
+//!   filter) and reads the picked file with `readFileSync`. Cancellation
+//!   returns `{ ok: false, error: "CANCELLED" }`.
+//! - Archive: `readBackupZipToMap` buffers the WHOLE archive into a
+//!   `Map<string, Buffer>` (last-wins on duplicates, unbounded), skipping
+//!   directories, normalizing `\` to `/`.
+//! - Manifest: `JSON.parse` + `version === 1` only. No shape, size, or
+//!   include-flag validation; `clientMods` is returned to the renderer
+//!   VERBATIM (no validation at all).
+//! - Routing (in Map insertion order, inline writes — no staging):
+//!   `data/storage/settings.json` (only when `rest === "settings.json"`) is
+//!   fed through `setConfigBulk` (SHALLOW merge into the live cache, then
+//!   write); `data/quickCss.css` verbatim; `data/themes/**`,
+//!   `data/plugins/**` (disk `extensions/`), `data/runtime-plugins/**`
+//!   (disk `plugins/`), `data/plugin-storage/**` verbatim through
+//!   `resolvePathUnderBaseDir` (zip-slip guard; unsafe entries SKIPPED with a
+//!   console warning while earlier entries stay written); `bundles/<name>`
+//!   only on EXACT allowlist equality. Include flags gate each section
+//!   (present-but-flagged-off entries are skipped); unknown names fall
+//!   through silently. Overwrites are silent; symlinks/junctions are followed
+//!   (`writeFileSync`); a mid-loop throw leaves earlier writes committed.
+//! - Renderer (`BackupSection.tsx`): `JSON.parse` the returned string;
+//!   `applyClientModsFromRestore` writes `VencordSettings`/`EquicordSettings`
+//!   into `localStorage` and calls `shelter.plugins.addRemotePlugin(id, src,
+//!   update)` per shelter entry (URL fetch/execution happens renderer-side).
+//!
+//! Native RESTORE contract (deliberate, documented differences from Electron):
+//! - Lifecycle: open (host dialog) -> parse/validate the ENTIRE archive ->
+//!   stage outside the profile -> commit with rollback. NO final-profile
+//!   mutation happens until every entry, the manifest, sizes, counts,
+//!   duplicates, collisions, and containment have passed.
+//! - Duplicates/collisions FAIL the whole restore (`INVALID_ARCHIVE`):
+//!   exact duplicate names, case-insensitive (Windows) collisions, and
+//!   separator-normalization collisions are rejected instead of Electron's
+//!   silent last-wins.
+//! - Traversal/device/absolute/ADS shapes FAIL the whole restore instead of
+//!   Electron's skip-with-warning (which leaves a half-restored profile).
+//! - Paths are validated by the existing section owners (`validate_theme_id`,
+//!   `validate_theme_css_filename` is NOT reused for archive names — archive
+//!   theme files are validated as id + relative path — `validate_plugin_id`,
+//!   `validate_relative_path`, the runtime-plugin id charset, the bundle
+//!   allowlist), plus lexical + canonical containment at commit. Links at any
+//!   destination (or in any staging/commit parent) fail closed.
+//! - Settings restore is a STAGED SHALLOW MERGE (Electron `setConfigBulk`
+//!   parity: archive keys overwrite, existing/unknown keys survive), committed
+//!   atomically with the file writes. A corrupt/missing existing file merges
+//!   from `{}` (Electron cache-fallback parity); archive settings must still
+//!   be a JSON object. Type repair stays deferred to the existing startup
+//!   check, exactly as in Electron.
+//! - `clientMods` is validated with the SAME bounded envelope as save
+//!   (per-string <= 1 MiB, total <= 4 MiB, shelter <= 2 MiB, depth <= 32,
+//!   nodes <= 65536) and only the filtered envelope crosses the bridge. The
+//!   host NEVER applies it (no localStorage, no addRemotePlugin, no fetch).
+//! - Unknown top-level sections and unknown bundle names are IGNORED
+//!   (Electron parity — they fall through there too), never extracted.
+//! - `custom.js` / `custom.css` restore as DATA ONLY (same as every other
+//!   bundle name here): presence is written to disk, never executed.
+//! - The renderer receives only `{ canceled, clientMods }` semantics — never
+//!   archive paths, profile paths, filenames, or path-bearing errors.
 //!
 //! Traced Electron behavior (actual implementation, not declarations):
 //! - Request: one JSON string `{ includes, clientMods }` — no path, no
@@ -883,6 +965,1222 @@ pub fn write_backup_file(target: &Path, zip_bytes: &[u8]) -> Result<u64, BackupF
     Ok(persisted)
 }
 
+// ============================================================================
+// Restore (D4-2): `backup.restore`.
+//
+// The archive is untrusted input. The lifecycle is:
+//
+//     open (host dialog, bounded read)
+//       -> parse + validate the ENTIRE archive (manifest, every entry name,
+//          section routing, sizes, counts, duplicates, collisions)
+//       -> stage every byte outside the profile (host temp dir)
+//       -> pre-commit destination check (no writes yet)
+//       -> commit (per-file atomic temp + rename, settings merged) with
+//          rollback state for already-replaced files
+//       -> delete staging (success AND failure)
+//
+// No final-profile mutation happens before validation + staging complete.
+// ============================================================================
+
+/// Maximum picked archive file size in bytes: the 64 MiB uncompressed budget
+/// plus 1 MiB of ZIP-container slack. A `Stored` (uncompressed) archive is at
+/// most ~400 KiB of per-entry overhead above its payload, so every archive
+/// the native saver can produce fits; anything larger fails closed before a
+/// large buffer exists.
+pub const MAX_RESTORE_ARCHIVE_BYTES: usize = 65 * 1024 * 1024;
+/// Maximum raw `manifest.json` size in bytes: the bounded clientMods envelope
+/// (4 MiB) plus metadata slack — the same expression the save request bound
+/// uses, so save and restore agree on what a manifest may carry.
+pub const MAX_RESTORE_MANIFEST_BYTES: usize = MAX_CLIENT_MODS_BYTES + 64 * 1024;
+/// Maximum single archive entry name in bytes. Real save-generated names are
+/// short; this is a safety rail, not a target.
+pub const MAX_RESTORE_NAME_BYTES: usize = 1024;
+/// Maximum single archive path component in bytes. Mirrors the theme filename
+/// bound; every section validator enforces its own tighter cap as well.
+pub const MAX_RESTORE_COMPONENT_BYTES: usize = 128;
+/// Maximum archive path depth in components. Real trees are a handful deep.
+pub const MAX_RESTORE_DEPTH: usize = 32;
+/// Maximum merged `settings.json` size in bytes. Reuses the authoritative
+/// settings cap so a restore can never produce a file the settings loader
+/// would refuse to read.
+pub const MAX_RESTORE_SETTINGS_BYTES: usize = 256 * 1024;
+
+/// Translated restore-dialog title key (same catalog `localization.get_lang`
+/// serves). The renderer supplies none of the dialog strings.
+pub const DIALOG_OPEN_TITLE_KEY: &str = "backup-dialogOpen-title";
+/// Fallback title, byte-identical to the embedded `en-US` catalog value.
+pub const FALLBACK_DIALOG_OPEN_TITLE: &str = "Open Legcord backup";
+
+/// Reserved Windows device-stem check for archive directory names that do
+/// NOT pass through `validate_relative_path` (theme ids and runtime-plugin
+/// directory names have their own charset rules). Mirrors the
+/// plugin-storage/themes stem rule; relative-path components are already
+/// covered by their own validator.
+fn is_reserved_archive_stem(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    if upper.len() == 4 {
+        let (head, tail) = upper.split_at(3);
+        if (head == "COM" || head == "LPT")
+            && matches!(tail, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Runtime-plugin directory-name rule, mirroring Electron
+/// `VALID_PLUGIN_ID` (`src/discord/plugins/manager.ts:55`):
+/// `^[a-zA-Z0-9._-]{1,64}$`. The restore path does NOT infer plugin identity
+/// from the archive (the loader validates manifest ids at load time); this
+/// charset only keeps directory names lexically safe. It is deliberately NOT
+/// the stricter plugin-storage id rule (`[A-Za-z0-9_-]`, no dots): runtime
+/// plugin ids may contain dots, and rejecting them would refuse valid
+/// Electron archives.
+fn validate_runtime_plugin_dir(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > MAX_RESTORE_COMPONENT_BYTES {
+        return Err("runtime plugin directory name is invalid".to_owned());
+    }
+    if name == "." || name == ".." {
+        return Err("runtime plugin directory name is invalid".to_owned());
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    if is_reserved_archive_stem(stem) {
+        return Err("runtime plugin directory name uses a reserved device name".to_owned());
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(
+            "runtime plugin directory name uses characters outside [A-Za-z0-9._-]".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// The validated restore manifest: `{ version, createdAt, appVersion,
+/// includes, clientMods }`. Unlike the save request, the OUTER object allows
+/// unknown future metadata keys (forward compatibility — they are ignored and
+/// never routed anywhere); the seven include flags and the clientMods envelope
+/// stay exact.
+#[derive(Debug, serde::Deserialize)]
+pub struct RestoreManifest {
+    pub version: u8,
+    #[serde(rename = "createdAt", default)]
+    pub created_at: String,
+    #[serde(rename = "appVersion", default)]
+    pub app_version: String,
+    pub includes: BackupIncludes,
+    #[serde(rename = "clientMods")]
+    pub client_mods: BackupClientMods,
+}
+
+/// One routed archive entry: the section it belongs to plus validated,
+/// join-safe components. Display-free: no raw archive name is retained, so no
+/// path-bearing value can leak into logs or errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestoreTarget {
+    /// `data/storage/settings.json` — staged, then shallow-merged.
+    Settings,
+    /// `data/quickCss.css` — file bytes verbatim.
+    QuickCss,
+    /// `data/themes/<rel...>` — `theme_dir` is `Some(id)` for nested files
+    /// (validated id + validated rest) and `None` for a loose file directly
+    /// under `themes/` (validated as a relative path). Electron restores
+    /// both shapes verbatim; no enablement is flipped by the host either way
+    /// (a restored `manifest.json` carries the archive's own `enabled`
+    /// value, exactly as Electron's overwrite does).
+    ThemeFile {
+        theme_dir: Option<String>,
+        rel: Vec<String>,
+    },
+    /// `data/plugins/<rel...>` — disk `extensions/`. No id architecture
+    /// exists for this directory, so the whole rest is validated as a
+    /// relative path and nothing is inferred from its structure.
+    ExtensionFile { rel: Vec<String> },
+    /// `data/runtime-plugins/<rel...>` — disk `plugins/`. The first
+    /// component uses the runtime-plugin directory charset; identity itself
+    /// stays loader-owned (manifest ids are validated at load time, not from
+    /// archive structure).
+    RuntimePluginFile { rel: Vec<String> },
+    /// `data/plugin-storage/<plugin_id>/<rel...>` — the strict native rule:
+    /// `validate_plugin_id` plus `validate_relative_path`.
+    PluginStorageFile { plugin_id: String, rel: Vec<String> },
+    /// `bundles/<name>` — exact allowlist equality only, data-only.
+    Bundle { name: &'static str },
+}
+
+/// Split and validate one raw archive name into `/`-separated components.
+///
+/// Normalizes `\` to `/` first (Electron `entryName.replace(/\\/g, "/")`
+/// parity — so backslash traversal cannot bypass the checks), then rejects
+/// the whole archive on: over-long names, absolute POSIX paths, Windows
+/// drive-letter paths, UNC/device prefixes, NUL/control characters, `:`
+/// (drive + ADS syntax in one rule), empty components, `.`/`..` components,
+/// excessive depth, and over-long components. Reserved device names and
+/// trailing space/dot components are enforced by the section validators
+/// below (every routed shape passes through one).
+fn split_archive_name(raw: &str) -> Result<Vec<String>, BackupFailure> {
+    let normalized = raw.replace('\\', "/");
+    if normalized.is_empty() || normalized.len() > MAX_RESTORE_NAME_BYTES {
+        return Err(failure(
+            "BACKUP_TOO_LARGE",
+            "backup archive entry exceeds the size limit",
+        ));
+    }
+    if normalized.starts_with('/') {
+        return Err(failure(
+            "INVALID_ARCHIVE",
+            "backup archive contains an entry outside its sections",
+        ));
+    }
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' {
+        return Err(failure(
+            "INVALID_ARCHIVE",
+            "backup archive contains an entry outside its sections",
+        ));
+    }
+    if normalized.contains('\0')
+        || normalized.bytes().any(|byte| byte < 0x20)
+        || normalized.contains(':')
+    {
+        return Err(failure(
+            "INVALID_ARCHIVE",
+            "backup archive contains an entry outside its sections",
+        ));
+    }
+    let components: Vec<String> = normalized.split('/').map(str::to_owned).collect();
+    if components.len() > MAX_RESTORE_DEPTH {
+        return Err(failure(
+            "BACKUP_TOO_LARGE",
+            "backup archive entry exceeds the size limit",
+        ));
+    }
+    for component in &components {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(failure(
+                "INVALID_ARCHIVE",
+                "backup archive contains an entry outside its sections",
+            ));
+        }
+        if component.len() > MAX_RESTORE_COMPONENT_BYTES {
+            return Err(failure(
+                "BACKUP_TOO_LARGE",
+                "backup archive entry exceeds the size limit",
+            ));
+        }
+    }
+    Ok(components)
+}
+
+/// Route validated components to a section target, or `None` when the entry
+/// is legitimately skipped: unknown top-level sections, non-`settings.json`
+/// files under `data/storage/`, unknown bundle names (Electron
+/// `BUNDLE_FILES.includes` parity — never restored, never rejected), and any
+/// entry whose section flag is `false` (present-but-disabled sections are
+/// skipped exactly like Electron's `continue`).
+fn route_entry(
+    components: &[String],
+    includes: &BackupIncludes,
+) -> Result<Option<RestoreTarget>, BackupFailure> {
+    let invalid = || {
+        failure(
+            "INVALID_ARCHIVE",
+            "backup archive contains an entry outside its sections",
+        )
+    };
+    if components.is_empty() {
+        return Err(invalid());
+    }
+    match components[0].as_str() {
+        "manifest.json" => Ok(None),
+        "data" => {
+            if components.len() < 2 {
+                return Ok(None);
+            }
+            match components[1].as_str() {
+                "storage" => {
+                    if !includes.legcord_config {
+                        return Ok(None);
+                    }
+                    if components.len() == 3 && components[2] == "settings.json" {
+                        Ok(Some(RestoreTarget::Settings))
+                    } else {
+                        // Electron parity: only `settings.json` is honored;
+                        // anything else under `data/storage/` falls through.
+                        Ok(None)
+                    }
+                }
+                "quickCss.css" => {
+                    if !includes.legcord_themes_and_quick_css {
+                        return Ok(None);
+                    }
+                    if components.len() == 2 {
+                        Ok(Some(RestoreTarget::QuickCss))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                "themes" => {
+                    if !includes.legcord_themes_and_quick_css {
+                        return Ok(None);
+                    }
+                    let under = &components[2..];
+                    if under.is_empty() {
+                        return Ok(None);
+                    }
+                    if under.len() == 1 {
+                        // A loose file directly under `themes/` (the saver
+                        // collects those too, and Electron restores them).
+                        let rel = crate::plugin_storage::validate_relative_path(&under[0])
+                            .map_err(|_| invalid())?;
+                        Ok(Some(RestoreTarget::ThemeFile {
+                            theme_dir: None,
+                            rel,
+                        }))
+                    } else {
+                        crate::themes::validate_theme_id(&under[0]).map_err(|_| invalid())?;
+                        let theme_stem = under[0].split('.').next().unwrap_or(&under[0]);
+                        if is_reserved_archive_stem(theme_stem) {
+                            return Err(invalid());
+                        }
+                        let rel =
+                            crate::plugin_storage::validate_relative_path(&under[1..].join("/"))
+                                .map_err(|_| invalid())?;
+                        Ok(Some(RestoreTarget::ThemeFile {
+                            theme_dir: Some(under[0].clone()),
+                            rel,
+                        }))
+                    }
+                }
+                "plugins" => {
+                    if !includes.legcord_extension_plugins {
+                        return Ok(None);
+                    }
+                    let under = &components[2..];
+                    if under.is_empty() {
+                        return Ok(None);
+                    }
+                    let rel = crate::plugin_storage::validate_relative_path(&under.join("/"))
+                        .map_err(|_| invalid())?;
+                    Ok(Some(RestoreTarget::ExtensionFile { rel }))
+                }
+                "runtime-plugins" => {
+                    if !includes.legcord_extension_plugins {
+                        return Ok(None);
+                    }
+                    let under = &components[2..];
+                    if under.is_empty() {
+                        return Ok(None);
+                    }
+                    validate_runtime_plugin_dir(&under[0]).map_err(|_| invalid())?;
+                    let rel = crate::plugin_storage::validate_relative_path(&under.join("/"))
+                        .map_err(|_| invalid())?;
+                    Ok(Some(RestoreTarget::RuntimePluginFile { rel }))
+                }
+                "plugin-storage" => {
+                    if !includes.legcord_extension_plugins {
+                        return Ok(None);
+                    }
+                    let under = &components[2..];
+                    if under.len() < 2 {
+                        // A bare file directly under `plugin-storage/` names
+                        // no plugin namespace; there is no safe destination.
+                        return Err(invalid());
+                    }
+                    crate::plugin_storage::validate_plugin_id(&under[0]).map_err(|_| invalid())?;
+                    let rel = crate::plugin_storage::validate_relative_path(&under[1..].join("/"))
+                        .map_err(|_| invalid())?;
+                    Ok(Some(RestoreTarget::PluginStorageFile {
+                        plugin_id: under[0].clone(),
+                        rel,
+                    }))
+                }
+                _ => Ok(None),
+            }
+        }
+        "bundles" => {
+            if !includes.mod_bundles {
+                return Ok(None);
+            }
+            if components.len() == 2 {
+                match crate::bundles::BUNDLE_FILES
+                    .iter()
+                    .find(|name| **name == components[1].as_str())
+                {
+                    Some(name) => Ok(Some(RestoreTarget::Bundle { name })),
+                    // Electron parity: unknown bundle names are skipped, so
+                    // they can never become arbitrary profile-root writes.
+                    None => Ok(None),
+                }
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Per-target uncompressed content bound: the bundle allowlist carries the
+/// same 32 MiB ceiling the save path uses (real build artifacts); every
+/// other section keeps the 1 MiB file bound.
+fn target_bound(target: &RestoreTarget) -> usize {
+    match target {
+        RestoreTarget::Bundle { .. } => MAX_BACKUP_BUNDLE_BYTES,
+        _ => MAX_BACKUP_FILE_BYTES,
+    }
+}
+
+/// Validate the manifest document: exact version 1, bounded metadata
+/// strings, exact includes, and the bounded clientMods envelope (reusing the
+/// save-path validator so both directions agree on what fits).
+fn validate_restore_manifest(
+    text: &str,
+) -> Result<(BackupIncludes, serde_json::Value), BackupFailure> {
+    let manifest: RestoreManifest = serde_json::from_str(text)
+        .map_err(|_| failure("INVALID_BACKUP", "backup manifest is invalid"))?;
+    if manifest.version != BACKUP_VERSION {
+        return Err(failure("INVALID_BACKUP", "backup version is not supported"));
+    }
+    if manifest.created_at.len() > 1024 || manifest.app_version.len() > 1024 {
+        return Err(failure("INVALID_BACKUP", "backup manifest is invalid"));
+    }
+    let envelope = validate_client_mods(&manifest.includes, &manifest.client_mods)?;
+    Ok((manifest.includes, envelope))
+}
+
+/// Bounded restore summary: the filtered clientMods envelope for the
+/// renderer plus concrete metrics. No paths, no names, no counts of skipped
+/// entries — only sizes and outcome.
+#[derive(Debug, Clone)]
+pub struct RestoreSummary {
+    /// True when the user dismissed the picker. Every other field is then
+    /// zeroed (`client_mods` is null).
+    pub canceled: bool,
+    /// Filtered `clientMods` envelope for the renderer (host never applies).
+    pub client_mods: serde_json::Value,
+    /// Picked archive file size in bytes.
+    pub archive_bytes: usize,
+    /// Total staged uncompressed content in bytes.
+    pub uncompressed_bytes: usize,
+    /// File entries validated (manifest excluded, directories excluded).
+    pub entry_count: usize,
+    /// Serialized clientMods envelope size in bytes.
+    pub client_mods_bytes: usize,
+}
+
+/// Read one host-picked archive file through the no-follow bounded policy:
+/// symlinks/junctions are refused (never followed), oversized files fail
+/// closed before a large buffer exists, and the authoritative post-read
+/// length is re-checked so a file that grows mid-read cannot force an
+/// unbounded allocation.
+pub fn read_archive_file(path: &Path) -> Result<Vec<u8>, BackupFailure> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| failure("BACKUP_UNAVAILABLE", "backup archive cannot be read"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(failure(
+            "BACKUP_UNAVAILABLE",
+            "backup archive cannot be read",
+        ));
+    }
+    if metadata.len() > MAX_RESTORE_ARCHIVE_BYTES as u64 {
+        return Err(failure(
+            "BACKUP_TOO_LARGE",
+            "backup archive exceeds the size limit",
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|_| failure("BACKUP_UNAVAILABLE", "backup archive cannot be read"))?;
+    let mut buffer = Vec::new();
+    file.take(MAX_RESTORE_ARCHIVE_BYTES as u64 + 1)
+        .read_to_end(&mut buffer)
+        .map_err(|_| failure("BACKUP_UNAVAILABLE", "backup archive cannot be read"))?;
+    if buffer.len() > MAX_RESTORE_ARCHIVE_BYTES {
+        return Err(failure(
+            "BACKUP_TOO_LARGE",
+            "backup archive exceeds the size limit",
+        ));
+    }
+    if buffer.is_empty() {
+        return Err(failure("INVALID_ARCHIVE", "backup archive is invalid"));
+    }
+    Ok(buffer)
+}
+
+/// Create the private staging directory: unique, host-controlled, outside
+/// every profile root (never inside `themes/`, `plugins/`,
+/// `plugin-storage/`, or `extensions/`, where an existing link could
+/// interfere with containment).
+fn create_staging_dir() -> Result<PathBuf, BackupFailure> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "legcord-backup-restore-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir)
+        .map_err(|_| failure("BACKUP_UNAVAILABLE", "backup restore cannot be staged"))?;
+    Ok(dir)
+}
+
+/// One staged write: the routing plus the staging-file sequence number. The
+/// settings blob is staged as a file like everything else and parsed from
+/// the staged bytes, so validation never holds the whole archive in memory.
+#[derive(Debug)]
+struct StagedWrite {
+    target: RestoreTarget,
+    sequence: usize,
+}
+
+/// Reject exact duplicate archive names and case-insensitive /
+/// separator-normalization collisions across the whole entry table.
+///
+/// Electron buffers the archive into a `Map<string, Buffer>` (silent
+/// last-wins); native refuses the archive instead, so two archive paths can
+/// never silently target the same final file.
+fn reject_duplicate_names(normalized: &[String]) -> Result<(), BackupFailure> {
+    let mut seen_exact: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen_folded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for name in normalized {
+        if !seen_exact.insert(name.as_str()) {
+            return Err(failure(
+                "INVALID_ARCHIVE",
+                "backup archive contains a duplicate entry",
+            ));
+        }
+        if !seen_folded.insert(name.to_lowercase()) {
+            return Err(failure(
+                "INVALID_ARCHIVE",
+                "backup archive contains a colliding entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the ENTIRE archive and stage every routed entry to `staging_dir`.
+///
+/// One pass over the entry table: names are collected first (the zip reader
+/// borrows mutably per entry), then each entry is validated (name, routing,
+/// duplicates, collisions, header size), streamed to staging with a bounded
+/// `take`, and length-verified. The manifest is required exactly once.
+/// Returns the includes, the filtered clientMods envelope, and the staged
+/// writes in archive order.
+fn validate_and_stage(
+    archive_bytes: &[u8],
+    staging_dir: &Path,
+) -> Result<(BackupIncludes, serde_json::Value, Vec<StagedWrite>), BackupFailure> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive_bytes))
+        .map_err(|_| failure("INVALID_ARCHIVE", "backup archive is invalid"))?;
+    if archive.len() > MAX_BACKUP_ENTRIES {
+        return Err(failure(
+            "BACKUP_TOO_LARGE",
+            "backup archive exceeds the size limit",
+        ));
+    }
+    let mut names: Vec<String> = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        names.push(
+            archive
+                .name_for_index(index)
+                .ok_or_else(|| failure("INVALID_ARCHIVE", "backup archive is invalid"))?
+                .to_owned(),
+        );
+    }
+    // The manifest is located by exact normalized name; duplicates are
+    // caught by the same duplicate detection every other entry passes.
+    let mut manifest_text: Option<String> = None;
+    // First pass: structural validation only (no routing yet — the includes
+    // come from the manifest, which may not be first in a hostile archive).
+    // Directory entries are skipped (Electron parity: they create nothing).
+    let mut file_indices: Vec<usize> = Vec::new();
+    let mut file_names: Vec<String> = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        let is_dir = archive
+            .by_index(index)
+            .map(|file| file.is_dir())
+            .unwrap_or(false);
+        if is_dir {
+            continue;
+        }
+        let normalized = name.replace('\\', "/");
+        file_indices.push(index);
+        file_names.push(normalized);
+    }
+    reject_duplicate_names(&file_names)?;
+    let mut content_indices: Vec<usize> = Vec::new();
+    for (position, index) in file_indices.iter().enumerate() {
+        let normalized = &file_names[position];
+        let index = *index;
+        if normalized == MANIFEST_ENTRY {
+            let file = archive
+                .by_index(index)
+                .map_err(|_| failure("INVALID_ARCHIVE", "backup archive is invalid"))?;
+            if file.size() > MAX_RESTORE_MANIFEST_BYTES as u64 {
+                return Err(failure(
+                    "BACKUP_TOO_LARGE",
+                    "backup manifest exceeds the size limit",
+                ));
+            }
+            let mut buffer = Vec::new();
+            file.take(MAX_RESTORE_MANIFEST_BYTES as u64 + 1)
+                .read_to_end(&mut buffer)
+                .map_err(|_| failure("INVALID_ARCHIVE", "backup archive is invalid"))?;
+            if buffer.len() > MAX_RESTORE_MANIFEST_BYTES {
+                return Err(failure(
+                    "BACKUP_TOO_LARGE",
+                    "backup manifest exceeds the size limit",
+                ));
+            }
+            let text = String::from_utf8(buffer)
+                .map_err(|_| failure("INVALID_BACKUP", "backup manifest is invalid"))?;
+            manifest_text = Some(text);
+        } else {
+            content_indices.push(index);
+        }
+    }
+    let manifest_text =
+        manifest_text.ok_or_else(|| failure("INVALID_ARCHIVE", "backup archive is invalid"))?;
+    let (includes, client_mods) = validate_restore_manifest(&manifest_text)?;
+    // Second pass: route + bound + stage every entry. Nothing has been
+    // written to the profile; staging lives under the host temp dir.
+    let mut staged: Vec<StagedWrite> = Vec::new();
+    let mut total_bytes: usize = 0;
+    for index in content_indices {
+        let components = split_archive_name(&names[index])?;
+        let Some(target) = route_entry(&components, &includes)? else {
+            continue;
+        };
+        let bound = target_bound(&target);
+        let file = archive
+            .by_index(index)
+            .map_err(|_| failure("INVALID_ARCHIVE", "backup archive is invalid"))?;
+        if file.size() > bound as u64 {
+            return Err(failure(
+                "BACKUP_TOO_LARGE",
+                "backup archive entry exceeds the size limit",
+            ));
+        }
+        let staged_path = staging_dir.join(format!("entry-{}.bin", staged.len()));
+        let mut staged_file = std::fs::File::create(&staged_path)
+            .map_err(|_| failure("BACKUP_UNAVAILABLE", "backup restore cannot be staged"))?;
+        let copied = std::io::copy(&mut file.take(bound as u64 + 1), &mut staged_file)
+            .map_err(|_| failure("INVALID_ARCHIVE", "backup archive is invalid"))?;
+        if copied > bound as u64 {
+            return Err(failure(
+                "BACKUP_TOO_LARGE",
+                "backup archive entry exceeds the size limit",
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(copied as usize);
+        if total_bytes > MAX_BACKUP_TOTAL_BYTES {
+            return Err(failure(
+                "BACKUP_TOO_LARGE",
+                "backup archive exceeds the size limit",
+            ));
+        }
+        if staged.len() + 1 > MAX_BACKUP_ENTRIES {
+            return Err(failure(
+                "BACKUP_TOO_LARGE",
+                "backup archive exceeds the size limit",
+            ));
+        }
+        staged.push(StagedWrite {
+            target,
+            sequence: staged.len(),
+        });
+    }
+    Ok((includes, client_mods, staged))
+}
+
+/// Merge the staged settings blob over the live file (Electron
+/// `setConfigBulk` parity): the archive must be a JSON OBJECT (anything else
+/// is `INVALID_BACKUP`); the existing file starts from `{}` when
+/// missing/corrupt (Electron's corrupt-cache `{}` fallback — restore is a
+/// recovery path, so failing closed here would strand corrupt profiles);
+/// archive keys overwrite while existing/unknown keys survive. The merged
+/// document must fit the authoritative settings cap.
+fn merge_settings_blob(existing: Option<&[u8]>, staged: &[u8]) -> Result<Vec<u8>, BackupFailure> {
+    let staged_value: serde_json::Value = serde_json::from_slice(staged)
+        .map_err(|_| failure("INVALID_BACKUP", "backup settings are invalid"))?;
+    let staged_object = staged_value
+        .as_object()
+        .ok_or_else(|| failure("INVALID_BACKUP", "backup settings are invalid"))?;
+    let mut merged = match existing {
+        Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default(),
+        None => serde_json::Map::new(),
+    };
+    for (key, value) in staged_object {
+        merged.insert(key.clone(), value.clone());
+    }
+    let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(merged))
+        .map_err(|_| failure("BACKUP_FAILED", "backup settings cannot be restored"))?;
+    if serialized.len() > MAX_RESTORE_SETTINGS_BYTES {
+        return Err(failure(
+            "BACKUP_TOO_LARGE",
+            "backup settings exceed the size limit",
+        ));
+    }
+    Ok(serialized.into_bytes())
+}
+
+fn join_components(root: &Path, components: &[String]) -> PathBuf {
+    let mut path = root.to_path_buf();
+    for component in components {
+        path.push(component);
+    }
+    path
+}
+
+/// Resolve one staged write to its final destination. All components are
+/// already validated (single-component joins, no separators possible); the
+/// canonical containment check happens at commit time, after parents exist.
+fn resolve_destination(profile_dir: &Path, target: &RestoreTarget) -> PathBuf {
+    match target {
+        RestoreTarget::Settings => profile_dir.join("storage").join("settings.json"),
+        RestoreTarget::QuickCss => profile_dir.join("quickCss.css"),
+        RestoreTarget::ThemeFile { theme_dir, rel } => {
+            let mut root = profile_dir.join("themes");
+            if let Some(dir) = theme_dir {
+                root.push(dir);
+            }
+            join_components(&root, rel)
+        }
+        RestoreTarget::ExtensionFile { rel } => {
+            join_components(&profile_dir.join("extensions"), rel)
+        }
+        RestoreTarget::RuntimePluginFile { rel } => {
+            join_components(&profile_dir.join("plugins"), rel)
+        }
+        RestoreTarget::PluginStorageFile { plugin_id, rel } => {
+            join_components(&profile_dir.join("plugin-storage").join(plugin_id), rel)
+        }
+        RestoreTarget::Bundle { name } => profile_dir.join(name),
+    }
+}
+
+/// Section root a destination must stay under (canonical containment at
+/// commit). Bundles, settings, and Quick CSS live directly under the profile.
+fn section_root(profile_dir: &Path, target: &RestoreTarget) -> PathBuf {
+    match target {
+        RestoreTarget::Settings => profile_dir.join("storage"),
+        RestoreTarget::QuickCss => profile_dir.to_path_buf(),
+        RestoreTarget::ThemeFile { theme_dir, .. } => {
+            let mut root = profile_dir.join("themes");
+            if let Some(dir) = theme_dir {
+                root.push(dir);
+            }
+            root
+        }
+        RestoreTarget::ExtensionFile { .. } => profile_dir.join("extensions"),
+        RestoreTarget::RuntimePluginFile { .. } => profile_dir.join("plugins"),
+        RestoreTarget::PluginStorageFile { plugin_id, .. } => {
+            profile_dir.join("plugin-storage").join(plugin_id)
+        }
+        RestoreTarget::Bundle { .. } => profile_dir.to_path_buf(),
+    }
+}
+
+/// Commit one staged file to `dest` (parent already created + contained):
+/// refuse symlinks (never write through a link), then atomically replace via
+/// a uniquely named sibling temp file plus same-directory rename. Returns
+/// whether the destination previously existed (for rollback bookkeeping).
+fn commit_staged_file(
+    dest: &Path,
+    staged_path: &Path,
+    rollback_path: Option<&Path>,
+) -> Result<bool, BackupFailure> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COMMIT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    if std::fs::symlink_metadata(dest)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(failure(
+            "BACKUP_FAILED",
+            "backup restore target is outside the approved root",
+        ));
+    }
+    let existed = dest.exists();
+    if existed {
+        if let Some(rollback) = rollback_path {
+            let existing_len = std::fs::symlink_metadata(dest)
+                .ok()
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if existing_len > MAX_BACKUP_TOTAL_BYTES as u64 {
+                return Err(failure(
+                    "BACKUP_TOO_LARGE",
+                    "backup restore target exceeds the size limit",
+                ));
+            }
+            std::fs::copy(dest, rollback)
+                .map_err(|_| failure("BACKUP_FAILED", "backup restore cannot proceed"))?;
+        }
+    }
+    let temp_name = format!(
+        ".restore-{}-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0),
+        COMMIT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let temp_path = dest.with_file_name(temp_name);
+    let staged_len = std::fs::symlink_metadata(staged_path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if staged_len == 0 && !staged_path.exists() {
+        return Err(failure("BACKUP_FAILED", "backup restore cannot proceed"));
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+    {
+        Ok(mut temp) => {
+            let mut staged = std::fs::File::open(staged_path)
+                .map_err(|_| failure("BACKUP_FAILED", "backup restore cannot proceed"))?;
+            if std::io::copy(&mut staged, &mut temp).is_err() {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(failure("BACKUP_FAILED", "backup restore cannot proceed"));
+            }
+            drop(temp);
+        }
+        Err(_) => {
+            return Err(failure("BACKUP_FAILED", "backup restore cannot proceed"));
+        }
+    }
+    if std::fs::rename(&temp_path, dest).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(failure("BACKUP_FAILED", "backup restore cannot proceed"));
+    }
+    Ok(existed)
+}
+
+/// Commit every staged write to the profile with rollback.
+///
+/// Phase 1 (no writes): resolve every destination; refuse symlinks,
+/// directories, and anything that is neither a missing path nor a regular
+/// file — before ANY byte lands in the profile.
+/// Phase 2: for each write, create + contain the parent, back up the existing
+/// file (when any), and atomically replace. The settings blob is merged over
+/// the live file first (Electron shallow-merge parity) and committed through
+/// the same atomic path.
+/// On ANY failure, already-replaced files are restored from rollback state
+/// and newly created files are removed, so the profile holds either complete
+/// old files or complete new files — never truncations. Staging cleanup is
+/// the caller's job (it runs on success AND failure).
+///
+/// `fail_after` injects a failure after that many successful commits. It is
+/// `None` in production and exercised by tests to prove rollback converges.
+fn commit_staged(
+    profile_dir: &Path,
+    staged: &[StagedWrite],
+    staging_dir: &Path,
+    fail_after: Option<usize>,
+) -> Result<(), BackupFailure> {
+    let profile_canonical = std::fs::canonicalize(profile_dir)
+        .map_err(|_| failure("BACKUP_UNAVAILABLE", "backup restore target is unavailable"))?;
+    // Phase 1: destination pre-check — no writes.
+    let mut destinations: Vec<PathBuf> = Vec::with_capacity(staged.len());
+    for write in staged {
+        let dest = resolve_destination(profile_dir, &write.target);
+        match std::fs::symlink_metadata(&dest) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(failure(
+                    "BACKUP_FAILED",
+                    "backup restore target is outside the approved root",
+                ));
+            }
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                // A directory (or device) at a file position: Electron's
+                // `writeFileSync` would fail mid-loop leaving earlier writes
+                // committed; native fails before any write.
+                return Err(failure("BACKUP_FAILED", "backup restore cannot proceed"));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(failure(
+                    "BACKUP_UNAVAILABLE",
+                    "backup restore target is unavailable",
+                ));
+            }
+        }
+        destinations.push(dest);
+    }
+    // Phase 2: backup + replace with rollback.
+    let rollback_dir = staging_dir.join("rollback");
+    std::fs::create_dir_all(&rollback_dir)
+        .map_err(|_| failure("BACKUP_FAILED", "backup restore cannot proceed"))?;
+    // (index into `staged`, whether the destination previously existed)
+    let mut committed: Vec<(usize, bool)> = Vec::new();
+    let mut commit_failed: Option<BackupFailure> = None;
+    for (position, write) in staged.iter().enumerate() {
+        if commit_failed.is_some() {
+            break;
+        }
+        let dest = &destinations[position];
+        let root = section_root(profile_dir, &write.target);
+        // Host-owned parents only: create, then require the canonical parent
+        // to stay under the canonical section root, so a pre-planted
+        // symlink/junction inside the profile can never redirect the write.
+        // (`Bundle`/`QuickCss`/`Settings` parents are host-fixed directories;
+        // theme/plugin parents are built from validated components only.)
+        if let Some(parent) = dest.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                commit_failed = Some(failure("BACKUP_FAILED", "backup restore cannot proceed"));
+                break;
+            }
+            let contained = (|| {
+                let canonical_root = std::fs::canonicalize(&root).ok()?;
+                // The section root itself must stay under the profile: a
+                // junction planted AT the section root resolves outside and
+                // must fail closed, not become the new containment scope.
+                if !canonical_root.starts_with(&profile_canonical) {
+                    return None;
+                }
+                let canonical_parent = std::fs::canonicalize(parent).ok()?;
+                canonical_parent.starts_with(&canonical_root).then_some(())
+            })();
+            if contained.is_none() {
+                commit_failed = Some(failure(
+                    "BACKUP_FAILED",
+                    "backup restore target is outside the approved root",
+                ));
+                break;
+            }
+        }
+        let staged_path = staging_dir.join(format!("entry-{}.bin", write.sequence));
+        let rollback_path = rollback_dir.join(format!("{position}.bak"));
+        let outcome: Result<bool, BackupFailure> =
+            if matches!(write.target, RestoreTarget::Settings) {
+                // Staged shallow merge over the live file (Electron parity),
+                // committed through the same atomic path as every other file.
+                let staged_bytes = std::fs::read(&staged_path)
+                    .map_err(|_| failure("BACKUP_FAILED", "backup restore cannot proceed"))?;
+                if staged_bytes.len() > MAX_BACKUP_FILE_BYTES {
+                    Err(failure(
+                        "BACKUP_TOO_LARGE",
+                        "backup archive entry exceeds the size limit",
+                    ))
+                } else {
+                    let existing = std::fs::read(dest).ok();
+                    match merge_settings_blob(existing.as_deref(), &staged_bytes) {
+                        Ok(merged) => {
+                            let merged_staged =
+                                staging_dir.join(format!("entry-{}-merged.bin", write.sequence));
+                            if std::fs::write(&merged_staged, &merged).is_err() {
+                                Err(failure("BACKUP_FAILED", "backup restore cannot proceed"))
+                            } else {
+                                commit_staged_file(dest, &merged_staged, Some(&rollback_path))
+                            }
+                        }
+                        Err(failure) => Err(failure),
+                    }
+                }
+            } else {
+                commit_staged_file(dest, &staged_path, Some(&rollback_path))
+            };
+        match outcome {
+            Ok(existed) => {
+                committed.push((position, existed));
+                if fail_after.is_some_and(|limit| committed.len() >= limit) {
+                    commit_failed = Some(failure("BACKUP_FAILED", "backup restore cannot proceed"));
+                }
+            }
+            Err(failure) => {
+                commit_failed = Some(failure);
+            }
+        }
+    }
+    if let Some(failure) = commit_failed {
+        // Roll back already-replaced files: restore originals, remove files
+        // that did not exist before. Best effort per file (a rollback I/O
+        // error is logged host-side); the typed failure still reports.
+        for (position, existed) in committed.iter().rev() {
+            let dest = &destinations[*position];
+            if *existed {
+                let backup = rollback_dir.join(format!("{position}.bak"));
+                if std::fs::rename(&backup, dest).is_err() {
+                    // Same-directory copy fallback (cross-device staging):
+                    // the backup was copied, not moved, so a copy restores.
+                    if std::fs::copy(&backup, dest).is_err() {
+                        eprintln!("[Backup][Restore] rollback could not restore a replaced file");
+                    }
+                }
+            } else if std::fs::remove_file(dest).is_err() {
+                eprintln!("[Backup][Restore] rollback could not remove a created file");
+            }
+        }
+        // The profile root itself is host-controlled; destinations were
+        // pre-checked, so rollback restores the pre-restore bytes. This is
+        // per-file atomicity plus best-effort multi-file recovery — NOT a
+        // cross-filesystem transaction, and it is documented as such.
+        return Err(failure);
+    }
+    Ok(())
+}
+
+/// Validate, stage, and commit one archive's bytes into the profile.
+///
+/// Creates a private staging directory, validates + stages the entire
+/// archive, commits, and ALWAYS removes staging (success and failure leave
+/// no temp residue). `fail_after` is the failure-injection hook (production
+/// passes `None`; tests prove first/middle/final-commit recovery).
+fn restore_profile_from_bytes_with_hook(
+    profile_dir: &Path,
+    archive_bytes: &[u8],
+    fail_after: Option<usize>,
+) -> Result<RestoreSummary, BackupFailure> {
+    if archive_bytes.len() > MAX_RESTORE_ARCHIVE_BYTES {
+        return Err(failure(
+            "BACKUP_TOO_LARGE",
+            "backup archive exceeds the size limit",
+        ));
+    }
+    if archive_bytes.is_empty() {
+        return Err(failure("INVALID_ARCHIVE", "backup archive is invalid"));
+    }
+    let validate_started = std::time::Instant::now();
+    let staging_dir = create_staging_dir()?;
+    let outcome = (|| {
+        let (includes, client_mods, staged) = validate_and_stage(archive_bytes, &staging_dir)?;
+        let _ = &includes;
+        let validate_ms = validate_started.elapsed().as_secs_f64() * 1000.0;
+        let uncompressed: usize = staged
+            .iter()
+            .map(|write| {
+                std::fs::symlink_metadata(staging_dir.join(format!("entry-{}.bin", write.sequence)))
+                    .ok()
+                    .filter(|metadata| metadata.is_file())
+                    .map(|metadata| metadata.len() as usize)
+                    .unwrap_or(0)
+            })
+            .sum();
+        let entry_count = staged.len();
+        let commit_started = std::time::Instant::now();
+        commit_staged(profile_dir, &staged, &staging_dir, fail_after)?;
+        let commit_ms = commit_started.elapsed().as_secs_f64() * 1000.0;
+        let client_mods_bytes = serde_json::to_string(&client_mods)
+            .map(|text| text.len())
+            .unwrap_or(0);
+        println!(
+            "[Backup][Restore] entries={} uncompressed={} archive={} client_mods={} validate_ms={:.3} commit_ms={:.3}",
+            entry_count,
+            uncompressed,
+            archive_bytes.len(),
+            client_mods_bytes,
+            validate_ms,
+            commit_ms,
+        );
+        Ok(RestoreSummary {
+            canceled: false,
+            client_mods,
+            archive_bytes: archive_bytes.len(),
+            uncompressed_bytes: uncompressed,
+            entry_count,
+            client_mods_bytes,
+        })
+    })();
+    // Staging is removed on success AND failure: no temp residue either way.
+    std::fs::remove_dir_all(&staging_dir).ok();
+    outcome
+}
+
+/// Validate, stage, and commit one archive's bytes into the profile.
+/// Production entry point (no failure injection).
+pub fn restore_profile_from_bytes(
+    profile_dir: &Path,
+    archive_bytes: &[u8],
+) -> Result<RestoreSummary, BackupFailure> {
+    restore_profile_from_bytes_with_hook(profile_dir, archive_bytes, None)
+}
+
+/// Read one host-picked archive through the bounded policy and restore it.
+/// Used by the dedicated STA worker after the host-owned open dialog.
+pub fn restore_profile_from_picked_file(
+    profile_dir: &Path,
+    picked: &Path,
+) -> Result<RestoreSummary, BackupFailure> {
+    let bytes = read_archive_file(picked)?;
+    restore_profile_from_bytes(profile_dir, &bytes)
+}
+
+/// Resolve the host-owned restore-dialog configuration: translated title
+/// only. The renderer influences none of this.
+pub fn restore_dialog_config(profile_dir: &Path) -> String {
+    let found = crate::localization::lookup(profile_dir, DIALOG_OPEN_TITLE_KEY);
+    if found.value.is_empty() {
+        FALLBACK_DIALOG_OPEN_TITLE.to_owned()
+    } else {
+        found.value
+    }
+}
+
+/// Outcome of the host-owned restore picker: cancelled/empty, one
+/// host-selected archive path, or a host failure that never leaks paths.
+#[derive(Debug)]
+pub enum OpenPickerOutcome {
+    /// The user dismissed the dialog. Normal control flow: resolves the
+    /// canceled outcome, never rejects.
+    Canceled,
+    /// Host-selected archive to read (bounded, validated downstream). The
+    /// path stays host-side; only the clientMods envelope crosses the bridge.
+    Selected(PathBuf),
+    /// The picker itself failed (COM/shell error, unsupported platform). No
+    /// path and no OS error text cross this boundary.
+    Failed(BackupFailure),
+}
+
+/// Show the host-owned backup restore picker and return its outcome.
+///
+/// Windows Common Item Dialog (`IFileOpenDialog`) preserving the Electron
+/// semantics: translated title, one `ZIP/*.zip` filter, open-file semantics
+/// with `FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM`, single selection. MUST run
+/// on an STA thread with COM already initialized (the dedicated restore
+/// worker owns that); the dialog is entirely host-side and modal to the
+/// worker, never to the WebView thread.
+///
+/// Deliberate Electron difference: no renderer-supplied anything (Electron's
+/// handler likewise takes no arguments — the parity is exact here).
+#[cfg(target_os = "windows")]
+pub fn show_open_picker(profile_dir: &Path) -> OpenPickerOutcome {
+    use windows::Win32::{
+        System::Com::{CoCreateInstance, CLSCTX_ALL},
+        UI::Shell::{FileOpenDialog, IFileOpenDialog},
+    };
+
+    let failed =
+        |code: &'static str, message: &str| OpenPickerOutcome::Failed(failure(code, message));
+    let title = restore_dialog_config(profile_dir);
+    let dialog: IFileOpenDialog =
+        match unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) } {
+            Ok(dialog) => dialog,
+            Err(_) => {
+                return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+            }
+        };
+    // Every COM interface call below is unsafe by windows-crate contract;
+    // the STA worker guarantees the threading model (STA + COM initialized
+    // exactly once for its thread) that makes them sound to invoke.
+    unsafe { show_open_picker_inner(&dialog, &title) }
+}
+
+/// Inner picker flow: every COM call. Split so the caller documents the
+/// safety contract once instead of scattering `unsafe` per call.
+#[cfg(target_os = "windows")]
+unsafe fn show_open_picker_inner(
+    dialog: &windows::Win32::UI::Shell::IFileOpenDialog,
+    title: &str,
+) -> OpenPickerOutcome {
+    use windows::{
+        core::{HSTRING, PCWSTR},
+        Win32::UI::Shell::{
+            Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH,
+        },
+    };
+
+    let failed =
+        |code: &'static str, message: &str| OpenPickerOutcome::Failed(failure(code, message));
+    if dialog.SetTitle(&HSTRING::from(title)).is_err() {
+        return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+    }
+    // The single ZIP filter, mirroring Electron's `filters: [{ name: "ZIP",
+    // extensions: ["zip"] }]`. HSTRING buffers outlive the borrowed PCWSTRs.
+    let filter_name = HSTRING::from(DIALOG_FILTER_NAME);
+    let filter_spec = HSTRING::from(DIALOG_FILTER_SPEC);
+    let specs = [COMDLG_FILTERSPEC {
+        pszName: PCWSTR(filter_name.as_ptr()),
+        pszSpec: PCWSTR(filter_spec.as_ptr()),
+    }];
+    if dialog.SetFileTypes(&specs).is_err() {
+        return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+    }
+    if dialog.SetFileTypeIndex(1).is_err() {
+        return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+    }
+    // Open-file semantics layered onto the dialog defaults (never replacing
+    // them). Single selection: no FOS_ALLOWMULTISELECT — one archive per
+    // restore, exactly like Electron's single `filePaths[0]`.
+    let options = match dialog.GetOptions() {
+        Ok(options) => options,
+        Err(_) => {
+            return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+        }
+    };
+    if dialog
+        .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST)
+        .is_err()
+    {
+        return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+    }
+    // No owner window: the picker is host-side and worker-modal, so the
+    // WebView/UI thread stays responsive while it is open.
+    match unsafe { dialog.Show(None) } {
+        Ok(()) => {}
+        Err(error) => {
+            // ERROR_CANCELLED (1223): the user dismissed the dialog. Normal
+            // control flow, never an error.
+            if error.code() == windows::core::HRESULT::from_win32(1223) {
+                return OpenPickerOutcome::Canceled;
+            }
+            return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+        }
+    }
+    let item = match dialog.GetResult() {
+        Ok(item) => item,
+        Err(_) => {
+            return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+        }
+    };
+    let display = match item.GetDisplayName(SIGDN_FILESYSPATH) {
+        Ok(display) => display,
+        Err(_) => {
+            return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+        }
+    };
+    let text = unsafe { display.to_string().unwrap_or_default() };
+    unsafe {
+        windows::Win32::System::Com::CoTaskMemFree(Some(display.0 as *const std::ffi::c_void));
+    }
+    if text.is_empty() {
+        return failed("BACKUP_FAILED", "backup restore picker cannot be shown");
+    }
+    // The path stays host-side; only the clientMods envelope crosses the
+    // bridge after validation + staging + commit.
+    OpenPickerOutcome::Selected(PathBuf::from(text))
+}
+
+/// Non-Windows builds fail closed: the picker is a Windows WebView2 surface
+/// (project rule), never a guessed shell command.
+#[cfg(not(target_os = "windows"))]
+pub fn show_open_picker(_profile_dir: &Path) -> OpenPickerOutcome {
+    OpenPickerOutcome::Failed(failure(
+        "BACKUP_UNSUPPORTED_PLATFORM",
+        "backup restore is not supported on this platform",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1438,5 +2736,906 @@ mod tests {
         {
             eprintln!("SKIP: live dialog test is Windows-only");
         }
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn restore_profile(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must advance")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "legcord-native-restore-test-{}-{tag}-{nanos}",
+            std::process::id(),
+        ));
+        std::fs::create_dir_all(&dir).expect("must create temp profile");
+        dir
+    }
+
+    fn full_includes() -> &'static str {
+        r#"{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true}"#
+    }
+
+    fn manifest_text(includes: &str, client_mods: &str) -> String {
+        format!(
+            r#"{{"version":1,"createdAt":"2026-10-07T00:00:00.000Z","appVersion":"1.3.0","includes":{includes},"clientMods":{client_mods}}}"#
+        )
+    }
+
+    fn default_manifest() -> String {
+        manifest_text(
+            full_includes(),
+            r#"{"vencordLocalStorage":"{\"a\":1}","equicordLocalStorage":null,"shelter":{"plugins":{}}}"#,
+        )
+    }
+
+    /// Independently constructed archive: a raw `zip` writer driven by a
+    /// hand-written manifest string, NOT the native save path. `stored`
+    /// selects the `Stored` (uncompressed) method to prove method-agnostic
+    /// reading; otherwise entries use Deflate.
+    fn raw_zip(entries: &[(&str, &[u8])], stored: bool) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            let method = if stored {
+                zip::CompressionMethod::Stored
+            } else {
+                zip::CompressionMethod::Deflated
+            };
+            let options = zip::write::SimpleFileOptions::default().compression_method(method);
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn profile_files(profile: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![profile.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(listing) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in listing.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(
+                        path.strip_prefix(profile)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn manifest_validation_pins_version_shape_and_bounds() {
+        let (_, envelope) = validate_restore_manifest(&default_manifest()).unwrap();
+        assert_eq!(envelope["vencordLocalStorage"], "{\"a\":1}");
+        // Wrong version fails.
+        let bad = manifest_text(full_includes(), "{}").replace("\"version\":1", "\"version\":2");
+        assert_eq!(
+            validate_restore_manifest(&bad).unwrap_err().code,
+            "INVALID_BACKUP"
+        );
+        // Malformed JSON fails.
+        assert_eq!(
+            validate_restore_manifest("{not json").unwrap_err().code,
+            "INVALID_BACKUP"
+        );
+        // Unknown include keys fail (the seven flags are authoritative).
+        let bad_inc = manifest_text(
+            r#"{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"evil":true}"#,
+            "{}",
+        );
+        assert_eq!(
+            validate_restore_manifest(&bad_inc).unwrap_err().code,
+            "INVALID_BACKUP"
+        );
+        // Unknown clientMods keys fail (they would otherwise cross the bridge).
+        let bad_cm = manifest_text(full_includes(), r#"{"evil":{}}"#);
+        assert_eq!(
+            validate_restore_manifest(&bad_cm).unwrap_err().code,
+            "INVALID_BACKUP"
+        );
+        // Wrong-typed clientMods fail.
+        let bad_type = manifest_text(full_includes(), r#"{"vencordLocalStorage":42}"#);
+        assert_eq!(
+            validate_restore_manifest(&bad_type).unwrap_err().code,
+            "INVALID_BACKUP"
+        );
+        // Oversized client data fails bounded.
+        let big = "x".repeat(MAX_CLIENT_MOD_STRING_BYTES + 1);
+        let bad_big = manifest_text(
+            full_includes(),
+            &format!(r#"{{"vencordLocalStorage":"{big}"}}"#),
+        );
+        assert_eq!(
+            validate_restore_manifest(&bad_big).unwrap_err().code,
+            "BACKUP_TOO_LARGE"
+        );
+        // Unknown TOP-LEVEL metadata is forward-compatible (ignored).
+        let extra = default_manifest().replace(
+            "\"appVersion\":\"1.3.0\"",
+            "\"appVersion\":\"1.3.0\",\"futureSection\":{\"paths\":[\"/etc/passwd\"]}",
+        );
+        let (_, envelope) = validate_restore_manifest(&extra).unwrap();
+        assert!(envelope.get("futureSection").is_none());
+    }
+
+    #[test]
+    fn entry_names_reject_escape_shapes() {
+        for bad in [
+            "../escape",
+            "/absolute",
+            "C:/secret",
+            "C:relative",
+            "\\\\server\\share",
+            "data/../../escape",
+            "data/./themes",
+            "data//themes",
+            "data/themes/",
+            "a:b",
+            "with\0nul",
+            "trailing/",
+        ] {
+            assert!(split_archive_name(bad).is_err(), "must reject {bad:?}");
+        }
+        // Backslash traversal normalizes into traversal and is rejected.
+        assert!(split_archive_name("data\\..\\escape").is_err());
+        assert!(split_archive_name("data\\themes\\a.css").is_ok());
+        // Depth and component bounds fail as TOO_LARGE.
+        let deep = (0..MAX_RESTORE_DEPTH + 1)
+            .map(|index| format!("d{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(
+            split_archive_name(&deep).unwrap_err().code,
+            "BACKUP_TOO_LARGE"
+        );
+        let long_component = format!("data/{}", "a".repeat(MAX_RESTORE_COMPONENT_BYTES + 1));
+        assert_eq!(
+            split_archive_name(&long_component).unwrap_err().code,
+            "BACKUP_TOO_LARGE"
+        );
+    }
+
+    #[test]
+    fn independent_archive_restores_every_section() {
+        let profile = restore_profile("independent");
+        let manifest = default_manifest();
+        let archive = raw_zip(
+            &[
+                ("manifest.json", manifest.as_bytes()),
+                (
+                    "data/storage/settings.json",
+                    b"{\"windowStyle\":\"overlay\"}",
+                ),
+                ("data/quickCss.css", b":root{--q:1;}"),
+                (
+                    "data/themes/my-theme/manifest.json",
+                    b"{\"name\":\"M\",\"theme\":\"src.css\",\"enabled\":true}",
+                ),
+                ("data/themes/my-theme/src.css", b":root{--m:1;}"),
+                ("data/themes/loose.css", b":root{--loose:1;}"),
+                ("data/plugins/ext/m.json", b"{}"),
+                ("data/runtime-plugins/rt/index.js", b"x"),
+                ("data/plugin-storage/probe/cache.txt", b"y"),
+                ("bundles/shelter.js", b"shelter"),
+                ("bundles/evil.js", b"must be ignored"),
+                ("unknown-section/file.txt", b"must be ignored"),
+                ("data/storage/other.json", b"must be ignored"),
+            ],
+            false,
+        );
+        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        assert_eq!(summary.entry_count, 9);
+        assert_eq!(summary.client_mods["vencordLocalStorage"], "{\"a\":1}");
+        // Settings land as a merged document (pretty-printed): compare values.
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(profile.join("storage").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["windowStyle"], "overlay");
+        assert_eq!(
+            std::fs::read(profile.join("quickCss.css")).unwrap(),
+            b":root{--q:1;}"
+        );
+        assert_eq!(
+            std::fs::read(profile.join("themes").join("my-theme").join("src.css")).unwrap(),
+            b":root{--m:1;}"
+        );
+        assert_eq!(
+            std::fs::read(profile.join("themes").join("loose.css")).unwrap(),
+            b":root{--loose:1;}"
+        );
+        assert_eq!(
+            std::fs::read(profile.join("extensions").join("ext").join("m.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            std::fs::read(profile.join("plugins").join("rt").join("index.js")).unwrap(),
+            b"x"
+        );
+        assert_eq!(
+            std::fs::read(
+                profile
+                    .join("plugin-storage")
+                    .join("probe")
+                    .join("cache.txt")
+            )
+            .unwrap(),
+            b"y"
+        );
+        assert_eq!(
+            std::fs::read(profile.join("shelter.js")).unwrap(),
+            b"shelter"
+        );
+        // Unknown bundle names, unknown sections, and non-settings storage
+        // files are ignored, never written.
+        assert!(!profile.join("evil.js").exists());
+        assert!(!profile.join("unknown-section").exists());
+        assert!(!profile.join("storage").join("other.json").exists());
+        // Enabled state rides along inside the restored theme manifest
+        // (Electron overwrite parity — the host flips nothing itself).
+        let theme_manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                profile
+                    .join("themes")
+                    .join("my-theme")
+                    .join("manifest.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(theme_manifest["enabled"], true);
+        // No staging/temp residue inside the profile.
+        assert!(profile_files(&profile)
+            .iter()
+            .all(|name| !name.contains(".restore-") && !name.contains(".tmp")));
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn native_save_archive_round_trips_through_restore() {
+        // The archive below is produced by the NATIVE save path
+        // (`collect_backup_entries` + `build_backup_zip`), proving format
+        // compatibility in that direction; the previous test proves an
+        // independently constructed archive restores.
+        let source = restore_profile("roundtrip-src");
+        std::fs::create_dir_all(source.join("storage")).unwrap();
+        std::fs::write(
+            source.join("storage").join("settings.json"),
+            r#"{"windowStyle":"overlay"}"#,
+        )
+        .unwrap();
+        std::fs::write(source.join("quickCss.css"), ":root{}").unwrap();
+        std::fs::create_dir_all(source.join("themes").join("t")).unwrap();
+        std::fs::write(source.join("themes").join("t").join("src.css"), "t").unwrap();
+        let request = validate_backup_request(
+            r#"{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":false,"modBundles":false},"clientMods":{"vencordLocalStorage":"v"}}"#,
+        )
+        .unwrap();
+        let manifest = build_backup_manifest(&request, "1.3.0", "2026-10-07T00:00:00.000Z");
+        let entries = collect_backup_entries(&source, &request.includes).unwrap();
+        let archive = build_backup_zip(&manifest, &entries).unwrap();
+        let dest = restore_profile("roundtrip-dst");
+        let summary = restore_profile_from_bytes(&dest, &archive).unwrap();
+        assert_eq!(summary.entry_count, 3);
+        assert_eq!(summary.client_mods["vencordLocalStorage"], "v");
+        assert!(summary.client_mods.get("equicordLocalStorage").is_none());
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dest.join("storage").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["windowStyle"], "overlay");
+        assert_eq!(
+            std::fs::read(dest.join("quickCss.css")).unwrap(),
+            b":root{}"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("themes").join("t").join("src.css")).unwrap(),
+            b"t"
+        );
+        // Repeated restore is deterministic.
+        let again = restore_profile_from_bytes(&dest, &archive).unwrap();
+        assert_eq!(again.entry_count, summary.entry_count);
+        assert_eq!(profile_files(&dest), profile_files(&dest));
+        std::fs::remove_dir_all(&source).ok();
+        std::fs::remove_dir_all(&dest).ok();
+    }
+
+    #[test]
+    fn structural_failures_reject_before_any_write() {
+        type ArchiveFixture<'a> = (&'a str, &'a [u8]);
+        let cases: Vec<(&str, Vec<ArchiveFixture<'_>>, &str)> = vec![
+            (
+                "missing-manifest",
+                vec![("data/quickCss.css", b"x".as_slice())],
+                "INVALID_ARCHIVE",
+            ),
+            (
+                "bad-json-manifest",
+                vec![
+                    ("manifest.json", b"{not json".as_slice()),
+                    ("data/quickCss.css", b"x".as_slice()),
+                ],
+                "INVALID_BACKUP",
+            ),
+            (
+                "wrong-version",
+                vec![(
+                    "manifest.json",
+                    manifest_text(full_includes(), "{}")
+                        .replace("\"version\":1", "\"version\":7")
+                        .into_bytes()
+                        .leak() as &[u8],
+                )],
+                "INVALID_BACKUP",
+            ),
+            (
+                "traversal",
+                vec![
+                    (
+                        "manifest.json",
+                        default_manifest().into_bytes().leak() as &[u8],
+                    ),
+                    ("data/themes/../escape.css", b"x".as_slice()),
+                    ("data/quickCss.css", b"legit".as_slice()),
+                ],
+                "INVALID_ARCHIVE",
+            ),
+            (
+                "absolute",
+                vec![
+                    (
+                        "manifest.json",
+                        default_manifest().into_bytes().leak() as &[u8],
+                    ),
+                    ("/absolute.css", b"x".as_slice()),
+                ],
+                "INVALID_ARCHIVE",
+            ),
+            (
+                "case-collision",
+                vec![
+                    (
+                        "manifest.json",
+                        default_manifest().into_bytes().leak() as &[u8],
+                    ),
+                    ("data/quickCss.css", b"first".as_slice()),
+                    ("DATA/QUICKCSS.CSS", b"second".as_slice()),
+                ],
+                "INVALID_ARCHIVE",
+            ),
+            (
+                "separator-collision",
+                vec![
+                    (
+                        "manifest.json",
+                        default_manifest().into_bytes().leak() as &[u8],
+                    ),
+                    ("data/themes/a/x.css", b"first".as_slice()),
+                    ("data\\themes\\a\\x.css", b"second".as_slice()),
+                ],
+                "INVALID_ARCHIVE",
+            ),
+        ];
+        for (tag, entries, code) in cases {
+            let profile = restore_profile(tag);
+            // A pre-existing file proves no partial write happened.
+            std::fs::write(profile.join("quickCss.css"), "original").unwrap();
+            let archive = raw_zip(
+                &entries
+                    .iter()
+                    .map(|(name, data)| (*name, *data))
+                    .collect::<Vec<_>>(),
+                false,
+            );
+            let failure = restore_profile_from_bytes(&profile, &archive).unwrap_err();
+            assert_eq!(failure.code, code, "case {tag}");
+            assert_eq!(
+                std::fs::read(profile.join("quickCss.css")).unwrap(),
+                b"original",
+                "case {tag} must not partially write"
+            );
+            assert!(!failure.message.contains("quickCss"));
+            std::fs::remove_dir_all(&profile).ok();
+        }
+        // Exact duplicates cannot be built with the high-level zip writer
+        // (it rejects them at construction, and the native saver never emits
+        // them): the whole-table detector is asserted directly, while the
+        // case/backslash variants above prove the wiring end to end.
+        assert_eq!(
+            reject_duplicate_names(&[
+                "manifest.json".to_owned(),
+                "data/quickCss.css".to_owned(),
+                "data/quickCss.css".to_owned(),
+            ])
+            .unwrap_err()
+            .code,
+            "INVALID_ARCHIVE"
+        );
+        assert!(reject_duplicate_names(&[
+            "manifest.json".to_owned(),
+            "data/quickCss.css".to_owned(),
+        ])
+        .is_ok());
+        // Malformed bytes and empty input are structural failures too.
+        let profile = restore_profile("malformed");
+        assert_eq!(
+            restore_profile_from_bytes(&profile, b"not a zip at all".as_slice())
+                .unwrap_err()
+                .code,
+            "INVALID_ARCHIVE"
+        );
+        assert_eq!(
+            restore_profile_from_bytes(&profile, b"".as_slice())
+                .unwrap_err()
+                .code,
+            "INVALID_ARCHIVE"
+        );
+        assert!(profile_files(&profile).is_empty());
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn include_flags_gate_every_section() {
+        let off = r#"{"legcordConfig":false,"legcordThemesAndQuickCss":false,"legcordExtensionPlugins":false,"vencordModData":false,"equicordModData":false,"shelterModData":false,"modBundles":false}"#;
+        let archive = raw_zip(
+            &[
+                ("manifest.json", manifest_text(off, "{}").as_bytes()),
+                ("data/storage/settings.json", b"{\"a\":1}"),
+                ("data/quickCss.css", b"q"),
+                ("data/themes/t/src.css", b"t"),
+                ("data/plugins/e/f.txt", b"e"),
+                ("data/runtime-plugins/r/f.txt", b"r"),
+                ("data/plugin-storage/p/f.txt", b"p"),
+                ("bundles/shelter.js", b"s"),
+            ],
+            false,
+        );
+        let profile = restore_profile("flags-off");
+        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        assert_eq!(summary.entry_count, 0);
+        assert!(profile_files(&profile).is_empty());
+        // A section absent while its flag is true restores nothing, cleanly.
+        let sparse = raw_zip(&[("manifest.json", default_manifest().as_bytes())], false);
+        let summary = restore_profile_from_bytes(&profile, &sparse).unwrap();
+        assert_eq!(summary.entry_count, 0);
+        assert_eq!(summary.client_mods["vencordLocalStorage"], "{\"a\":1}");
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn section_identifiers_are_validated() {
+        let bad_names = [
+            "data/themes/my theme/x.css",
+            "data/themes/CON/x.css",
+            "data/themes/good/CON.css",
+            "data/themes/good/C:\\x.css",
+            "data/plugin-storage/bad id/x.txt",
+            "data/plugin-storage/lonely.txt",
+            "data/plugin-storage/p/../x.txt",
+            "data/plugins/../escape.txt",
+            "data/runtime-plugins/../escape.txt",
+        ];
+        for (index, name) in bad_names.iter().enumerate() {
+            let profile = restore_profile(&format!("ids-{index}"));
+            let archive = raw_zip(
+                &[
+                    ("manifest.json", default_manifest().as_bytes()),
+                    (*name, b"x".as_slice()),
+                ],
+                false,
+            );
+            assert!(
+                restore_profile_from_bytes(&profile, &archive).is_err(),
+                "must reject {name:?}"
+            );
+            assert!(profile_files(&profile).is_empty());
+            std::fs::remove_dir_all(&profile).ok();
+        }
+        // Every bundle allowlist name restores; anything else is ignored.
+        let manifest = default_manifest();
+        let mut entries: Vec<(&str, &[u8])> = vec![("manifest.json", manifest.as_bytes())];
+        let bundle_names = [
+            "vencord.js",
+            "vencord.css",
+            "equicord.js",
+            "equicord.css",
+            "shelter.js",
+            "custom.js",
+            "custom.css",
+        ];
+        for name in bundle_names {
+            entries.push((
+                Box::leak(format!("bundles/{name}").into_boxed_str()) as &str,
+                b"b".as_slice(),
+            ));
+        }
+        let profile = restore_profile("bundles");
+        let archive = raw_zip(&entries, false);
+        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        assert_eq!(summary.entry_count, 7);
+        for name in bundle_names {
+            assert_eq!(std::fs::read(profile.join(name)).unwrap(), b"b");
+        }
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn content_bounds_fail_closed() {
+        // Normal file one byte over the per-file bound.
+        let big = vec![b'x'; MAX_BACKUP_FILE_BYTES + 1];
+        let profile = restore_profile("big-file");
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/quickCss.css", &big),
+            ],
+            true,
+        );
+        assert_eq!(
+            restore_profile_from_bytes(&profile, &archive)
+                .unwrap_err()
+                .code,
+            "BACKUP_TOO_LARGE"
+        );
+        assert!(profile_files(&profile).is_empty());
+        // Bundle one byte over the bundle ceiling.
+        let huge = vec![b'x'; MAX_BACKUP_BUNDLE_BYTES + 1];
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("bundles/shelter.js", &huge),
+            ],
+            true,
+        );
+        assert_eq!(
+            restore_profile_from_bytes(&profile, &archive)
+                .unwrap_err()
+                .code,
+            "BACKUP_TOO_LARGE"
+        );
+        assert!(profile_files(&profile).is_empty());
+        drop(huge);
+        // Total uncompressed over 64 MiB (65 × 1 MiB stored entries).
+        let one = vec![b'z'; MAX_BACKUP_FILE_BYTES];
+        let total_manifest = default_manifest();
+        let mut entries: Vec<(&str, &[u8])> = vec![("manifest.json", total_manifest.as_bytes())];
+        for index in 0..65 {
+            entries.push((
+                Box::leak(format!("data/plugins/many/f{index}.bin").into_boxed_str()) as &str,
+                one.as_slice(),
+            ));
+        }
+        let archive = raw_zip(&entries, true);
+        assert_eq!(
+            restore_profile_from_bytes(&profile, &archive)
+                .unwrap_err()
+                .code,
+            "BACKUP_TOO_LARGE"
+        );
+        assert!(profile_files(&profile).is_empty());
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn entry_count_bound_fails_closed() {
+        let manifest = default_manifest();
+        let mut entries: Vec<(&str, &[u8])> = vec![("manifest.json", manifest.as_bytes())];
+        for index in 0..MAX_BACKUP_ENTRIES {
+            entries.push((
+                Box::leak(format!("data/plugins/crowd/f{index}.txt").into_boxed_str()) as &str,
+                b"x".as_slice(),
+            ));
+        }
+        let profile = restore_profile("crowd");
+        let archive = raw_zip(&entries, true);
+        assert_eq!(
+            restore_profile_from_bytes(&profile, &archive)
+                .unwrap_err()
+                .code,
+            "BACKUP_TOO_LARGE"
+        );
+        assert!(profile_files(&profile).is_empty());
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn settings_merge_preserves_unknown_keys() {
+        let profile = restore_profile("merge");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        std::fs::write(
+            profile.join("storage").join("settings.json"),
+            r#"{"windowStyle":"overlay","futureKey":{"nested":1}}"#,
+        )
+        .unwrap();
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                (
+                    "data/storage/settings.json",
+                    b"{\"windowStyle\":\"default\",\"added\":true}",
+                ),
+            ],
+            false,
+        );
+        restore_profile_from_bytes(&profile, &archive).unwrap();
+        let merged: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(profile.join("storage").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        // Archive keys win; existing and unknown keys survive (shallow merge).
+        assert_eq!(merged["windowStyle"], "default");
+        assert_eq!(merged["added"], true);
+        assert_eq!(merged["futureKey"]["nested"], 1);
+        // A corrupt existing file merges from {} (Electron cache parity).
+        std::fs::write(profile.join("storage").join("settings.json"), b"{broken").unwrap();
+        restore_profile_from_bytes(&profile, &archive).unwrap();
+        let merged: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(profile.join("storage").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(merged["windowStyle"], "default");
+        // A non-object staged settings blob is rejected before any write.
+        let bad = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/storage/settings.json", b"[1,2,3]"),
+            ],
+            false,
+        );
+        assert_eq!(
+            restore_profile_from_bytes(&profile, &bad).unwrap_err().code,
+            "INVALID_BACKUP"
+        );
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn overwrite_replace_repeat_and_unrelated_files() {
+        let profile = restore_profile("overwrite");
+        std::fs::write(profile.join("quickCss.css"), "old").unwrap();
+        std::fs::write(profile.join("unrelated.txt"), "keep").unwrap();
+        let first = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/quickCss.css", b"new".as_slice()),
+            ],
+            false,
+        );
+        restore_profile_from_bytes(&profile, &first).unwrap();
+        assert_eq!(std::fs::read(profile.join("quickCss.css")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(profile.join("unrelated.txt")).unwrap(),
+            b"keep"
+        );
+        // Exact replacement twice converges.
+        restore_profile_from_bytes(&profile, &first).unwrap();
+        assert_eq!(std::fs::read(profile.join("quickCss.css")).unwrap(), b"new");
+        // A directory at a file position fails BEFORE any write (Electron
+        // would fail mid-loop with earlier entries already committed).
+        std::fs::remove_file(profile.join("quickCss.css")).unwrap();
+        std::fs::create_dir_all(profile.join("quickCss.css")).unwrap();
+        let failure = restore_profile_from_bytes(&profile, &first).unwrap_err();
+        assert_eq!(failure.code, "BACKUP_FAILED");
+        assert!(profile.join("quickCss.css").is_dir());
+        assert_eq!(
+            std::fs::read(profile.join("unrelated.txt")).unwrap(),
+            b"keep"
+        );
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn commit_failures_roll_back_to_pre_restore_bytes() {
+        // fail_after = 1: first file commits, second fails -> the first is
+        // restored and the second never lands.
+        let profile = restore_profile("rollback-mid");
+        std::fs::write(profile.join("quickCss.css"), "original-css").unwrap();
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/quickCss.css", b"new-css".as_slice()),
+                ("data/themes/t/src.css", b"new-theme".as_slice()),
+            ],
+            false,
+        );
+        let failure =
+            restore_profile_from_bytes_with_hook(&profile, &archive, Some(1)).unwrap_err();
+        assert_eq!(failure.code, "BACKUP_FAILED");
+        assert_eq!(
+            std::fs::read(profile.join("quickCss.css")).unwrap(),
+            b"original-css"
+        );
+        assert!(profile_files(&profile)
+            .iter()
+            .all(|name| !name.starts_with("themes/")));
+        // fail_after covers the final commit too: everything rolls back.
+        let failure =
+            restore_profile_from_bytes_with_hook(&profile, &archive, Some(2)).unwrap_err();
+        assert_eq!(failure.code, "BACKUP_FAILED");
+        assert_eq!(
+            std::fs::read(profile.join("quickCss.css")).unwrap(),
+            b"original-css"
+        );
+        assert!(profile_files(&profile)
+            .iter()
+            .all(|name| !name.starts_with("themes/")));
+        // ... and a clean run commits everything.
+        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        assert_eq!(summary.entry_count, 2);
+        assert_eq!(
+            std::fs::read(profile.join("quickCss.css")).unwrap(),
+            b"new-css"
+        );
+        // Settings rollback restores the pre-restore document.
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        std::fs::write(
+            profile.join("storage").join("settings.json"),
+            r#"{"keepMe":1}"#,
+        )
+        .unwrap();
+        let settings_archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/storage/settings.json", b"{\"keepMe\":2}".as_slice()),
+                ("data/quickCss.css", b"new-css".as_slice()),
+            ],
+            false,
+        );
+        let failure =
+            restore_profile_from_bytes_with_hook(&profile, &settings_archive, Some(1)).unwrap_err();
+        assert_eq!(failure.code, "BACKUP_FAILED");
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(profile.join("storage").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["keepMe"], 1);
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn symlink_destinations_fail_closed_without_outside_writes() {
+        let profile = restore_profile("link-dest");
+        let outside = restore_profile("link-outside");
+        std::fs::write(outside.join("secret.txt"), "outside").unwrap();
+        std::fs::create_dir_all(profile.join("themes")).unwrap();
+        let link = profile.join("themes").join("linked");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&outside, &link).is_ok();
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+        if !made {
+            eprintln!("SKIP: link creation needs privileges in this environment");
+            std::fs::remove_dir_all(&profile).ok();
+            std::fs::remove_dir_all(&outside).ok();
+            return;
+        }
+        // A theme directory that resolves outside fails closed at commit.
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/themes/linked/x.css", b"evil".as_slice()),
+            ],
+            false,
+        );
+        let before = profile_files(&profile);
+        assert!(restore_profile_from_bytes(&profile, &archive).is_err());
+        assert!(!outside.join("x.css").exists());
+        assert_eq!(profile_files(&profile), before);
+        // A symlink AT a file destination fails in the pre-commit check.
+        std::fs::remove_dir_all(&link).ok();
+        std::fs::create_dir_all(profile.join("extensions")).unwrap();
+        let file_link = profile.join("quickCss.css");
+        #[cfg(windows)]
+        let made_file =
+            std::os::windows::fs::symlink_file(outside.join("secret.txt"), &file_link).is_ok();
+        #[cfg(not(windows))]
+        let made_file = std::os::unix::fs::symlink(outside.join("secret.txt"), &file_link).is_ok();
+        if made_file {
+            let archive = raw_zip(
+                &[
+                    ("manifest.json", default_manifest().as_bytes()),
+                    ("data/quickCss.css", b"evil".as_slice()),
+                ],
+                false,
+            );
+            assert!(restore_profile_from_bytes(&profile, &archive).is_err());
+            assert_eq!(
+                std::fs::read(outside.join("secret.txt")).unwrap(),
+                b"outside"
+            );
+        }
+        std::fs::remove_dir_all(&profile).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn client_mods_envelope_is_bounded_but_never_applied() {
+        // The host returns the envelope; applying it is renderer-owned.
+        let profile = restore_profile("clientmods");
+        // Shelter nesting past the depth bound fails.
+        let mut nested = serde_json::json!({"leaf": true});
+        for _ in 0..(MAX_SHELTER_DEPTH + 4) {
+            nested = serde_json::json!({"next": nested});
+        }
+        let manifest = manifest_text(
+            full_includes(),
+            &serde_json::to_string(&serde_json::json!({"shelter": nested})).unwrap(),
+        );
+        let archive = raw_zip(&[("manifest.json", manifest.as_bytes())], false);
+        assert_eq!(
+            restore_profile_from_bytes(&profile, &archive)
+                .unwrap_err()
+                .code,
+            "BACKUP_TOO_LARGE"
+        );
+        // A bounded envelope restores with byte-exact fidelity.
+        let archive = raw_zip(&[("manifest.json", default_manifest().as_bytes())], false);
+        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        assert_eq!(summary.entry_count, 0);
+        assert_eq!(
+            summary.client_mods["shelter"]["plugins"],
+            serde_json::json!({})
+        );
+        assert!(summary.client_mods_bytes > 0);
+        assert!(summary.client_mods_bytes <= MAX_CLIENT_MODS_BYTES);
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn restore_errors_carry_codes_only_never_paths() {
+        let profile = restore_profile("codes");
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/themes/../escape.css", b"x".as_slice()),
+            ],
+            false,
+        );
+        let failure = restore_profile_from_bytes(&profile, &archive).unwrap_err();
+        assert!(!failure.message.contains("escape"));
+        assert!(!failure.message.contains("themes"));
+        assert!(!failure.message.contains('\\'));
+        assert!(!failure.message.contains('/'));
+        assert!(!failure
+            .message
+            .contains(&profile.to_string_lossy().into_owned()));
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn open_picker_config_pins_translated_title() {
+        // No lang.json: the embedded en-US catalog applies.
+        let profile = restore_profile("dialog");
+        assert_eq!(restore_dialog_config(&profile), FALLBACK_DIALOG_OPEN_TITLE);
+        assert_eq!(restore_dialog_config(&profile), "Open Legcord backup");
+        assert_eq!(DIALOG_OPEN_TITLE_KEY, "backup-dialogOpen-title");
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn picked_archive_read_is_bounded_and_link_free() {
+        let dir = restore_profile("picked");
+        let missing = dir.join("gone.zip");
+        assert!(read_archive_file(&missing).is_err());
+        let archive = raw_zip(&[("manifest.json", default_manifest().as_bytes())], false);
+        let picked = dir.join("picked.zip");
+        std::fs::write(&picked, &archive).unwrap();
+        assert_eq!(read_archive_file(&picked).unwrap(), archive);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

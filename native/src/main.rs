@@ -33,7 +33,8 @@ use mod_substrate::{
 use app::{current_app_version, validate_version};
 use backup::{
     build_backup_manifest, build_backup_zip, collect_backup_entries, created_at_now,
-    show_save_picker, validate_backup_request, BackupFailure, BackupSaveSummary, SavePickerOutcome,
+    restore_profile_from_picked_file, show_open_picker, show_save_picker, validate_backup_request,
+    BackupFailure, BackupSaveSummary, OpenPickerOutcome, RestoreSummary, SavePickerOutcome,
 };
 use bundles::{describe_bundle_files, BUNDLE_FILES};
 use css_watch::{
@@ -46,14 +47,14 @@ use folders::{
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
-    parse_bridge_message, validate_mod_bundle_id, AppVersionResponse, BackupSavedResponse,
-    BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest,
-    BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
-    FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse, PingResponse,
-    PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse,
-    SettingsMutationResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
-    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
-    PROTOCOL_VERSION,
+    parse_bridge_message, validate_mod_bundle_id, AppVersionResponse, BackupRestoredResponse,
+    BackupSavedResponse, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage,
+    BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry,
+    BundlesListResponse, FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse,
+    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker,
+    SettingsConfigResponse, SettingsMutationResponse, ThemeEnabledResponse,
+    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
+    ThemesListResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -258,6 +259,7 @@ const THEME_IMPORT_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_IMPORT_SMOKE";
 const THEME_SET_ENABLED_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
 const THEME_LIST_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_LIST_SMOKE";
 const BACKUP_SAVE_SMOKE_ENV: &str = "LEGCORD_NATIVE_BACKUP_SAVE_SMOKE";
+const BACKUP_RESTORE_SMOKE_ENV: &str = "LEGCORD_NATIVE_BACKUP_RESTORE_SMOKE";
 const SHELTER_LOADER_PROBE_ENV: &str = "LEGCORD_NATIVE_LOADER_PROBE";
 const SETTINGS_BOOT_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE";
 const SETTINGS_UI_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_UI_SMOKE";
@@ -281,6 +283,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "plugin_storage.write",
         "backup.list_bundles",
         "backup.save",
+        "backup.restore",
         "folders.open",
         "folders.open_theme",
         "themes.install_code",
@@ -1180,11 +1183,6 @@ const BACKUP_SAVE_SMOKE_SCRIPT: &str = r#"
         fail("backup save facade missing");
         return;
       }
-      // No restore surface may exist alongside the save capability.
-      if (typeof backup.restore === "function") {
-        fail("backup restore must not exist");
-        return;
-      }
       // Fixed probe payload: every section on, small synthetic envelope.
       // Cancellation is control flow ({ ok: false, error: "CANCELLED" }),
       // never a rejection.
@@ -1215,6 +1213,63 @@ const BACKUP_SAVE_SMOKE_SCRIPT: &str = r#"
         probe({ ok: true, stage: "save", canceled: true, bytes: 0, error: null });
       } else {
         fail(result.error || "backup save failed");
+      }
+    } catch (error) {
+      fail(error);
+    }
+  })();
+})();
+"#;
+
+/// DEV-only backup restore probe (`LEGCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`).
+/// Opens the REAL host picker through the `backup.restore` capability and
+/// reports the bounded outcome as one typed `backup_restore_probe` event per
+/// document with `stage: "restore"`. Completion validates, stages, commits,
+/// and reports the clientMods byte size (the host never applies clientMods —
+/// no localStorage write, no remote-plugin fetch, no script execution);
+/// dismissal resolves `{ canceled: true }` and the probe reports the silent
+/// path. Like the save probe there is no `attacks_blocked`: the facade takes
+/// no input, so there is no client-side attack shape to block. The probe
+/// never carries settings, themes, paths, URLs, or client-mod contents —
+/// only stage strings, flags, and byte counts.
+const BACKUP_RESTORE_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "backup_restore_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "restore", canceled: false, client_mods_bytes: 0,
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  (async () => {
+    try {
+      const backup = window.legcord?.backup;
+      if (typeof backup?.restore !== "function") {
+        fail("backup restore facade missing");
+        return;
+      }
+      // Parameter-free by protocol: no archive path, filename, URL,
+      // filter, or dialog option may exist alongside the capability.
+      if (backup.restore.length !== 0) {
+        fail("restore facade must take no arguments");
+        return;
+      }
+      // Opens the real host picker; user completion or dismissal resolves.
+      // Cancellation is control flow ({ ok: false, error: "CANCELLED" }),
+      // never a rejection. The host never applies clientMods: the probe
+      // reports the envelope size only.
+      const result = await backup.restore();
+      if (!result || typeof result.ok !== "boolean") {
+        fail("backup restore result shape is invalid");
+        return;
+      }
+      if (result.ok === true) {
+        const envelope = JSON.stringify(result.clientMods ?? null);
+        probe({ ok: true, stage: "restore", canceled: false, client_mods_bytes: envelope.length, error: null });
+      } else if (result.error === "CANCELLED") {
+        probe({ ok: true, stage: "restore", canceled: true, client_mods_bytes: 0, error: null });
+      } else {
+        fail(result.error || "backup restore failed");
       }
     } catch (error) {
       fail(error);
@@ -2099,6 +2154,16 @@ enum NativeEvent {
         received_at: Instant,
         result: Result<BackupSaveSummary, BackupFailure>,
     },
+    /// Completed backup restore from the dedicated STA restore worker. The
+    /// worker owns the modal open dialog, the bounded archive read, full
+    /// validation, staging, and the commit with rollback, so the WebView/UI
+    /// thread never blocks; the bounded outcome (cancellation plus the
+    /// clientMods envelope — never a path) is delivered here.
+    BackupRestoreReady {
+        request_id: String,
+        received_at: Instant,
+        result: Result<RestoreSummary, BackupFailure>,
+    },
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -2272,6 +2337,72 @@ fn run_backup_save_job(job: &BackupSaveJob) -> Result<BackupSaveSummary, BackupF
         canceled: false,
         bytes: persisted,
     })
+}
+
+/// Name of the dedicated STA worker thread that owns the backup restore
+/// dialog plus the bounded read, full validation, staging, and commit with
+/// rollback. The modal dialog must never run on the WebView/UI thread: COM
+/// is initialized exactly once for this thread (STA, as the Common Item
+/// Dialog requires — never once per request), and restore jobs are processed
+/// sequentially for determinism and bounded memory. A separate worker from
+/// the save path keeps the two lifecycles (write-new-archive vs
+/// overwrite-profile) isolated: a stuck save dialog can never block a
+/// restore and vice versa.
+const BACKUP_RESTORE_WORKER_NAME: &str = "legcord-backup-restore-sta";
+
+/// One backup-restore job for the dedicated STA worker thread. The renderer
+/// supplies nothing: the dialog, the picked path, validation, staging, and
+/// commit are all host-owned.
+struct BackupRestoreJob {
+    request_id: String,
+    received_at: Instant,
+    profile: PathBuf,
+    proxy: EventLoopProxy<NativeEvent>,
+}
+
+/// Run one backup-restore job on the STA worker: show the host-owned open
+/// dialog, read the picked archive bounded, validate the entire archive,
+/// stage outside the profile, and commit with rollback. Cancellation is
+/// normal control flow (`canceled: true`, zeroed envelope). Timings are
+/// logged by stage (dialog wait, validation + staging, commit) so dialog
+/// wait never masquerades as host work.
+fn run_backup_restore_job(job: &BackupRestoreJob) -> Result<RestoreSummary, BackupFailure> {
+    let dialog_started = Instant::now();
+    let picked = match show_open_picker(&job.profile) {
+        OpenPickerOutcome::Canceled => {
+            println!("[Backup][Restore] picker dismissed by the user");
+            return Ok(RestoreSummary {
+                canceled: true,
+                client_mods: serde_json::Value::Null,
+                archive_bytes: 0,
+                uncompressed_bytes: 0,
+                entry_count: 0,
+                client_mods_bytes: 0,
+            });
+        }
+        OpenPickerOutcome::Selected(path) => path,
+        OpenPickerOutcome::Failed(failure) => {
+            eprintln!("[Backup][Restore:{}] {}", failure.code, failure.message);
+            return Err(failure);
+        }
+    };
+    let dialog_ms = dialog_started.elapsed().as_secs_f64() * 1000.0;
+    let restore_started = Instant::now();
+    let summary =
+        restore_profile_from_picked_file(&job.profile, &picked).inspect_err(|failure| {
+            eprintln!("[Backup][Restore:{}] {}", failure.code, failure.message);
+        })?;
+    let restore_ms = restore_started.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "[Backup][Restore] entries={} uncompressed={} archive={} client_mods={} dialog_wait_ms={:.3} restore_ms={:.3}",
+        summary.entry_count,
+        summary.uncompressed_bytes,
+        summary.archive_bytes,
+        summary.client_mods_bytes,
+        dialog_ms,
+        restore_ms,
+    );
+    Ok(summary)
 }
 
 fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
@@ -2866,6 +2997,67 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         eprintln!("[Backup][Save] could not start the save worker: {error}");
     }
+    // Dedicated STA worker for backup restores: the modal open dialog, the
+    // bounded archive read, full validation, staging, and the commit with
+    // rollback run sequentially here so the WebView/UI thread never blocks.
+    // COM is initialized exactly once for this thread (STA, as the Common
+    // Item Dialog requires); the typed outcome comes back as
+    // BackupRestoreReady on the event loop.
+    let (restore_tx, restore_rx) = std::sync::mpsc::channel::<BackupRestoreJob>();
+    if let Err(error) = thread::Builder::new()
+        .name(BACKUP_RESTORE_WORKER_NAME.to_owned())
+        .spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                let com_init = unsafe {
+                    windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                    )
+                };
+                if com_init.is_err() {
+                    eprintln!(
+                        "[Backup][Restore] STA COM initialization failed; restore jobs will fail closed"
+                    );
+                }
+                let com_owned = com_init == windows::core::HRESULT(0);
+                while let Ok(job) = restore_rx.recv() {
+                    let result = run_backup_restore_job(&job);
+                    queue_event(
+                        &job.proxy,
+                        NativeEvent::BackupRestoreReady {
+                            request_id: job.request_id,
+                            received_at: job.received_at,
+                            result,
+                        },
+                    );
+                }
+                if com_owned {
+                    unsafe {
+                        windows::Win32::System::Com::CoUninitialize();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                while let Ok(job) = restore_rx.recv() {
+                    queue_event(
+                        &job.proxy,
+                        NativeEvent::BackupRestoreReady {
+                            request_id: job.request_id,
+                            received_at: job.received_at,
+                            result: Err(BackupFailure {
+                                code: "BACKUP_UNSUPPORTED_PLATFORM",
+                                message: "backup restore is not supported on this platform".to_owned(),
+                            }),
+                        },
+                    );
+                }
+            }
+        })
+    {
+        eprintln!("[Backup][Restore] could not start the restore worker: {error}");
+    }
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
@@ -2957,6 +3149,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(BACKUP_SAVE_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_backup_save_smoke {
         println!("[Backup][SaveSmoke] backup save smoke probe enabled");
+    }
+    let diagnostic_backup_restore_smoke =
+        std::env::var(BACKUP_RESTORE_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_backup_restore_smoke {
+        println!("[Backup][RestoreSmoke] backup restore smoke probe enabled");
     }
     let diagnostic_shelter_loader_probe =
         std::env::var(SHELTER_LOADER_PROBE_ENV).is_ok_and(|value| value == "1");
@@ -3787,6 +3984,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if diagnostic_backup_save_smoke {
                             if let Err(error) = webview.evaluate_script(BACKUP_SAVE_SMOKE_SCRIPT) {
                                 eprintln!("[Backup][SaveSmoke] probe failed: {error}");
+                            }
+                        }
+                        if diagnostic_backup_restore_smoke {
+                            if let Err(error) = webview.evaluate_script(BACKUP_RESTORE_SMOKE_SCRIPT)
+                            {
+                                eprintln!("[Backup][RestoreSmoke] probe failed: {error}");
                             }
                         }
                         if diagnostic_shelter_loader_probe {
@@ -4877,6 +5080,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::BackupRestore(_) => {
+                            // Import only: the renderer supplies NOTHING (the
+                            // empty payload is enforced by
+                            // `deny_unknown_fields` at parse). The modal open
+                            // dialog, the bounded archive read, full
+                            // validation, staging, and the commit with
+                            // rollback run on the dedicated STA restore
+                            // worker, and the bounded outcome comes back as
+                            // BackupRestoreReady. The renderer waits with the
+                            // long-operation timeout (the picker stays open
+                            // as long as the user needs).
+                            let restore_request_id = request.request_id.clone();
+                            let job = BackupRestoreJob {
+                                request_id: restore_request_id.clone(),
+                                received_at,
+                                profile: profile_path.clone(),
+                                proxy: proxy.clone(),
+                            };
+                            match restore_tx.send(job) {
+                                Ok(()) => {
+                                    println!("[Backup][Restore] restore request accepted");
+                                }
+                                Err(_) => {
+                                    eprintln!(
+                                        "[Backup][Restore:BACKUP_UNAVAILABLE] restore worker is unavailable"
+                                    );
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: restore_request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "BACKUP_UNAVAILABLE",
+                                            message: "backup restore is unavailable".to_owned(),
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) =
+                                        request_tracker.complete(&restore_request_id)
+                                    {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::ModGetBundle(payload) => {                            let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
                                 let response = BridgeResponse {
@@ -5283,6 +5532,67 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            Event::UserEvent(NativeEvent::BackupRestoreReady {
+                request_id,
+                received_at,
+                result,
+            }) => {
+                // Cancellation is normal control flow: it resolves the
+                // bounded canceled outcome, never a bridge rejection, so the
+                // future backup UI shows its silent cancelled toast and no
+                // unhandled rejection can follow. The response carries the
+                // clientMods envelope only — never archive or profile paths.
+                // Cancellation resolves `canceled: true` with a null
+                // envelope; the facade maps it to the silent
+                // `{ ok: false, error: "CANCELLED" }` shape.
+                match result {
+                    Ok(summary) => {
+                        let canceled = summary.canceled;
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: true,
+                            payload: Some(BridgeResponsePayload::BackupRestored(
+                                BackupRestoredResponse {
+                                    canceled,
+                                    client_mods: summary.client_mods,
+                                },
+                            )),
+                            error: None,
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                        println!(
+                            "[Backup][Restore] canceled={} entries={} client_mods={} request_latency_ms={:.3}",
+                            canceled,
+                            summary.entry_count,
+                            summary.client_mods_bytes,
+                            received_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    Err(failure) => {
+                        eprintln!("[Backup][Restore:{}] {}", failure.code, failure.message);
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: false,
+                            payload: None,
+                            error: Some(BridgeError {
+                                code: failure.code,
+                                message: failure.message,
+                            }),
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                    }
+                }
+            }
             Event::UserEvent(NativeEvent::BridgeEvent(message)) => {
                 incoming_messages += 1;
                 event_count += 1;
@@ -5653,6 +5963,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[Backup][SaveSmoke] ok=false stage={} error={}",
+                                payload.stage,
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::BackupRestoreProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Backup][RestoreSmoke] ok=true stage={} canceled={} client_mods_bytes={}",
+                                payload.stage, payload.canceled, payload.client_mods_bytes
+                            );
+                        } else {
+                            eprintln!(
+                                "[Backup][RestoreSmoke] ok=false stage={} error={}",
                                 payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
@@ -6799,14 +7123,14 @@ mod tests {
     }
 
     #[test]
-    fn boot_snapshot_grants_discovery_and_save_for_backups() {
+    fn boot_snapshot_grants_discovery_save_and_restore_for_backups() {
         assert!(super::BOOT_SNAPSHOT
             .capabilities
             .contains(&"backup.list_bundles"));
         assert!(super::BOOT_SNAPSHOT.capabilities.contains(&"backup.save"));
-        // Restore (host-mediated open dialog + zip apply) stays deferred:
-        // save is the only backup-write capability that may exist.
-        assert!(!super::BOOT_SNAPSHOT
+        // Restore (D4-2): host-mediated open dialog plus bounded validate /
+        // stage / commit — the renderer supplies nothing.
+        assert!(super::BOOT_SNAPSHOT
             .capabilities
             .contains(&"backup.restore"));
         assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"backup"));
@@ -6817,7 +7141,7 @@ mod tests {
     }
 
     #[test]
-    fn initialization_script_exposes_namespaced_backup_save_facade() {
+    fn initialization_script_exposes_namespaced_backup_facade() {
         let script = initialization_script(
             &[],
             crate::settings_boot::test_fixture_json(),
@@ -6834,11 +7158,15 @@ mod tests {
         assert!(script.contains("function saveBackup("));
         assert!(script.contains("backup_saved"));
         assert!(script.contains("120_000"));
-        // Restore stays deferred: no restore member, open dialog, or sync
-        // IPC may ride along with save.
+        // Restore (D4-2): the parameter-free restore with the long-operation
+        // timeout and the bounded clientMods outcome. No open-dialog send,
+        // no sync IPC, and no generic invocation may ride along.
+        assert!(script.contains("backup_restore"));
+        assert!(script.contains("backup.restore"));
+        assert!(script.contains("function restoreBackup("));
+        assert!(script.contains("backup_restored"));
         assert!(!script.contains("backupRestore"));
         assert!(!script.contains("showOpenDialog"));
-        assert!(!script.contains("restore:"));
         assert!(!script.contains("sendSync"));
     }
 
@@ -6859,13 +7187,50 @@ mod tests {
         assert!(super::BACKUP_SAVE_SMOKE_SCRIPT.contains("backup_save_probe"));
         assert!(super::BACKUP_SAVE_SMOKE_SCRIPT.contains("CANCELLED"));
         assert!(super::BACKUP_SAVE_SMOKE_SCRIPT.contains("stage"));
-        // The probe asserts restore is ABSENT (never invokes it): no restore
-        // wire type, open dialog, fetch, or sync IPC may appear.
-        assert!(super::BACKUP_SAVE_SMOKE_SCRIPT.contains("backup.restore"));
+        // Save and restore are sibling capabilities now: the save probe never
+        // drives restore (no restore wire type, open dialog, fetch, or sync
+        // IPC may appear in it).
         assert!(!super::BACKUP_SAVE_SMOKE_SCRIPT.contains("backup_restore"));
         assert!(!super::BACKUP_SAVE_SMOKE_SCRIPT.contains("showOpenDialog"));
         assert!(!super::BACKUP_SAVE_SMOKE_SCRIPT.contains("fetch("));
         assert!(!super::BACKUP_SAVE_SMOKE_SCRIPT.contains("sendSync"));
+    }
+
+    #[test]
+    fn backup_restore_runs_on_a_dedicated_named_worker() {
+        // The modal open dialog plus validation/staging/commit must never run
+        // on the WebView/UI thread, and the restore lifecycle stays isolated
+        // from the save lifecycle.
+        assert_eq!(
+            super::BACKUP_RESTORE_WORKER_NAME,
+            "legcord-backup-restore-sta"
+        );
+        assert_ne!(
+            super::BACKUP_RESTORE_WORKER_NAME,
+            super::BACKUP_SAVE_WORKER_NAME
+        );
+        assert_ne!(
+            super::BACKUP_RESTORE_WORKER_NAME,
+            super::THEME_IMPORT_WORKER_NAME
+        );
+    }
+
+    #[test]
+    fn backup_restore_smoke_probe_uses_only_the_restore_capability() {
+        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup.restore"));
+        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup_restore_probe"));
+        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("CANCELLED"));
+        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("stage"));
+        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("client_mods_bytes"));
+        // Parameter-free by protocol: no archive path, filename, URL,
+        // filter, or dialog option may appear. The host never applies
+        // clientMods: no localStorage write, no remote-plugin fetch, no
+        // script execution surface may appear either.
+        assert!(!super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("localStorage"));
+        assert!(!super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("addRemotePlugin"));
+        assert!(!super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("fetch("));
+        assert!(!super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("sendSync"));
+        assert!(!super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("showOpenDialog"));
     }
 
     #[test]

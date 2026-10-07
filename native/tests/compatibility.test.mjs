@@ -1691,16 +1691,20 @@ function respondBundlesList(window, request, bundles = BUNDLE_FIXTURE) {
     );
 }
 
-test("the facade exposes backup save plus discovery and no restore surface", () => {
-    const { window } = createBundlesRuntime(["bridge.ping", "backup.list_bundles", "backup.save"]);
+test("the facade exposes backup save, restore, plus discovery", () => {
+    const { window } = createBundlesRuntime(["bridge.ping", "backup.list_bundles", "backup.save", "backup.restore"]);
     assert.equal(typeof window.legcord.backup.listBundles, "function");
     assert.equal(typeof window.legcord.backup.save, "function");
+    assert.equal(typeof window.legcord.backup.restore, "function");
     assert.equal(Object.isFrozen(window.legcord.backup), true);
     assert.equal(window.legcord.native.supports("backup.list_bundles"), true);
     assert.equal(window.legcord.native.supports("backup.save"), true);
-    // Restore (open dialog + zip apply) stays deferred.
-    assert.equal(window.legcord.backup.restore, undefined);
-    assert.equal(window.legcord.native.supports("backup.restore"), false);
+    assert.equal(window.legcord.native.supports("backup.restore"), true);
+    // No generic restore/filesystem surface may ride along: the Electron
+    // channel names and dialog sends stay out of the native facade.
+    assert.doesNotMatch(bootstrapTemplate, /backupRestore/);
+    assert.doesNotMatch(bootstrapTemplate, /showOpenDialog/);
+    assert.doesNotMatch(bootstrapTemplate, /showSaveDialog/);
 });
 
 test("backup.list_bundles sends a parameter-free typed request and resolves the inventory", async () => {
@@ -1976,6 +1980,164 @@ test("backup.save surfaces malformed save outcomes as the Electron error shape",
 test("backup.save rejects pending requests when the document is disposed", async () => {
     const { window } = createBackupSaveRuntime();
     const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    // Cancellation-by-disposal maps through the Electron error shape, never
+    // an unhandled rejection: the pending promise settles as ok:false.
+    const rejection = pending.then((result) => {
+        assert.equal(result.ok, false);
+    });
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
+});
+
+function createBackupRestoreRuntime(capabilities = ["bridge.ping", "backup.restore"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const BACKUP_RESTORE_ENVELOPE = {
+    vencordLocalStorage: '{"probe":1}',
+    equicordLocalStorage: null,
+    shelter: { plugins: {}, enabledPlugins: [] },
+};
+
+function respondBackupRestored(window, request, payload = { canceled: false, client_mods: BACKUP_RESTORE_ENVELOPE }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "backup_restored", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("backup.restore sends a parameter-free typed request and resolves the envelope", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.legcord.backup.restore();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
+    assert.ok(message);
+    // No archive path, filename, URL, filter, or dialog option may ride along.
+    assert.deepEqual(message.command, { type: "backup_restore", payload: {} });
+
+    respondBackupRestored(window, message);
+    const restored = await pending;
+    assert.equal(restored.ok, true);
+    assert.deepEqual(restored.clientMods, BACKUP_RESTORE_ENVELOPE);
+});
+
+test("backup.restore resolves cancellation as the silent Electron shape", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.legcord.backup.restore();
+    const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
+    respondBackupRestored(window, message, { canceled: true, client_mods: null });
+    const canceled = await pending;
+    assert.equal(canceled.ok, false);
+    assert.equal(canceled.error, "CANCELLED");
+});
+
+test("backup.restore maps typed host failures to the Electron error shape", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.legcord.backup.restore();
+    const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "INVALID_ARCHIVE", message: "backup archive is invalid" },
+            },
+        }),
+    );
+    assert.deepEqual(await pending.then((result) => ({ ok: result.ok, error: result.error })), {
+        ok: false,
+        error: "INVALID_ARCHIVE",
+    });
+});
+
+test("backup.restore throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createBackupRestoreRuntime(["bridge.ping", "backup.save"]);
+    assert.equal(window.legcord.native.supports("backup.restore"), false);
+    assert.throws(
+        () => window.legcord.backup.restore(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "backup_restore"),
+        false,
+    );
+});
+
+test("backup.restore surfaces malformed restore outcomes without paths", async () => {
+    // A path riding along with the outcome.
+    const withPath = createBackupRestoreRuntime();
+    const pendingPath = withPath.window.legcord.backup.restore();
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_restore");
+    respondBackupRestored(withPath.window, messagePath, {
+        canceled: false,
+        client_mods: BACKUP_RESTORE_ENVELOPE,
+        path: "C:\\x.zip",
+    });
+    const malformedPath = await pendingPath;
+    assert.equal(malformedPath.ok, false);
+    assert.equal(malformedPath.error, "UNKNOWN");
+
+    // An unknown clientMods key: the dispatcher rejects the schema before
+    // the facade ever sees it.
+    const unknownKey = createBackupRestoreRuntime();
+    const pendingUnknown = unknownKey.window.legcord.backup.restore();
+    const messageUnknown = unknownKey.window.messages.find((entry) => entry.command?.type === "backup_restore");
+    respondBackupRestored(unknownKey.window, messageUnknown, {
+        canceled: false,
+        client_mods: { discordToken: "x" },
+    });
+    const malformedUnknown = await pendingUnknown;
+    assert.equal(malformedUnknown.ok, false);
+    assert.equal(malformedUnknown.error, "UNKNOWN");
+
+    // A non-object envelope is not valid clientMods.
+    const arrayEnvelope = createBackupRestoreRuntime();
+    const pendingArray = arrayEnvelope.window.legcord.backup.restore();
+    const messageArray = arrayEnvelope.window.messages.find((entry) => entry.command?.type === "backup_restore");
+    respondBackupRestored(arrayEnvelope.window, messageArray, {
+        canceled: false,
+        client_mods: ["x"],
+    });
+    const malformedArray = await pendingArray;
+    assert.equal(malformedArray.ok, false);
+    assert.equal(malformedArray.error, "UNKNOWN");
+
+    // Cancellation must carry a null envelope.
+    const canceledEnvelope = createBackupRestoreRuntime();
+    const pendingCanceled = canceledEnvelope.window.legcord.backup.restore();
+    const messageCanceled = canceledEnvelope.window.messages.find((entry) => entry.command?.type === "backup_restore");
+    respondBackupRestored(canceledEnvelope.window, messageCanceled, {
+        canceled: true,
+        client_mods: BACKUP_RESTORE_ENVELOPE,
+    });
+    const malformedCanceled = await pendingCanceled;
+    assert.equal(malformedCanceled.ok, false);
+    assert.equal(malformedCanceled.error, "UNKNOWN");
+});
+
+test("backup.restore maps its timeout through the Electron error shape", async () => {
+    // Like save, restore never rejects on timeout: the shared pending map
+    // rejects with REQUEST_TIMEOUT and the facade maps it to the resolved
+    // { ok: false, error } shape (transport misuse still throws
+    // synchronously before dispatch).
+    const { window } = createBackupRestoreRuntime();
+    const result = await window.legcord.backup.restore(50);
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "REQUEST_TIMEOUT");
+});
+
+test("backup.restore rejects pending requests when the document is disposed", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.legcord.backup.restore();
     // Cancellation-by-disposal maps through the Electron error shape, never
     // an unhandled rejection: the pending promise settles as ok:false.
     const rejection = pending.then((result) => {
@@ -3775,10 +3937,11 @@ test("the shim exposes no generic sync API beyond the closed members", () => {
     assert.equal(legcord.version, undefined);
     assert.equal(legcord.fs, undefined);
     assert.equal(legcord.plugins, undefined);
-    // backup.save IS a closed member now (D4-1): the typed JSON-string save
-    // with the long-operation timeout. Restore stays absent.
+    // backup.save and backup.restore are closed members (D4-1/D4-2): the
+    // typed JSON-string save and the parameter-free restore, both with the
+    // long-operation timeout. Neither takes a path.
     assert.equal(typeof legcord.backup.save, "function");
-    assert.equal(legcord.backup.restore, undefined);
+    assert.equal(typeof legcord.backup.restore, "function");
     assert.equal(typeof legcord.translations, "object");
 });
 

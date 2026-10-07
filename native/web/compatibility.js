@@ -554,6 +554,59 @@
         );
     }
 
+    // The exact client-mod envelope keys the host may return (the same three
+    // the save path sends, in BACKUP_CLIENT_MOD_KEYS above). No additional
+    // field may ride along.
+    function isBoundedClientMods(value) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+        for (const key of Object.keys(value)) {
+            if (!BACKUP_CLIENT_MOD_KEYS.includes(key)) return false;
+        }
+        for (const key of ["vencordLocalStorage", "equicordLocalStorage"]) {
+            const entry = value[key];
+            if (entry !== undefined && entry !== null) {
+                if (typeof entry !== "string" || textEncoder.encode(entry).length > MAX_CLIENT_MOD_STRING_BYTES) {
+                    return false;
+                }
+            }
+        }
+        const shelter = value.shelter;
+        if (shelter !== undefined && shelter !== null && (typeof shelter !== "object" || Array.isArray(shelter))) {
+            return false;
+        }
+        return true;
+    }
+
+    function restoreBackup(timeoutMs = 120_000) {
+        requireCapability("backup.restore");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host owns the entire open picker
+        // plus validation, staging, and commit. No archive path, filename,
+        // URL, filter, or dialog option may be supplied. The modal picker
+        // stays open as long as the user needs, so this uses the
+        // long-operation timeout like save and the theme import.
+        // Cancellation resolves { ok: false, error: "CANCELLED" } (silent
+        // typed control flow, never a rejection); host failures resolve
+        // { ok: false, error: <typed code> }. Success resolves
+        // { ok: true, clientMods } for the existing renderer mechanism to
+        // apply — the host never applies clientMods itself.
+        return request({ type: "backup_restore", payload: {} }, timeoutMs).then(
+            (payload) => {
+                if (payload.canceled === true) return { ok: false, error: "CANCELLED" };
+                if (!isBoundedClientMods(payload.client_mods)) {
+                    throw new Error("Native backup restore response schema is invalid");
+                }
+                return { ok: true, clientMods: payload.client_mods };
+            },
+            (error) => ({
+                ok: false,
+                error: typeof error?.code === "string" ? error.code : "UNKNOWN",
+            }),
+        );
+    }
+
     window.addEventListener("legcord-native:response", (event) => {
         const response = event.detail;
         if (!response || response.version !== protocolVersion || typeof response.request_id !== "string") {
@@ -866,6 +919,27 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "backup_restored") {
+            const payload = response.payload.payload;
+            // Bounded restore outcome only: cancellation plus the filtered
+            // clientMods envelope. No archive path, profile path, filename,
+            // URL, or filesystem error may ride along. Cancellation carries
+            // a null envelope; success carries the bounded object the
+            // existing renderer mechanism applies (the host never applies it).
+            const envelopeValid =
+                payload?.canceled === true
+                    ? payload.client_mods === null || payload.client_mods === undefined
+                    : isBoundedClientMods(payload?.client_mods);
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                typeof payload.canceled !== "boolean" ||
+                !envelopeValid
+            ) {
+                request.reject(new Error("Native backup restore response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -932,9 +1006,10 @@
     const pluginStorage = Object.freeze({ readFile: readPluginFile, writeFile: writePluginFile });
     // Backup save plus discovery: `save` takes the existing Electron JSON
     // string ({ includes, clientMods }) and resolves the existing result
-    // shape ({ ok } / { ok: false, error }); restore stays deferred, so no
-    // restore member may exist on this namespace.
-    const backup = Object.freeze({ listBundles, save: saveBackup });
+    // shape ({ ok } / { ok: false, error }); `restore` is parameter-free and
+    // resolves { ok: true, clientMods } / { ok: false, error } with the same
+    // silent CANCELLED control flow.
+    const backup = Object.freeze({ listBundles, save: saveBackup, restore: restoreBackup });
     // Folder opening only: reveal for the three fixed roots, open for one
     // validated theme id. No path, dialog, picker, or shell surface.
     const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });

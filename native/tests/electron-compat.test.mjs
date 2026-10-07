@@ -539,12 +539,16 @@ test("custom bundles stay inventory-only and non-executable natively", () => {
     // never become execution (the pre-existing "custom" settings-gate test
     // below only proves an unregistered id enables nothing).
     assert.doesNotMatch(main, /id: "custom"/);
-    // The native backup facade exposes discovery plus save: no restore, zip,
-    // dialog-send, or bundle-content member may exist alongside them, and
-    // custom artifacts stay DATA ONLY inside the archive (never executed).
+    // The native backup facade exposes discovery plus save plus restore: no
+    // Electron channel name, dialog send, zip/generic member, or bundle
+    // content may exist alongside them, and custom artifacts stay DATA ONLY
+    // inside the archive (never executed).
     assert.match(nativeFacade, /function listBundles\(/);
     assert.match(nativeFacade, /function saveBackup\(/);
+    assert.match(nativeFacade, /function restoreBackup\(/);
     assert.match(nativeFacade, /backup_saved/);
+    assert.match(nativeFacade, /backup_restored/);
+    assert.match(nativeFacade, /backup_restore/);
     assert.doesNotMatch(nativeFacade, /backupSave/);
     assert.doesNotMatch(nativeFacade, /backupRestore/);
     assert.doesNotMatch(nativeFacade, /showSaveDialog/);
@@ -581,6 +585,71 @@ test("the native backup save preserves the Electron archive and dialog contract"
     // The save dialog owns its configuration: the host never sets a folder
     // (no renderer defaultPath exists anywhere in the capability).
     assert.doesNotMatch(nativeBackup, /SetFolder/);
+});
+
+test("the native backup restore preserves the Electron restore contract", () => {
+    // Restore keeps the Electron section layout and dialog semantics while
+    // hardening every unsafe behavior: the exact data/ + bundles/ prefixes,
+    // settings-only storage routing, the fixed Quick CSS name, the bundle
+    // allowlist, the translated OPEN title, and no renderer-supplied path.
+    const nativeBackup = readFileSync(new URL("../src/backup.rs", import.meta.url), "utf8");
+    const nativeProtocol = readFileSync(new URL("../src/protocol.rs", import.meta.url), "utf8");
+    const nativeFacade = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+    const nativeMain = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    // Section routing parity.
+    assert.match(nativeBackup, /data\/storage\/settings\.json/);
+    assert.match(nativeBackup, /data\/quickCss\.css/);
+    assert.match(nativeBackup, /"themes"/);
+    assert.match(nativeBackup, /"plugins"/);
+    assert.match(nativeBackup, /"runtime-plugins"/);
+    assert.match(nativeBackup, /"plugin-storage"/);
+    assert.match(nativeBackup, /BUNDLE_FILES/);
+    // The dialog is host-owned with the translated open title; the renderer
+    // request is exactly empty.
+    assert.match(nativeBackup, /backup-dialogOpen-title/);
+    assert.match(nativeBackup, /Open Legcord backup/);
+    assert.match(nativeProtocol, /BackupRestore/);
+    assert.match(nativeProtocol, /backup_restore/);
+    assert.match(nativeProtocol, /BackupRestored/);
+    assert.match(nativeFacade, /function restoreBackup\(/);
+    // Hardening markers: closed routing (no generic extract), whole-archive
+    // duplicate/collision rejection, staging outside the profile, commit
+    // with rollback, existing section validators, and bounded clientMods.
+    assert.match(nativeBackup, /validate_and_stage/);
+    assert.match(nativeBackup, /reject_duplicate_names/);
+    assert.match(nativeBackup, /create_staging_dir/);
+    assert.match(nativeBackup, /commit_staged/);
+    assert.match(nativeBackup, /validate_theme_id/);
+    assert.match(nativeBackup, /validate_plugin_id/);
+    assert.match(nativeBackup, /validate_relative_path/);
+    assert.match(nativeBackup, /INVALID_ARCHIVE/);
+    assert.match(nativeBackup, /merge_settings_blob/);
+    assert.match(nativeBackup, /custom\.js.*DATA ONLY|DATA ONLY/);
+    // The restore worker is dedicated and STA-owned, like the save worker.
+    assert.match(nativeMain, /legcord-backup-restore-sta/);
+    assert.match(nativeMain, /BackupRestoreReady/);
+    // Electron behavior stays untouched: the Map-buffered apply path, the
+    // shallow-merge settings restore, and the renderer clientMods applier.
+    const backupMain = readFileSync(new URL("../../src/common/backup.ts", import.meta.url), "utf8");
+    assert.match(backupMain, /readBackupZipToMap/);
+    assert.match(backupMain, /applyBackupFromMap/);
+    assert.match(backupMain, /setConfigBulk/);
+    const backupSection = readFileSync(
+        new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(backupSection, /applyClientModsFromRestore/);
+    assert.match(backupSection, /addRemotePlugin/);
+    // No BackupSection UI wiring: the native restore capability is not
+    // referenced from src/ (a branch there would be fabrication). The
+    // Electron `window.legcord.backup.restore()` call stays byte-identical,
+    // so the check targets the native wire type and native branches only.
+    for (const source of [bridge, ipc, types]) {
+        assert.doesNotMatch(source, /backup_restore/);
+    }
+    assert.doesNotMatch(backupSection, /backup_restore/);
+    assert.doesNotMatch(backupSection, /isNativeWebView/);
+    assert.match(backupSection, /window\.legcord\.backup\.restore\(\)/);
 });
 
 test("Electron keeps every folder and file-open IPC handler", () => {
