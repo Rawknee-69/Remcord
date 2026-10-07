@@ -75,6 +75,12 @@ pub enum BridgeCommand {
     ThemesList(ThemesListRequest),
     BackupSave(BackupSaveRequest),
     BackupRestore(BackupRestoreRequest),
+    WindowShow(WindowShowRequest),
+    WindowHide(WindowHideRequest),
+    WindowMinimize(WindowMinimizeRequest),
+    WindowMaximize(WindowMaximizeRequest),
+    WindowUnmaximize(WindowUnmaximizeRequest),
+    WindowQuit(WindowQuitRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +289,48 @@ pub struct BackupSaveRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupRestoreRequest {}
+
+/// Empty request for the `window.show` capability: reveal the single host
+/// window (restore when minimized, clear skip-taskbar where supported, show,
+/// focus). There is deliberately NO window id, handle, coordinate, style, or
+/// message parameter: the host owns the one Legcord window. Any extra field
+/// is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowShowRequest {}
+
+/// Empty request for the `window.hide` capability: hide the single host
+/// window. No parameter of any kind; any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowHideRequest {}
+
+/// Empty request for the `window.minimize` capability: minimize the single
+/// host window. No parameter of any kind; any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowMinimizeRequest {}
+
+/// Empty request for the `window.maximize` capability: maximize the single
+/// host window. No parameter of any kind; any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowMaximizeRequest {}
+
+/// Empty request for the `window.unmaximize` capability: restore the single
+/// host window from maximized state. No parameter of any kind; any extra
+/// field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowUnmaximizeRequest {}
+
+/// Empty request for the `window.quit` capability: terminate the application
+/// through the existing native shutdown path. No parameter of any kind; any
+/// extra field is rejected. There is deliberately NO `window.close`: Electron
+/// exposes no renderer `win-close` operation, so none is added.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowQuitRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -829,6 +877,7 @@ pub enum BridgeResponsePayload {
     ThemesList(ThemesListResponse),
     BackupSaved(BackupSavedResponse),
     BackupRestored(BackupRestoredResponse),
+    WindowAck(WindowAckResponse),
 }
 
 #[derive(Serialize)]
@@ -1053,6 +1102,43 @@ pub struct BackupRestoredResponse {
     pub client_mods: serde_json::Value,
 }
 
+/// Acknowledgement for one typed window chrome command. `command` echoes the
+/// exact wire type the renderer sent (`window_show`, `window_hide`,
+/// `window_minimize`, `window_maximize`, `window_unmaximize`, `window_quit`),
+/// so one window's acknowledgement can never resolve another command's call.
+/// Electron's `send` commands return `void`; the async bridge needs this
+/// minimal correlation instead of a value. No state, handle, or geometry
+/// crosses the boundary.
+#[derive(Serialize)]
+pub struct WindowAckResponse {
+    pub command: &'static str,
+}
+
+/// Typed host-to-renderer window state event. Replaces Electron's
+/// `executeJavaScript` attribute writes for focus/blur/maximize/unmaximize
+/// with schema-validated data: the renderer owns the DOM attributes and no
+/// generic script execution crosses the boundary. Emitted only when the
+/// effective state actually changes — never polled, never per-frame.
+#[allow(dead_code)]
+#[derive(Serialize)]
+pub struct WindowStateEvent {
+    pub version: u8,
+    pub focused: bool,
+    pub maximized: bool,
+}
+
+/// Serializes one `window_state` host event detail for delivery as a
+/// `legcord-native:window-state` CustomEvent. The shape is fixed by
+/// construction; the renderer re-validates every field before applying it.
+pub fn window_state_event_json(focused: bool, maximized: bool) -> String {
+    serde_json::json!({
+        "version": PROTOCOL_VERSION,
+        "focused": focused,
+        "maximized": maximized,
+    })
+    .to_string()
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -1244,6 +1330,17 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // manifest, path, size, and clientMods bounds live in
                 // `backup` and are enforced at dispatch.
                 BridgeCommand::BackupRestore(_) => {}
+                // Window chrome commands are parameter-free by protocol
+                // (`deny_unknown_fields` already rejected any
+                // renderer-supplied member: no window id, handle,
+                // coordinate, style, message, or process selector can cross).
+                // The host acts on the one Legcord window only.
+                BridgeCommand::WindowShow(_)
+                | BridgeCommand::WindowHide(_)
+                | BridgeCommand::WindowMinimize(_)
+                | BridgeCommand::WindowMaximize(_)
+                | BridgeCommand::WindowUnmaximize(_)
+                | BridgeCommand::WindowQuit(_) => {}
                 BridgeCommand::BackupSave(payload) => {
                     // The seven include flags are typed booleans by serde
                     // (`deny_unknown_fields` rejected anything else); the
@@ -1989,6 +2086,141 @@ mod tests {
         let invoke = r#"{"version":1,"request_id":"settings-2","command":{"type":"invoke","payload":{"method":"settings.getConfig"}}}"#;
         assert!(parse_bridge_message(set_config).is_err());
         assert!(parse_bridge_message(invoke).is_err());
+    }
+
+    #[test]
+    fn accepts_all_six_window_chrome_commands_without_parameters() {
+        // Each typed window command carries an exact empty payload: no
+        // window id, handle, coordinate, style, message, or process member
+        // exists to supply.
+        for (wire, request_id) in [
+            ("window_show", "win-1"),
+            ("window_hide", "win-2"),
+            ("window_minimize", "win-3"),
+            ("window_maximize", "win-4"),
+            ("window_unmaximize", "win-5"),
+            ("window_quit", "win-6"),
+        ] {
+            let message = format!(
+                "{{\"version\":1,\"request_id\":\"{request_id}\",\"command\":{{\"type\":\"{wire}\",\"payload\":{{}}}}}}"
+            );
+            let parsed = parse_bridge_message(&message);
+            assert!(parsed.is_ok(), "{wire} must parse: {parsed:?}");
+            let command = match parsed.unwrap() {
+                BridgeMessage::Request(request) => request.command,
+                BridgeMessage::Event(_) => panic!("{wire} must parse as a request"),
+            };
+            let expected = match wire {
+                "window_show" => matches!(command, BridgeCommand::WindowShow(_)),
+                "window_hide" => matches!(command, BridgeCommand::WindowHide(_)),
+                "window_minimize" => matches!(command, BridgeCommand::WindowMinimize(_)),
+                "window_maximize" => matches!(command, BridgeCommand::WindowMaximize(_)),
+                "window_unmaximize" => matches!(command, BridgeCommand::WindowUnmaximize(_)),
+                "window_quit" => matches!(command, BridgeCommand::WindowQuit(_)),
+                _ => unreachable!(),
+            };
+            assert!(expected, "{wire} must dispatch to its own typed variant");
+        }
+    }
+
+    #[test]
+    fn rejects_generic_window_control_and_extra_window_members() {
+        // There is no generic window dispatcher: no operation string, no
+        // args object, no close (Electron exposes no renderer win-close).
+        for wire in [
+            "window_control",
+            "window_invoke",
+            "window_close",
+            "win_close",
+            "window_show_all",
+        ] {
+            let message = format!(
+                "{{\"version\":1,\"request_id\":\"win-x\",\"command\":{{\"type\":\"{wire}\",\"payload\":{{}}}}}}"
+            );
+            assert!(
+                parse_bridge_message(&message).is_err(),
+                "{wire} must be rejected"
+            );
+        }
+        let generic = r#"{"version":1,"request_id":"win-y","command":{"type":"window_show","payload":{"op":"maximize","args":{}}}}"#;
+        assert!(parse_bridge_message(generic).is_err());
+        // No handle, coordinate, style, message, or process member may ride
+        // along with any typed window command.
+        for payload in [
+            r#"{"hwnd":1234}"#,
+            r#"{"handle":"0x1234"}"#,
+            r#"{"x":10,"y":10}"#,
+            r#"{"width":835,"height":600}"#,
+            r#"{"style":"borderless"}"#,
+            r#"{"message":274}"#,
+            r#"{"pid":1234}"#,
+            r#"{"id":"main"}"#,
+        ] {
+            for wire in [
+                "window_show",
+                "window_hide",
+                "window_minimize",
+                "window_maximize",
+                "window_unmaximize",
+                "window_quit",
+            ] {
+                let message = format!(
+                    "{{\"version\":1,\"request_id\":\"win-z\",\"command\":{{\"type\":\"{wire}\",\"payload\":{payload}}}}}"
+                );
+                assert!(
+                    parse_bridge_message(&message).is_err(),
+                    "{wire} with {payload} must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn serializes_a_typed_window_ack_without_state_or_handles() {
+        use super::{BridgeResponsePayload, WindowAckResponse};
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "win-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::WindowAck(WindowAckResponse {
+                command: "window_show",
+            })),
+            error: None,
+        };
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serialized["payload"]["type"],
+            serde_json::Value::String("window_ack".to_owned())
+        );
+        assert_eq!(
+            serialized["payload"]["payload"]["command"],
+            serde_json::Value::String("window_show".to_owned())
+        );
+        // The acknowledgement echoes the command only: no handle, geometry,
+        // state, path, or error text may ride along.
+        let keys: Vec<&str> = serialized["payload"]["payload"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["command"]);
+    }
+
+    #[test]
+    fn window_state_event_carries_exactly_focused_and_maximized() {
+        use super::window_state_event_json;
+        for (focused, maximized) in [(true, true), (true, false), (false, true), (false, false)] {
+            let detail: serde_json::Value =
+                serde_json::from_str(&window_state_event_json(focused, maximized)).unwrap();
+            let object = detail.as_object().unwrap();
+            let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["focused", "maximized", "version"]);
+            assert_eq!(object["version"], serde_json::Value::from(PROTOCOL_VERSION));
+            assert_eq!(object["focused"], serde_json::Value::from(focused));
+            assert_eq!(object["maximized"], serde_json::Value::from(maximized));
+        }
     }
 
     #[test]

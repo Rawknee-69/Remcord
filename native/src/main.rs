@@ -47,14 +47,14 @@ use folders::{
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
-    parse_bridge_message, validate_mod_bundle_id, AppVersionResponse, BackupRestoredResponse,
-    BackupSavedResponse, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage,
-    BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry,
-    BundlesListResponse, FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse,
-    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker,
-    SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
-    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    ThemesListResponse, PROTOCOL_VERSION,
+    parse_bridge_message, validate_mod_bundle_id, window_state_event_json, AppVersionResponse,
+    BackupRestoredResponse, BackupSavedResponse, BridgeCommand, BridgeError, BridgeEvent,
+    BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
+    BundleFileEntry, BundlesListResponse, FoldersOpenedResponse, LocalizationStringResponse,
+    ModBundleResponse, PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse,
+    RequestTracker, SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse,
+    ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse,
+    ThemeWrittenResponse, ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use serde::Serialize;
@@ -273,6 +273,12 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
     runtime: "webview2",
     platform: "win32",
     protocol_version: PROTOCOL_VERSION,
+    window: BootWindowState {
+        // The window is created hidden and restored; no stored-bounds
+        // restore exists in this milestone, so neither flag can be true.
+        focused: false,
+        maximized: false,
+    },
     capabilities: &[
         "bridge.ping",
         "mod.get_bundle",
@@ -293,6 +299,12 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "themes.import_files",
         "themes.set_enabled",
         "themes.list",
+        "window.show",
+        "window.hide",
+        "window.minimize",
+        "window.maximize",
+        "window.unmaximize",
+        "window.quit",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -1873,7 +1885,19 @@ struct BootSnapshot {
     runtime: &'static str,
     platform: &'static str,
     protocol_version: u8,
+    window: BootWindowState,
     capabilities: &'static [&'static str],
+}
+
+/// Synchronous initial window state for the renderer facade. The window is
+/// created hidden and restored, so both flags are false at boot; the typed
+/// `window_state` host event converges them afterwards. This keeps the
+/// existing synchronous `maximized()`/`isNormal()` titlebar checks total
+/// without synchronous IPC.
+#[derive(Serialize)]
+struct BootWindowState {
+    focused: bool,
+    maximized: bool,
 }
 
 /// Closed registry id for the real Legcord settings plugin. It matches the
@@ -2301,6 +2325,11 @@ enum NativeEvent {
         received_at: Instant,
         result: Result<RestoreSummary, BackupFailure>,
     },
+    /// One DEV-only window chrome smoke step (`LEGCORD_NATIVE_WINDOW_SMOKE=1`).
+    /// Drives the shipped renderer facade through the real typed bridge and
+    /// logs the resulting native state. Never present in normal runs.
+    #[allow(dead_code)]
+    WindowSmokeStep(u8),
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -2556,6 +2585,79 @@ fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
         }
         Err(error) => eprintln!("[Bridge] Could not serialize response: {error}"),
     }
+}
+
+/// Host-owned authoritative window state. `focused` converges only from Tao
+/// `Focused` events; `maximized` converges from `Resized` queries plus the
+/// maximize/unmaximize commands. Nothing here polls: every update is pushed
+/// by a window event or a renderer command.
+#[derive(Default)]
+struct NativeWindowState {
+    focused: bool,
+    maximized: bool,
+}
+
+/// Delivers one typed `window_state` host event to the renderer. Callers must
+/// invoke this only when the effective state actually changed.
+fn send_window_state_event(webview: &WebView, focused: bool, maximized: bool) {
+    let detail = window_state_event_json(focused, maximized);
+    match serde_json::to_string(&detail) {
+        Ok(serialized) => {
+            let script = format!(
+                "window.dispatchEvent(new CustomEvent('legcord-native:window-state', {{ detail: JSON.parse({serialized}) }}));"
+            );
+            if let Err(error) = webview.evaluate_script(&script) {
+                eprintln!("[Window] Could not deliver window state to renderer: {error}");
+            }
+        }
+        Err(error) => eprintln!("[Window] Could not serialize window state: {error}"),
+    }
+}
+
+/// Re-queries the native maximized flag and emits a `window_state` event only
+/// when it differs from the tracked state. Used after maximize/unmaximize
+/// commands and `Resized` events. Focused state is never queried here: it
+/// converges exclusively from `Focused` events.
+fn sync_native_maximized_state(
+    webview: &WebView,
+    window: &Arc<tao::window::Window>,
+    state: &mut NativeWindowState,
+    reason: &str,
+) {
+    let maximized = window.is_maximized();
+    if state.maximized != maximized {
+        state.maximized = maximized;
+        send_window_state_event(webview, state.focused, state.maximized);
+        println!("[Window] maximized={maximized} ({reason})");
+    }
+}
+
+/// Acknowledges one typed window chrome command with the exact wire-type echo
+/// the facade correlates against its pending request.
+fn respond_window_ack(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    request_id: &str,
+    command: &'static str,
+    received_at: &Instant,
+) {
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.to_owned(),
+        ok: true,
+        payload: Some(BridgeResponsePayload::WindowAck(WindowAckResponse {
+            command,
+        })),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    println!(
+        "[Window][Metrics] command={command} request_latency_ms={:.3}",
+        received_at.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 /// Push one managed style create/update to the live document. Returns true
@@ -2944,10 +3046,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let proxy = event_loop.create_proxy();
 
     let window = WindowBuilder::new()
-        .with_title("Legcord — WebView2 DEV Prototype")
-        .with_inner_size(Size::Logical(LogicalSize::new(1280.0, 800.0)))
-        .with_min_inner_size(Size::Logical(LogicalSize::new(640.0, 480.0)))
+        .with_title("Legcord")
+        .with_inner_size(Size::Logical(LogicalSize::new(835.0, 600.0)))
+        .with_min_inner_size(Size::Logical(LogicalSize::new(400.0, 300.0)))
+        .with_decorations(false)
+        .with_visible(false)
         .build(&event_loop)?;
+    // Keep a reference to the Tao window for native window chrome
+    // operations (visible, minimize, maximize, focus, state queries).
+    // The WebView is built on this window, but the WebView API does not
+    // expose the Tao window directly, so we hold an Arc.
+    let window = Arc::new(window);
+    let window_for_webview = Arc::clone(&window);
 
     let profile_path = PathBuf::from(WEBVIEW_PROFILE);
     std::fs::create_dir_all(&profile_path)?;
@@ -3474,7 +3584,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         });
 
-    let webview = webview_builder.build(&window)?;
+    let webview = webview_builder.build(&window_for_webview)?;
     println!("[Native] WebView2 prototype started");
     println!("[Native] Persistent DEV profile: {WEBVIEW_PROFILE}");
     println!("[Native] Initial navigation: {DISCORD_URL}");
@@ -3821,6 +3931,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut settings_plugin_started_generation = None::<u64>;
     let mut settings_plugin_start_count = 0_u64;
+    // Authoritative window state tracked from native events. Seeded from
+    // boot snapshot (both false at startup since window is created hidden).
+    let mut native_window_state = NativeWindowState::default();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -3860,6 +3973,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                 }
                 *control_flow = ControlFlow::Exit;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Focused(focused),
+                ..
+            } => {
+                if native_window_state.focused != focused {
+                    native_window_state.focused = focused;
+                    send_window_state_event(&webview, native_window_state.focused, native_window_state.maximized);
+                    println!("[Window] focused={focused}");
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => {
+                // Maximize/unmaximize state changes via the native OS are
+                // reported through Resized. Query the authoritative flag and
+                // emit only when it actually changed.
+                sync_native_maximized_state(&webview, &window, &mut native_window_state, "Resized");
             }
             Event::UserEvent(NativeEvent::PageLoadStarted) => {
                 document_lifecycle.begin_document();
@@ -4441,7 +4573,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match request_tracker.begin(&request.request_id) {
                     Err(error) => eprintln!("[Bridge] rejected request: {error}"),
                     Ok(()) => match request.command {
-                        BridgeCommand::Ping(payload) => {
+                            BridgeCommand::WindowShow(_) => {
+                                window.set_visible(true);
+                                if window.is_minimized() {
+                                    window.set_minimized(false);
+                                }
+                                window.set_focus();
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_show", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowHide(_) => {
+                                window.set_visible(false);
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_hide", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowMinimize(_) => {
+                                window.set_minimized(true);
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_minimize", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowMaximize(_) => {
+                                window.set_maximized(true);
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_maximize", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowUnmaximize(_) => {
+                                window.set_maximized(false);
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_unmaximize", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowQuit(_) => {
+                                *control_flow = ControlFlow::Exit;
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_quit", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::Ping(payload) => {
                             let request_id = request.request_id;
                             let response = BridgeResponse {
                                 version: PROTOCOL_VERSION,
@@ -5503,10 +5669,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     );
                                 }
                             }
-                        }
+                        },
                     },
                 }
-            }
+            },
             Event::UserEvent(NativeEvent::ModBundleReady {
                 mod_id,
                 generation,

@@ -1068,6 +1068,21 @@
 
     const snapshot = freezeDeep(bootSnapshot);
     const capabilities = new Set(snapshot.capabilities);
+    // Local window state seeded from boot snapshot. The window is created
+    // hidden, so both focused and maximized start as false. The typed
+    // `window_state` host event converges the authoritative state.
+    let windowFocused = snapshot.window?.focused === true;
+    let windowMaximized = snapshot.window?.maximized === true;
+
+    window.addEventListener("legcord-native:window-state", (event) => {
+        const detail = event?.detail;
+        if (!detail || typeof detail !== "object") return;
+        if (detail.version !== protocolVersion) return;
+        if (typeof detail.focused !== "boolean" || typeof detail.maximized !== "boolean") return;
+        windowFocused = detail.focused;
+        windowMaximized = detail.maximized;
+    });
+
     const native = Object.freeze({
         ping,
         getModBundle,
@@ -1083,6 +1098,41 @@
             return typeof capability === "string" && capabilities.has(capability);
         },
         requireCapability,
+        window: Object.freeze({
+            show() {
+                requireCapability("window.show");
+                return request({ type: "window_show", payload: {} });
+            },
+            hide() {
+                requireCapability("window.hide");
+                return request({ type: "window_hide", payload: {} });
+            },
+            minimize() {
+                requireCapability("window.minimize");
+                return request({ type: "window_minimize", payload: {} });
+            },
+            maximize() {
+                requireCapability("window.maximize");
+                return request({ type: "window_maximize", payload: {} });
+            },
+            unmaximize() {
+                requireCapability("window.unmaximize");
+                return request({ type: "window_unmaximize", payload: {} });
+            },
+            quit() {
+                requireCapability("window.quit");
+                return request({ type: "window_quit", payload: {} });
+            },
+            // Synchronous local-state reads — NO synchronous native bridge
+            // call, NO polling. Seeded from boot snapshot and converged by
+            // the typed window_state host event.
+            maximized() {
+                return windowMaximized;
+            },
+            isNormal() {
+                return !windowMaximized;
+            },
+        }),
     });
     // (settingsShim/themesShim below replace these narrow namespaces with
     // the shimmed versions; the originals are kept out of the surface so no
@@ -1220,6 +1270,22 @@
         value: Object.freeze({
             boot: snapshot,
             native,
+            // Window API at top level for Electron compatibility.
+            // The native path uses `window.legcord.native.window.*` for
+            // capability-gated async operations and `window.legcord.window.*`
+            // for synchronous local-state reads. Electron's bridge exposes
+            // all under `window.legcord.window` directly; the native facade
+            // mirrors both for exactly-one-path dispatch.
+            window: Object.freeze({
+                show: native.window.show,
+                hide: native.window.hide,
+                minimize: native.window.minimize,
+                maximize: native.window.maximize,
+                unmaximize: native.window.unmaximize,
+                quit: native.window.quit,
+                maximized: native.window.maximized,
+                isNormal: native.window.isNormal,
+            }),
             settings: settingsShim,
             getLang,
             pluginStorage,
