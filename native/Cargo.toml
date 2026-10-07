@@ -16,6 +16,9 @@ tao = "0.37.1"
 wry = "0.57.0"
 notify = "8"
 http = "1.5"
+# Backup export only (D4-1): deterministic ZIP creation for `backup.save`.
+# Deflate only — no bzip2/lzma/zstd/ppmd backends, no external utilities.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # Windows WebView2 COM interop for response header interception (CSP modification)
 webview2-com = "0.39"
 windows = { version = "0.62", features = [

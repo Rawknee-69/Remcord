@@ -1691,15 +1691,15 @@ function respondBundlesList(window, request, bundles = BUNDLE_FIXTURE) {
     );
 }
 
-test("the facade exposes a read-only backup.list_bundles capability and no save/restore surface", () => {
-    const { window } = createBundlesRuntime();
+test("the facade exposes backup save plus discovery and no restore surface", () => {
+    const { window } = createBundlesRuntime(["bridge.ping", "backup.list_bundles", "backup.save"]);
     assert.equal(typeof window.legcord.backup.listBundles, "function");
+    assert.equal(typeof window.legcord.backup.save, "function");
     assert.equal(Object.isFrozen(window.legcord.backup), true);
     assert.equal(window.legcord.native.supports("backup.list_bundles"), true);
-    // Save/restore (dialogs + zip) are deferred: only discovery exists.
-    assert.equal(window.legcord.backup.save, undefined);
+    assert.equal(window.legcord.native.supports("backup.save"), true);
+    // Restore (open dialog + zip apply) stays deferred.
     assert.equal(window.legcord.backup.restore, undefined);
-    assert.equal(window.legcord.native.supports("backup.save"), false);
     assert.equal(window.legcord.native.supports("backup.restore"), false);
 });
 
@@ -1812,6 +1812,177 @@ test("a reloaded document gets a fresh bundle inventory facade with no stale pro
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
     respondBundlesList(nextDocument.window, message);
     assert.deepEqual(await pending, BUNDLE_FIXTURE);
+});
+
+function createBackupSaveRuntime(capabilities = ["bridge.ping", "backup.list_bundles", "backup.save"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const BACKUP_SAVE_PAYLOAD = JSON.stringify({
+    includes: {
+        legcordConfig: true,
+        legcordThemesAndQuickCss: true,
+        legcordExtensionPlugins: true,
+        vencordModData: true,
+        equicordModData: true,
+        shelterModData: true,
+        modBundles: true,
+    },
+    clientMods: {
+        vencordLocalStorage: '{"probe":1}',
+        equicordLocalStorage: null,
+        shelter: { plugins: {}, enabledPlugins: [] },
+    },
+});
+
+function respondBackupSaved(window, request, payload = { canceled: false, bytes: 2048 }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "backup_saved", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("backup.save sends the exact includes/clientMods shape with the long timeout", async () => {
+    const { window } = createBackupSaveRuntime();
+    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "backup_save");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "backup_save",
+        payload: JSON.parse(BACKUP_SAVE_PAYLOAD),
+    });
+
+    respondBackupSaved(window, message);
+    const saved = await pending;
+    assert.equal(saved.ok, true);
+});
+
+test("backup.save resolves cancellation as the silent Electron shape", async () => {
+    const { window } = createBackupSaveRuntime();
+    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const message = window.messages.find((entry) => entry.command?.type === "backup_save");
+    respondBackupSaved(window, message, { canceled: true, bytes: 0 });
+    const canceled = await pending;
+    assert.equal(canceled.ok, false);
+    assert.equal(canceled.error, "CANCELLED");
+});
+
+test("backup.save maps typed host failures to the Electron error shape", async () => {
+    const { window } = createBackupSaveRuntime();
+    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const message = window.messages.find((entry) => entry.command?.type === "backup_save");
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "BACKUP_TOO_LARGE", message: "backup source exceeds the size limit" },
+            },
+        }),
+    );
+    assert.deepEqual(await pending.then((result) => ({ ok: result.ok, error: result.error })), {
+        ok: false,
+        error: "BACKUP_TOO_LARGE",
+    });
+});
+
+test("backup.save rejects paths, filenames, unknown keys, and oversized envelopes", async () => {
+    const { window } = createBackupSaveRuntime();
+    const parsed = JSON.parse(BACKUP_SAVE_PAYLOAD);
+    // Renderer-supplied output path / filename / dialog option.
+    for (const extra of [{ outputPath: "C:\\x.zip" }, { filename: "x.zip" }, { defaultPath: "C:\\x" }]) {
+        await assert.rejects(
+            window.legcord.backup.save(JSON.stringify({ ...parsed, ...extra })),
+            /exactly includes and clientMods/,
+        );
+    }
+    // Unknown include key.
+    await assert.rejects(
+        window.legcord.backup.save(JSON.stringify({ ...parsed, includes: { ...parsed.includes, everything: true } })),
+        /seven known booleans/,
+    );
+    // Non-boolean include.
+    await assert.rejects(
+        window.legcord.backup.save(JSON.stringify({ ...parsed, includes: { ...parsed.includes, modBundles: "yes" } })),
+        /seven known booleans/,
+    );
+    // Unknown clientMods field.
+    await assert.rejects(
+        window.legcord.backup.save(JSON.stringify({ ...parsed, clientMods: { discordToken: "x" } })),
+        /unknown field/,
+    );
+    // Oversized client string.
+    await assert.rejects(
+        window.legcord.backup.save(
+            JSON.stringify({
+                ...parsed,
+                clientMods: { vencordLocalStorage: "x".repeat(1048577) },
+            }),
+        ),
+        /at most 1048576/,
+    );
+    // Non-string payload / invalid JSON.
+    await assert.rejects(window.legcord.backup.save(42), /JSON string/);
+    await assert.rejects(window.legcord.backup.save("{not json"), /valid JSON/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "backup_save"),
+        false,
+    );
+});
+
+test("backup.save throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createBackupSaveRuntime(["bridge.ping", "backup.list_bundles"]);
+    assert.equal(window.legcord.native.supports("backup.save"), false);
+    assert.throws(
+        () => window.legcord.backup.save(BACKUP_SAVE_PAYLOAD),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "backup_save"),
+        false,
+    );
+});
+
+test("backup.save surfaces malformed save outcomes as the Electron error shape", async () => {
+    // A path riding along with the outcome.
+    const withPath = createBackupSaveRuntime();
+    const pendingPath = withPath.window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_save");
+    respondBackupSaved(withPath.window, messagePath, { canceled: false, bytes: 12, path: "C:\\x.zip" });
+    const malformedPath = await pendingPath;
+    assert.equal(malformedPath.ok, false);
+    assert.equal(malformedPath.error, "UNKNOWN");
+
+    // Negative bytes.
+    const negative = createBackupSaveRuntime();
+    const pendingNegative = negative.window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const messageNegative = negative.window.messages.find((entry) => entry.command?.type === "backup_save");
+    respondBackupSaved(negative.window, messageNegative, { canceled: false, bytes: -1 });
+    const malformedNegative = await pendingNegative;
+    assert.equal(malformedNegative.ok, false);
+    assert.equal(malformedNegative.error, "UNKNOWN");
+});
+
+test("backup.save rejects pending requests when the document is disposed", async () => {
+    const { window } = createBackupSaveRuntime();
+    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    // Cancellation-by-disposal maps through the Electron error shape, never
+    // an unhandled rejection: the pending promise settles as ok:false.
+    const rejection = pending.then((result) => {
+        assert.equal(result.ok, false);
+    });
+    window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    await rejection;
 });
 
 function createFoldersRuntime(capabilities = ["bridge.ping", "folders.open", "folders.open_theme"]) {
@@ -3604,7 +3775,10 @@ test("the shim exposes no generic sync API beyond the closed members", () => {
     assert.equal(legcord.version, undefined);
     assert.equal(legcord.fs, undefined);
     assert.equal(legcord.plugins, undefined);
-    assert.equal(legcord.backup.save, undefined);
+    // backup.save IS a closed member now (D4-1): the typed JSON-string save
+    // with the long-operation timeout. Restore stays absent.
+    assert.equal(typeof legcord.backup.save, "function");
+    assert.equal(legcord.backup.restore, undefined);
     assert.equal(typeof legcord.translations, "object");
 });
 

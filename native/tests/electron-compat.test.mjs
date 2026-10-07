@@ -284,8 +284,11 @@ test("no renderer Quick CSS pull exists in Electron or native", () => {
     assert.doesNotMatch(bridge, /getQuickCss|readQuickCss|invoke\("getQuickCss"/);
     assert.doesNotMatch(types, /getQuickCss|readQuickCss/);
     assert.doesNotMatch(themesMain, /getQuickCss|quickCss\.get|getCSS/);
-    assert.doesNotMatch(nativeFacade, /quickCss/i);
-    assert.doesNotMatch(nativeFacade, /legcord-quick-css/);
+    // No quickCss.get() shape may be introduced on either side. The backup
+    // include key `legcordThemesAndQuickCss` is Electron's exact save-shape
+    // member (not a CSS reader), so the native assertion targets pull-side
+    // tokens instead of the bare substring.
+    assert.doesNotMatch(nativeFacade, /getQuickCss|quickCss\.get|readQuickCss|legcord-quick-css/);
 });
 
 test("no src caller is migrated to a native Quick CSS path in this milestone", () => {
@@ -529,19 +532,55 @@ test("custom bundles stay inventory-only and non-executable natively", () => {
     // registry serves only registered host-controlled descriptors, and the
     // discovery module documents the restriction.
     const nativeBundles = readFileSync(new URL("../src/bundles.rs", import.meta.url), "utf8");
+    const nativeBackup = readFileSync(new URL("../src/backup.rs", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
     assert.match(nativeBundles, /inventory-only and non-executable/);
     // No descriptor registers the custom id, so inventory presence can
     // never become execution (the pre-existing "custom" settings-gate test
     // below only proves an unregistered id enables nothing).
     assert.doesNotMatch(main, /id: "custom"/);
-    // The native facade exposes discovery only: no save, restore, zip,
-    // dialog, or bundle-content member may exist alongside it.
+    // The native backup facade exposes discovery plus save: no restore, zip,
+    // dialog-send, or bundle-content member may exist alongside them, and
+    // custom artifacts stay DATA ONLY inside the archive (never executed).
     assert.match(nativeFacade, /function listBundles\(/);
+    assert.match(nativeFacade, /function saveBackup\(/);
+    assert.match(nativeFacade, /backup_saved/);
     assert.doesNotMatch(nativeFacade, /backupSave/);
     assert.doesNotMatch(nativeFacade, /backupRestore/);
     assert.doesNotMatch(nativeFacade, /showSaveDialog/);
+    assert.doesNotMatch(nativeFacade, /showOpenDialog/);
     assert.doesNotMatch(nativeFacade, /AdmZip|readBackupZipToMap|buildBackupZipBuffer/);
+    assert.match(nativeBackup, /custom\.js.*DATA ONLY|DATA ONLY/);
+});
+
+test("the native backup save preserves the Electron archive and dialog contract", () => {
+    // Save keeps the Electron layout/manifest semantics: manifest first,
+    // the exact data/ + bundles/ prefixes, version 1, UTC ISO-8601 dates,
+    // the translated save title, the ZIP filter, the dated default filename,
+    // and .zip enforcement — while the renderer never supplies a path.
+    const nativeBackup = readFileSync(new URL("../src/backup.rs", import.meta.url), "utf8");
+    assert.match(nativeBackup, /manifest\.json/);
+    assert.match(nativeBackup, /data\/storage\/settings\.json/);
+    assert.match(nativeBackup, /data\/quickCss\.css/);
+    assert.match(nativeBackup, /data\/themes/);
+    assert.match(nativeBackup, /data\/plugins/);
+    assert.match(nativeBackup, /data\/runtime-plugins/);
+    assert.match(nativeBackup, /data\/plugin-storage/);
+    assert.match(nativeBackup, /bundles\//);
+    assert.match(nativeBackup, /BACKUP_VERSION: u8 = 1/);
+    assert.match(nativeBackup, /backup-dialogSave-title/);
+    assert.match(nativeBackup, /legcord-backup-/);
+    assert.match(nativeBackup, /BUNDLE_FILES/);
+    // Bounds and link policy are explicit and stricter than Electron.
+    assert.match(nativeBackup, /MAX_BACKUP_FILE_BYTES/);
+    assert.match(nativeBackup, /MAX_BACKUP_BUNDLE_BYTES/);
+    assert.match(nativeBackup, /MAX_BACKUP_TOTAL_BYTES/);
+    assert.match(nativeBackup, /MAX_BACKUP_ENTRIES/);
+    assert.match(nativeBackup, /BACKUP_TOO_LARGE/);
+    assert.match(nativeBackup, /symlink_metadata/);
+    // The save dialog owns its configuration: the host never sets a folder
+    // (no renderer defaultPath exists anywhere in the capability).
+    assert.doesNotMatch(nativeBackup, /SetFolder/);
 });
 
 test("Electron keeps every folder and file-open IPC handler", () => {

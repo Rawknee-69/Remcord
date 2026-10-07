@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::backup::{MAX_CLIENT_MODS_BYTES, MAX_CLIENT_MOD_STRING_BYTES, MAX_SHELTER_MOD_BYTES};
 use crate::folders::{FolderLocation, MAX_FOLDER_THEME_ID_BYTES};
 use crate::localization::MAX_LANG_KEY_BYTES;
 use crate::plugin_storage::{
@@ -19,6 +20,19 @@ pub const MAX_IPC_MESSAGE_BYTES: usize = 8 * 1024;
 /// whose effective bound stays 8 KiB) is held to `MAX_IPC_MESSAGE_BYTES`.
 /// Each CSS body itself is re-checked against `MAX_THEME_CSS_BYTES` below.
 pub const MAX_THEME_INSTALL_MESSAGE_BYTES: usize = 1024 * 1024 + 4096;
+/// Single large-payload exception for the backup-save request: the
+/// renderer-built `clientMods` envelope carries up to 4 MiB plus JSON slack
+/// in one message, so real localStorage snapshots fit without a chunked
+/// sub-protocol. Every other command keeps the legacy bound.
+pub const MAX_BACKUP_SAVE_MESSAGE_BYTES: usize = 4 * 1024 * 1024 + 64 * 1024;
+/// Absolute transport ceiling: the larger of the two large-payload
+/// exceptions above. Named so both bounds stay live code.
+pub const MAX_BRIDGE_MESSAGE_BYTES: usize =
+    if MAX_BACKUP_SAVE_MESSAGE_BYTES > MAX_THEME_INSTALL_MESSAGE_BYTES {
+        MAX_BACKUP_SAVE_MESSAGE_BYTES
+    } else {
+        MAX_THEME_INSTALL_MESSAGE_BYTES
+    };
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_ERROR_BYTES: usize = 2 * 1024;
 pub const MAX_TRACKED_REQUEST_IDS: usize = 4096;
@@ -58,6 +72,7 @@ pub enum BridgeCommand {
     ThemeImportFiles(ThemeImportFilesRequest),
     ThemeSetEnabled(ThemeSetEnabledRequest),
     ThemesList(ThemesListRequest),
+    BackupSave(BackupSaveRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +246,19 @@ pub struct ThemeSetEnabledRequest {
 #[serde(deny_unknown_fields)]
 pub struct ThemesListRequest {}
 
+/// Save request for the `backup.save` capability: exactly the include flags
+/// plus the bounded renderer-built client-mod envelope. There is deliberately
+/// NO path, filename, archive path, source path, dialog option, or root: the
+/// host owns collection, the manifest, ZIP creation, the dialog, and the
+/// final write. Unknown keys at any level are rejected, and the envelope
+/// bounds live in `backup` and are re-enforced at dispatch.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BackupSaveRequest {
+    pub includes: crate::backup::BackupIncludes,
+    pub client_mods: crate::backup::BackupClientMods,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -301,6 +329,9 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the theme list smoke probe
     /// (`LEGCORD_NATIVE_THEME_LIST_SMOKE=1`). Never sent by shipped code.
     ThemeListProbe(ThemeListProbe),
+    /// DEV-only diagnostic posted by the backup save probe
+    /// (`LEGCORD_NATIVE_BACKUP_SAVE_SMOKE=1`). Never sent by shipped code.
+    BackupSaveProbe(BackupSaveProbe),
     /// DEV-only diagnostic posted by the Shelter loader probe
     /// (`LEGCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
     ShelterLoaderProbe(ShelterLoaderProbe),
@@ -598,6 +629,22 @@ pub struct ThemeListProbe {
     pub error: Option<String>,
 }
 
+/// DEV-only report for the backup save probe. `stage` is `"save"` (run the
+/// real `backup.save` capability with all includes through the host dialog;
+/// user completion or dismissal resolves the bounded outcome). Unlike the
+/// install/write probes there is no `attacks_blocked`: the probe input is a
+/// fixed payload, never user data. The probe never carries settings, themes,
+/// paths, URLs, or client-mod contents — only counts and flags.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupSaveProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub canceled: bool,
+    pub bytes: u64,
+    pub error: Option<String>,
+}
+
 /// DEV-only report for the Shelter plugin-loader probe. `stage` is one of
 /// `"presence"`, `"synthetic"`, or `"cleanup"`: the probe first verifies the
 /// upstream `shelter.plugins` loader surface exists (and that the URL-based
@@ -706,6 +753,7 @@ pub enum BridgeResponsePayload {
     ThemeImported(ThemeImportedResponse),
     ThemeEnabled(ThemeEnabledResponse),
     ThemesList(ThemesListResponse),
+    BackupSaved(BackupSavedResponse),
 }
 
 #[derive(Serialize)]
@@ -893,6 +941,18 @@ pub struct ThemesListResponse {
     pub themes: Vec<crate::themes::ThemeListEntry>,
 }
 
+/// Bounded save response for the `backup.save` capability: cancellation plus
+/// the final archive size. No theme ids, no paths, no filenames, no source
+/// echo, no filesystem error text — the smallest response that distinguishes
+/// cancel from success.
+#[derive(Serialize)]
+pub struct BackupSavedResponse {
+    /// True when the user dismissed the picker. `bytes` is then zero.
+    pub canceled: bool,
+    /// Final archive size in bytes (zero when canceled).
+    pub bytes: u64,
+}
+
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAX_REQUEST_ID_BYTES
@@ -930,26 +990,29 @@ impl RequestTracker {
 }
 
 pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
-    // Absolute ceiling first (one theme install may legitimately approach
-    // 1 MiB); the per-command transport bound is enforced after the command
+    // Absolute ceiling first (one backup save may legitimately approach
+    // 4 MiB); the per-command transport bound is enforced after the command
     // is identified below.
-    if body.len() > MAX_THEME_INSTALL_MESSAGE_BYTES {
+    if body.len() > MAX_BRIDGE_MESSAGE_BYTES {
         return Err("message exceeds the size limit".to_owned());
     }
 
     let message: BridgeMessage = serde_json::from_str(body).map_err(|error| error.to_string())?;
-    // Only a theme code payload may exceed the 8 KiB transport bound. Every
-    // other command — requests and events alike — keeps the legacy bound,
-    // so the large-payload exception cannot widen any other surface.
-    let is_theme_code = matches!(
+    // Only a theme code payload or a backup save payload may exceed the 8 KiB
+    // transport bound. Every other command — requests and events alike —
+    // keeps the legacy bound, so the large-payload exception cannot widen any
+    // other surface.
+    let is_large_payload = matches!(
         &message,
         BridgeMessage::Request(request)
             if matches!(
                 request.command,
-                BridgeCommand::ThemeInstallCode(_) | BridgeCommand::ThemeWriteCss(_)
+                BridgeCommand::ThemeInstallCode(_)
+                    | BridgeCommand::ThemeWriteCss(_)
+                    | BridgeCommand::BackupSave(_)
             )
     );
-    if !is_theme_code && body.len() > MAX_IPC_MESSAGE_BYTES {
+    if !is_large_payload && body.len() > MAX_IPC_MESSAGE_BYTES {
         return Err("message exceeds the size limit".to_owned());
     }
     match &message {
@@ -1064,6 +1127,39 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // is needed. Enumeration, bounds, and ordering live in
                 // `themes` and are enforced at dispatch.
                 BridgeCommand::ThemesList(_) => {}
+                BridgeCommand::BackupSave(payload) => {
+                    // The seven include flags are typed booleans by serde
+                    // (`deny_unknown_fields` rejected anything else); the
+                    // clientMods envelope bounds live in `backup` and are
+                    // enforced here (parse) and re-enforced at dispatch.
+                    if payload
+                        .client_mods
+                        .vencord_local_storage
+                        .as_ref()
+                        .is_some_and(|text| text.len() > MAX_CLIENT_MOD_STRING_BYTES)
+                        || payload
+                            .client_mods
+                            .equicord_local_storage
+                            .as_ref()
+                            .is_some_and(|text| text.len() > MAX_CLIENT_MOD_STRING_BYTES)
+                    {
+                        return Err("backup client data exceeds the size limit".to_owned());
+                    }
+                    if let Some(shelter) = payload.client_mods.shelter.as_ref() {
+                        let serialized = serde_json::to_string(shelter)
+                            .map_err(|_| "backup client data exceeds the size limit".to_owned())?;
+                        if serialized.len() > MAX_SHELTER_MOD_BYTES
+                            || serialized.len() > MAX_CLIENT_MODS_BYTES
+                        {
+                            return Err("backup client data exceeds the size limit".to_owned());
+                        }
+                    }
+                    let envelope = serde_json::to_string(&payload.client_mods)
+                        .map_err(|_| "backup client data exceeds the size limit".to_owned())?;
+                    if envelope.len() > MAX_CLIENT_MODS_BYTES {
+                        return Err("backup client data exceeds the size limit".to_owned());
+                    }
+                }
             }
         }
         BridgeMessage::Event(event) => {
@@ -1387,6 +1483,17 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || (payload.ok && payload.clearvision == "failed")
                     {
                         return Err("invalid theme list probe result".to_owned());
+                    }
+                }
+                BridgeEvent::BackupSaveProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "save")
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid backup save probe result".to_owned());
                     }
                 }
                 BridgeEvent::ShelterLoaderProbe(payload) => {
@@ -1759,9 +1866,9 @@ mod tests {
 
     #[test]
     fn rejects_backup_save_restore_and_generic_invocation_as_unknown_commands() {
-        // Only discovery exists natively. Save/restore (with dialogs and zip
-        // handling) are deferred, so their Electron channel names must not
-        // parse as commands.
+        // Save (D4-1) requires the exact `{ includes, clientMods }` shape, so
+        // an empty payload is rejected; restore (D4-2+) stays deferred, so its
+        // Electron channel name must not parse as a command.
         let save = r#"{"version":1,"request_id":"bundles-1","command":{"type":"backup_save","payload":{}}}"#;
         let restore = r#"{"version":1,"request_id":"bundles-2","command":{"type":"backup_restore","payload":{}}}"#;
         let invoke = r#"{"version":1,"request_id":"bundles-3","command":{"type":"invoke","payload":{"method":"backup.save"}}}"#;
@@ -2215,6 +2322,92 @@ mod tests {
         assert!(parse_bridge_message(ok_url_present).is_err());
         assert!(parse_bridge_message(with_path).is_err());
         assert!(parse_bridge_message(with_source).is_err());
+    }
+
+    #[test]
+    fn accepts_backup_save_with_exact_shape_and_rejects_paths() {
+        let request = r#"{"version":1,"request_id":"backup-1","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"vencordLocalStorage":"{\"a\":1}","shelter":{"plugins":{}}}}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+
+        // No path, filename, archive path, source path, dialog option, or
+        // arbitrary key may ride along at any level.
+        let with_path = r#"{"version":1,"request_id":"backup-2","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"outputPath":"C:\\x.zip"}}}"#;
+        let with_filename = r#"{"version":1,"request_id":"backup-3","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"filename":"x.zip"}}}"#;
+        let with_include = r#"{"version":1,"request_id":"backup-4","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"everything":true},"clientMods":{}}}}"#;
+        let with_mod = r#"{"version":1,"request_id":"backup-5","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"discordToken":"x"}}}}"#;
+        let missing_mods = r#"{"version":1,"request_id":"backup-6","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true}}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(with_filename).is_err());
+        assert!(parse_bridge_message(with_include).is_err());
+        assert!(parse_bridge_message(with_mod).is_err());
+        assert!(parse_bridge_message(missing_mods).is_err());
+    }
+
+    #[test]
+    fn backup_save_enforces_client_envelope_bounds() {
+        let includes = r#""includes":{"legcordConfig":false,"legcordThemesAndQuickCss":false,"legcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":false,"modBundles":false}"#;
+        // A 9 KiB client string fits the legacy 8 KiB transport only through
+        // the backup exception, and parses (the 1 MiB per-string bound holds).
+        let medium = "x".repeat(9000);
+        let fits = format!(
+            "{{\"version\":1,\"request_id\":\"backup-7\",\"command\":{{\"type\":\"backup_save\",\"payload\":{{{includes},\"clientMods\":{{\"vencordLocalStorage\":\"{medium}\"}}}}}}}}"
+        );
+        assert!(matches!(
+            parse_bridge_message(&fits),
+            Ok(BridgeMessage::Request(_))
+        ));
+        // Past the per-string bound, the request fails.
+        let big = "x".repeat(super::MAX_CLIENT_MOD_STRING_BYTES + 1);
+        let over = format!(
+            "{{\"version\":1,\"request_id\":\"backup-8\",\"command\":{{\"type\":\"backup_save\",\"payload\":{{{includes},\"clientMods\":{{\"vencordLocalStorage\":\"{big}\"}}}}}}}}"
+        );
+        assert!(parse_bridge_message(&over).is_err());
+        // Past the absolute ceiling, even backup saves are rejected.
+        let huge = "x".repeat(super::MAX_BACKUP_SAVE_MESSAGE_BYTES);
+        let huge_save = format!(
+            "{{\"version\":1,\"request_id\":\"backup-9\",\"command\":{{\"type\":\"backup_save\",\"payload\":{{{includes},\"clientMods\":{{\"vencordLocalStorage\":\"{huge}\"}}}}}}}}"
+        );
+        assert!(parse_bridge_message(&huge_save).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_backup_saved_response() {
+        use super::BackupSavedResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "backup-10".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::BackupSaved(BackupSavedResponse {
+                canceled: false,
+                bytes: 2048,
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "backup_saved");
+        assert_eq!(value["payload"]["payload"]["canceled"], false);
+        assert_eq!(value["payload"]["payload"]["bytes"], 2048);
+        // Bounded response: no path, filename, URL, or source echo.
+        assert!(value["payload"]["payload"].get("path").is_none());
+        assert!(value["payload"]["payload"].get("filename").is_none());
+        assert!(value["payload"]["payload"].get("url").is_none());
+    }
+
+    #[test]
+    fn validates_backup_save_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"backup_save_probe","payload":{"ok":true,"stage":"save","canceled":false,"bytes":2048,"error":null}}}"#;
+        let canceled = r#"{"version":1,"event":{"type":"backup_save_probe","payload":{"ok":true,"stage":"save","canceled":true,"bytes":0,"error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"backup_save_probe","payload":{"ok":false,"stage":"save","canceled":false,"bytes":0,"error":"timeout"}}}"#;
+        let bad_stage = r#"{"version":1,"event":{"type":"backup_save_probe","payload":{"ok":true,"stage":"export","canceled":false,"bytes":1,"error":null}}}"#;
+        let with_path = r#"{"version":1,"event":{"type":"backup_save_probe","payload":{"ok":true,"stage":"save","canceled":false,"bytes":1,"path":"C:\\x","error":null}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(canceled).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        assert!(parse_bridge_message(bad_stage).is_err());
+        assert!(parse_bridge_message(with_path).is_err());
     }
 
     #[test]

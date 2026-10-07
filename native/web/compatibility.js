@@ -434,6 +434,27 @@
     // widen the bridge response past these.
     const MAX_THEME_LIST_ENTRIES = 256;
     const MAX_THEME_LIST_FIELD_BYTES = 4096;
+    // Maximum backup-save request in UTF-8 bytes, mirroring the host
+    // transport bound (4 MiB clientMods envelope plus slack). Larger
+    // payloads are rejected before dispatch.
+    const MAX_BACKUP_SAVE_MESSAGE_BYTES = 4259840;
+    // Maximum single client-mod string in UTF-8 bytes, mirroring the host
+    // per-string bound. Larger snapshots are rejected before dispatch.
+    const MAX_CLIENT_MOD_STRING_BYTES = 1048576;
+    // The exact seven include flags Electron's backup UI sends. Unknown
+    // keys are rejected: the renderer cannot invent an archive section.
+    const BACKUP_INCLUDE_KEYS = [
+        "legcordConfig",
+        "legcordThemesAndQuickCss",
+        "legcordExtensionPlugins",
+        "vencordModData",
+        "equicordModData",
+        "shelterModData",
+        "modBundles",
+    ];
+    // The exact client-mod envelope keys. No additional field may be
+    // supplied (no path, filename, archive path, source, or root).
+    const BACKUP_CLIENT_MOD_KEYS = ["vencordLocalStorage", "equicordLocalStorage", "shelter"];
 
     function listThemes(timeoutMs = 5000) {
         requireCapability("themes.list");
@@ -455,6 +476,82 @@
         // selector may be supplied. The host inventories the fixed
         // allowlist only.
         return request({ type: "backup_list_bundles", payload: {} }, timeoutMs).then((payload) => payload.bundles);
+    }
+
+    function saveBackup(payloadString, timeoutMs = 120_000) {
+        requireCapability("backup.save");
+        if (typeof payloadString !== "string") {
+            return Promise.reject(new TypeError("payload must be a JSON string"));
+        }
+        if (textEncoder.encode(payloadString).length > MAX_BACKUP_SAVE_MESSAGE_BYTES) {
+            return Promise.reject(new TypeError("payload exceeds the backup size limit"));
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(payloadString);
+        } catch {
+            return Promise.reject(new TypeError("payload must be valid JSON"));
+        }
+        // The exact Electron save shape ({ includes, clientMods }): no
+        // output path, filename, archive path, source path, dialog option,
+        // or root may ride along. The host owns collection, the manifest,
+        // ZIP creation, the dialog, and the final write.
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return Promise.reject(new TypeError("payload must be an object"));
+        }
+        const topKeys = Object.keys(parsed);
+        if (topKeys.length !== 2 || !topKeys.includes("includes") || !topKeys.includes("clientMods")) {
+            return Promise.reject(new TypeError("payload must carry exactly includes and clientMods"));
+        }
+        const includes = parsed.includes;
+        if (!includes || typeof includes !== "object" || Array.isArray(includes)) {
+            return Promise.reject(new TypeError("includes must be an object"));
+        }
+        const includeKeys = Object.keys(includes);
+        if (
+            includeKeys.length !== BACKUP_INCLUDE_KEYS.length ||
+            !BACKUP_INCLUDE_KEYS.every((key) => typeof includes[key] === "boolean")
+        ) {
+            return Promise.reject(new TypeError("includes must carry exactly the seven known booleans"));
+        }
+        const clientMods = parsed.clientMods;
+        if (!clientMods || typeof clientMods !== "object" || Array.isArray(clientMods)) {
+            return Promise.reject(new TypeError("clientMods must be an object"));
+        }
+        for (const key of Object.keys(clientMods)) {
+            if (!BACKUP_CLIENT_MOD_KEYS.includes(key)) {
+                return Promise.reject(new TypeError("clientMods carries an unknown field"));
+            }
+        }
+        for (const key of ["vencordLocalStorage", "equicordLocalStorage"]) {
+            const value = clientMods[key];
+            if (value !== undefined && value !== null) {
+                if (typeof value !== "string" || textEncoder.encode(value).length > MAX_CLIENT_MOD_STRING_BYTES) {
+                    return Promise.reject(new TypeError(`${key} must be a string of at most 1048576 UTF-8 bytes`));
+                }
+            }
+        }
+        if (clientMods.shelter !== undefined && clientMods.shelter !== null && typeof clientMods.shelter !== "object") {
+            return Promise.reject(new TypeError("shelter must be an object"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // The modal picker stays open as long as the user needs, so this
+        // uses the long-operation timeout like the mod bundle retrieval and
+        // the theme import rather than the ordinary 5-second command
+        // timeout. The Electron result shape is preserved ({ ok } /
+        // { ok: false, error }): cancellation resolves { ok: false, error:
+        // "CANCELLED" } (silent typed control flow, never a rejection), and
+        // host failures resolve { ok: false, error: <typed code> } so the
+        // existing backup UI keeps working without a native branch.
+        return request({ type: "backup_save", payload: { includes, clientMods } }, timeoutMs).then(
+            (payload) => (payload.canceled === true ? { ok: false, error: "CANCELLED" } : { ok: true }),
+            (error) => ({
+                ok: false,
+                error: typeof error?.code === "string" ? error.code : "UNKNOWN",
+            }),
+        );
     }
 
     window.addEventListener("legcord-native:response", (event) => {
@@ -753,6 +850,22 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "backup_saved") {
+            const payload = response.payload.payload;
+            // Bounded save outcome only: cancellation plus the final archive
+            // size. No path, filename, URL, source echo, or filesystem error
+            // may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                typeof payload.canceled !== "boolean" ||
+                !Number.isSafeInteger(payload.bytes) ||
+                payload.bytes < 0
+            ) {
+                request.reject(new Error("Native backup save response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -817,9 +930,11 @@
     // the shimmed versions; the originals are kept out of the surface so no
     // duplicate member can drift.)
     const pluginStorage = Object.freeze({ readFile: readPluginFile, writeFile: writePluginFile });
-    // Backup discovery only: save/restore (dialogs + zip) are deferred, so
-    // no save/restore member may exist on this namespace.
-    const backup = Object.freeze({ listBundles });
+    // Backup save plus discovery: `save` takes the existing Electron JSON
+    // string ({ includes, clientMods }) and resolves the existing result
+    // shape ({ ok } / { ok: false, error }); restore stays deferred, so no
+    // restore member may exist on this namespace.
+    const backup = Object.freeze({ listBundles, save: saveBackup });
     // Folder opening only: reveal for the three fixed roots, open for one
     // validated theme id. No path, dialog, picker, or shell surface.
     const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });

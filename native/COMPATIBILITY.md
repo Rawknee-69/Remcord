@@ -49,6 +49,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Renderer request (plugin storage read) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_read","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt"}}}` |
 | Renderer request (plugin storage write) | `{"version":1,"request_id":"...","command":{"type":"plugin_storage_write","payload":{"plugin_id":"my-plugin","relative_path":"cache/note.txt","data":"..."}}}` |
 | Renderer request (bundle discovery) | `{"version":1,"request_id":"...","command":{"type":"bundles_list","payload":{}}}` |
+| Renderer request (backup save) | `{"version":1,"request_id":"...","command":{"type":"backup_save","payload":{"includes":{...7 booleans...},"clientMods":{...bounded envelope...}}}}` |
 | Renderer request (folder reveal) | `{"version":1,"request_id":"...","command":{"type":"folders_open","payload":{"location":"themes"}}}` |
 | Renderer request (theme folder open) | `{"version":1,"request_id":"...","command":{"type":"folders_open_theme","payload":{"id":"my-theme"}}}` |
 | Renderer request (theme install) | `{"version":1,"request_id":"...","command":{"type":"theme_install_code","payload":{"css":"/** @name Midnight Harbor */ :root {}"}}}` |
@@ -64,6 +65,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Plugin storage read response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"plugin_storage_read","payload":{"data":"...","payload_bytes":38}},"error":null}` |
 | Plugin storage write response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"plugin_storage_write","payload":{"payload_bytes":38}},"error":null}` |
 | Bundle inventory response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"bundles_list","payload":{"bundles":[{"name":"vencord.js","present":true,"bytes":698272},{"name":"vencord.css","present":true,"bytes":41335},{"name":"equicord.js","present":false,"bytes":0},{"name":"equicord.css","present":false,"bytes":0},{"name":"shelter.js","present":true,"bytes":235850},{"name":"custom.js","present":false,"bytes":0},{"name":"custom.css","present":false,"bytes":0}]}},"error":null}` |
+| Backup save response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"backup_saved","payload":{"canceled":false,"bytes":1217955}},"error":null}` |
 | Folder reveal response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"folders_opened","payload":{"location":"themes"}},"error":null}` |
 | Theme folder open response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_folder_opened","payload":{"id":"my-theme"}},"error":null}` |
 | Theme install response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_installed","payload":{"id":"Midnight-Harbor-BD","enabled":false,"css_bytes":128}},"error":null}` |
@@ -72,7 +74,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 | Theme enable response | `{"version":1,"request_id":"...","ok":true,"payload":{"type":"theme_enabled","payload":{"id":"my-theme","enabled":true}},"error":null}` |
 | Renderer event | `{"version":1,"event":{"type":"round_trip_ack","payload":{"nonce":"..."}}}` |
 
-The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `folders_open`, `folders_open_theme`, `theme_install_code`, `theme_write_css`, `theme_import_files`, and `theme_set_enabled`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
+The commands are `ping`, `mod_get_bundle`, `settings_get_config`, `settings_set_block_power_saving`, `localization_get_lang`, `app_get_version`, `plugin_storage_read`, `plugin_storage_write`, `bundles_list`, `backup_save`, `folders_open`, `folders_open_theme`, `theme_install_code`, `theme_write_css`, `theme_import_files`, and `theme_set_enabled`; events include `round_trip_ack`, `css_probe`, `renderer_error`, `bootstrap_metrics`, the typed Vencord CSS/bootstrap/adapter/response acknowledgements, and the DEV-only `settings_probe`/`get_lang_probe`/`settings_mutation_probe`/`app_version_probe`/`plugin_storage_probe` diagnostics (emitted only by the `LEGCORD_NATIVE_SETTINGS_SMOKE=1` / `LEGCORD_NATIVE_GETLANG_SMOKE=1` / `LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1` / `LEGCORD_NATIVE_APP_VERSION_SMOKE=1` / `LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1` probes, never by shipped adapters). Request IDs are limited to 128 ASCII alphanumeric, `-`, or `_` characters, may not be reused within a document, and are capped at 4096 tracked IDs per document. The request/response contract is asynchronous. The renderer correlates responses by ID, ignores unknown IDs and wrong-version responses, and rejects outstanding promises on timeout or `pagehide`. Native request state and Vencord's one-start/one-execution guard reset on a new document. Unknown versions, commands, events, malformed payloads, duplicate IDs, oversized messages, and untrusted origins are rejected and logged; no unknown request is dispatched.
 
 ## Vencord execution boundary
 
@@ -217,6 +219,40 @@ renderer await window.legcord.backup.listBundles()
 Semantic parity with Electron (asserted by comparing the canonical definitions, not by paraphrase): same 7 bundle names, same ordering, same presence semantics for regular files, same `<name>` bundle path naming. `custom.js`/`custom.css` are inventoried exactly like the other five names but stay inventory-only and non-executable — no descriptor registers the `custom` id, so presence can never become execution.
 
 Deliberate Electron differences (hardening, not regressions): metadata only (`{name, present, bytes}` — contents, absolute/profile paths, URLs, and path-bearing errors never cross); symlinks/junctions/directories report absent instead of being followed (Electron's `readFileSync` would follow a planted link and embed outside bytes into a backup); no upper byte bound on reported sizes (nothing is allocated from metadata); non-`NotFound` IO errors fail the whole inventory closed instead of guessing absence. The facade enforces the exact 7-name sequence, `absent ⇒ bytes 0`, and rejects any entry carrying `path`/`url`/`data`.
+
+## Backup save capability (Phase D4-1)
+
+The second backups slice migrates ONLY the save half — `buildBackupZipBuffer` plus the `showSaveDialog` + write path of `backupSave` — to a typed capability `backup.save` (wire `backup_save`, facade `window.legcord.backup.save(payloadString)` preserving the existing Electron JSON-string signature, so `BackupSection.tsx` is untouched). Restore (`applyBackupFromMap` / `backupRestore`) and BackupSection UI wiring stay deferred. There is no new `src/` caller: a native branch in the Electron backup UI would be fabrication, so a DEV-only probe (`LEGCORD_NATIVE_BACKUP_SAVE_SMOKE=1`) exercises the real capability instead.
+
+### Electron chain (unchanged)
+
+`src/common/backup.ts::buildBackupZipBuffer(payload, paths)` builds `{ version: 1, createdAt: new Date().toISOString(), appVersion: app.getVersion(), includes, clientMods }` (only flagged clientMods keys carried; unflagged stay absent; flagged-but-missing values become `null`), then collects `data/storage/settings.json`, `data/quickCss.css` + `data/themes/**`, `data/plugins/**` (disk `extensions/`) + `data/runtime-plugins/**` (disk `plugins/`) + `data/plugin-storage/**`, and `bundles/<name>` for the 7 fixed names — manifest first, whole-file unbounded reads, filesystem order, missing files/dirs silently skipped. `src/discord/ipc.ts::backupSave` parses one JSON string, builds the buffer, shows `dialog.showSaveDialog` (translated title `backup-dialogSave-title`, `defaultPath: Documents/legcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter), returns `{ ok: false, error: "CANCELLED" }` on dismissal, appends `.zip` when missing, and writes with `writeFileSync`. `native/tests/electron-compat.test.mjs` asserts every handler, bridge mapping, and declared contract above is byte-identical.
+
+### Native chain
+
+```text
+renderer await window.legcord.backup.save(jsonString)
+  → requireCapability("backup.save") or sync UNSUPPORTED_CAPABILITY throw
+  → client exact-shape check ({includes, clientMods} only; 7 booleans;
+     3 known clientMods keys; per-string ≤ 1 MiB; TypeError before dispatch)
+  → {"type":"backup_save","payload":{"includes":{...},"clientMods":{...}}}
+     (any path/filename/archive/source/dialog/root member host-rejected)
+  → dedicated STA worker (COM once per thread): validate envelope
+     → synthesize manifest (version 1, UTC ISO-8601 createdAt, appVersion
+        from the existing app-version owner) → collect bounded entries
+        (sorted order) → build deflate ZIP (zip 2.x, manifest first)
+        → IFileSaveDialog (translated title, ZIP filter, UTC-date default
+        filename, .zip enforced) → sibling-temp + rename write
+  → validated backup_saved { canceled, bytes } (byte count only, never a path)
+  → facade maps to the Electron shape: {ok:true} | {ok:false, error:"CANCELLED"}
+     | {ok:false, error:<typed code>} (rejections mapped, never unhandled)
+```
+
+Response echo discipline differs from other capabilities by necessity: the renderer needs Electron's `{ok, error?}` shape, so the facade resolves (never rejects) all host outcomes into it. Transport/capability misuse still rejects or throws synchronously before dispatch.
+
+Deliberate Electron differences (hardening, not regressions): typed includes + bounded clientMods (per-string ≤ 1 MiB, total ≤ 4 MiB, shelter ≤ 2 MiB with depth ≤ 32 / nodes ≤ 65536 — renderer input is never trusted); per-file ≤ 1 MiB except the bundle allowlist (≤ 32 MiB, the mod-substrate retrieval ceiling — real artifacts like `equicord.js` are multi-megabyte); total uncompressed ≤ 64 MiB; entries ≤ 4096; overflow fails closed as `BACKUP_TOO_LARGE`, never a truncated archive; links/junctions/non-regular files skipped, never followed; sorted traversal (deterministic archives; Electron uses filesystem order); nothing created for backup purposes (a missing `quickCss.css` is NOT created, unlike the Quick CSS loader); no `defaultPath` (the host sets the filename only); temp-file + rename write (Electron writes in place); typed path-free errors instead of raw messages; renderer receives `{canceled, bytes}` semantics only.
+
+Known issue (pre-existing, untouched): `compatibility.js` discovery sends `backup_list_bundles` while the protocol expects `bundles_list` (host rejects it; visible as `[Bridge] rejected invalid message` in DEV logs). D4-1 does not exercise listBundles and leaves the one-line fix out of scope.
 
 ## Folder opening capability (Phase D Step 2)
 
