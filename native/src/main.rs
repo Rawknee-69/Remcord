@@ -2,6 +2,7 @@ mod app;
 mod backup;
 mod bundles;
 mod css_watch;
+mod downloads;
 mod folders;
 mod legcord_protocol;
 mod localization;
@@ -2614,6 +2615,57 @@ where
     }
 }
 
+/// Attaches the P0.5 download policy to one WebView builder (main and P0.4
+/// child share this helper — no policy fork).
+///
+/// Start: take ONLY the file name from WebView2's suggested path (its
+/// directory is discarded), sanitize, resolve a unique host-owned
+/// destination; invalid/exhausted denies. Synchronous by wry design — no
+/// picker, no shell, no JS, no bridge traffic. Completion only logs the
+/// redacted URL, the bare file name, and success (paths stay host-side).
+fn apply_download_handlers(
+    builder: WebViewBuilder<'_>,
+    downloads_dir: PathBuf,
+) -> WebViewBuilder<'_> {
+    let start_dir = downloads_dir.clone();
+    let done_dir = downloads_dir;
+    builder
+        .with_download_started_handler(move |url, path| {
+            let redacted = downloads::redact_url(&url);
+            match downloads::decide_download(&start_dir, path) {
+                downloads::DownloadDecision::Allow(destination) => {
+                    let name = destination
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "?".to_owned());
+                    println!("[Downloads] start file={name} source={redacted}");
+                    *path = destination;
+                    true
+                }
+                downloads::DownloadDecision::Deny => {
+                    println!("[Downloads] denied source={redacted}");
+                    false
+                }
+            }
+        })
+        .with_download_completed_handler(move |url, result_path, success| {
+            let redacted = downloads::redact_url(&url);
+            // Defense in depth: the completed path must still sit directly
+            // beneath the host dir (we set it, but never trust it back).
+            let name = result_path
+                .as_ref()
+                .filter(|path| path.parent() == Some(done_dir.as_path()))
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned());
+            match (success, name) {
+                (true, Some(name)) => {
+                    println!("[Downloads] completed file={name} source={redacted}")
+                }
+                (true, None) => println!("[Downloads] completed-unverified source={redacted}"),
+                (false, _) => println!("[Downloads] interrupted source={redacted}"),
+            }
+        })
+}
 /// The single managed popup child (P0.4). At most one lives at a time:
 /// the approved Discord popout / `about:blank` / hidden ICS surface.
 /// The `WebView` field is never read — it exists to keep the child alive
@@ -2649,6 +2701,7 @@ fn create_popup_child(
     initialization_script: &str,
     ipc_proxy: &EventLoopProxy<NativeEvent>,
     roots: &crate::legcord_protocol::NamespaceRoots,
+    downloads_dir: &std::path::Path,
     always_on_top: bool,
 ) -> Result<PopupChild, String> {
     let (visible, initial_url) = match kind {
@@ -2673,6 +2726,7 @@ fn create_popup_child(
     {
         builder = builder.with_environment(environment);
     }
+    let builder = apply_download_handlers(builder, downloads_dir.to_path_buf());
     let builder = builder
         .with_url(initial_url)
         .with_initialization_script_for_main_only(initialization_script, true)
@@ -3383,6 +3437,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let profile_path = PathBuf::from(WEBVIEW_PROFILE);
     std::fs::create_dir_all(&profile_path)?;
+    // P0.5 host-owned downloads directory. Fail fast: every download
+    // decision needs this root, and a broken profile dir is fatal anyway.
+    let downloads_dir = downloads::ensure_downloads_dir(&profile_path)?;
     // Fail fast if the embedded package version ever loses its shape: the
     // capability serves this constant on every request.
     if let Err(error) = validate_version(current_app_version()) {
@@ -3895,6 +3952,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         webview_builder = webview_builder.with_environment(webview_env);
     }
+    // P0.5: host-owned downloads directory, no dialog, never overwrite.
+    webview_builder = apply_download_handlers(webview_builder, downloads_dir.clone());
     // Two-phase boot: the initial document is the empty `about:blank`
     // (committed synchronously inside `build()`, before any
     // WebResourceRequested filter can exist), then the host navigates to
@@ -4496,6 +4555,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &popup_ipc_proxy,
                     #[cfg(target_os = "windows")]
                     &popup_roots,
+                    &downloads_dir,
                     always_on_top,
                 ) {
                     Ok(child) => {
