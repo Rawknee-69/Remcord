@@ -780,6 +780,59 @@ test("rejects capabilities that are not in the immutable snapshot", () => {
     );
 });
 
+test("window-state events converge local reads and body attributes without polling", () => {
+    const { window, context } = createRuntime();
+    const attributes = new Map();
+    context.document = {
+        body: {
+            setAttribute: (name, value) => attributes.set(name, value),
+            removeAttribute: (name) => attributes.delete(name),
+        },
+    };
+    // Seeded from the boot snapshot: unfocused, unmaximized.
+    assert.equal(window.legcord.native.window.maximized(), false);
+    assert.equal(window.legcord.native.window.isNormal(), true);
+    assert.equal(window.legcord.window.maximized(), false);
+    assert.equal(window.legcord.window.isNormal(), true);
+
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:window-state", {
+            detail: { version: 1, focused: true, maximized: true },
+        }),
+    );
+    assert.equal(window.legcord.native.window.maximized(), true);
+    assert.equal(window.legcord.native.window.isNormal(), false);
+    assert.equal(window.legcord.window.maximized(), true);
+    assert.equal(attributes.get("isMaximized"), "");
+    assert.equal(attributes.has("unFocused"), false);
+
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:window-state", {
+            detail: { version: 1, focused: false, maximized: false },
+        }),
+    );
+    assert.equal(window.legcord.native.window.maximized(), false);
+    assert.equal(window.legcord.native.window.isNormal(), true);
+    assert.equal(attributes.has("isMaximized"), false);
+    assert.equal(attributes.get("unFocused"), "");
+
+    // Malformed details are ignored: no listener throw, no state change.
+    window.dispatchEvent(new FakeCustomEvent("legcord-native:window-state", { detail: null }));
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:window-state", {
+            detail: { version: 2, focused: true, maximized: true },
+        }),
+    );
+    window.dispatchEvent(
+        new FakeCustomEvent("legcord-native:window-state", {
+            detail: { version: 1, focused: "yes", maximized: true },
+        }),
+    );
+    assert.equal(window.legcord.native.window.maximized(), false);
+    assert.equal(attributes.has("isMaximized"), false);
+    assert.equal(attributes.get("unFocused"), "");
+});
+
 test("correlates asynchronous responses independently of their arrival order", async () => {
     const { window } = createRuntime();
     const first = window.legcord.native.ping("first");

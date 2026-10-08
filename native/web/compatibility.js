@@ -1081,6 +1081,16 @@
         if (typeof detail.focused !== "boolean" || typeof detail.maximized !== "boolean") return;
         windowFocused = detail.focused;
         windowMaximized = detail.maximized;
+        // Mirror Electron's body-attribute writes (window.ts focus/blur and
+        // maximize/unmaximize handlers) in the same event — no polling, no
+        // extra listener — so titlebar CSS ([isMaximized], [unFocused])
+        // reflects maximized/restored/focused state.
+        if (typeof document !== "undefined" && document && document.body) {
+            if (detail.maximized) document.body.setAttribute("isMaximized", "");
+            else document.body.removeAttribute("isMaximized");
+            if (detail.focused) document.body.removeAttribute("unFocused");
+            else document.body.setAttribute("unFocused", "");
+        }
     });
 
     const native = Object.freeze({

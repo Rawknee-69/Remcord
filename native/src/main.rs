@@ -17,6 +17,7 @@ mod settings_boot;
 mod settings_plugin;
 mod theme_import;
 mod themes;
+mod titlebar_plugin;
 
 use std::{
     collections::HashMap,
@@ -2156,16 +2157,17 @@ fn settings_plugin_start_script() -> Result<String, String> {
     Ok(script)
 }
 
-/// Per-document guard for the real Legcord settings plugin start. The plugin
-/// may start at most once per document generation: the guard compares against
-/// the live generation, so reloads start fresh and replays are refused.
-/// Threaded as one bundle to keep the bootstrap handler readable.
-struct SettingsPluginStart<'a> {
+/// Per-document guard for one real Legcord Shelter plugin start (settings,
+/// titlebar, …). The plugin may start at most once per document generation:
+/// the guard compares against the live generation, so reloads start fresh
+/// and replays are refused. Threaded as one bundle to keep the bootstrap
+/// handler readable.
+struct ShelterPluginStart<'a> {
     /// Host-built evaluation script (closed id + embedded artifact).
     script: &'a str,
     /// Generation that already started the plugin (`None` = not yet started).
     started_generation: &'a mut Option<u64>,
-    /// Count of documents the plugin was started in (3d-2 observability).
+    /// Count of documents the plugin was started in (observability).
     start_count: &'a mut u64,
 }
 
@@ -2174,6 +2176,153 @@ struct SettingsPluginStart<'a> {
 /// without a WebView.
 fn settings_plugin_start_due(started_generation: Option<u64>, current_generation: u64) -> bool {
     started_generation != Some(current_generation)
+}
+
+/// Closed registry id for the real Legcord titlebar plugin. It matches the
+/// `"legcord-titlebar"` key Electron pins in the Shelter injector map
+/// (`src/discord/preload/mods/shelter.mts`), so host logs and the Electron
+/// contract name the same plugin. The renderer never supplies this id: the
+/// host splices it into the fixed start script below.
+const TITLEBAR_PLUGIN_ID: &str = "legcord-titlebar";
+
+/// Fixed manifest for the real Legcord titlebar plugin registration. Only the
+/// name is carried (the loader-probe precedent); the renderer supplies no
+/// manifest, id, source, or update flag.
+const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Titlebar Controller"}"#;
+
+/// Host-built start script for the real Legcord titlebar plugin, evaluated
+/// once per document after Shelter's own bootstrap marker proves
+/// `window.shelter.plugins` exists (same trigger as the settings plugin).
+/// It registers the embedded artifact through the same closed add/start
+/// lifecycle the loader probe proved (remove-first for idempotency,
+/// host-fixed id/source/manifest, then start), and returns a plain status
+/// string the host logs — never plugin source, paths, or URLs.
+///
+/// Before registration it reproduces `src/discord/preload/newTitlebar.mts`
+/// for the overlay-chrome styles: the host platform comes from the
+/// facade-owned `window.legcord.platform` (never renderer input), the body
+/// attributes and the build-embedded per-OS stylesheets are host-chosen and
+/// injected as inline `<style>` nodes (no subresource fetch, so reloads
+/// cannot silently unstyle the controls). All existing window actions flow through the typed
+/// `window.legcord.window.*` operations the plugin already calls; no new
+/// RPC is added.
+///
+/// `__LEGCORD_TITLEBAR_PLUGIN_JS__` is spliced as a JSON-encoded string
+/// literal (never interpolated raw); `__LEGCORD_TITLEBAR_PLUGIN_MANIFEST__`
+/// is spliced as fixed JSON; `__LEGCORD_TITLEBAR_CSS__` is spliced as a
+/// JSON object of build-embedded stylesheet texts keyed `base`/`win`/
+/// `darwin`/`linux` (never paths or URLs).
+const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
+(() => {
+  const ID = "legcord-titlebar";
+  try {
+    const plugins = window.shelter && window.shelter.plugins;
+    if (!plugins) return "titlebar-failed: shelter plugins unavailable";
+    for (const name of ["addLocalPlugin", "startPlugin", "removePlugin"]) {
+      if (typeof plugins[name] !== "function") return "titlebar-failed: missing " + name;
+    }
+    const legcord = window.legcord;
+    if (!legcord || typeof legcord.platform !== "string") return "titlebar-failed: facade unavailable";
+    const body = document.body;
+    if (!body) return "titlebar-failed: no document body";
+    body.setAttribute("legcord-platform", legcord.platform);
+    const cssText = __LEGCORD_TITLEBAR_CSS__;
+    const wanted = ["base"];
+    if (legcord.platform === "win32") {
+      body.setAttribute("class", "platform-win");
+      wanted.push("win");
+    } else if (legcord.platform === "darwin") {
+      wanted.push("darwin");
+    } else {
+      body.setAttribute("class", "platform-linux");
+      wanted.push("linux");
+    }
+    // Inline <style> nodes from build-embedded text (no subresource fetch:
+    // fetched sheets stop reaching the host after a reload, which silently
+    // unstyles link-based sheets). Legacy link sheets from older builds are removed; style nodes are deduped and refreshed per
+    // document, so reloads converge instead of stacking.
+    for (const stale of document.querySelectorAll('link[data-legcord-titlebar-css]')) {
+      stale.remove();
+    }
+    for (const key of wanted) {
+      const text = cssText && cssText[key];
+      if (typeof text !== "string" || text.length === 0) return "titlebar-failed: missing " + key + " css";
+      let node = document.querySelector('style[data-legcord-titlebar-css="' + key + '"]');
+      if (!node) {
+        node = document.createElement("style");
+        node.setAttribute("data-legcord-titlebar-css", key);
+        document.head.appendChild(node);
+      }
+      if (node.textContent !== text) node.textContent = text;
+    }
+    // Shelter auto-starts persisted plugins at its own boot, before this
+    // marker-time script runs — and the plugin's remove/unload path never
+    // removes injected DOM. Drop any stale controls first so exactly one set
+    // exists no matter who started the plugin earlier in this document.
+    for (const id of ["legcordNavControls", "legcordTitlebar"]) {
+      const stale = document.getElementById(id);
+      if (stale) stale.remove();
+    }
+    try {
+      plugins.removePlugin(ID);
+    } catch (ignored) {}
+    plugins.addLocalPlugin(ID, {
+      js: __LEGCORD_TITLEBAR_PLUGIN_JS__,
+      manifest: __LEGCORD_TITLEBAR_PLUGIN_MANIFEST__,
+      update: false,
+    });
+    plugins.startPlugin(ID);
+    // Structural census (DOM + inline style nodes + platform + readyState).
+    // Styles are build-embedded text injected above (no fetch), so the node
+    // count is steady-state truthful here, unlike link load timing. The host
+    // re-runs this same idempotent script at document finish (settle pass).
+    const controls = document.querySelectorAll('#legcordNavControls').length;
+    const styles = Array.from(document.querySelectorAll('style[data-legcord-titlebar-css]'));
+    const platform = document.body.getAttribute("legcord-platform") || "none";
+    const ready = document.readyState || "unknown";
+    if (controls < 1) {
+      return "titlebar-started:controls-missing";
+    }
+    return "titlebar-started:controls-" + controls + "-styles-" + styles.length
+      + "-platform-" + platform + "-ready-" + ready;
+  } catch (error) {
+    return "titlebar-failed: " + String((error && error.message) || error).slice(0, 256);
+  }
+})()
+"#;
+
+/// Builds the per-launch titlebar plugin start script by splicing the
+/// embedded artifact, the fixed manifest, and the embedded stylesheets into
+/// the closed template. Fails fast on an unspliced placeholder or an
+/// unserializable artifact.
+fn titlebar_plugin_start_script() -> Result<String, String> {
+    let js = serde_json::to_string(titlebar_plugin::artifact().js)
+        .map_err(|error| format!("titlebar plugin artifact cannot be serialized: {error}"))?;
+    let css = titlebar_plugin::TITLEBAR_CSS_KEYS
+        .iter()
+        .map(|key| {
+            titlebar_plugin::css_for(key)
+                .map(|text| (*key, text))
+                .ok_or_else(|| format!("titlebar css key {key:?} is missing"))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+    let css_json = serde_json::to_string(&css)
+        .map_err(|error| format!("titlebar stylesheets cannot be serialized: {error}"))?;
+    let script = TITLEBAR_PLUGIN_START_TEMPLATE
+        .replace("__LEGCORD_TITLEBAR_PLUGIN_JS__", &js)
+        .replace(
+            "__LEGCORD_TITLEBAR_PLUGIN_MANIFEST__",
+            TITLEBAR_PLUGIN_MANIFEST_JSON,
+        )
+        .replace("__LEGCORD_TITLEBAR_CSS__", &css_json);
+    if script.contains("__LEGCORD_TITLEBAR_PLUGIN_") || script.contains("__LEGCORD_TITLEBAR_CSS__")
+    {
+        return Err("titlebar plugin start script has an unspliced placeholder".to_owned());
+    }
+    if !script.contains(TITLEBAR_PLUGIN_ID) {
+        return Err("titlebar plugin start script lost the closed plugin id".to_owned());
+    }
+    Ok(script)
 }
 
 /// DEV-only settings smoke probe (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`).
@@ -3284,7 +3433,8 @@ fn handle_mod_bootstrap_result(
     response_count: &mut u64,
     observe_after_marker: Option<&str>,
     loader_probe_after_marker: Option<&str>,
-    settings_plugin_start: Option<SettingsPluginStart<'_>>,
+    settings_plugin_start: Option<ShelterPluginStart<'_>>,
+    titlebar_plugin_start: Option<ShelterPluginStart<'_>>,
 ) {
     let Some(pending) = pending_mods.remove(&request_id) else {
         eprintln!(
@@ -3419,6 +3569,34 @@ fn handle_mod_bootstrap_result(
                     })
                 {
                     eprintln!("[SettingsPlugin] start evaluation failed: {error}");
+                }
+            }
+        }
+        // Real Legcord titlebar plugin: same trigger, same closed lifecycle,
+        // own generation guard so a settings replay can never start (or skip)
+        // the titlebar. Failure is loud but never blocks the document.
+        if let Some(start) = titlebar_plugin_start {
+            let generation = document_lifecycle.generation();
+            if !settings_plugin_start_due(*start.started_generation, generation) {
+                eprintln!(
+                    "[Titlebar][duplicate] titlebar plugin already started in document generation {generation}"
+                );
+            } else {
+                *start.started_generation = Some(generation);
+                *start.start_count += 1;
+                let count = *start.start_count;
+                if let Err(error) =
+                    webview.evaluate_script_with_callback(start.script, move |result| {
+                        if result.starts_with("\"titlebar-started:controls-") {
+                            println!(
+                                "[Titlebar] start ok=true count={count} generation={generation} result={result}"
+                            );
+                        } else {
+                            eprintln!("[Titlebar] start ok=false result={result}");
+                        }
+                    })
+                {
+                    eprintln!("[Titlebar] start evaluation failed: {error}");
                 }
             }
         }
@@ -3792,6 +3970,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "[SettingsPlugin] artifact name='{}' bytes={} sha256={}",
         settings_plugin.name, settings_plugin.bytes, settings_plugin.sha256
+    );
+    let titlebar_plugin = titlebar_plugin::artifact();
+    // Same defense in depth as the settings artifact: the build validated,
+    // the running host re-checks, startup fails fast on drift.
+    titlebar_plugin::validate_artifact(titlebar_plugin.js, titlebar_plugin.name)
+        .expect("embedded titlebar plugin artifact must validate at startup");
+    titlebar_plugin::validate_sha256(titlebar_plugin.sha256)
+        .expect("embedded titlebar plugin identity must be well-formed");
+    println!(
+        "[Titlebar] artifact name='{}' bytes={} sha256={}",
+        titlebar_plugin.name, titlebar_plugin.bytes, titlebar_plugin.sha256
     );
     let diagnostic_bare_page = std::env::var(BARE_PAGE_ENV).is_ok_and(|value| value == "1");
     let diagnostic_interaction =
@@ -4502,6 +4691,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut settings_plugin_started_generation = None::<u64>;
     let mut settings_plugin_start_count = 0_u64;
+    // Real Legcord titlebar plugin: same host-built script plus per-document
+    // guard as the settings plugin, moved into the event-loop closure below.
+    // Started from the same Shelter bootstrap trigger, right after settings.
+    let titlebar_plugin_start_script =
+        titlebar_plugin_start_script().expect("titlebar plugin start script must build");
+    println!(
+        "[Titlebar] start script bytes={}",
+        titlebar_plugin_start_script.len()
+    );
+    let mut titlebar_started_generation = None::<u64>;
+    let mut titlebar_start_count = 0_u64;
+    // Settle generation for the finish-time titlebar re-run (see the
+    // PageLoadFinished arm): heals marker-time injections discarded by a
+    // later mount, once per document, with no retry loop.
+    let mut titlebar_settled_generation = None::<u64>;
     // Authoritative window state tracked from native events. Seeded from
     // boot snapshot (both false at startup since window is created hidden).
     let mut native_window_state = NativeWindowState::default();
@@ -4660,6 +4864,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .parse::<Uri>()
                     .is_ok_and(|uri| is_trusted_bridge_origin(&uri))
                 {
+                    // Titlebar settle pass: the marker-time start can land
+                    // before Discord finishes mounting (warm reloads), and a
+                    // mount can discard body-appended nodes afterwards. This
+                    // one-shot-per-generation re-run of the same idempotent
+                    // script heals that wipe; the marker path still covers a
+                    // Shelter marker that arrives after finish, in either
+                    // order, with at most two evaluations per document and
+                    // never a retry loop.
+                    if titlebar_settled_generation != Some(document_lifecycle.generation()) {
+                        titlebar_settled_generation = Some(document_lifecycle.generation());
+                        let generation = document_lifecycle.generation();
+                        if let Err(error) = webview.evaluate_script_with_callback(
+                            &titlebar_plugin_start_script,
+                            move |result| {
+                                println!("[Titlebar] settle generation={generation} result={result}");
+                            },
+                        ) {
+                            eprintln!("[Titlebar] settle evaluation failed: {error}");
+                        }
+                    }
                     if let Err(error) = webview.evaluate_script_with_callback(
                         RENDERER_HEALTH_SCRIPT,
                         |result| println!("[Renderer][Health] {result}"),
@@ -6792,10 +7016,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 diagnostic_mod_smoke.then_some(mod_smoke_script.as_str()),
                                 diagnostic_shelter_loader_probe
                                     .then_some(SHELTER_LOADER_PROBE_SCRIPT),
-                                Some(SettingsPluginStart {
+                                Some(ShelterPluginStart {
                                     script: &settings_plugin_start_script,
                                     started_generation: &mut settings_plugin_started_generation,
                                     start_count: &mut settings_plugin_start_count,
+                                }),
+                                Some(ShelterPluginStart {
+                                    script: &titlebar_plugin_start_script,
+                                    started_generation: &mut titlebar_started_generation,
+                                    start_count: &mut titlebar_start_count,
                                 }),
                             );
                         } else {
@@ -6864,6 +7093,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut smoke_reloads_remaining,
                             &mut smoke_reload_request_id,
                             &mut response_count,
+                            None,
                             None,
                             None,
                             None,
@@ -7260,9 +7490,10 @@ mod tests {
         initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
         lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, settings_plugin_start_due,
         settings_plugin_start_script, settings_ui_probe_script, startup_visibility,
-        StartupVisibility, EQUICORD_MOD, KNOWN_MODS, LEGCORD_PROTOCOL_SMOKE_SCRIPT,
-        PERMISSIONS_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD,
-        VENCORD_MOD,
+        titlebar_plugin_start_script, StartupVisibility, EQUICORD_MOD, KNOWN_MODS,
+        LEGCORD_PROTOCOL_SMOKE_SCRIPT, PERMISSIONS_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
+        SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
+        TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
@@ -7443,6 +7674,60 @@ mod tests {
         assert!(settings_plugin_start_due(None, 7));
         assert!(!settings_plugin_start_due(Some(7), 7));
         assert!(settings_plugin_start_due(Some(7), 8));
+    }
+
+    #[test]
+    fn titlebar_plugin_start_script_is_closed_and_embedded() {
+        // The template is closed: host-fixed lifecycle calls, inline style
+        // management over build-embedded text (no legcord:// fetch, no
+        // generic fetch at all), platform-gated attributes, and plain status
+        // strings — no bridge, no renderer input.
+        for token in [
+            "removePlugin",
+            "addLocalPlugin",
+            "startPlugin",
+            "titlebar-started:controls-",
+            "titlebar-started:controls-missing",
+            "titlebar-failed",
+            "legcord-platform",
+            "data-legcord-titlebar-css",
+            "__LEGCORD_TITLEBAR_CSS__",
+        ] {
+            assert!(
+                TITLEBAR_PLUGIN_START_TEMPLATE.contains(token),
+                "template must carry {token}"
+            );
+        }
+        assert!(
+            TITLEBAR_PLUGIN_START_TEMPLATE.contains(TITLEBAR_PLUGIN_ID),
+            "template must use the closed plugin id"
+        );
+        for token in [
+            "legcord://",
+            "postMessage",
+            "http://",
+            "https://",
+            "eval(",
+            "new Function",
+            "fetch(",
+        ] {
+            assert!(
+                !TITLEBAR_PLUGIN_START_TEMPLATE.contains(token),
+                "template must not carry {token}"
+            );
+        }
+        let script = titlebar_plugin_start_script().expect("the start script must build");
+        assert!(!script.contains("__LEGCORD_TITLEBAR_PLUGIN_"));
+        assert!(!script.contains("__LEGCORD_TITLEBAR_CSS__"));
+        assert!(script.contains("legcord-titlebar"));
+        assert!(script.contains("Legcord Titlebar Controller"));
+        // The embedded artifact travels with the script (a structural member
+        // proves the splice carries real plugin bytes, not padding).
+        assert!(script.contains("legcordNavControls"));
+        assert!(script.contains("window-controls-container"));
+        // The embedded stylesheets travel with the script (a controls rule
+        // proves real CSS bytes, not padding).
+        assert!(script.contains("#window-controls-container"));
     }
 
     #[test]
