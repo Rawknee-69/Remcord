@@ -6,6 +6,7 @@ mod folders;
 mod legcord_protocol;
 mod localization;
 mod mod_substrate;
+mod permissions;
 mod plugin_storage;
 mod protocol;
 mod quick_css;
@@ -269,6 +270,7 @@ const SETTINGS_BOOT_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE";
 const SETTINGS_UI_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_UI_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
 const LEGCORD_PROTOCOL_SMOKE_ENV: &str = "LEGCORD_NATIVE_LEGCORD_PROTOCOL_SMOKE";
+const PERMISSIONS_SMOKE_ENV: &str = "LEGCORD_NATIVE_PERMISSIONS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
@@ -1949,6 +1951,90 @@ const LEGCORD_PROTOCOL_SMOKE_READBACK_SCRIPT: &str = r#"
   });
 })()
 "#;
+
+/// DEV-only permissions smoke probe (`LEGCORD_NATIVE_PERMISSIONS_SMOKE=1`).
+/// Triggers one real request per exercised kind from the trusted document
+/// and records the renderer-observed outcome in dataset flags the host
+/// reads back; the host log carries the authoritative kind/origin/decision
+/// per request. Microphone/camera tracks are stopped immediately in the
+/// same expression (no hot mic, no lingering capture). Never screenshare:
+/// no `getDisplayMedia`, no picker, no audio graph. No bridge event, no new
+/// capability, no renderer input accepted — every target is a literal.
+const PERMISSIONS_SMOKE_SCRIPT: &str = r#"
+(() => {
+  try {
+    const root = document.documentElement;
+    if (root.dataset.legcordPermissionsSmoke === "started") return;
+    root.dataset.legcordPermissionsSmoke = "started";
+    root.dataset.legcordPermissionsNotification = "pending";
+    root.dataset.legcordPermissionsMic = "pending";
+    root.dataset.legcordPermissionsCamera = "pending";
+    root.dataset.legcordPermissionsGeo = "pending";
+    try {
+      const pending = Notification.requestPermission();
+      if (pending && typeof pending.then === "function") {
+        pending.then(
+          (value) => { root.dataset.legcordPermissionsNotification = String(value); },
+          (error) => { root.dataset.legcordPermissionsNotification = "error"; },
+        );
+      } else {
+        root.dataset.legcordPermissionsNotification = String(Notification.permission);
+      }
+    } catch (error) {
+      root.dataset.legcordPermissionsNotification = "error";
+    }
+    try {
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(
+        (stream) => {
+          try { stream.getTracks().forEach((track) => track.stop()); } catch (ignored) {}
+          root.dataset.legcordPermissionsMic = "live-stopped";
+        },
+        (error) => { root.dataset.legcordPermissionsMic = "denied:" + String((error && error.name) || error).slice(0, 32); },
+      );
+    } catch (error) {
+      root.dataset.legcordPermissionsMic = "error";
+    }
+    try {
+      navigator.mediaDevices.getUserMedia({ video: true }).then(
+        (stream) => {
+          try { stream.getTracks().forEach((track) => track.stop()); } catch (ignored) {}
+          root.dataset.legcordPermissionsCamera = "live-stopped";
+        },
+        (error) => { root.dataset.legcordPermissionsCamera = "denied:" + String((error && error.name) || error).slice(0, 32); },
+      );
+    } catch (error) {
+      root.dataset.legcordPermissionsCamera = "error";
+    }
+    try {
+      navigator.geolocation.getCurrentPosition(
+        () => { root.dataset.legcordPermissionsGeo = "unexpected-allow"; },
+        (error) => { root.dataset.legcordPermissionsGeo = "denied:" + (error && error.code); },
+        { timeout: 8000 },
+      );
+    } catch (error) {
+      root.dataset.legcordPermissionsGeo = "error";
+    }
+  } catch (error) {
+    document.documentElement.dataset.legcordPermissionsSmoke =
+      "probe-failed:" + String((error && error.message) || error).slice(0, 64);
+  }
+})();
+"#;
+
+/// Reads back the DEV-only permissions probe dataset flags. Returns JSON
+/// through the evaluate callback, never through the typed bridge.
+const PERMISSIONS_SMOKE_READBACK_SCRIPT: &str = r#"
+(() => {
+  const root = document.documentElement;
+  return JSON.stringify({
+    smoke: root.dataset.legcordPermissionsSmoke || "absent",
+    notification: root.dataset.legcordPermissionsNotification || "absent",
+    mic: root.dataset.legcordPermissionsMic || "absent",
+    camera: root.dataset.legcordPermissionsCamera || "absent",
+    geo: root.dataset.legcordPermissionsGeo || "absent",
+  });
+})()
+"#;
 /// DEV-only themes observation (`LEGCORD_NATIVE_THEMES_SMOKE=1`,
 /// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
 /// pushes: the renderer never requests their CSS, so this probe only observes
@@ -2433,6 +2519,10 @@ enum NativeEvent {
     /// Fired once per document ~5 s after the probe started, so async
     /// subresource loads have settled before the host reads the flags.
     LegcordProtocolSmokeReadback,
+    /// DEV-only delayed readback for the permissions smoke probe. Fired
+    /// once per document ~8 s after the probe started, so the async media
+    /// and geolocation settlements have landed before the host reads back.
+    PermissionsSmokeReadback,
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -3597,6 +3687,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_legcord_protocol_smoke {
         println!("[LegcordProtocol][Smoke] legcord:// protocol smoke probe enabled");
     }
+    let diagnostic_permissions_smoke =
+        std::env::var(PERMISSIONS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_permissions_smoke {
+        println!("[Permissions][Smoke] permission smoke probe enabled");
+    }
     let diagnostic_mod_smoke = std::env::var(MOD_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_mod_smoke {
         println!("[Mods][Smoke] native mod runtime observation enabled");
@@ -3737,6 +3832,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("[LegcordProtocol] Failed to register protocol handler: {e}");
         } else {
             println!("[LegcordProtocol] Custom scheme handler registered");
+        }
+        // Native permission policy (P0.3): exact-origin allowlist for
+        // microphone/camera/notifications, explicit deny for everything
+        // else, request-scoped (no profile persistence). A registration
+        // failure is logged loudly but must not block boot: permissions
+        // are not boot-required, and the pre-P0.3 behavior (browser
+        // default) is strictly worse but not a startup crash.
+        if let Err(e) = permissions::register(&core_webview2) {
+            eprintln!("[Permissions] Failed to register permission handler: {e}");
+        } else {
+            println!("[Permissions] Permission handler registered (discord.com: mic/camera/notifications)");
         }
     }
 
@@ -4511,6 +4617,30 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 eprintln!("[SettingsUi][Smoke] probe failed: {error}");
                             }
                         }
+                        if diagnostic_permissions_smoke {
+                            if let Err(error) = webview.evaluate_script(PERMISSIONS_SMOKE_SCRIPT) {
+                                eprintln!("[Permissions][Smoke] probe failed: {error}");
+                            } else {
+                                // One-shot delayed readback: media and
+                                // geolocation settle asynchronously, so the
+                                // flags are read ~8 s later (DEV only).
+                                let readback_proxy = proxy.clone();
+                                if let Err(error) = thread::Builder::new()
+                                    .name("legcord-permissions-smoke-readback".to_owned())
+                                    .spawn(move || {
+                                        thread::sleep(Duration::from_millis(8000));
+                                        queue_event(
+                                            &readback_proxy,
+                                            NativeEvent::PermissionsSmokeReadback,
+                                        );
+                                    })
+                                {
+                                    eprintln!(
+                                        "[Permissions][Smoke] readback timer failed: {error}"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -4523,6 +4653,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                         },
                     ) {
                         eprintln!("[LegcordProtocol][Smoke] readback failed: {error}");
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::PermissionsSmokeReadback) => {
+                if diagnostic_permissions_smoke {
+                    if let Err(error) = webview.evaluate_script_with_callback(
+                        PERMISSIONS_SMOKE_READBACK_SCRIPT,
+                        |result| {
+                            println!("[Permissions][Smoke] outcomes={result}");
+                        },
+                    ) {
+                        eprintln!("[Permissions][Smoke] readback failed: {error}");
                     }
                 }
             }
@@ -6757,8 +6899,8 @@ mod tests {
         initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
         lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, settings_plugin_start_due,
         settings_plugin_start_script, settings_ui_probe_script, EQUICORD_MOD, KNOWN_MODS,
-        LEGCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE,
-        SHELTER_MOD, VENCORD_MOD,
+        LEGCORD_PROTOCOL_SMOKE_SCRIPT, PERMISSIONS_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
+        SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
@@ -6853,6 +6995,25 @@ mod tests {
         // No query/fragment: the resolver hardens by rejecting them.
         assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains('?'));
         assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains('#'));
+    }
+
+    #[test]
+    fn permissions_smoke_probe_requests_only_fixed_kinds_and_stops_tracks() {
+        // The DEV probe exercises exactly four DOM APIs with literal shapes
+        // (notification permission, mic-only getUserMedia, camera-only
+        // getUserMedia, geolocation) and stops every obtained track in the
+        // same expression. No display media, no picker, no audio graph, no
+        // eval surface, no bridge traffic.
+        assert!(PERMISSIONS_SMOKE_SCRIPT.contains("Notification.requestPermission()"));
+        assert!(PERMISSIONS_SMOKE_SCRIPT.contains("getUserMedia({ audio: true })"));
+        assert!(PERMISSIONS_SMOKE_SCRIPT.contains("getUserMedia({ video: true })"));
+        assert!(PERMISSIONS_SMOKE_SCRIPT.contains("navigator.geolocation.getCurrentPosition("));
+        assert!(PERMISSIONS_SMOKE_SCRIPT.contains("track.stop()"));
+        assert!(!PERMISSIONS_SMOKE_SCRIPT.contains("getDisplayMedia"));
+        assert!(!PERMISSIONS_SMOKE_SCRIPT.contains("desktopCapturer"));
+        assert!(!PERMISSIONS_SMOKE_SCRIPT.contains("eval("));
+        assert!(!PERMISSIONS_SMOKE_SCRIPT.contains("new Function"));
+        assert!(!PERMISSIONS_SMOKE_SCRIPT.contains("postMessage"));
     }
 
     #[test]
