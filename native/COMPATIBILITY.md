@@ -994,3 +994,33 @@ Cold start: scheme registered → `about:blank` gen 1 → Discord gen 2 with `[C
 - cors-mode `fetch()` of cross-origin legcord:// URLs is rejected renderer-side (no ACAO sent); subresource loads (link/img/media/top-level) are unaffected.
 - `local/*` (userAssets) serves only what the profile holds; no writer was added in this milestone.
 - Query/fragment forms are rejected even though Electron would fold them into the path — hardening wins, documented.
+
+## Native permission policy (P0.3)
+
+Electron contract (`src/main.ts:368-411`, the sole `setPermissionRequestHandler` on `session.defaultSession`): allow exactly `fullscreen`, `notifications`, `clipboard-sanitized-write`, and one undifferentiated `media`; deny everything else with a log. No origin/URL is inspected. Display capture never reaches that handler — it is a separate `setDisplayMediaRequestHandler` surface (`src/discord/screenshare.ts`) and stays out of this milestone.
+
+### WebView2 mapping (installed `webview2-com-sys 0.39.1`, verified)
+
+Only MICROPHONE (1), CAMERA (2), and NOTIFICATIONS (4) are allowlisted. There is NO WebView2 permission kind for fullscreen, clipboard-write, or screen/display capture (PERSISTENT_STORAGE is not exposed by the installed bindings either) — those cannot arrive here, and any unknown or future kind integer denies via the catch-all. Every other installed kind (geolocation, sensors, clipboard-read, multi-downloads, file-read-write, autoplay, local-fonts, MIDI, window-management, unknown) denies.
+
+### Origin policy
+
+Exact `https://discord.com` only (bridge-gate parity, deliberately stricter than the navigation gate's `*.discord.com`). Both `args.Uri()` and the live WebView source must validate (https, exact host case-insensitive, no explicit port even `:443`, no userinfo, no opaque origin, no `about:blank`, no subdomains); any parse failure or disagreement denies.
+
+### Decision mechanics
+
+One `PermissionRequested` handler on the main WebView (never wry's `with_permission_handler` — it drops the origin this policy is built on). Per event: read URI/kind/`IsUserInitiated` (diagnostics only), decide from the positive allowlist, set `SavesInProfile=false` explicitly (WebView2 persists grants by default; Electron answered per-request), then set ALLOW or DENY explicitly — State is never left DEFAULT. No deferral (synchronous policy), no `Handled` (single handler, wry precedent of `SetState`-only), no `SetPermissionState`/profile APIs, no filesystem/fetch/paths/renderer input. Logs carry kind + trusted/untrusted + gesture + decision only.
+
+### Tests
+
+9 Rust tests (3 allow, 10-kind deny + fabricated/future integers, 14-origin deny matrix, exact-form acceptance, enum name coverage, shipped-surface structural test) + 1 probe guard test (fixed DOM APIs only, tracks stopped, no display media/eval/bridge). Full suite: 406 Rust + 217 compatibility + 84 electron-compat, clippy `-D warnings` clean, fmt clean.
+
+### Runtime evidence (DEV only)
+
+`LEGCORD_NATIVE_PERMISSIONS_SMOKE=1`: notifications ALLOW → renderer `granted`, no browser prompt; microphone ALLOW → live stream obtained and stopped (`live-stopped`); geolocation DENY → renderer `PERMISSION_DENIED` (code 1); camera UNVERIFIED — no camera device in this environment, `getUserMedia({video:true})` rejects with `NotFoundError` before any PermissionRequested fires (policy arm unit-tested, code path shared with microphone). Reload re-issues identical decisions on the new document (no persisted grants, no duplicate handlers); same DEV profile across all runs reaches the handler every time. P0.2 intact in the same runs (CSP extended with badges + 6 `legcord:`, legcord 200s, subresources loaded). Renderer errors: only pre-existing diagnostics. Production untouched.
+
+### Known limitations
+
+- Camera grant unvalidated live (no device); fullscreen/clipboard-write produce no WebView2 permission event (verified by absence — nothing to allow, nothing claimed).
+- No persistence by design: repeated visits re-prompt through policy (Electron parity).
+- A mic/camera grant is not voice/video parity; screensharing/venmic/loopback/pickers untouched.
