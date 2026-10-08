@@ -17,7 +17,7 @@ This document records the existing Electron renderer/preload contract and the in
 | `ipcRenderer` | The Vencord/Shelter/Equicord preloads use only `invoke("getVencordBundle"/"getShelterBundle"/"getEquicordBundle")`; `bridge.ts`, `preload/plugins.mts`, and other mod preloads use separate APIs | `window.ipc.postMessage` / `WebMessageReceived` with one exact mod-bundle request contract | Very high: subscriptions, events, invokes, and synchronous calls need async typed equivalents | No for bare Discord | All three mod bundle startups are bridged through one shared registry-scoped capability; all other IPC surfaces defer |
 | `session.webRequest` | `window.ts` blocks telemetry/local WebSockets, rewrites YouTube Referer; `main.ts` applies proxy; CSP extension mutates policy | `WebResourceRequested`, filters, response replacement, WebView2 proxy configuration | High: request coverage and response/CSP manipulation require backend-specific validation | No | Yes; not part of first boot |
 | Permissions | [`src/main.ts`](../src/main.ts) `setPermissionRequestHandler`; `screenshare.ts` display-media handler | `PermissionRequested`, media-capture and OS permission APIs | High: microphone/camera/display capture and consent must be tested separately | No for login; yes for voice/video | Yes |
-| Downloads | Repository search found no custom `will-download`/download-item handler in the active source. Existing behavior is therefore the Electron/Chromium default unless another integration registers one at runtime. | `DownloadStarting` plus explicit destination/consent/completion handling | Medium-high: first characterize default behavior before choosing save/overwrite policy | No | Yes |
+| Downloads | Repository search found no custom `will-download`/download-item handler in the active source. Existing behavior is therefore the Electron/Chromium default unless another integration registers one at runtime. | `DownloadStarting` + `SetResultFilePath`/`SetCancel` into a host-owned profile directory (P0.5: silent save, sanitized names, never overwrite) | Medium-high: first characterize default behavior before choosing save/overwrite policy | No | Implemented (P0.5); no dialog, no manager, no renderer API |
 | Popups / windows | `window.ts` `setWindowOpenHandler`: `about:blank`, Discord stream popout, ICS blob, external links | `NewWindowRequested` classification (`native/src/new_window.rs`) with one managed single-slot child, host-owned `ShellExecuteW` external open, deny-by-default | High: popup ownership, external URL policy, and blob behavior | No | Implemented (P0.4); downloads stay deferred |
 | Screen sharing | [`src/discord/screenshare.ts`](../src/discord/screenshare.ts), `window.ts`, Shelter screen-share integration | WebView2 media permission/capture APIs plus Windows capture/audio services | Very high: `desktopCapturer`, loopback audio and source picker need native adapters | No for boot; critical for call parity | Yes, but must be qualified before claiming voice/video parity |
 | Clipboard | `window.ts` context-menu image copy; `ipc.ts` debug/text clipboard | Win32 clipboard APIs and narrow WebView2 clipboard permission | Medium: image encoding, user gesture and permission behavior | No | Yes |
@@ -364,6 +364,33 @@ Parsed classification instead of `startsWith` (`https:evil`, `https:///x` never 
 ### Bundles list fix (rides with P0.4)
 
 `native/web/compatibility.js::listBundles` sent `backup_list_bundles`; the protocol (`protocol.rs::BridgeCommand::BundlesList`, `rename_all="snake_case"`) only ever accepted `bundles_list`, and the response validator already expected `bundles_list`. One-line facade correction; the old string stays a host-side deserialization error (new `protocol.rs` test pins the rejection). No backup format/inventory/save/restore/Electron change. `window.legcord.backup.listBundles()` now round-trips to the 7-entry `{name, present, bytes}` inventory.
+
+## Download handling (P0.5)
+
+P0.5 migrates the *absence* of an Electron download policy — active source has no `will-download`/`download-item`/`downloadURL` handler, so production Legcord uses the Chromium default of a per-download Save dialog with the server filename — to a narrow native policy in `native/src/downloads.rs` (pure logic, no COM) wired by one shared `apply_download_handlers` helper onto the main and P0.4 child WebViews. No save dialog (wry's `DownloadStarting` closure is synchronous), no manager/progress/pause/history, no renderer API, no `DefaultDownloadFolderPath` mutation.
+
+### Electron chain (unchanged)
+
+No handler exists; `native/tests/electron-compat.test.mjs` pins the absence. Each download gets the stock Save dialog; filename from server/`Content-Disposition`; user picks the destination; no Legcord overwrite/progress/cancel UI.
+
+### Native chain
+
+```text
+DownloadStarting(url, suggested ResultFilePath)  [wry; sync, per-WebView]
+  → take ONLY the file name (directory discarded, never trusted)
+  → sanitize: no separators/traversal/absolute/UNC, no <>:"/\|?* or
+    controls, no trailing dots/spaces, reserved names neutralized
+    (_CON.txt), extension kept only if alphanumeric ≤ 16, cap 128 chars,
+    empty → `download`; containment assert parent == <profile>/downloads/
+  → unique destination: foo.txt, foo (2).txt, … (100 attempts, then deny)
+  → valid: SetResultFilePath + Handled (dialog hidden) | invalid: Cancel
+Download completed(url, path?, success): log redacted source + bare name
+  + outcome only; interrupted claims no file; paths never reach the renderer
+```
+
+Destination is always `<userData>/downloads/` (created at startup, symlinks refused, fail-fast when unusable). OS `%USERPROFILE%\Downloads` is never used. Duplicate names uniquify; existing files are never overwritten. Unknown/zero sizes never cancel (wry exposes no size/MIME through this surface anyway). The hidden P0.4 ICS child carries the identical handlers and stays alive through terminal completion via the existing single-slot lifecycle; ICS filenames get zero special-casing and ICS end-to-end parity stays unclaimed until a real calendar download is observed.
+
+Deliberate Electron difference (hardening, not parity): silent host-owned save instead of a per-download Save dialog — required because no async dialog can run in the synchronous handler, and safer than the pre-P0.5 default, which silently allowed every download into the OS Downloads folder.
 
 ## Folder opening capability (Phase D Step 2)
 
