@@ -2561,6 +2561,57 @@ fn is_allowed_navigation(url: &str) -> bool {
     url == "about:blank" || url.parse::<Uri>().is_ok_and(|uri| is_discord_uri(&uri))
 }
 
+/// Native startup window visibility (minimum port of Electron
+/// `applyStartupWindowVisibility` in `src/common/windowVisibility.ts`).
+/// The Tao window is built hidden and shown exactly once, host-owned, when
+/// the first real (non-`about:blank`) allowed document finishes loading —
+/// late enough that the WebView has content to paint (no blank flash, no
+/// externally-forced bounds), with no timers, no polling, and no renderer
+/// involvement. No new show/hide RPC: the existing P0.1 `window.show`
+/// capability is untouched.
+///
+/// Electron differences (documented, minimal): CLI flags
+/// (`--start-in-tray`/`--start-minimized`) have no native CLI parser, so
+/// the settings-file mode alone decides; `skipTaskbar` is not toggled (no
+/// native tray icon yet — tray mode only stays hidden, like Electron's
+/// disabled-tray warning path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupVisibility {
+    Show,
+    ShowMinimized,
+    HiddenTray,
+}
+
+/// Maps the `startMinimized` setting to its mode. Mirrors Electron's
+/// `START_MINIMIZED_MODES` exactly: only `"minimized"` and `"tray"` are
+/// special; anything else (including unknown/empty) fails safe to `Show`,
+/// like Electron's `"off"` fallback.
+fn startup_visibility(start_minimized: &str) -> StartupVisibility {
+    match start_minimized {
+        "minimized" => StartupVisibility::ShowMinimized,
+        "tray" => StartupVisibility::HiddenTray,
+        _ => StartupVisibility::Show,
+    }
+}
+
+fn apply_startup_visibility(window: &tao::window::Window, mode: StartupVisibility, tray: &str) {
+    match mode {
+        StartupVisibility::Show => window.set_visible(true),
+        StartupVisibility::ShowMinimized => {
+            window.set_visible(true);
+            window.set_minimized(true);
+        }
+        StartupVisibility::HiddenTray => {
+            if tray == "disabled" {
+                eprintln!(
+                    "[Window] startMinimized is \"tray\" but the tray icon is disabled; the window will stay hidden with no tray."
+                );
+            }
+            // Stay hidden; there is no native tray icon yet to reveal from.
+        }
+    }
+}
+
 /// Builds the document-start script for one run.
 ///
 /// The always-present prefix (storage preservation, the frozen facade, the
@@ -4454,6 +4505,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Authoritative window state tracked from native events. Seeded from
     // boot snapshot (both false at startup since window is created hidden).
     let mut native_window_state = NativeWindowState::default();
+    // Startup visibility fires exactly once per process (first real
+    // document); reloads and later documents never re-apply it, and
+    // shutdown drops the owned window handle with no stale state.
+    let mut startup_visibility_applied = false;
     // P0.4 single popup slot: at most one managed child (Discord popout /
     // about:blank / hidden ICS). Repeated requests focus the live child;
     // child close clears the slot; parent shutdown drops it via RAII.
@@ -4576,6 +4631,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                 );
             }
             Event::UserEvent(NativeEvent::PageLoadFinished(url)) => {
+                // One host-owned ShowWindow at the native-ready point: the
+                // first finished non-boot document that passes the
+                // navigation clamp. Hidden startup is preserved until then.
+                if !startup_visibility_applied
+                    && url != "about:blank"
+                    && is_allowed_navigation(&url)
+                {
+                    startup_visibility_applied = true;
+                    let (mode_name, tray_name) = match load_settings(&profile_path) {
+                        Ok(loaded) => (loaded.snapshot.start_minimized, loaded.snapshot.tray),
+                        Err(error) => {
+                            eprintln!("[Window] startup settings unreadable, showing ({error})");
+                            ("off".to_owned(), "dynamic".to_owned())
+                        }
+                    };
+                    let mode = startup_visibility(mode_name.as_str());
+                    println!("[Window] startup visibility mode={mode:?}");
+                    apply_startup_visibility(&window, mode, tray_name.as_str());
+                }
                 if let Some(started_at) = page_load_started_at.take() {
                     println!(
                         "[Navigation][Metrics] document load completed in {:.3} ms",
@@ -7185,9 +7259,10 @@ mod tests {
     use super::{
         initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
         lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, settings_plugin_start_due,
-        settings_plugin_start_script, settings_ui_probe_script, EQUICORD_MOD, KNOWN_MODS,
-        LEGCORD_PROTOCOL_SMOKE_SCRIPT, PERMISSIONS_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
-        SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, VENCORD_MOD,
+        settings_plugin_start_script, settings_ui_probe_script, startup_visibility,
+        StartupVisibility, EQUICORD_MOD, KNOWN_MODS, LEGCORD_PROTOCOL_SMOKE_SCRIPT,
+        PERMISSIONS_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD,
+        VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
@@ -7206,6 +7281,26 @@ mod tests {
             .into_iter()
             .filter(|descriptor| ids.contains(&descriptor.id))
             .collect()
+    }
+
+    #[test]
+    fn startup_visibility_maps_exactly_like_electron_modes() {
+        // Electron `START_MINIMIZED_MODES` parity: only the two spelled
+        // modes are special; everything else (unknown, empty, wrong case)
+        // fails safe to Show, like the `"off"` fallback.
+        assert_eq!(startup_visibility("off"), StartupVisibility::Show);
+        assert_eq!(
+            startup_visibility("minimized"),
+            StartupVisibility::ShowMinimized
+        );
+        assert_eq!(startup_visibility("tray"), StartupVisibility::HiddenTray);
+        for other in ["", "OFF", "Minimized", "TRAY", "hidden", "true", "tray "] {
+            assert_eq!(
+                startup_visibility(other),
+                StartupVisibility::Show,
+                "{other:?}"
+            );
+        }
     }
 
     #[test]
