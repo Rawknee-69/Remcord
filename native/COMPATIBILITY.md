@@ -392,6 +392,31 @@ Destination is always `<userData>/downloads/` (created at startup, symlinks refu
 
 Deliberate Electron difference (hardening, not parity): silent host-owned save instead of a per-download Save dialog — required because no async dialog can run in the synchronous handler, and safer than the pre-P0.5 default, which silently allowed every download into the OS Downloads folder.
 
+## Titlebar controls (window chrome completion)
+
+P0.1 implemented the typed host window operations but nothing loaded the titlebar UI natively (Electron pins `legcord-titlebar` via the Shelter injector map, which the native shell deliberately does not reproduce), so the frameless window had no min/max/close buttons. This slice loads the exact `src/shelter/titlebar` artifact through the proven Shelter loader surface — no new RPC, no new capability, no renderer API.
+
+### Native chain
+
+```text
+Shelter bootstrap marker (same trigger as the settings plugin)
+  → evaluate titlebar start script (closed id/source/manifest + embedded CSS)
+  → remove stale controls (Shelter auto-starts persisted plugins on its own;
+     the plugin's unload path never removes DOM, so marker-time-only starts
+     stack duplicate button sets without this)
+  → addLocalPlugin("legcord-titlebar") + startPlugin (idempotent per document)
+  → onLoad injects minimize/maximize/quit wired to window.legcord.window.*
+PageLoadFinished (trusted Discord docs, once per generation)
+  → settle re-run of the same idempotent script (heals injections discarded
+     by a later mount; covers marker-after-finish ordering either way)
+window-state host event → facade mirrors body[isMaximized]/[unFocused]
+  (same listener, no polling) so the restore icon swaps like Electron
+```
+
+Titlebar styling is build-embedded (`base` + per-OS sheet, `newTitlebar.mts` parity: `legcord-platform` attribute, `platform-win` class) and injected as inline `<style>` nodes — deliberately NOT `<link legcord://>` subresources: those stop reaching the host after a reload (two 200s on first load, zero afterwards; consistent with service-worker takeover of subresource fetches), which silently unstyles link-based controls post-reload. Managed-CSS precedent (themes/Quick CSS) proves inline `<style>` works under the extended CSP.
+
+Deliberate Electron differences: no injector preload (host-pushed closed loader instead); close follows existing P0.1 host lifecycle (`hide()` when `minimizeToTray`, else quit — no tray icon yet, so hide leaves no visible affordance); no `skipTaskbar` toggle.
+
 ## Folder opening capability (Phase D Step 2)
 
 Four caller-backed folder behaviors migrate to two typed capabilities under `window.legcord.folders`: `folders.open` (wire `folders_open`, facade `folders.open(location)`) reveals exactly one of three fixed roots, and `folders.open_theme` (wire `folders_open_theme`, facade `folders.openTheme(id)`) opens exactly one validated theme directory. No generic open(path), no dialogs, no pickers, no file-in-editor paths, no theme install/edit.
