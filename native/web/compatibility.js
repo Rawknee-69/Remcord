@@ -536,7 +536,7 @@
         // Parameter-free by protocol: no path, URL, include flag, or
         // selector may be supplied. The host inventories the fixed
         // allowlist only.
-        return request({ type: "backup_list_bundles", payload: {} }, timeoutMs).then((payload) => payload.bundles);
+        return request({ type: "bundles_list", payload: {} }, timeoutMs).then((payload) => payload.bundles);
     }
 
     function saveBackup(payloadString, timeoutMs = 120_000) {

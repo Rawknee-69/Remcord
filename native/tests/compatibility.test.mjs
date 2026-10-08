@@ -1829,9 +1829,9 @@ test("backup.list_bundles sends a parameter-free typed request and resolves the 
     const { window } = createBundlesRuntime();
     const pending = window.legcord.backup.listBundles();
     assert.ok(pending instanceof Promise);
-    const message = window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    const message = window.messages.find((entry) => entry.command?.type === "bundles_list");
     assert.ok(message);
-    assert.deepEqual(message.command, { type: "backup_list_bundles", payload: {} });
+    assert.deepEqual(message.command, { type: "bundles_list", payload: {} });
 
     respondBundlesList(window, message);
     assert.deepEqual(await pending, BUNDLE_FIXTURE);
@@ -1845,7 +1845,7 @@ test("backup.list_bundles throws UNSUPPORTED_CAPABILITY when the snapshot denies
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
-        window.messages.some((message) => message.command?.type === "backup_list_bundles"),
+        window.messages.some((message) => message.command?.type === "bundles_list"),
         false,
     );
 });
@@ -1854,14 +1854,14 @@ test("backup.list_bundles rejects malformed inventories", async () => {
     // Wrong entry count.
     const short = createBundlesRuntime();
     const pendingShort = short.window.legcord.backup.listBundles();
-    const messageShort = short.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    const messageShort = short.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(short.window, messageShort, BUNDLE_FIXTURE.slice(0, 6));
     await assert.rejects(pendingShort, /bundle inventory response schema is invalid/);
 
     // Wrong name or order.
     const renamed = createBundlesRuntime();
     const pendingRenamed = renamed.window.legcord.backup.listBundles();
-    const messageRenamed = renamed.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    const messageRenamed = renamed.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(renamed.window, messageRenamed, [
         ...BUNDLE_FIXTURE.slice(0, 5),
         { name: "custom.css", present: false, bytes: 0 },
@@ -1872,7 +1872,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
     // Absent entry carrying bytes.
     const absentBytes = createBundlesRuntime();
     const pendingAbsent = absentBytes.window.legcord.backup.listBundles();
-    const messageAbsent = absentBytes.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    const messageAbsent = absentBytes.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(absentBytes.window, messageAbsent, [
         ...BUNDLE_FIXTURE.slice(0, 6),
         { name: "custom.css", present: false, bytes: 12 },
@@ -1882,7 +1882,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
     // Metadata-only: a path riding along is rejected.
     const withPath = createBundlesRuntime();
     const pendingPath = withPath.window.legcord.backup.listBundles();
-    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(withPath.window, messagePath, [
         ...BUNDLE_FIXTURE.slice(0, 6),
         { name: "custom.css", present: false, bytes: 0, path: "C:\\secret" },
@@ -1893,7 +1893,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
 test("backup.list_bundles rejects host failures with the typed error", async () => {
     const { window } = createBundlesRuntime();
     const pending = window.legcord.backup.listBundles();
-    const message = window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    const message = window.messages.find((entry) => entry.command?.type === "bundles_list");
     window.dispatchEvent(
         new FakeCustomEvent("legcord-native:response", {
             detail: {
@@ -1931,7 +1931,7 @@ test("a reloaded document gets a fresh bundle inventory facade with no stale pro
     const nextDocument = createBundlesRuntime();
     assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
     const pending = nextDocument.window.legcord.backup.listBundles();
-    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "backup_list_bundles");
+    const message = nextDocument.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(nextDocument.window, message);
     assert.deepEqual(await pending, BUNDLE_FIXTURE);
 });

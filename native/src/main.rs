@@ -6,6 +6,7 @@ mod folders;
 mod legcord_protocol;
 mod localization;
 mod mod_substrate;
+mod new_window;
 mod permissions;
 mod plugin_storage;
 mod protocol;
@@ -2515,6 +2516,14 @@ enum NativeEvent {
     /// logs the resulting native state. Never present in normal runs.
     #[allow(dead_code)]
     WindowSmokeStep(u8),
+    /// Approved popup request from `NewWindowRequested` (P0.4). The WebView2
+    /// popup itself is always denied at the layer above; the event loop
+    /// creates the single managed child (or focuses the live one). Carries
+    /// only the validated URL plus its kind — never renderer options.
+    PopupRequested {
+        url: String,
+        kind: new_window::PopupKind,
+    },
     /// DEV-only delayed readback for the legcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
     /// subresource loads have settled before the host reads the flags.
@@ -2603,6 +2612,123 @@ where
     if let Err(error) = proxy.send_event(event) {
         eprintln!("[Native] Could not queue event: {error}");
     }
+}
+
+/// The single managed popup child (P0.4). At most one lives at a time:
+/// the approved Discord popout / `about:blank` / hidden ICS surface.
+/// The `WebView` field is never read — it exists to keep the child alive
+/// exactly as long as the slot; dropping the slot destroys the child.
+struct PopupChild {
+    window: Arc<tao::window::Window>,
+    #[allow(dead_code)]
+    webview: WebView,
+}
+
+/// Builds the single managed child for an approved popup (P0.4).
+///
+/// Verified mechanism (A): wry's own `NewWindowResponse::Create` path needs
+/// a caller-built `ICoreWebView2` plus an `EventLoopWindowTarget` that the
+/// `NewWindowRequested` closure does not have, so approved popups are
+/// denied at that layer and re-created here on the event loop instead.
+/// Every child option is host-owned: fixed 800x600 size, default
+/// decorations, `alwaysOnTop` only from the host `popoutPiP` setting and
+/// only for the Discord popout. Renderer window features are never read.
+/// The child shares the main profile/session (same `WebContext` plus the
+/// same adopted `ICoreWebView2Environment`), the same document-start
+/// facade, the same bridge origin gate, the same `legcord://` registration,
+/// and the same permission policy; nested popups deny unconditionally and
+/// navigation stays clamped to Discord (plus the ICS blob shape for hidden
+/// ICS children only).
+#[allow(clippy::too_many_arguments)]
+fn create_popup_child(
+    target: &tao::event_loop::EventLoopWindowTarget<NativeEvent>,
+    kind: new_window::PopupKind,
+    url: &str,
+    web_context: &mut WebContext,
+    #[cfg(target_os = "windows")] environment: ICoreWebView2Environment,
+    initialization_script: &str,
+    ipc_proxy: &EventLoopProxy<NativeEvent>,
+    roots: &crate::legcord_protocol::NamespaceRoots,
+    always_on_top: bool,
+) -> Result<PopupChild, String> {
+    let (visible, initial_url) = match kind {
+        new_window::PopupKind::AboutBlank => (true, "about:blank"),
+        // Hidden transient (Electron `show:false` parity). No download
+        // manager exists yet: the blob load is attempted, never shown.
+        new_window::PopupKind::Ics => (false, url),
+        new_window::PopupKind::DiscordPopout => (true, url),
+    };
+    let child_window = WindowBuilder::new()
+        .with_title("Legcord")
+        .with_inner_size(Size::Logical(LogicalSize::new(800.0, 600.0)))
+        .with_visible(false)
+        .with_always_on_top(always_on_top && kind == new_window::PopupKind::DiscordPopout)
+        .build(target)
+        .map_err(|error| format!("popup window failed: {error}"))?;
+    let child_window = Arc::new(child_window);
+    let allow_blob = kind == new_window::PopupKind::Ics;
+    let child_ipc_proxy = ipc_proxy.clone();
+    let mut builder = WebViewBuilder::new_with_web_context(web_context);
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.with_environment(environment);
+    }
+    let builder = builder
+        .with_url(initial_url)
+        .with_initialization_script_for_main_only(initialization_script, true)
+        .with_navigation_handler(move |navigation_url| {
+            if is_allowed_navigation(&navigation_url) {
+                return true;
+            }
+            if allow_blob && new_window::is_discord_ics_blob_url(&navigation_url) {
+                return true;
+            }
+            println!("[Popup][Navigation] block {navigation_url}");
+            false
+        })
+        .with_new_window_req_handler(|nested_url, _features| {
+            println!("[Popup][Navigation] blocked nested popup: {nested_url}");
+            NewWindowResponse::Deny
+        })
+        .with_ipc_handler(move |request: Request<String>| {
+            if !is_trusted_bridge_origin(request.uri()) {
+                eprintln!(
+                    "[Popup][Bridge] rejected message from untrusted origin: {}",
+                    request.uri()
+                );
+                return;
+            }
+            match parse_bridge_message(request.body()) {
+                Ok(BridgeMessage::Request(request)) => queue_event(
+                    &child_ipc_proxy,
+                    NativeEvent::BridgeRequest(request, Instant::now()),
+                ),
+                Ok(BridgeMessage::Event(event)) => {
+                    queue_event(&child_ipc_proxy, NativeEvent::BridgeEvent(event));
+                }
+                Err(error) => eprintln!("[Popup][Bridge] rejected invalid message: {error}"),
+            }
+        });
+    let child_webview = builder
+        .build(&child_window)
+        .map_err(|error| format!("popup webview failed: {error}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        let core_webview2: ICoreWebView2 = child_webview.webview();
+        if let Err(error) = register_legcord_protocol(&core_webview2, roots.clone()) {
+            eprintln!("[Popup][LegcordProtocol] registration failed: {error}");
+        }
+        if let Err(error) = permissions::register(&core_webview2) {
+            eprintln!("[Popup][Permissions] registration failed: {error}");
+        }
+    }
+    if visible {
+        child_window.set_visible(true);
+    }
+    Ok(PopupChild {
+        window: child_window,
+        webview: child_webview,
+    })
 }
 
 /// Name of the dedicated STA worker thread that owns the theme import
@@ -3300,9 +3426,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         env
     };
+    // Shared with the single P0.4 popup child so it runs in the same
+    // WebView2 environment (same profile/session). Cloned before the main
+    // builder consumes the original; COM `Clone` is a cheap `AddRef`.
+    #[cfg(target_os = "windows")]
+    let popup_environment = webview_env.clone();
     let bundle_cache = Arc::new(Mutex::new(ModCache::default()));
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
+    // P0.4 popup path: the `NewWindowRequested` closure classifies
+    // synchronously and queues approved popups here; the shell open for
+    // external URLs also runs from that closure (both proxies are
+    // thread-safe like the existing IPC path).
+    let popup_proxy = proxy.clone();
+    let popup_ipc_proxy = proxy.clone();
     // Dedicated STA worker for the theme import picker. The Common Item
     // Dialog is modal, so it must never run on the WebView/UI thread; COM is
     // initialized exactly once for this thread (STA, as the dialog
@@ -3775,9 +3912,44 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             allowed
         })
-        .with_new_window_req_handler(|url, _features| {
-            println!("[Navigation] blocked popup: {url}");
-            NewWindowResponse::Deny
+        .with_new_window_req_handler(move |url, _features| {
+            // Renderer window features (size/position) are deliberately
+            // ignored: every child option is host-owned (see
+            // `create_popup_child`). Decision order mirrors Electron
+            // (`src/discord/window.ts:214-264`) with the documented
+            // hardening: parsed classification, no sticky bypass.
+            match new_window::decide(&url) {
+                decision @ (new_window::Decision::AllowAboutBlank
+                | new_window::Decision::AllowIcs
+                | new_window::Decision::AllowDiscordPopout) => {
+                    let kind = new_window::popup_kind_for(decision)
+                        .expect("allow decision must map to a popup kind");
+                    println!("[Popup] approved {kind:?}: {url}");
+                    queue_event(
+                        &popup_proxy,
+                        NativeEvent::PopupRequested {
+                            url: url.clone(),
+                            kind,
+                        },
+                    );
+                    NewWindowResponse::Deny
+                }
+                new_window::Decision::ExternalOpen => {
+                    match new_window::open_external_url(&url) {
+                        Ok(()) => println!("[Popup] external open: {url}"),
+                        Err(error) => eprintln!("[Popup] external open failed: {error} url={url}"),
+                    }
+                    NewWindowResponse::Deny
+                }
+                // Unknown custom schemes: deny with a log instead of
+                // Electron's modal + sticky bypass (documented P0.4
+                // hardening; no new settings key). Dangerous and malformed
+                // values deny the same way, never reaching the shell.
+                new_window::Decision::ConfirmExternal | new_window::Decision::Deny => {
+                    println!("[Popup] denied: {url}");
+                    NewWindowResponse::Deny
+                }
+            }
         })
         .with_on_page_load_handler(move |event, url| {
             let event_name = match &event {
@@ -3820,15 +3992,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("[Native] Persistent DEV profile: {WEBVIEW_PROFILE}");
 
     // Register legcord:// protocol handler
+    // The roots are kept for the P0.4 popup child, which registers the
+    // same protocol on its own core WebView (registration is per-WebView,
+    // not per-environment).
     #[cfg(target_os = "windows")]
-    {
+    let popup_roots = {
         let core_webview2: ICoreWebView2 = webview.webview();
         let bundle_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("ts-out");
         let user_data_dir = std::path::PathBuf::from(WEBVIEW_PROFILE);
         let roots = build_namespace_roots(&bundle_dir, &user_data_dir);
-        if let Err(e) = register_legcord_protocol(&core_webview2, roots) {
+        if let Err(e) = register_legcord_protocol(&core_webview2, roots.clone()) {
             eprintln!("[LegcordProtocol] Failed to register protocol handler: {e}");
         } else {
             println!("[LegcordProtocol] Custom scheme handler registered");
@@ -3844,7 +4019,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             println!("[Permissions] Permission handler registered (discord.com: mic/camera/notifications)");
         }
-    }
+        roots
+    };
 
     // Register WebResourceRequested handler to modify CSP header for Discord main document
     // This reproduces Electron's setupNoCSP() behavior by intercepting the main document response
@@ -4219,15 +4395,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Authoritative window state tracked from native events. Seeded from
     // boot snapshot (both false at startup since window is created hidden).
     let mut native_window_state = NativeWindowState::default();
+    // P0.4 single popup slot: at most one managed child (Discord popout /
+    // about:blank / hidden ICS). Repeated requests focus the live child;
+    // child close clears the slot; parent shutdown drops it via RAII.
+    let mut popup_child: Option<PopupChild> = None;
 
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
 
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
+                window_id,
                 ..
             } => {
+                // Child close clears the single slot; only the main window
+                // shuts the application down (dropping the slot with it).
+                if popup_child
+                    .as_ref()
+                    .is_some_and(|child| child.window.id() == window_id)
+                {
+                    println!("[Popup] child closed; clearing single slot");
+                    popup_child = None;
+                    return;
+                }
                 println!("[Native] Close requested; shutting down WebView");
                 println!(
                     "[Bridge][Metrics] messages_in={incoming_messages} requests={request_count} events={event_count} responses={response_count}"
@@ -4277,6 +4468,42 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // reported through Resized. Query the authoritative flag and
                 // emit only when it actually changed.
                 sync_native_maximized_state(&webview, &window, &mut native_window_state, "Resized");
+            }
+            Event::UserEvent(NativeEvent::PopupRequested { url, kind }) => {
+                if let Some(child) = popup_child.as_ref() {
+                    // Single slot: never stack unbounded windows. The live
+                    // child is focused instead of creating another.
+                    child.window.set_focus();
+                    println!("[Popup] slot occupied; focused live child for {url}");
+                    return;
+                }
+                // `alwaysOnTop` is host-owned (existing `popoutPiP`
+                // setting, read fresh per request) and applies to the
+                // Discord popout only; every other child option is fixed.
+                let always_on_top = load_settings(&profile_path)
+                    .map(|loaded| loaded.snapshot.popout_pip)
+                    .unwrap_or(false);
+                #[cfg(target_os = "windows")]
+                let environment = popup_environment.clone();
+                match create_popup_child(
+                    target,
+                    kind,
+                    &url,
+                    &mut web_context,
+                    #[cfg(target_os = "windows")]
+                    environment,
+                    &initialization_script,
+                    &popup_ipc_proxy,
+                    #[cfg(target_os = "windows")]
+                    &popup_roots,
+                    always_on_top,
+                ) {
+                    Ok(child) => {
+                        println!("[Popup] child opened {kind:?}: {url}");
+                        popup_child = Some(child);
+                    }
+                    Err(error) => eprintln!("[Popup] child failed: {error} url={url}"),
+                }
             }
             Event::UserEvent(NativeEvent::PageLoadStarted) => {
                 document_lifecycle.begin_document();
@@ -8072,7 +8299,11 @@ mod tests {
             crate::app::test_fixture_json(),
         )
         .unwrap();
-        assert!(script.contains("backup_list_bundles"));
+        assert!(script.contains("bundles_list"));
+        // P0.4: the facade sends the exact protocol wire type. The old
+        // `backup_list_bundles` string is rejected by the host and must not
+        // appear anywhere in shipped script.
+        assert!(!script.contains("backup_list_bundles"));
         assert!(script.contains("backup.list_bundles"));
         assert!(script.contains("listBundles"));
         // Save (D4-1): the Electron-compatible JSON-string save with the

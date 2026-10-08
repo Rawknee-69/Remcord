@@ -2246,6 +2246,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_the_historical_bundles_wire_type() {
+        // P0.4: the facade once sent `backup_list_bundles`; the protocol
+        // only ever accepted `bundles_list`, so the old string stays a
+        // deserialization error (unknown variant), never a dispatch.
+        let stale = r#"{"version":1,"request_id":"bundles-0","command":{"type":"backup_list_bundles","payload":{}}}"#;
+        assert!(parse_bridge_message(stale).is_err());
+    }
+
+    #[test]
     fn rejects_backup_save_shape_errors_and_generic_invocation() {
         // Save (D4-1) requires the exact `{ includes, clientMods }` shape, so
         // an empty payload is rejected; restore (D4-2) is parameter-free, so
