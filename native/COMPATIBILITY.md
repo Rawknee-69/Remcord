@@ -18,7 +18,7 @@ This document records the existing Electron renderer/preload contract and the in
 | `session.webRequest` | `window.ts` blocks telemetry/local WebSockets, rewrites YouTube Referer; `main.ts` applies proxy; CSP extension mutates policy | `WebResourceRequested`, filters, response replacement, WebView2 proxy configuration | High: request coverage and response/CSP manipulation require backend-specific validation | No | Yes; not part of first boot |
 | Permissions | [`src/main.ts`](../src/main.ts) `setPermissionRequestHandler`; `screenshare.ts` display-media handler | `PermissionRequested`, media-capture and OS permission APIs | High: microphone/camera/display capture and consent must be tested separately | No for login; yes for voice/video | Yes |
 | Downloads | Repository search found no custom `will-download`/download-item handler in the active source. Existing behavior is therefore the Electron/Chromium default unless another integration registers one at runtime. | `DownloadStarting` plus explicit destination/consent/completion handling | Medium-high: first characterize default behavior before choosing save/overwrite policy | No | Yes |
-| Popups / windows | `window.ts` `setWindowOpenHandler`: `about:blank`, Discord stream popout, ICS blob, external links | `NewWindowRequested` with explicit allow/deny and a window registry | High: popup ownership, external URL policy, and blob behavior | No | Yes; prototype logs and denies popups |
+| Popups / windows | `window.ts` `setWindowOpenHandler`: `about:blank`, Discord stream popout, ICS blob, external links | `NewWindowRequested` classification (`native/src/new_window.rs`) with one managed single-slot child, host-owned `ShellExecuteW` external open, deny-by-default | High: popup ownership, external URL policy, and blob behavior | No | Implemented (P0.4); downloads stay deferred |
 | Screen sharing | [`src/discord/screenshare.ts`](../src/discord/screenshare.ts), `window.ts`, Shelter screen-share integration | WebView2 media permission/capture APIs plus Windows capture/audio services | Very high: `desktopCapturer`, loopback audio and source picker need native adapters | No for boot; critical for call parity | Yes, but must be qualified before claiming voice/video parity |
 | Clipboard | `window.ts` context-menu image copy; `ipc.ts` debug/text clipboard | Win32 clipboard APIs and narrow WebView2 clipboard permission | Medium: image encoding, user gesture and permission behavior | No | Yes |
 | Tray | [`src/discord/tray.ts`](../src/discord/tray.ts); setup tray in `src/setup/tray.ts` | Native Windows notification-area icon and callbacks | Medium: lifecycle, icon updates, menu state | No | Yes |
@@ -266,7 +266,7 @@ UI wiring (D4-3): `BackupSection.tsx` calls one shared `saveBackup(payloadString
 
 Deliberate Electron differences (hardening, not regressions): typed includes + bounded clientMods (per-string ≤ 1 MiB, total ≤ 4 MiB, shelter ≤ 2 MiB with depth ≤ 32 / nodes ≤ 65536 — renderer input is never trusted); per-file ≤ 1 MiB except the bundle allowlist (≤ 32 MiB, the mod-substrate retrieval ceiling — real artifacts like `equicord.js` are multi-megabyte); total uncompressed ≤ 64 MiB; entries ≤ 4096; overflow fails closed as `BACKUP_TOO_LARGE`, never a truncated archive; links/junctions/non-regular files skipped, never followed; sorted traversal (deterministic archives; Electron uses filesystem order); nothing created for backup purposes (a missing `quickCss.css` is NOT created, unlike the Quick CSS loader); no `defaultPath` (the host sets the filename only); temp-file + rename write (Electron writes in place); typed path-free errors instead of raw messages; renderer receives `{canceled, bytes}` semantics only.
 
-Known issue (pre-existing, untouched): `compatibility.js` discovery sends `backup_list_bundles` while the protocol expects `bundles_list` (host rejects it; visible as `[Bridge] rejected invalid message` in DEV logs). D4-1 does not exercise listBundles and leaves the one-line fix out of scope.
+Known issue (fixed in P0.4): `compatibility.js` discovery sent `backup_list_bundles` while the protocol expects `bundles_list`. The facade now sends `bundles_list`; the old string stays host-rejected. D4-1 did not exercise listBundles and left the one-line fix out of scope.
 
 ## Backup restore capability (Phase D4-2)
 
@@ -328,7 +328,42 @@ The host NEVER applies clientMods: no `localStorage` manipulation, no `addRemote
 
 Whole-archive rejection instead of skip-with-warning (no half-restored profile); duplicate/collision rejection instead of last-wins; strict section validators instead of zip-slip-only; no-follow link refusal at read, stage, and commit instead of silent following; staged commit with rollback instead of inline writes; bounded everything instead of unbounded `Map`/reads; typed path-free errors instead of raw messages; renderer receives the filtered envelope only. Format-compatible in both directions for archives that avoid unsafe/unbounded behavior (proven: native save output round-trips; an independently constructed archive restores; archives exploiting unsafe shapes are rejected as expected).
 
-Known issue (pre-existing, untouched): `compatibility.js` discovery sends `backup_list_bundles` while the protocol expects `bundles_list` (host rejects it; visible as `[Bridge] rejected invalid message` in DEV logs). Neither D4-1 nor D4-2 exercises listBundles; the one-line fix belongs to its own slice.
+Known issue (fixed in P0.4): `compatibility.js` discovery sent `backup_list_bundles` while the protocol expects `bundles_list`. Neither D4-1 nor D4-2 exercised listBundles; the one-line facade fix landed with the popup slice.
+
+## Popup and external navigation (P0.4)
+
+P0.4 migrates ONLY the `setWindowOpenHandler` decision surface (`src/discord/window.ts:214-264`) to a dedicated module `native/src/new_window.rs` plus one managed single-slot child owned by the event loop. No downloads (`DownloadStarting` stays deferred), no tray/screenshare/power/crash/instance/benchmark work, no generic navigation framework, no generic shell API, no multi-window registry.
+
+### Electron chain (unchanged)
+
+Exact order: `url === "about:blank"` → allow (default options; comment cites the Vencord/Equicord QuickCSS popup); `isDiscordIcsBlobUrl(url)` → allow hidden (`show:false`); `isDiscordPopoutUrl(url)` → allow with `alwaysOnTop: getConfig("popoutPiP")`; raw `startsWith("https:"/"http:"/"mailto:")` → `shell.openExternal` + deny; `ignoreProtocolWarning` → `shell.openExternal` + deny; otherwise a modal Yes/No dialog (raw URL interpolated) whose checkbox persists `ignoreProtocolWarning`, answered asynchronously while the handler synchronously denies. No sanitizer runs on any external path. Renderer `window.open` callers in `src/` are all external `https:` links (About/support/HeroUpdater/download URL) — they take the external-open path, never a child.
+
+### Native chain
+
+```text
+NewWindowRequested(url)  [wry handler; renderer size/position ignored]
+  → decide(url) in new_window.rs (parsed, ordered like Electron)
+  → AllowAboutBlank | AllowIcs | AllowDiscordPopout
+      → WebView2 popup denied (Handled=true), NativeEvent::PopupRequested
+        queued → event loop creates/focuses the single managed child
+  → ExternalOpen (https/http with parsed host, mailto)
+      → open_external_url: ShellExecuteW("open", url), no command line,
+        no interpreter, no HWND/PID → WebView2 popup denied, parent stays
+  → ConfirmExternal (unknown custom, e.g. discord://, tel:) → denied + log
+      (no Electron modal, no sticky bypass, no new settings key)
+  → Deny (javascript:/data:/file:/non-ICS blob:/malformed) → denied + log,
+      never reaches the shell
+```
+
+Child (`create_popup_child`, `main.rs`): fixed 800x600 Tao window, default decorations, `alwaysOnTop` only from the host-read `popoutPiP` setting and only for the Discord popout; `about:blank` visible, ICS hidden, popout visible. Same `WebContext` + same adopted `ICoreWebView2Environment` (shared profile/session/cookies/storage), same document-start facade, same bridge origin gate (exact `https://discord.com`), same `legcord://` registration (per-WebView filters re-registered), same P0.3 permission policy, Discord-clamped navigation (ICS children additionally allow the ICS blob shape), nested popups unconditionally denied. Verified mechanism (A): wry's `Create{webview}` path needs an `EventLoopWindowTarget` the handler lacks, so approved popups deny at that layer and re-create on the event loop; raw `SetNewWindow`/deferral machinery is wry-internal and untouched. Repeated requests focus the live child (no window stacking); child `CloseRequested` clears the slot; parent shutdown drops it.
+
+### Intentional Electron/native differences (hardening, not regressions)
+
+Parsed classification instead of `startsWith` (`https:evil`, `https:///x` never fast-path — raw `://` authority required); popout requires exact host + no explicit port (even `:443`) + no userinfo (`evil@discord.com`, `discord.com:444` rejected; Electron's hostname-only check accepts both); ICS inner origin likewise port/userinfo-checked; `javascript:`/`data:`/`file:`/non-ICS `blob:` always deny (Electron dialogs them and can sticky-allow everything afterwards); unknown schemes deny instead of the modal (safest accepted policy; documented); `window.open` opener linkage is not preserved (managed child is a fresh navigation — the QuickCSS popup flow that needs `window.opener` is a known limitation); ICS has no download manager (hidden child only, parity unclaimed until runtime proves the flow).
+
+### Bundles list fix (rides with P0.4)
+
+`native/web/compatibility.js::listBundles` sent `backup_list_bundles`; the protocol (`protocol.rs::BridgeCommand::BundlesList`, `rename_all="snake_case"`) only ever accepted `bundles_list`, and the response validator already expected `bundles_list`. One-line facade correction; the old string stays a host-side deserialization error (new `protocol.rs` test pins the rejection). No backup format/inventory/save/restore/Electron change. `window.legcord.backup.listBundles()` now round-trips to the 7-entry `{name, present, bytes}` inventory.
 
 ## Folder opening capability (Phase D Step 2)
 
