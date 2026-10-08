@@ -3,6 +3,7 @@ mod backup;
 mod bundles;
 mod css_watch;
 mod folders;
+mod legcord_protocol;
 mod localization;
 mod mod_substrate;
 mod plugin_storage;
@@ -44,6 +45,8 @@ use css_watch::{
 use folders::{
     ensure_folder_root, open_folder, resolve_theme_folder, reveal_folder, FolderLocation,
 };
+use legcord_protocol::scheme::create_environment as create_legcord_webview_environment;
+use legcord_protocol::{build_namespace_roots, extend_csp_for_legcord, register_legcord_protocol};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use protocol::{
@@ -85,12 +88,12 @@ use windows::{
     core::{Interface, BOOL, HSTRING, PWSTR},
     Win32::System::Com::IStream,
 };
-#[cfg(target_os = "windows")]
-use wry::WebViewExtWindows;
 use wry::{
     http::{Request, Uri},
     NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder,
 };
+#[cfg(target_os = "windows")]
+use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
 
 const DISCORD_URL: &str = "https://discord.com/app";
 const WEBVIEW_PROFILE: &str = r"E:\Legcord.webview-dev-user-data";
@@ -265,6 +268,7 @@ const SHELTER_LOADER_PROBE_ENV: &str = "LEGCORD_NATIVE_LOADER_PROBE";
 const SETTINGS_BOOT_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE";
 const SETTINGS_UI_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_UI_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
+const LEGCORD_PROTOCOL_SMOKE_ENV: &str = "LEGCORD_NATIVE_LEGCORD_PROTOCOL_SMOKE";
 const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
 const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
@@ -1851,6 +1855,101 @@ fn settings_ui_probe_script(nonce: u64) -> Result<String, String> {
     }
     Ok(script)
 }
+/// DEV-only legcord:// protocol smoke probe
+/// (`LEGCORD_NATIVE_LEGCORD_PROTOCOL_SMOKE=1`). Loads three real bundle
+/// resources that exist on disk through real WebView2 subresource/fetch
+/// paths and records the outcome in document dataset flags the host reads
+/// back:
+///
+/// - a stylesheet (`legcord://assets/css/discord.css` via `<link>`,
+///   exercises style-src CSP + 200 + text/css)
+/// - an image (`legcord://assets/desktop.png` via `<img>`, exercises
+///   img-src CSP + 200 + image/png)
+/// - a plugin resource (`legcord://plugins/settings/plugin.js` via
+///   `fetch`, observed only — CORS headers are deliberately NOT added, so
+///   a TypeError here proves the handler served while reporting the CORS
+///   posture honestly)
+///
+/// The host logs one `[LegcordProtocol][Smoke]` line per document; no bridge
+/// event, no new capability, no script execution of the fetched bytes.
+const LEGCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
+(() => {
+  try {
+    const root = document.documentElement;
+    if (root.dataset.legcordProtocolSmoke === "started") return;
+    root.dataset.legcordProtocolSmoke = "started";
+    root.dataset.legcordProtocolCss = "pending";
+    root.dataset.legcordProtocolImg = "pending";
+    root.dataset.legcordProtocolPlugin = "pending";
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "legcord://assets/css/discord.css";
+    link.onload = () => { root.dataset.legcordProtocolCss = "loaded"; };
+    link.onerror = () => { root.dataset.legcordProtocolCss = "error"; };
+    (document.head || document.documentElement).appendChild(link);
+    const img = new Image();
+    img.onload = () => { root.dataset.legcordProtocolImg = "loaded"; };
+    img.onerror = () => { root.dataset.legcordProtocolImg = "error"; };
+    img.src = "legcord://assets/desktop.png";
+    // Distinguish CSP blocks from scheme/network failures: a
+    // securitypolicyviolation naming a legcord:// URI proves the scheme
+    // resolved and CSP refused it; silence + error proves the request never
+    // reached the handler.
+    root.dataset.legcordProtocolCsp = "none";
+    document.addEventListener("securitypolicyviolation", (event) => {
+      try {
+        const blocked = String(event.blockedURI || "");
+        if (blocked.indexOf("legcord://") === 0) {
+          root.dataset.legcordProtocolCsp =
+            String(event.violatedDirective || "unknown").slice(0, 48)
+            + "|" + blocked.slice(0, 80);
+        }
+      } catch (ignored) {}
+    });
+    // CORS posture observation: a no-cors fetch that resolves opaque proves
+    // the handler served bytes while a cors-mode rejection stands.
+    root.dataset.legcordProtocolNoCors = "pending";
+    fetch("legcord://plugins/settings/plugin.js", { method: "GET", mode: "no-cors" }).then(
+      () => { root.dataset.legcordProtocolNoCors = "resolved"; },
+      (error) => {
+        root.dataset.legcordProtocolNoCors =
+          "rejected:" + String((error && error.name) || error).slice(0, 32);
+      },
+    );
+    fetch("legcord://plugins/settings/plugin.js", { method: "GET" }).then(
+      (response) => {
+        root.dataset.legcordProtocolPlugin =
+          "http-" + response.status + "-bytes-" + (response.headers.get("content-type") || "no-mime");
+      },
+      (error) => {
+        root.dataset.legcordProtocolPlugin =
+          "fetch-rejected:" + String((error && error.name) || error).slice(0, 64);
+      },
+    );
+  } catch (error) {
+    document.documentElement.dataset.legcordProtocolSmoke =
+      "probe-failed:" + String((error && error.message) || error).slice(0, 64);
+  }
+})();
+"#;
+
+/// Reads back the DEV-only legcord:// probe dataset flags. Returns JSON
+/// through the evaluate callback (like the renderer health probe), never
+/// through the typed bridge.
+const LEGCORD_PROTOCOL_SMOKE_READBACK_SCRIPT: &str = r#"
+(() => {
+  const root = document.documentElement;
+  return JSON.stringify({
+    smoke: root.dataset.legcordProtocolSmoke || "absent",
+    css: root.dataset.legcordProtocolCss || "absent",
+    img: root.dataset.legcordProtocolImg || "absent",
+    plugin: root.dataset.legcordProtocolPlugin || "absent",
+    csp: root.dataset.legcordProtocolCsp || "absent",
+    nocors: root.dataset.legcordProtocolNoCors || "absent",
+  });
+})()
+"#;
+/// DEV-only themes observation (`LEGCORD_NATIVE_THEMES_SMOKE=1`,
 /// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
 /// pushes: the renderer never requests their CSS, so this probe only observes
 /// the managed `<style>` nodes the host injected at document load. It returns
@@ -2330,6 +2429,10 @@ enum NativeEvent {
     /// logs the resulting native state. Never present in normal runs.
     #[allow(dead_code)]
     WindowSmokeStep(u8),
+    /// DEV-only delayed readback for the legcord:// protocol smoke probe.
+    /// Fired once per document ~5 s after the probe started, so async
+    /// subresource loads have settled before the host reads the flags.
+    LegcordProtocolSmokeReadback,
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -2352,7 +2455,10 @@ fn is_trusted_bridge_origin(uri: &Uri) -> bool {
 }
 
 fn is_allowed_navigation(url: &str) -> bool {
-    url.parse::<Uri>().is_ok_and(|uri| is_discord_uri(&uri))
+    // `about:blank` is the two-phase boot document only (see the builder):
+    // it carries no content and commits before any handler exists. Popups
+    // stay denied through `NewWindowRequested` regardless of this.
+    url == "about:blank" || url.parse::<Uri>().is_ok_and(|uri| is_discord_uri(&uri))
 }
 
 /// Builds the document-start script for one run.
@@ -3092,6 +3198,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         seen_ids.push(descriptor.id);
     }
     let mut web_context = WebContext::new(Some(profile_path.clone()));
+    // WebView2 environment with the legcord custom scheme registered (P0.2).
+    // Created here — before the environment exists and before navigation —
+    // and adopted by wry below. Fail-fast: without registration, legcord://
+    // subresources fail as an unknown scheme and no handler ever fires.
+    #[cfg(target_os = "windows")]
+    let webview_env = {
+        let env = create_legcord_webview_environment(&profile_path)?;
+        println!(
+            "[LegcordProtocol] scheme registered: legcord (authority, secure, https://discord.com)"
+        );
+        env
+    };
     let bundle_cache = Arc::new(Mutex::new(ModCache::default()));
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
@@ -3474,6 +3592,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_quickcss_smoke {
         println!("[QuickCss][Smoke] native Quick CSS smoke observation enabled");
     }
+    let diagnostic_legcord_protocol_smoke =
+        std::env::var(LEGCORD_PROTOCOL_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_legcord_protocol_smoke {
+        println!("[LegcordProtocol][Smoke] legcord:// protocol smoke probe enabled");
+    }
     let diagnostic_mod_smoke = std::env::var(MOD_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_mod_smoke {
         println!("[Mods][Smoke] native mod runtime observation enabled");
@@ -3533,9 +3656,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         "[Native] Document-start script: {} bytes",
         initialization_script.len()
     );
-    let webview_builder = WebViewBuilder::new_with_web_context(&mut web_context)
+    let mut webview_builder = WebViewBuilder::new_with_web_context(&mut web_context);
+    // Adopt the pre-registered environment (P0.2). wry uses a
+    // caller-provided environment verbatim instead of creating its own.
+    #[cfg(target_os = "windows")]
+    {
+        webview_builder = webview_builder.with_environment(webview_env);
+    }
+    // Two-phase boot: the initial document is the empty `about:blank`
+    // (committed synchronously inside `build()`, before any
+    // WebResourceRequested filter can exist), then the host navigates to
+    // Discord AFTER both interception filters are registered below. Without
+    // this, the first Discord document races filter registration and would
+    // keep Discord's original CSP (no `legcord:` allowance) until a reload.
+    let webview_builder = webview_builder
+        .with_url("about:blank")
         .with_initialization_script_for_main_only(&initialization_script, true)
-        .with_url(DISCORD_URL)
         .with_navigation_handler(|url| {
             let allowed = is_allowed_navigation(&url);
             println!(
@@ -3587,7 +3723,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let webview = webview_builder.build(&window_for_webview)?;
     println!("[Native] WebView2 prototype started");
     println!("[Native] Persistent DEV profile: {WEBVIEW_PROFILE}");
-    println!("[Native] Initial navigation: {DISCORD_URL}");
+
+    // Register legcord:// protocol handler
+    #[cfg(target_os = "windows")]
+    {
+        let core_webview2: ICoreWebView2 = webview.webview();
+        let bundle_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("ts-out");
+        let user_data_dir = std::path::PathBuf::from(WEBVIEW_PROFILE);
+        let roots = build_namespace_roots(&bundle_dir, &user_data_dir);
+        if let Err(e) = register_legcord_protocol(&core_webview2, roots) {
+            eprintln!("[LegcordProtocol] Failed to register protocol handler: {e}");
+        } else {
+            println!("[LegcordProtocol] Custom scheme handler registered");
+        }
+    }
 
     // Register WebResourceRequested handler to modify CSP header for Discord main document
     // This reproduces Electron's setupNoCSP() behavior by intercepting the main document response
@@ -3737,7 +3888,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
                 let response = match response {
                     Ok(r) => r,
-                    Err(_) => {
+                    Err(error) => {
+                        // Forwarding failed: leave the original response
+                        // untouched (fail-closed, never stripped) and note it.
+                        // Without forwarding, neither the badges patch nor
+                        // the legcord: scheme allowance can apply.
+                        eprintln!("[CSP] document forward failed: {error}");
                         let _ = unsafe { deferral.Complete() };
                         return Ok(());
                     }
@@ -3774,6 +3930,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 for (name_str, val_str) in header_names {
                     if name_str.to_lowercase() == "content-security-policy" {
                         let mut csp = val_str.to_string();
+                        // P0.2: WebView2 custom schemes participate in CSP (no
+                        // bypassCSP parity), so allow legcord: in exactly the
+                        // directives traced consumers need (default/script/
+                        // style/img/media/connect). Preservation + badges
+                        // patch below stay unchanged in behavior.
+                        csp = extend_csp_for_legcord(&csp);
                         if !csp.contains("badges.vencord.dev") {
                             csp = if let Some(pos) = csp.to_lowercase().find("connect-src") {
                                 let after = &csp[pos..];
@@ -3791,8 +3953,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                             } else {
                                 format!("{}; connect-src https://badges.vencord.dev", csp)
                             };
-                            csp_modified = true;
                         }
+                        // Any CSP-bearing Discord response is now modified
+                        // (badges and/or legcord:), never removed.
+                        csp_modified = true;
+                        let legcord_sources = csp.matches("legcord:").count();
+                        println!(
+                            "[CSP] document policy extended badges={} legcord_sources={legcord_sources}",
+                            csp.contains("badges.vencord.dev")
+                        );
                         headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));
                     } else {
                         headers_map.push_str(&format!("{}: {}\r\n", name_str, val_str));
@@ -3850,6 +4019,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         println!("[CSP] WebResourceRequested handler registered for Discord main document (CSP modification)");
     }
+    // Second boot phase (P0.2): navigate to Discord only after both
+    // WebResourceRequested filters exist, so the first Discord document is
+    // intercepted like every later one. `about:blank` has no CSP of its own
+    // and the navigation handler allows only it plus HTTPS Discord hosts.
+    if let Err(error) =
+        webview.evaluate_script(&format!("window.location.href = \"{DISCORD_URL}\";"))
+    {
+        return Err(format!("initial Discord navigation failed: {error}").into());
+    }
+    println!("[Native] Initial navigation: {DISCORD_URL}");
     let mut smoke_reloads_remaining: u32 = std::env::var("LEGCORD_NATIVE_SMOKE_RELOAD")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -4302,11 +4481,48 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 eprintln!("[SettingsBoot][Smoke] probe failed: {error}");
                             }
                         }
+                        if diagnostic_legcord_protocol_smoke {
+                            if let Err(error) = webview.evaluate_script(LEGCORD_PROTOCOL_SMOKE_SCRIPT)
+                            {
+                                eprintln!("[LegcordProtocol][Smoke] probe failed: {error}");
+                            } else {
+                                // One-shot delayed readback: subresource loads
+                                // settle asynchronously, so the flags are read
+                                // ~5 s later on the event loop (DEV only).
+                                let readback_proxy = proxy.clone();
+                                if let Err(error) = thread::Builder::new()
+                                    .name("legcord-protocol-smoke-readback".to_owned())
+                                    .spawn(move || {
+                                        thread::sleep(Duration::from_millis(5000));
+                                        queue_event(
+                                            &readback_proxy,
+                                            NativeEvent::LegcordProtocolSmokeReadback,
+                                        );
+                                    })
+                                {
+                                    eprintln!(
+                                        "[LegcordProtocol][Smoke] readback timer failed: {error}"
+                                    );
+                                }
+                            }
+                        }
                         if diagnostic_settings_ui_smoke {
                             if let Err(error) = webview.evaluate_script(&settings_ui_probe_script) {
                                 eprintln!("[SettingsUi][Smoke] probe failed: {error}");
                             }
                         }
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::LegcordProtocolSmokeReadback) => {
+                if diagnostic_legcord_protocol_smoke {
+                    if let Err(error) = webview.evaluate_script_with_callback(
+                        LEGCORD_PROTOCOL_SMOKE_READBACK_SCRIPT,
+                        |result| {
+                            println!("[LegcordProtocol][Smoke] subresources={result}");
+                        },
+                    ) {
+                        eprintln!("[LegcordProtocol][Smoke] readback failed: {error}");
                     }
                 }
             }
@@ -6541,7 +6757,8 @@ mod tests {
         initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
         lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, settings_plugin_start_due,
         settings_plugin_start_script, settings_ui_probe_script, EQUICORD_MOD, KNOWN_MODS,
-        SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, VENCORD_MOD,
+        LEGCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE,
+        SHELTER_MOD, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
@@ -6613,6 +6830,29 @@ mod tests {
         // No generic invocation surface may appear alongside the snapshot.
         assert!(!script.contains("sendSync"));
         assert!(!script.contains("require(\"electron\")"));
+    }
+
+    #[test]
+    fn legcord_protocol_smoke_probe_uses_only_fixed_bundle_urls() {
+        // The DEV probe may request exactly three host-fixed bundle URLs that
+        // exist on disk; it must not accept input, execute fetched bytes, or
+        // open a generic fetch/eval surface.
+        for fixed in [
+            "legcord://assets/css/discord.css",
+            "legcord://assets/desktop.png",
+            "legcord://plugins/settings/plugin.js",
+        ] {
+            assert!(
+                LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains(fixed),
+                "probe must reference the fixed bundle URL {fixed}"
+            );
+        }
+        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains("eval("));
+        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains("new Function"));
+        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains("innerHTML"));
+        // No query/fragment: the resolver hardens by rejecting them.
+        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains('?'));
+        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains('#'));
     }
 
     #[test]

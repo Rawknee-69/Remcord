@@ -1347,8 +1347,7 @@ test("no src caller uses the native shim surface", () => {
     }
 });
 
-test("native shim is static data plus closed narrow senders", () => {
-    // platform/osRelease are spliced launch-time strings (process.platform /
+test("native shim is static data plus closed narrow senders", () => {    // platform/osRelease are spliced launch-time strings (process.platform /
     // os.release() parity), never capabilities, requests, or reads.
     const platformFacade = nativeFacade.slice(
         nativeFacade.indexOf("const hostPlatform = freezeDeep"),
@@ -1370,4 +1369,53 @@ test("native shim is static data plus closed narrow senders", () => {
     assert.match(dualGetConfig, /\{\s*type:\s*"settings_get_config",\s*payload:\s*\{\s*\}\s*\}/);
     assert.match(dualGetConfig, /settingsWorkingCopy/);
     assert.doesNotMatch(dualGetConfig, /sendSync|new Function|[^a-zA-Z]eval\(/);
+});
+
+test("Electron keeps the legcord:// protocol namespaces and root mapping", () => {
+    // P0.2 parity pin: the native resolver serves exactly the six Electron
+    // namespaces with the same bundle-relative roots. Electron behavior is
+    // the reference; native hardening (canonical containment, no `..`
+    // substring check) is a deliberate, documented difference, not a drift
+    // in coverage.
+    const electronProtocol = readFileSync(new URL("../../src/protocol.ts", import.meta.url), "utf8");
+    for (const namespace of ["plugins", "html", "js", "assets", "css", "local"]) {
+        assert.match(electronProtocol, new RegExp(`legcord://${namespace}/`));
+    }
+    // Root mapping parity: bundle-relative dirs plus userAssets under userData.
+    assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "plugins"/);
+    assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "html"/);
+    assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "js"/);
+    assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "assets", "app"/);
+    assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "css"/);
+    assert.match(electronProtocol, /path\.join\(app\.getPath\("userData"\), "userAssets"\)/);
+    const nativeScheme = readFileSync(new URL("../src/legcord_protocol/scheme.rs", import.meta.url), "utf8");
+    const nativeHandler = readFileSync(new URL("../src/legcord_protocol/handler.rs", import.meta.url), "utf8");
+    assert.match(nativeHandler, /plugins.*bundle_dir\.join\("plugins"\)/s);
+    assert.match(nativeHandler, /html.*bundle_dir\.join\("html"\)/s);
+    assert.match(nativeHandler, /assets.*bundle_dir\.join\("assets"\)\.join\("app"\)/s);
+    assert.match(nativeHandler, /local.*user_data_dir\.join\("userAssets"\)/s);
+    assert.match(nativeScheme, /LEGCORD_ALLOWED_ORIGINS.*https:\/\/discord\.com/);
+    // Hardening markers: canonical containment, symlink refusal, no path
+    // leakage, and no Electron-style substring check in executable code
+    // (the doc comment names Electron's weak check for contrast — strip
+    // comment lines before asserting).
+    const nativeResolver = readFileSync(new URL("../src/legcord_protocol/resolver.rs", import.meta.url), "utf8");
+    assert.match(nativeResolver, /canonicalize/);
+    assert.match(nativeResolver, /SymlinkEscape/);
+    const shippedResolver = nativeResolver
+        .slice(0, nativeResolver.indexOf("#[cfg(test)]"))
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n");
+    assert.doesNotMatch(shippedResolver, /includes\(\s*"\.\."\s*\)/);
+});
+
+test("the known-broken disableAutogain caller is left untouched", () => {
+    // legcord://assets/js/disableAutogain.js is referenced by
+    // src/discord/preload/patches.mts but the file does not exist in the
+    // repository. P0.2 must neither fabricate it nor silently rewrite the
+    // caller: resolution reports it missing (404) like any absent asset.
+    const patches = readFileSync(new URL("../../src/discord/preload/patches.mts", import.meta.url), "utf8");
+    assert.match(patches, /legcord:\/\/assets\/js\/disableAutogain\.js/);
+    assert.throws(() => readFileSync(new URL("../../ts-out/assets/app/js/disableAutogain.js", import.meta.url)));
 });
