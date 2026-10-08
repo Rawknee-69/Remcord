@@ -25,7 +25,7 @@ This document records the existing Electron renderer/preload contract and the in
 | Native menus | [`src/discord/menu.ts`](../src/discord/menu.ts); `window.ts` context menu | Win32 menus / WebView2 context-menu event | Medium-high: application, page and accessibility behavior | No | Yes |
 | Window state | `window.ts` saves/restores bounds and maximize/minimize/focus state; [`src/common/windowState.ts`](../src/common/windowState.ts) persists it | Tao/Win32 window events plus an isolated native config store | Medium | No | Yes |
 | Navigation / reload events | `window.ts` loads stable/canary/PTB Discord, handles `window.open`, reloads unresponsive pages; `main.ts` handles renderer-process loss | `NavigationStarting`, `NavigationCompleted`, process-failure events, `CoreWebView2.Reload` | Medium-high: origin policy and process recovery differ | Yes: initial navigation; reload events are prototype-validated only on target | Feature-complete loss/recovery policy can defer |
-| Protocol handling | [`src/protocol.ts`](../src/protocol.ts) registers `legcord://`; mods and theme assets use local resources | `SetVirtualHostNameToFolderMapping` or `WebResourceRequested` | High: local path authorization, MIME and CSP behavior | No for bare Discord; yes for current local assets/mods | Yes |
+| Protocol handling | [`src/protocol.ts`](../src/protocol.ts) registers `legcord://`; mods and theme assets use local resources | WebView2 environment scheme registration + `WebResourceRequested` (P0.2: all six namespaces served, CSP extended narrowly) | High: local path authorization, MIME and CSP behavior | No for bare Discord; yes for current local assets/mods | Splash/setup/editor windows can defer; the protocol itself is implemented |
 | Updater | [`src/updater.ts`](../src/updater.ts), enabled by config; `main.ts` restart/relaunch | A Rust updater/signature/rollback service | High: release channels, signing and install layout | No | Yes |
 | arRPC | [`src/rpc.ts`](../src/rpc.ts) starts arRPC; [`src/discord/rpcProcess.ts`](../src/discord/rpcProcess.ts) scans processes and forwards activity | Rust WebSocket service plus Windows process enumeration; typed page event | High: behavior and detection parity | No | Yes |
 | Client mods / renderer injection | `discord/extensions/modloader.ts`; `discord/preload/mods/*.mts`; `discord/preload/plugins.mts`; `common/themes.ts` | Document-start script registry, post-load execution and managed styles | High: preserve ordering, update/failure behavior, CSP and reload lifecycle | No for bare Discord; yes for existing modified-client behavior | The general registry can defer beyond prototype; early-script and CSS mechanics are demonstrated |
@@ -935,9 +935,62 @@ document-start init script (facade + settingsBoot + shim clones, all before adap
 
 ### What the shim does NOT do
 
-No sendSync, generic invoke, eval RPC, arbitrary source/plugin/filesystem/URL access, renderer-controlled ids, or snapshot construction input. The async capabilities are untouched. Theme operations reached by the executing UI are the already-implemented native capabilities (list/setEnabled/importFiles/folders), never duplicated. Deferred editor/URL/uninstall paths stay hidden via the existing isNativeThemesMode gates; legcord:// asset images have no native protocol and render broken (cosmetic, documented).
+No sendSync, generic invoke, eval RPC, arbitrary source/plugin/filesystem/URL access, renderer-controlled ids, or snapshot construction input. The async capabilities are untouched. Theme operations reached by the executing UI are the already-implemented native capabilities (list/setEnabled/importFiles/folders), never duplicated. Deferred editor/URL/uninstall paths stay hidden via the existing isNativeThemesMode gates. legcord:// asset images (Trash/Edit/Folder/UpgradeArrow icons, screenshots) now resolve through the native legcord protocol (P0.2); before it they rendered broken.
 
 ### Runtime acceptance (DEV profile only, 11 items)
 
 1. Discord loads (health hasAppMount, no login redirect). 2. Shelter loads (bootstrap marker per document). 3. Real artifact loads (start ok=true, 252,541 bytes, once per generation). 4. Plugin does not unload (Legcord section found on both documents). 5. Settings UI appears (modal via plain click). 6. ThemesPage exists (Installed Themes header). 7. Themes list renders (both cards). 8. ClearVision appears (card found, persisted disabled baseline shown). 9. No getThemes failure (sync shim + native list path; zero such errors anywhere). 10. No new unhandled rejections (stderr holds only previously attributed diagnostics). 11. No duplicate execution (start count tracks generations 1:1, no duplicate logs, execution_count=1).
 Beyond the eleven: enable/disable drive real managed-node add/remove (host css_updates/css_removes), two themes simultaneously (2 nodes), import click keeps the page alive (file selection itself is inherently manual - host modal), folder action proven twice by host Metrics lines, reload persistence verified (2 nodes without opening UI), DEV profile restored (0 nodes, both manifests disabled). CSS proof uses a self-contained fixture theme, never ClearVision visuals (Phase F gap above). setLang proven live (locale persisted per document).
+
+## legcord:// protocol (P0.2)
+
+Native serves all six Electron namespaces with the same bundle-relative roots: plugins/html/js/css under the bundle dir, assets under `<bundle>/assets/app/`, local under `<userData>/userAssets/`. The `legcord://plugins/settings/*` files resolve from the same `ts-out/plugins/settings/` tree the embedded settings artifact is built from (filesystem serve, no embedded dump).
+
+### Registration (exact mechanism)
+
+wry 0.57 creates the WebView2 environment internally with no scheme hook, so the host creates the environment itself with `webview2-com 0.39` (`CoreWebView2EnvironmentOptions` + `CoreWebView2CustomSchemeRegistration`, verified against the installed sources, not guessed) and hands it to wry via `WebViewBuilderExtWindows::with_environment` (which adopts a caller-provided environment verbatim). Every other option mirrors wry's own `create_environment` (same additional-args string, system language, default scroll style, same user-data directory), so the only delta is the registration:
+
+- scheme `legcord`, `HasAuthorityComponent=true` (the `legcord://namespace/path` syntax), `TreatAsSecure=true`
+- `AllowedOrigins=["https://discord.com"]` only — the one origin proven to load legcord:// subresources; origin restriction (the AllowedOrigins equivalent) is additionally enforced by navigation policy (HTTPS Discord hosts + `about:blank` boot document only, popups denied), the `legcord://*`-only filter, and CSP
+- registration happens at environment creation, before navigation. A generic Rust-side scheme registry was not invented.
+
+No `TreatAsSecure`/bypass parity beyond this is claimed. `supportFetchAPI`/`corsEnabled`/`stream` have no registration switch: fetch/XHR reach the same handler, and no `Access-Control-Allow-Origin` is sent (cors-mode fetch of a cross-origin legcord:// URL is rejected renderer-side while the handler still serves 200; observed, not worked around).
+
+### Request handling
+
+One `WebResourceRequested` handler with one filter per resource context actually served (`legcord://*` × DOCUMENT/STYLESHEET/SCRIPT/IMAGE/MEDIA/FETCH/XML_HTTP_REQUEST), via `ICoreWebView2_22::AddWebResourceRequestedFilterWithRequestSourceKinds` when the runtime supports it (same overload wry itself uses) and the two-argument overload otherwise. The existing Discord HTTPS filter, the Vencord badges interception, and every other filter are untouched. Success is 200 + extension MIME + bytes; traversal is 400 + minimal body; missing is 404. Rejections and successes log namespace + status + bytes + MIME only — never URIs or filesystem paths.
+
+### Path security (stronger than Electron by design)
+
+One authoritative resolver (`native/src/legcord_protocol/resolver.rs`): fixed six-namespace set, URI parsed as URI (raw text is checked BEFORE `url::Url` normalization, which would otherwise hide dot segments), single percent-decode with malformed-encoding and double-encoding rejection, Windows absolute/drive-relative/UNC/extended-length rejection, both separators normalized, canonical base + canonical target with containment, symlink/junction escape refused, directories refused, empty path refused, query/fragment rejected (no current consumer uses them — verified by source grep over `src/`, and the DEV probe asserts no `?`/`#`), no renderer-provided roots, no path leakage in errors or logs. Electron's weak `filePath.includes("..")` check is deliberately NOT reproduced.
+
+### MIME (extension-only, no sniffing)
+
+html/htm, js/mjs, css, json/map, txt/md, wasm, png, svg, jpg/jpeg, webp, ico, gif, bmp, avif, woff/woff2, ttf/otf/eot, webm/mp4, mp3/wav/ogg/m4a, zip; unknown → `application/octet-stream`.
+
+### CSP (narrow extension, never removed)
+
+Electron's `bypassCSP=true` has no WebView2 equivalent — registered custom schemes adhere to CSP. The existing Discord main-document interception now also appends `legcord:` to exactly the directives traced consumers need (`default-src` when present as fallback, `script-src`, `style-src`, `img-src`, `media-src`, `connect-src`; `font-src`/`object-src` untouched — no consumer). All existing sources preserved, badges patch preserved. Concrete modification, not "bypass parity".
+
+### Two-phase boot (filter-registration race)
+
+wry starts the initial navigation inside `build()`, before any `WebResourceRequested` filter can exist, so a single-phase boot would leave the first Discord document on Discord's original CSP until a reload. The host boots `about:blank` (generation 1, allowed as the empty boot document only), registers both interception filters, then navigates to Discord (generation 2+). Side effect, observed honestly: the two-phase boot also fixed the pre-existing first-load CSP race for the Vencord badges patch (badges `Failed to fetch` no longer appears; connect-src carries both badges and legcord:).
+
+### Tests
+
+- 25 resolver tests (valid/nested, `..`/`..\`, mixed/encoded/double-encoded traversal, drive/UNC/extended-length/drive-relative, prefix confusion, symlink escape with privilege skip, namespace crossing, empty path, directory, missing, malformed encoding, repeated separators, Unicode, query/fragment, invalid namespace, all-namespaces)
+- 4 MIME tests, 6 handler tests (roots mapping, 200+MIME, 400/404 mapping, no path leakage), 6 CSP tests (only-present directives extended, absent stay absent, badges preserved, no duplication, unlisted untouched, no substring false positives), 3 scheme tests (fixed name/origin, COM-level option values, options carry exactly one registration), 1 probe guard test (fixed bundle URLs only, no eval/Function/innerHTML, no query/fragment)
+- 2 electron-compat tests (namespace/root parity pin vs `src/protocol.ts`, hardening markers; known-broken `disableAutogain.js` caller left untouched — resolves 404, never fabricated)
+- Full suite: 397 Rust + 217 compatibility + 84 electron-compat, clippy `-D warnings` clean, fmt clean
+
+### Runtime evidence (DEV only, `LEGCORD_NATIVE_LEGCORD_PROTOCOL_SMOKE=1`)
+
+Cold start: scheme registered → `about:blank` gen 1 → Discord gen 2 with `[CSP] document policy extended badges=true legcord_sources=6` before its navigation → real WebView2 `status=200` for `assets/css/discord.css` (790 B, text/css), `assets/desktop.png` (29697 B, image/png), `plugins/settings/plugin.js` ×2 (256903 B, javascript) → probe `css=loaded img=loaded csp=none` (zero CSP violations) with `nocors=resolved` (cors-mode fetch stays rejected: no ACAO sent, by design). Reload run: same on generation 2, no duplicate handlers, HTTPS Discord networking intact, health `hasAppMount=true`, settings plugin starts per generation. Earlier transient runs additionally proved top-level `legcord://html/splash.html` navigation serves 200 (7850 B, text/html) with its `Loading.webm` subresource (160381 B, video/webm). Splash/setup/editor WINDOWS are not exercised by the native shell (deferred multi-window) — marked unverified as windows, validated as protocol resources. No traversal reached outside authorized roots; production Legcord/profile untouched.
+
+### Known limitations
+
+- `legcord://js/*` has no files in the current bundle (`ts-out/js/` absent): resolves 400 like any outside-root request, not a special case.
+- `disableAutogain.js` does not exist in the repo: 404, caller untouched.
+- cors-mode `fetch()` of cross-origin legcord:// URLs is rejected renderer-side (no ACAO sent); subresource loads (link/img/media/top-level) are unaffected.
+- `local/*` (userAssets) serves only what the profile holds; no writer was added in this milestone.
+- Query/fragment forms are rejected even though Electron would fold them into the path — hardening wins, documented.
