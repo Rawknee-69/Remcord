@@ -119,6 +119,18 @@ impl MainWebviewLifecycle {
         Ok(id)
     }
 
+    /// Record a browser-process-recovery replacement construction. Takes the
+    /// next fresh instance id, makes it the active instance, and increments
+    /// the construction counter. This is the only way to construct a main
+    /// WebView after the initial boot.
+    pub fn record_replacement(&mut self) -> u64 {
+        let id = self.next_instance;
+        self.active_instance = Some(id);
+        self.constructions += 1;
+        self.next_instance = id + 1;
+        id
+    }
+
     /// Fresh id reserved for a future replacement. Does not allocate: the
     /// replacement path (a later milestone) records it when it builds.
     pub fn next_instance_id(&self) -> u64 {

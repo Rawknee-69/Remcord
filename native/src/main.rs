@@ -1,8 +1,10 @@
 mod app;
 mod backup;
+mod browser_recovery;
 mod bundles;
 mod css_watch;
 mod downloads;
+mod environment_observer;
 mod folders;
 mod legcord_protocol;
 mod localization;
@@ -2689,6 +2691,12 @@ enum NativeEvent {
     /// recovery-budget input: failures only skip, and the manual F5 path
     /// recovers through a fresh gated navigation.
     NavigationCompleted(NavigationCompletedEvent),
+    /// Sanitized WebView2 environment-level browser-process exit record
+    /// (Phase 2G). The COM callback owns only primitives; this payload
+    /// carries the browser PID and exit kind (Normal/Failed) — never URLs,
+    /// page data, or interface objects. A `Failed` exit may approve one
+    /// browser-process recreation through the separate browser-recovery budget.
+    BrowserProcessExited(browser_recovery::BrowserProcessExitedEvent),
     /// DEV-only delayed readback for the legcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
     /// subresource loads have settled before the host reads the flags.
@@ -4216,6 +4224,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         env
     };
+    // Phase 2G: register the environment-level browser-process exit observer
+    // exactly once for the shared environment. This provides the authoritative
+    // exit kind (Normal/Failed) and browser PID — information the per-WebView
+    // ProcessFailed observer cannot provide. Unavailable interface degrades
+    // gracefully: the WebView-level observer remains as the fallback signal.
+    #[cfg(target_os = "windows")]
+    let mut env_browser_exited_token = {
+        let observer_proxy = proxy.clone(); // same event loop
+        match environment_observer::register(&webview_env, &observer_proxy) {
+            Ok(token) => {
+                println!("[Environment][BrowserProcessExited] observer registered");
+                Some(token)
+            }
+            Err(error) => {
+                eprintln!("[Environment][BrowserProcessExited] registration failed (fallback to WebView-level): {error}");
+                None
+            }
+        }
+    };
+    // Log whether the environment observer interface is available for diagnostics.
+    #[cfg(target_os = "windows")]
+    {
+        let available = environment_observer::is_available(&webview_env);
+        println!("[Environment][BrowserProcessExited] interface available={available}");
+    }
     // Shared with the single P0.4 popup child so it runs in the same
     // WebView2 environment (same profile/session). Cloned before the main
     // builder consumes the original; COM `Clone` is a cheap `AddRef`.
@@ -4696,7 +4729,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // is untouched. The instance id is threaded through so a future
     // replacement can take a fresh id; the boot value stays 0.
     let mut main_lifecycle = main_webview::MainWebviewLifecycle::new();
-    let main_instance_id = main_lifecycle
+    let mut main_instance_id = main_lifecycle
         .record_initial()
         .expect("initial main WebView builds exactly once");
     debug_assert_eq!(main_instance_id, MAIN_INSTANCE_ID);
@@ -4713,16 +4746,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         main_webview::INITIAL_MAIN_INSTANCE_ID
     );
     debug_assert!(!main_lifecycle.is_stale(main_instance_id));
-    let webview = {
+    let mut webview = {
+        // Clone process-lifetime resources before moving them into the builder
+        // so they remain available for browser-process recreation.
+        #[cfg(target_os = "windows")]
+        let webview_env_for_builder = webview_env.clone();
+        let ipc_proxy_for_builder = ipc_proxy.clone();
+        let load_proxy_for_builder = load_proxy.clone();
+        let popup_proxy_for_builder = popup_proxy.clone();
         let builder = main_webview::main_webview_builder(
             &mut web_context,
             #[cfg(target_os = "windows")]
-            webview_env,
+            webview_env_for_builder,
             &initialization_script,
             downloads_dir.clone(),
-            ipc_proxy,
-            load_proxy,
-            popup_proxy,
+            ipc_proxy_for_builder,
+            load_proxy_for_builder,
+            popup_proxy_for_builder,
             main_instance_id,
         );
         builder.build(&window_for_webview)?
@@ -4898,6 +4938,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // single-flight guard (see `recovery.rs`). Scoped to the main
     // instance; child records never reach it.
     let mut main_recovery = MainRendererRecovery::new(main_instance_id);
+    // Phase 2G bounded browser-process recovery: separate budget and
+    // single-flight guard (see `browser_recovery.rs`). Scoped to the main
+    // WebView slot (process-lifetime); independent of the renderer-recovery
+    // budget. The environment observer provides the authoritative trigger.
+    let mut browser_recovery = browser_recovery::BrowserRecovery::new();
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -4998,6 +5043,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if let Some((core_webview2, token)) = child.navigation_completed {
                             navigation_completed::unregister(&core_webview2, token);
                         }
+                    }
+                    // Remove environment-level browser-process exit observer.
+                    #[cfg(target_os = "windows")]
+                    if let Some(token) = env_browser_exited_token.take() {
+                        environment_observer::unregister(&webview_env, token);
                     }
                 }
                 *control_flow = ControlFlow::Exit;
@@ -5109,6 +5159,116 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 );
                             }
                         }
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::BrowserProcessExited(event)) => {
+                // Phase 2G: environment-level browser-process exit observer.
+                // Provides authoritative exit kind (Normal/Failed) and browser PID.
+                // Only Failed exits are eligible for browser-process recreation.
+                // The per-WebView ProcessFailed observer (above) remains as a
+                // corroborating signal but does NOT drive browser recreation.
+                let decision = browser_recovery.decide(&event, Instant::now());
+                println!("{}", browser_recovery::format_browser_recovery_log(&decision, &event));
+                if matches!(
+                    decision,
+                    browser_recovery::BrowserRecoveryDecision::RecreationRequested { .. }
+                ) {
+                    println!("[BrowserRecovery] Starting browser-process recreation (instance={} -> {})",
+                        main_instance_id, main_lifecycle.next_instance_id());
+
+                    // 1. Confirm shutdown has not started (event loop is running).
+                    // 2. Enter single-flight recovery state (already done by decide()).
+
+                    // 3. Prevent callbacks from old WebView by detaching observers first.
+                    #[cfg(target_os = "windows")]
+                    {
+                        main_webview::detach_main_observers(
+                            main_process_failed.take(),
+                            main_navigation_completed.take(),
+                        );
+                    }
+
+                    // 4. Drop the managed popup child and its subscriptions because
+                    // it shares the dead browser process.
+                    if let Some(child) = popup_child.take() {
+                        #[cfg(target_os = "windows")]
+                        if let Some((core_webview2, token)) = child.process_failed {
+                            process_failure::unregister(&core_webview2, token);
+                        }
+                        #[cfg(target_os = "windows")]
+                        if let Some((core_webview2, token)) = child.navigation_completed {
+                            navigation_completed::unregister(&core_webview2, token);
+                        }
+                        println!("[BrowserRecovery] Dropped popup child instance={}", child.instance_id);
+                    }
+                    // Reset child counters since the child is gone.
+                    child_process_failed_counters = process_failure::ProcessFailedCounters::default();
+                    child_navigation_counters = navigation_completed::NavigationCompletedCounters::default();
+
+                    // 5. The old WebView is dropped by replacing it with a new one.
+                    // The old CoreWebView2 is released when the WebView is dropped.
+
+                    // 6. Allocate a fresh, monotonically increasing main-WebView instance ID.
+                    let new_instance_id = main_lifecycle.record_replacement();
+                    main_instance_id = new_instance_id;
+                    println!("[BrowserRecovery] New main WebView instance id={}", main_instance_id);
+
+                    // 7. Reset per-instance state for the new WebView.
+                    document_lifecycle = DocumentModLifecycle::default();
+                    request_tracker.clear();
+                    pending_mods.clear();
+                    main_process_failed_counters = process_failure::ProcessFailedCounters::default();
+                    main_navigation_counters = navigation_completed::NavigationCompletedCounters::default();
+                    main_recovery = MainRendererRecovery::new(main_instance_id);
+                    main_trusted_gate = navigation_gate::NavigationGate::new(main_instance_id, true);
+                    // Reset trusted-load pipeline state.
+                    startup_visibility_applied = false;
+                    page_load_started_at = None;
+                    titlebar_settled_generation = None;
+                    last_quickcss_injected = false;
+                    last_quickcss_css = None;
+                    last_theme_style_ids.clear();
+                    last_themes.clear();
+
+                    // 8. Build a fresh main WebView using the Phase 2F helpers.
+                    let builder = main_webview::main_webview_builder(
+                        &mut web_context,
+                        #[cfg(target_os = "windows")]
+                        webview_env.clone(),
+                        &initialization_script,
+                        downloads_dir.clone(),
+                        ipc_proxy.clone(),
+                        load_proxy.clone(),
+                        popup_proxy.clone(),
+                        main_instance_id,
+                    );
+                    webview = builder.build(&window_for_webview).expect("failed to build replacement WebView");
+                    println!("[BrowserRecovery] Replacement WebView built");
+
+                    // 9. Re-attach per-WebView content filters (legcord://, permissions, CSP).
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = main_webview::attach_main_content_filters(&webview, &profile_path, WEBVIEW_PROFILE);
+                    }
+
+                    // 10. Re-attach per-WebView observers.
+                    #[cfg(target_os = "windows")]
+                    {
+                        let observer_proxy = popup_ipc_proxy.clone();
+                        let (pf_opt, nc_opt) = main_webview::attach_main_observers(&webview, main_instance_id, &observer_proxy);
+                        main_process_failed = pf_opt;
+                        main_navigation_completed = nc_opt;
+                    }
+
+                    // 11. Re-run the initial Discord navigation (two-phase: about:blank -> Discord).
+                    // The builder already navigated to about:blank; now navigate to Discord.
+                    if let Err(error) = main_webview::navigate_to_discord(&webview, DISCORD_URL) {
+                        eprintln!("[BrowserRecovery] Initial Discord navigation failed: {error}");
+                        browser_recovery.on_recreation_error();
+                        println!("[BrowserRecovery] Recreation failed; parked. Manual restart required.");
+                    } else {
+                        println!("[BrowserRecovery] Initial Discord navigation started for replacement");
                     }
                 }
             }
@@ -5252,6 +5412,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // attempt history is untouched: budget and cooldown still
                 // bound the next decision.
                 main_recovery.on_page_load_started();
+                // Phase 2G: browser-process recreation guard release.
+                browser_recovery.on_page_load_started();
                 page_load_started_at = Some(Instant::now());
                 println!(
                     "[Navigation] new document generation={} (bridge state reset)",
@@ -5724,6 +5886,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         {
                                             navigation_completed::unregister(&core_webview2, token);
                                         }
+                                    }
+                                    // Remove environment-level browser-process exit observer.
+                                    if let Some(token) = env_browser_exited_token.take() {
+                                        environment_observer::unregister(&webview_env, token);
                                     }
                                 }
                                 *control_flow = ControlFlow::Exit;
