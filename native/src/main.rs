@@ -7,6 +7,7 @@ mod folders;
 mod legcord_protocol;
 mod localization;
 mod mod_substrate;
+mod navigation_completed;
 mod new_window;
 mod permissions;
 mod plugin_storage;
@@ -54,6 +55,7 @@ use folders::{
 use legcord_protocol::scheme::create_environment as create_legcord_webview_environment;
 use legcord_protocol::{build_namespace_roots, extend_csp_for_legcord, register_legcord_protocol};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
+use navigation_completed::NavigationCompletedEvent;
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use process_failure::ProcessFailedEvent;
 use protocol::{
@@ -2685,6 +2687,15 @@ enum NativeEvent {
     /// Main `RenderProcessExited` records may approve one host-side reload
     /// through the recovery budget; every other record stays observe-only.
     ProcessFailed(ProcessFailedEvent),
+    /// Sanitized WebView2 navigation-completion record (Phase 2B observer,
+    /// observability only). The COM callback owns only primitives; this
+    /// payload carries the role, per-instance id, success flag, web error,
+    /// and HTTP status — never URLs, page data, or interface objects.
+    /// Counted per live instance and logged only. Failed navigations are
+    /// observed here, never acted on: this event must not gate
+    /// `PageLoadFinished`, trigger reloads/retries, or touch the recovery
+    /// budget.
+    NavigationCompleted(NavigationCompletedEvent),
     /// DEV-only delayed readback for the legcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
     /// subresource loads have settled before the host reads the flags.
@@ -2892,6 +2903,12 @@ struct PopupChild {
     /// its registration token, removed before the slot is dropped.
     #[cfg(target_os = "windows")]
     process_failed: Option<(ICoreWebView2, i64)>,
+    /// Phase 2B navigation-completed subscription: the CoreWebView2 clone
+    /// plus its registration token, removed before the slot is dropped.
+    /// A second, additive `NavigationCompleted` handler — wry's own
+    /// page-load subscription is untouched.
+    #[cfg(target_os = "windows")]
+    navigation_completed: Option<(ICoreWebView2, i64)>,
 }
 
 /// Builds the single managed child for an approved popup (P0.4).
@@ -3024,6 +3041,35 @@ fn create_popup_child(
             }
         }
     };
+    // Phase 2B navigation-completed observer (observability only). A
+    // SECOND `NavigationCompleted` subscription: wry's own page-load
+    // handler stays registered and keeps firing `PageLoadFinished`
+    // unconditionally. A registration failure is logged loudly but must
+    // not block the child: the pre-observer behavior (wry page-load
+    // events only) is the fallback.
+    #[cfg(target_os = "windows")]
+    let navigation_completed = {
+        let core_webview2: ICoreWebView2 = child_webview.webview();
+        match navigation_completed::register(
+            &core_webview2,
+            process_failure::WebViewRole::Child,
+            instance_id,
+            &child_observer_proxy,
+        ) {
+            Ok(token) => {
+                println!(
+                    "[WebView][NavigationCompleted] observer registered role=child instance={instance_id}"
+                );
+                Some((core_webview2, token))
+            }
+            Err(error) => {
+                eprintln!(
+                    "[WebView][NavigationCompleted] observer registration failed role=child: {error}"
+                );
+                None
+            }
+        }
+    };
     if visible {
         child_window.set_visible(true);
     }
@@ -3033,6 +3079,8 @@ fn create_popup_child(
         instance_id,
         #[cfg(target_os = "windows")]
         process_failed,
+        #[cfg(target_os = "windows")]
+        navigation_completed,
     })
 }
 
@@ -4804,6 +4852,39 @@ fn main() -> Result<(), Box<dyn Error>> {
     // resets with every new child.
     let mut main_process_failed_counters = process_failure::ProcessFailedCounters::default();
     let mut child_process_failed_counters = process_failure::ProcessFailedCounters::default();
+    // Phase 2B navigation-completed observer for the main WebView
+    // (observability only): the CoreWebView2 clone plus its registration
+    // token, removed on application shutdown. A second, additive
+    // `NavigationCompleted` subscription — wry's own page-load handler is
+    // untouched. Registration failure only loses visibility; boot
+    // continues exactly as before.
+    #[cfg(target_os = "windows")]
+    let mut main_navigation_completed: Option<(ICoreWebView2, i64)> = {
+        let core_webview2: ICoreWebView2 = webview.webview();
+        let observer_proxy = popup_ipc_proxy.clone();
+        match navigation_completed::register(
+            &core_webview2,
+            process_failure::WebViewRole::Main,
+            0,
+            &observer_proxy,
+        ) {
+            Ok(token) => {
+                println!("[WebView][NavigationCompleted] observer registered role=main instance=0");
+                Some((core_webview2, token))
+            }
+            Err(error) => {
+                eprintln!(
+                    "[WebView][NavigationCompleted] observer registration failed role=main: {error}"
+                );
+                None
+            }
+        }
+    };
+    // Per-instance navigation counters: main lives for the process, child
+    // resets with every new child. Observe-only: no budget, no guard.
+    let mut main_navigation_counters = navigation_completed::NavigationCompletedCounters::default();
+    let mut child_navigation_counters =
+        navigation_completed::NavigationCompletedCounters::default();
     // Phase 2A bounded main-renderer recovery: per-main-WebView budget and
     // single-flight guard (see `recovery.rs`). Scoped to the main
     // instance; child records never reach it.
@@ -4831,6 +4912,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         #[cfg(target_os = "windows")]
                         if let Some((core_webview2, token)) = child.process_failed {
                             process_failure::unregister(&core_webview2, token);
+                        }
+                        // Remove the navigation observer before the slot is
+                        // dropped so no late callback can target it.
+                        #[cfg(target_os = "windows")]
+                        if let Some((core_webview2, token)) = child.navigation_completed {
+                            navigation_completed::unregister(&core_webview2, token);
                         }
                         println!(
                             "[Popup] child closed instance={}; clearing single slot",
@@ -4873,6 +4960,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     main_process_failed_counters.total, child_process_failed_counters.total,
                 );
                 println!(
+                    "[WebView][NavigationCompleted] final main_total={} main_ok={} main_failed={} child_total={} child_ok={} child_failed={}",
+                    main_navigation_counters.total,
+                    main_navigation_counters.succeeded,
+                    main_navigation_counters.failed,
+                    child_navigation_counters.total,
+                    child_navigation_counters.succeeded,
+                    child_navigation_counters.failed,
+                );
+                println!(
                     "[WebView][Recovery] final attempts_in_window={} in_flight={}",
                     main_recovery.attempts_in_window(Instant::now()),
                     main_recovery.is_in_flight(),
@@ -4885,9 +4981,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some((core_webview2, token)) = main_process_failed.take() {
                         process_failure::unregister(&core_webview2, token);
                     }
+                    if let Some((core_webview2, token)) = main_navigation_completed.take() {
+                        navigation_completed::unregister(&core_webview2, token);
+                    }
                     if let Some(child) = popup_child.take() {
                         if let Some((core_webview2, token)) = child.process_failed {
                             process_failure::unregister(&core_webview2, token);
+                        }
+                        if let Some((core_webview2, token)) = child.navigation_completed {
+                            navigation_completed::unregister(&core_webview2, token);
                         }
                     }
                 }
@@ -4954,6 +5056,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // from a previous child must never alias this one.
                         child_process_failed_counters =
                             process_failure::ProcessFailedCounters::default();
+                        child_navigation_counters =
+                            navigation_completed::NavigationCompletedCounters::default();
                         popup_child = Some(child);
                     }
                     Err(error) => eprintln!("[Popup] child failed: {error} url={url}"),
@@ -5000,6 +5104,49 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
+            }
+            Event::UserEvent(NativeEvent::NavigationCompleted(event)) => {
+                // Phase 2B observer (observability only): count per live
+                // instance and log the sanitized record. Deliberately no
+                // recovery state change, no reload, no `PageLoadFinished`
+                // gating, no document/mod side effects: failed navigations
+                // are observed here, never acted on (gating is a separate
+                // milestone).
+                match event.role {
+                    process_failure::WebViewRole::Main => {
+                        if navigation_completed::is_stale(&event, MAIN_INSTANCE_ID) {
+                            println!(
+                                "{}",
+                                navigation_completed::format_stale_log(&event, MAIN_INSTANCE_ID)
+                            );
+                            return;
+                        }
+                        main_navigation_counters.record(&event);
+                    }
+                    process_failure::WebViewRole::Child => {
+                        match popup_child.as_ref() {
+                            Some(child) if child.instance_id == event.instance_id => {
+                                child_navigation_counters.record(&event);
+                            }
+                            Some(child) => {
+                                let expected = child.instance_id;
+                                println!(
+                                    "{}",
+                                    navigation_completed::format_stale_log(&event, expected)
+                                );
+                                return;
+                            }
+                            None => {
+                                println!(
+                                    "{} stale no_live_child",
+                                    navigation_completed::format_log(&event)
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+                println!("{}", navigation_completed::format_log(&event));
             }
             Event::UserEvent(NativeEvent::PageLoadStarted) => {
                 document_lifecycle.begin_document();
@@ -5742,6 +5889,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     main_process_failed_counters.total,
                                     child_process_failed_counters.total,
                                 );
+                                println!(
+                                    "[WebView][NavigationCompleted] final main_total={} main_ok={} main_failed={} child_total={} child_ok={} child_failed={}",
+                                    main_navigation_counters.total,
+                                    main_navigation_counters.succeeded,
+                                    main_navigation_counters.failed,
+                                    child_navigation_counters.total,
+                                    child_navigation_counters.succeeded,
+                                    child_navigation_counters.failed,
+                                );
                                 #[cfg(target_os = "windows")]
                                 {
                                     if let Some((core_webview2, token)) =
@@ -5749,10 +5905,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     {
                                         process_failure::unregister(&core_webview2, token);
                                     }
+                                    if let Some((core_webview2, token)) =
+                                        main_navigation_completed.take()
+                                    {
+                                        navigation_completed::unregister(&core_webview2, token);
+                                    }
                                     if let Some(child) = popup_child.take() {
                                         if let Some((core_webview2, token)) = child.process_failed
                                         {
                                             process_failure::unregister(&core_webview2, token);
+                                        }
+                                        if let Some((core_webview2, token)) =
+                                            child.navigation_completed
+                                        {
+                                            navigation_completed::unregister(&core_webview2, token);
                                         }
                                     }
                                 }
@@ -9431,5 +9597,32 @@ mod tests {
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("sendSync"));
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("legcord://"));
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("plugin.js"));
+    }
+
+    #[test]
+    fn navigation_observer_coexists_with_wry_page_load_path() {
+        // Phase 2B is a SECOND raw-COM `NavigationCompleted` subscription:
+        // wry's own page-load callback must keep firing `PageLoadFinished`
+        // when the observer is registered. Both registrations stay present
+        // in the shipped wiring, and the observer adds no reload path.
+        let source = include_str!("main.rs");
+        // Wry's page-load subscription is untouched.
+        assert!(source.contains("with_on_page_load_handler"));
+        assert!(source.contains("PageLoadEvent::Finished"));
+        assert!(source.contains("NativeEvent::PageLoadFinished"));
+        // The raw-COM observer is additive, for main and child.
+        assert!(source.contains("navigation_completed::register"));
+        assert!(source.contains("navigation_completed::unregister"));
+        assert!(source.contains("NativeEvent::NavigationCompleted"));
+        assert!(source.contains("remove_NavigationCompleted"));
+        // No new reload path: the single host-side `reload()` still belongs
+        // to the Phase 2A recovery decision only. (Needles are joined at
+        // runtime so this assertion's own source text cannot self-count.)
+        let reload_needle = ["match webview", "reload()"].join(".");
+        assert_eq!(source.matches(&reload_needle).count(), 1);
+        // The navigation event never reaches the recovery budget: the only
+        // policy decision still feeds on the process-failure record.
+        let decide_needle = ["main_recovery", "decide"].join(".");
+        assert_eq!(source.matches(&decide_needle).count(), 1);
     }
 }
