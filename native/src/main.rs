@@ -8,6 +8,7 @@ mod legcord_protocol;
 mod localization;
 mod mod_substrate;
 mod navigation_completed;
+mod navigation_gate;
 mod new_window;
 mod permissions;
 mod plugin_storage;
@@ -2687,14 +2688,15 @@ enum NativeEvent {
     /// Main `RenderProcessExited` records may approve one host-side reload
     /// through the recovery budget; every other record stays observe-only.
     ProcessFailed(ProcessFailedEvent),
-    /// Sanitized WebView2 navigation-completion record (Phase 2B observer,
-    /// observability only). The COM callback owns only primitives; this
+    /// Sanitized WebView2 navigation-completion record (Phase 2B observer;
+    /// Phase 2C gating). The COM callback owns only primitives; this
     /// payload carries the role, per-instance id, success flag, web error,
     /// and HTTP status — never URLs, page data, or interface objects.
-    /// Counted per live instance and logged only. Failed navigations are
-    /// observed here, never acted on: this event must not gate
-    /// `PageLoadFinished`, trigger reloads/retries, or touch the recovery
-    /// budget.
+    /// Counted per live instance and logged; the main-WebView success flag
+    /// additionally resolves the trusted-load gate (run the pipeline on
+    /// success, skip it on failure). Still never a reload, retry, or
+    /// recovery-budget input: failures only skip, and the manual F5 path
+    /// recovers through a fresh gated navigation.
     NavigationCompleted(NavigationCompletedEvent),
     /// DEV-only delayed readback for the legcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
@@ -2887,6 +2889,418 @@ fn apply_download_handlers(
                 (false, _) => println!("[Downloads] interrupted source={redacted}"),
             }
         })
+}
+/// DEV-only smoke/probe switches plus the two mutation-smoke stage
+/// machines, copied per trusted-load run. Every field is a plain value:
+/// the pipeline never flips a flag, so a failed document cannot perturb a
+/// later run through shared switch state.
+#[derive(Debug, Clone, Copy)]
+struct TrustedLoadFlags {
+    bare_page: bool,
+    themes_smoke: bool,
+    quickcss_smoke: bool,
+    mod_smoke: bool,
+    interaction: bool,
+    settings_smoke: bool,
+    settings_mutation_smoke: bool,
+    settings_set_smoke: bool,
+    getlang_smoke: bool,
+    app_version_smoke: bool,
+    plugin_storage_smoke: bool,
+    theme_install_smoke: bool,
+    theme_write_smoke: bool,
+    theme_import_smoke: bool,
+    theme_set_enabled_smoke: bool,
+    theme_list_smoke: bool,
+    backup_save_smoke: bool,
+    backup_restore_smoke: bool,
+    shelter_loader_probe: bool,
+    settings_boot_smoke: bool,
+    legcord_protocol_smoke: bool,
+    settings_ui_smoke: bool,
+    permissions_smoke: bool,
+    mutation_stage: u8,
+    mutation_before: bool,
+    settings_set_stage: u8,
+    settings_set_before: bool,
+}
+
+/// Borrowed context for one deferred trusted-load run (Phase 2C). The
+/// event loop builds this when a finished Discord document is proven
+/// successful — either immediately (outcome already known or no
+/// observer) or later, when the observer outcome resolves a stashed
+/// finish. All document state is reborrowed per run; nothing is retained
+/// between runs, so a failed document leaves no residue for the next one.
+struct TrustedLoadContext<'a> {
+    webview: &'a WebView,
+    profile_path: &'a PathBuf,
+    proxy: &'a EventLoopProxy<NativeEvent>,
+    generation: u64,
+    titlebar_plugin_start_script: &'a str,
+    mod_smoke_script: &'a str,
+    settings_ui_probe_script: &'a str,
+    titlebar_settled_generation: &'a mut Option<u64>,
+    last_quickcss_injected: &'a mut bool,
+    last_quickcss_css: &'a mut Option<String>,
+    last_theme_style_ids: &'a mut Vec<String>,
+    last_themes: &'a mut Vec<LoadedTheme>,
+    flags: TrustedLoadFlags,
+}
+
+/// The trusted Discord document pipeline: everything that assumes live
+/// Discord content is present (titlebar settle, health/CSS/bridge probes,
+/// host-pushed Quick CSS and themes, DEV smoke observations).
+///
+/// Phase 2C runs this ONLY for a successfully completed navigation —
+/// never for a failed one, never twice for one document, never for a
+/// superseded document. The caller owns that decision via
+/// [`navigation_gate::NavigationGate`]; this function only executes it.
+/// It performs no navigation, no reload, no retry, and no trust decision
+/// of its own.
+fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
+    // Titlebar settle pass: the marker-time start can land
+    // before Discord finishes mounting (warm reloads), and a
+    // mount can discard body-appended nodes afterwards. This
+    // one-shot-per-generation re-run of the same idempotent
+    // script heals that wipe; the marker path still covers a
+    // Shelter marker that arrives after finish, in either
+    // order, with at most two evaluations per document and
+    // never a retry loop.
+    if *ctx.titlebar_settled_generation != Some(ctx.generation) {
+        *ctx.titlebar_settled_generation = Some(ctx.generation);
+        let generation = ctx.generation;
+        if let Err(error) = ctx.webview.evaluate_script_with_callback(
+            ctx.titlebar_plugin_start_script,
+            move |result| {
+                println!("[Titlebar] settle generation={generation} result={result}");
+            },
+        ) {
+            eprintln!("[Titlebar] settle evaluation failed: {error}");
+        }
+    }
+    if let Err(error) = ctx
+        .webview
+        .evaluate_script_with_callback(RENDERER_HEALTH_SCRIPT, |result| {
+            println!("[Renderer][Health] {result}")
+        })
+    {
+        eprintln!("[Renderer][Health] probe failed: {error}");
+    }
+    if !ctx.flags.bare_page {
+        if let Err(error) = ctx.webview.evaluate_script(CSS_INJECTION_SCRIPT) {
+            eprintln!("[Injection] CSS script failed: {error}");
+        }
+        if let Err(error) = ctx.webview.evaluate_script(BRIDGE_PROBE_SCRIPT) {
+            eprintln!("[Injection] Bridge probe failed: {error}");
+        }
+        // Host-pushed Quick CSS injection (Phase D): the renderer
+        // never requests Quick CSS, so there is no bridge
+        // round trip here. The host reads its own fixed
+        // quickCss.css when the authoritative settings flag
+        // is enabled and pushes it through the shared
+        // managed-CSS lifecycle BEFORE themes, preserving
+        // Electron's Vencord -> Quick CSS -> themes cascade.
+        let quickcss_report = load_quick_css(ctx.profile_path);
+        let mut quickcss_injected = false;
+        match &quickcss_report.css {
+            Some(css) => match managed_css_script(QUICK_CSS_STYLE_ID, css) {
+                Ok(script) => {
+                    if let Err(error) = ctx.webview.evaluate_script(&script) {
+                        eprintln!("[QuickCss][css_injection] {error}");
+                    } else {
+                        quickcss_injected = true;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[QuickCss][css_injection] {error}");
+                }
+            },
+            None => {
+                // Disabled (or unreadable) after a previous
+                // injection: remove the managed style so no
+                // stale Quick CSS survives the reset. On a
+                // fresh document this is a cheap no-op.
+                if *ctx.last_quickcss_injected {
+                    match managed_css_remove_script(QUICK_CSS_STYLE_ID) {
+                        Ok(script) => {
+                            if let Err(error) = ctx.webview.evaluate_script(&script) {
+                                eprintln!("[QuickCss][css_removal] {error}");
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("[QuickCss][css_removal] {error}");
+                        }
+                    }
+                }
+            }
+        }
+        *ctx.last_quickcss_injected = quickcss_injected;
+        // Content snapshot for live diffing: `Some` exactly
+        // when the managed style is present in this document.
+        *ctx.last_quickcss_css = if quickcss_injected {
+            quickcss_report.css.clone()
+        } else {
+            None
+        };
+        println!(
+            "[QuickCss][Metrics] enabled={} state={} injected={} css_bytes={} read_ms={:.3}",
+            quickcss_report.enabled,
+            quickcss_report.state,
+            quickcss_injected,
+            quickcss_report.css_bytes,
+            quickcss_report.read_ms,
+        );
+        // Host-pushed theme injection (Phase D): the renderer
+        // never requests theme CSS, so there is no bridge
+        // round trip here. The host loads enabled themes from
+        // its own root and pushes each through the shared
+        // managed-CSS lifecycle in sorted-id order.
+        let theme_report = load_enabled_themes(ctx.profile_path);
+        // Reset semantics: drop managed styles for themes that
+        // were injected before but are no longer enabled, so
+        // no stale CSS survives a document reset. On a fresh
+        // document this is a cheap no-op (the nodes do not
+        // exist yet); the removal script is idempotent.
+        let current_theme_ids: Vec<String> = theme_report
+            .injected
+            .iter()
+            .map(|theme| theme.style_id.clone())
+            .collect();
+        for stale_id in ctx
+            .last_theme_style_ids
+            .iter()
+            .filter(|id| !current_theme_ids.contains(id))
+        {
+            match managed_css_remove_script(stale_id) {
+                Ok(script) => {
+                    if let Err(error) = ctx.webview.evaluate_script(&script) {
+                        eprintln!("[Themes][css_removal] {stale_id}: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[Themes][css_removal] {stale_id}: {error}");
+                }
+            }
+        }
+        *ctx.last_theme_style_ids = current_theme_ids;
+        let mut theme_injected = 0_usize;
+        let mut injected_now: Vec<LoadedTheme> = Vec::new();
+        for theme in &theme_report.injected {
+            match managed_css_script(&theme.style_id, &theme.css) {
+                Ok(script) => {
+                    if let Err(error) = ctx.webview.evaluate_script(&script) {
+                        eprintln!("[Themes][css_injection] {}: {error}", theme.id);
+                    } else {
+                        theme_injected += 1;
+                        injected_now.push(theme.clone());
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[Themes][css_injection] {}: {error}", theme.id);
+                }
+            }
+        }
+        // Content snapshot for live diffing: only successfully
+        // injected themes, so a failed push is retried rather
+        // than mistaken for present.
+        *ctx.last_themes = injected_now;
+        if theme_report.discovered > 0 || ctx.flags.themes_smoke {
+            println!(
+                "[Themes][Metrics] discovered={} enabled={} injected={} skipped={} css_bytes={} read_ms={:.3}",
+                theme_report.discovered,
+                theme_report.enabled,
+                theme_injected,
+                theme_report.skipped.len(),
+                theme_report.css_bytes,
+                theme_report.read_ms,
+            );
+            for skipped in &theme_report.skipped {
+                println!("[Themes][Skip] id={} reason={}", skipped.id, skipped.reason);
+            }
+        }
+        if ctx.flags.themes_smoke || ctx.flags.quickcss_smoke {
+            // Copied for the 'static observation callback.
+            let themes_smoke = ctx.flags.themes_smoke;
+            let quickcss_smoke = ctx.flags.quickcss_smoke;
+            if let Err(error) =
+                ctx.webview
+                    .evaluate_script_with_callback(THEMES_SMOKE_SCRIPT, move |result| {
+                        if themes_smoke {
+                            println!("[Themes][Smoke] managed_styles={result}");
+                        }
+                        if quickcss_smoke {
+                            println!("[QuickCss][Smoke] managed_styles={result}");
+                        }
+                    })
+            {
+                eprintln!("[Themes][Smoke] observation failed: {error}");
+            }
+        }
+        // DEV-only read-only observation of every active mod's
+        // real page-world global, managed style, and adapter
+        // state. Observation only: no request, no injection.
+        if ctx.flags.mod_smoke {
+            if let Err(error) = ctx
+                .webview
+                .evaluate_script_with_callback(ctx.mod_smoke_script, |result| {
+                    println!("[Mods][Smoke] {result}")
+                })
+            {
+                eprintln!("[Mods][Smoke] observation failed: {error}");
+            }
+        }
+        if ctx.flags.interaction {
+            if let Err(error) = ctx.webview.evaluate_script(INTERACTION_PROBE_SCRIPT) {
+                eprintln!("[Renderer][Interaction] probe failed: {error}");
+            }
+        }
+        if ctx.flags.settings_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(SETTINGS_SMOKE_SCRIPT) {
+                eprintln!("[Settings][Smoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.settings_mutation_smoke {
+            if ctx.flags.mutation_stage == 0 {
+                if let Err(error) = ctx.webview.evaluate_script(SETTINGS_MUTATION_SMOKE_SCRIPT) {
+                    eprintln!("[Settings][MutationSmoke] probe failed: {error}");
+                }
+            } else if ctx.flags.mutation_stage == 1 {
+                let restore = SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE.replace(
+                    "__LEGCORD_MUTATION_RESTORE_VALUE__",
+                    if ctx.flags.mutation_before {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+                if let Err(error) = ctx.webview.evaluate_script(&restore) {
+                    eprintln!("[Settings][MutationSmoke] restore failed: {error}");
+                }
+            }
+        }
+        if ctx.flags.settings_set_smoke {
+            if ctx.flags.settings_set_stage == 0 {
+                if let Err(error) = ctx.webview.evaluate_script(SETTINGS_SET_SMOKE_SCRIPT) {
+                    eprintln!("[Settings][SetSmoke] probe failed: {error}");
+                }
+            } else if ctx.flags.settings_set_stage == 1 {
+                let restore = SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE.replace(
+                    "__LEGCORD_SETTINGS_SET_RESTORE_VALUE__",
+                    if ctx.flags.settings_set_before {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
+                if let Err(error) = ctx.webview.evaluate_script(&restore) {
+                    eprintln!("[Settings][SetSmoke] restore failed: {error}");
+                }
+            }
+        }
+        if ctx.flags.getlang_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(GETLANG_SMOKE_SCRIPT) {
+                eprintln!("[Localization][Smoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.app_version_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(APP_VERSION_SMOKE_SCRIPT) {
+                eprintln!("[App][Smoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.plugin_storage_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(PLUGIN_STORAGE_SMOKE_SCRIPT) {
+                eprintln!("[PluginStorage][Smoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.theme_install_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(THEME_INSTALL_SMOKE_SCRIPT) {
+                eprintln!("[Themes][InstallSmoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.theme_write_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(THEME_WRITE_SMOKE_SCRIPT) {
+                eprintln!("[Themes][WriteSmoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.theme_import_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(THEME_IMPORT_SMOKE_SCRIPT) {
+                eprintln!("[Themes][ImportSmoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.theme_set_enabled_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(THEME_SET_ENABLED_SMOKE_SCRIPT) {
+                eprintln!("[Themes][SetEnabledSmoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.theme_list_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(THEME_LIST_SMOKE_SCRIPT) {
+                eprintln!("[Themes][ListSmoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.backup_save_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(BACKUP_SAVE_SMOKE_SCRIPT) {
+                eprintln!("[Backup][SaveSmoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.backup_restore_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(BACKUP_RESTORE_SMOKE_SCRIPT) {
+                eprintln!("[Backup][RestoreSmoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.shelter_loader_probe {
+            if let Err(error) = ctx.webview.evaluate_script(SHELTER_LOADER_PROBE_SCRIPT) {
+                eprintln!("[ShelterLoader][Probe] probe failed: {error}");
+            }
+        }
+        if ctx.flags.settings_boot_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(SETTINGS_BOOT_SMOKE_SCRIPT) {
+                eprintln!("[SettingsBoot][Smoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.legcord_protocol_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(LEGCORD_PROTOCOL_SMOKE_SCRIPT) {
+                eprintln!("[LegcordProtocol][Smoke] probe failed: {error}");
+            } else {
+                // One-shot delayed readback: subresource loads
+                // settle asynchronously, so the flags are read
+                // ~5 s later on the event loop (DEV only).
+                let readback_proxy = ctx.proxy.clone();
+                if let Err(error) = thread::Builder::new()
+                    .name("legcord-protocol-smoke-readback".to_owned())
+                    .spawn(move || {
+                        thread::sleep(Duration::from_millis(5000));
+                        queue_event(&readback_proxy, NativeEvent::LegcordProtocolSmokeReadback);
+                    })
+                {
+                    eprintln!("[LegcordProtocol][Smoke] readback timer failed: {error}");
+                }
+            }
+        }
+        if ctx.flags.settings_ui_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(ctx.settings_ui_probe_script) {
+                eprintln!("[SettingsUi][Smoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.permissions_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(PERMISSIONS_SMOKE_SCRIPT) {
+                eprintln!("[Permissions][Smoke] probe failed: {error}");
+            } else {
+                // One-shot delayed readback: media and
+                // geolocation settle asynchronously, so the
+                // flags are read ~8 s later (DEV only).
+                let readback_proxy = ctx.proxy.clone();
+                if let Err(error) = thread::Builder::new()
+                    .name("legcord-permissions-smoke-readback".to_owned())
+                    .spawn(move || {
+                        thread::sleep(Duration::from_millis(8000));
+                        queue_event(&readback_proxy, NativeEvent::PermissionsSmokeReadback);
+                    })
+                {
+                    eprintln!("[Permissions][Smoke] readback timer failed: {error}");
+                }
+            }
+        }
+    }
 }
 /// The single managed popup child (P0.4). At most one lives at a time:
 /// the approved Discord popout / `about:blank` / hidden ICS surface.
@@ -4885,6 +5299,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut main_navigation_counters = navigation_completed::NavigationCompletedCounters::default();
     let mut child_navigation_counters =
         navigation_completed::NavigationCompletedCounters::default();
+    // Phase 2C trusted-load gate for the main WebView: a finished Discord
+    // document enters the initialization pipeline only on a proven
+    // successful navigation. The gate degrades to the pre-gating behavior
+    // (every finish runs the pipeline) only when the observer
+    // registration above failed.
+    #[cfg(target_os = "windows")]
+    let main_nav_observer_active = main_navigation_completed.is_some();
+    #[cfg(not(target_os = "windows"))]
+    let main_nav_observer_active = false;
+    let mut main_trusted_gate =
+        navigation_gate::NavigationGate::new(MAIN_INSTANCE_ID, main_nav_observer_active);
     // Phase 2A bounded main-renderer recovery: per-main-WebView budget and
     // single-flight guard (see `recovery.rs`). Scoped to the main
     // instance; child records never reach it.
@@ -5106,12 +5531,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             Event::UserEvent(NativeEvent::NavigationCompleted(event)) => {
-                // Phase 2B observer (observability only): count per live
-                // instance and log the sanitized record. Deliberately no
-                // recovery state change, no reload, no `PageLoadFinished`
-                // gating, no document/mod side effects: failed navigations
-                // are observed here, never acted on (gating is a separate
-                // milestone).
+                // Phase 2B observer: count per live instance and log the
+                // sanitized record. Phase 2C additionally resolves a
+                // stashed main-document finish with the authoritative
+                // `IsSuccess` (HTTP/error metadata never decide). Still no
+                // recovery state change and no reload: a failure only
+                // skips the trusted pipeline, and the manual F5 path still
+                // recovers through a fresh gated navigation. Child records
+                // stay observe-only: the child builder registers no
+                // page-load handler, so no finish-driven pipeline exists
+                // for the child to gate (per-message origin checks are
+                // unaffected by load state).
                 match event.role {
                     process_failure::WebViewRole::Main => {
                         if navigation_completed::is_stale(&event, MAIN_INSTANCE_ID) {
@@ -5147,11 +5577,93 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 println!("{}", navigation_completed::format_log(&event));
+                if event.role == process_failure::WebViewRole::Main {
+                    match main_trusted_gate.on_outcome(event.is_success) {
+                        navigation_gate::OutcomeAction::RunPipeline { generation } => {
+                            // Gate invariant: a resolved pending finish
+                            // always belongs to the live generation —
+                            // any intervening `Started` would have
+                            // cleared it — so this pipeline run targets
+                            // the current document, never a superseded
+                            // one.
+                            debug_assert_eq!(generation, document_lifecycle.generation());
+                            run_trusted_load_pipeline(TrustedLoadContext {
+                                webview: &webview,
+                                profile_path: &profile_path,
+                                proxy: &proxy,
+                                generation,
+                                titlebar_plugin_start_script:
+                                    &titlebar_plugin_start_script,
+                                mod_smoke_script: &mod_smoke_script,
+                                settings_ui_probe_script: &settings_ui_probe_script,
+                                titlebar_settled_generation:
+                                    &mut titlebar_settled_generation,
+                                last_quickcss_injected: &mut last_quickcss_injected,
+                                last_quickcss_css: &mut last_quickcss_css,
+                                last_theme_style_ids: &mut last_theme_style_ids,
+                                last_themes: &mut last_themes,
+                                flags: TrustedLoadFlags {
+                                    bare_page: diagnostic_bare_page,
+                                    themes_smoke: diagnostic_themes_smoke,
+                                    quickcss_smoke: diagnostic_quickcss_smoke,
+                                    mod_smoke: diagnostic_mod_smoke,
+                                    interaction: diagnostic_interaction,
+                                    settings_smoke: diagnostic_settings_smoke,
+                                    settings_mutation_smoke:
+                                        diagnostic_settings_mutation_smoke,
+                                    settings_set_smoke: diagnostic_settings_set_smoke,
+                                    getlang_smoke: diagnostic_getlang_smoke,
+                                    app_version_smoke: diagnostic_app_version_smoke,
+                                    plugin_storage_smoke: diagnostic_plugin_storage_smoke,
+                                    theme_install_smoke: diagnostic_theme_install_smoke,
+                                    theme_write_smoke: diagnostic_theme_write_smoke,
+                                    theme_import_smoke: diagnostic_theme_import_smoke,
+                                    theme_set_enabled_smoke:
+                                        diagnostic_theme_set_enabled_smoke,
+                                    theme_list_smoke: diagnostic_theme_list_smoke,
+                                    backup_save_smoke: diagnostic_backup_save_smoke,
+                                    backup_restore_smoke:
+                                        diagnostic_backup_restore_smoke,
+                                    shelter_loader_probe: diagnostic_shelter_loader_probe,
+                                    settings_boot_smoke: diagnostic_settings_boot_smoke,
+                                    legcord_protocol_smoke:
+                                        diagnostic_legcord_protocol_smoke,
+                                    settings_ui_smoke: diagnostic_settings_ui_smoke,
+                                    permissions_smoke: diagnostic_permissions_smoke,
+                                    mutation_stage: mutation_smoke_stage,
+                                    mutation_before: mutation_smoke_before,
+                                    settings_set_stage: settings_set_smoke_stage,
+                                    settings_set_before: settings_set_smoke_before,
+                                },
+                            });
+                        }
+                        navigation_gate::OutcomeAction::SkipFailed { generation } => {
+                            println!(
+                                "{}",
+                                main_trusted_gate.format_skip_log("main", generation)
+                            );
+                        }
+                        navigation_gate::OutcomeAction::Absorbed => {}
+                    }
+                }
             }
             Event::UserEvent(NativeEvent::PageLoadStarted) => {
                 document_lifecycle.begin_document();
                 request_tracker.clear();
                 pending_mods.clear();
+                // Phase 2C: the new navigation attempt supersedes every
+                // pending finish and stored outcome — a previous
+                // navigation's verdict can never decide this document. A
+                // discarded stranded finish is fail-closed (its pipeline
+                // never ran) and logged for observability.
+                if let Some(stranded) =
+                    main_trusted_gate.on_started(document_lifecycle.generation())
+                {
+                    println!(
+                        "{}",
+                        main_trusted_gate.format_stranded_log("main", stranded)
+                    );
+                }
                 // Phase 2A: `Started` is WebView2 `ContentLoading` — a live
                 // renderer began loading new content — so an approved reload
                 // has taken effect and the single-flight guard releases. The
@@ -5199,367 +5711,83 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .parse::<Uri>()
                     .is_ok_and(|uri| is_trusted_bridge_origin(&uri))
                 {
-                    // Titlebar settle pass: the marker-time start can land
-                    // before Discord finishes mounting (warm reloads), and a
-                    // mount can discard body-appended nodes afterwards. This
-                    // one-shot-per-generation re-run of the same idempotent
-                    // script heals that wipe; the marker path still covers a
-                    // Shelter marker that arrives after finish, in either
-                    // order, with at most two evaluations per document and
-                    // never a retry loop.
-                    if titlebar_settled_generation != Some(document_lifecycle.generation()) {
-                        titlebar_settled_generation = Some(document_lifecycle.generation());
-                        let generation = document_lifecycle.generation();
-                        if let Err(error) = webview.evaluate_script_with_callback(
-                            &titlebar_plugin_start_script,
-                            move |result| {
-                                println!("[Titlebar] settle generation={generation} result={result}");
-                            },
-                        ) {
-                            eprintln!("[Titlebar] settle evaluation failed: {error}");
-                        }
-                    }
-                    if let Err(error) = webview.evaluate_script_with_callback(
-                        RENDERER_HEALTH_SCRIPT,
-                        |result| println!("[Renderer][Health] {result}"),
-                    ) {
-                        eprintln!("[Renderer][Health] probe failed: {error}");
-                    }
-                    if !diagnostic_bare_page {
-                        if let Err(error) = webview.evaluate_script(CSS_INJECTION_SCRIPT) {
-                            eprintln!("[Injection] CSS script failed: {error}");
-                        }
-                        if let Err(error) = webview.evaluate_script(BRIDGE_PROBE_SCRIPT) {
-                            eprintln!("[Injection] Bridge probe failed: {error}");
-                        }
-                        // Host-pushed Quick CSS injection (Phase D): the renderer
-                        // never requests Quick CSS, so there is no bridge
-                        // round trip here. The host reads its own fixed
-                        // quickCss.css when the authoritative settings flag
-                        // is enabled and pushes it through the shared
-                        // managed-CSS lifecycle BEFORE themes, preserving
-                        // Electron's Vencord -> Quick CSS -> themes cascade.
-                        let quickcss_report = load_quick_css(&profile_path);
-                        let mut quickcss_injected = false;
-                        match &quickcss_report.css {
-                            Some(css) => {
-                                match managed_css_script(QUICK_CSS_STYLE_ID, css) {
-                                    Ok(script) => {
-                                        if let Err(error) = webview.evaluate_script(&script) {
-                                            eprintln!("[QuickCss][css_injection] {error}");
-                                        } else {
-                                            quickcss_injected = true;
-                                        }
-                                    }
-                                    Err(error) => {
-                                        eprintln!("[QuickCss][css_injection] {error}");
-                                    }
-                                }
-                            }
-                            None => {
-                                // Disabled (or unreadable) after a previous
-                                // injection: remove the managed style so no
-                                // stale Quick CSS survives the reset. On a
-                                // fresh document this is a cheap no-op.
-                                if last_quickcss_injected {
-                                    match managed_css_remove_script(QUICK_CSS_STYLE_ID) {
-                                        Ok(script) => {
-                                            if let Err(error) = webview.evaluate_script(&script)
-                                            {
-                                                eprintln!("[QuickCss][css_removal] {error}");
-                                            }
-                                        }
-                                        Err(error) => {
-                                            eprintln!("[QuickCss][css_removal] {error}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        last_quickcss_injected = quickcss_injected;
-                        // Content snapshot for live diffing: `Some` exactly
-                        // when the managed style is present in this document.
-                        last_quickcss_css = if quickcss_injected {
-                            quickcss_report.css.clone()
-                        } else {
-                            None
-                        };
-                        println!(
-                            "[QuickCss][Metrics] enabled={} state={} injected={} css_bytes={} read_ms={:.3}",
-                            quickcss_report.enabled,
-                            quickcss_report.state,
-                            quickcss_injected,
-                            quickcss_report.css_bytes,
-                            quickcss_report.read_ms,
-                        );
-                        // Host-pushed theme injection (Phase D): the renderer
-                        // never requests theme CSS, so there is no bridge
-                        // round trip here. The host loads enabled themes from
-                        // its own root and pushes each through the shared
-                        // managed-CSS lifecycle in sorted-id order.
-                        let theme_report = load_enabled_themes(&profile_path);
-                        // Reset semantics: drop managed styles for themes that
-                        // were injected before but are no longer enabled, so
-                        // no stale CSS survives a document reset. On a fresh
-                        // document this is a cheap no-op (the nodes do not
-                        // exist yet); the removal script is idempotent.
-                        let current_theme_ids: Vec<String> = theme_report
-                            .injected
-                            .iter()
-                            .map(|theme| theme.style_id.clone())
-                            .collect();
-                        for stale_id in last_theme_style_ids
-                            .iter()
-                            .filter(|id| !current_theme_ids.contains(id))
-                        {
-                            match managed_css_remove_script(stale_id) {
-                                Ok(script) => {
-                                    if let Err(error) = webview.evaluate_script(&script) {
-                                        eprintln!(
-                                            "[Themes][css_removal] {stale_id}: {error}"
-                                        );
-                                    }
-                                }
-                                Err(error) => {
-                                    eprintln!("[Themes][css_removal] {stale_id}: {error}");
-                                }
-                            }
-                        }
-                        last_theme_style_ids = current_theme_ids;
-                        let mut theme_injected = 0_usize;
-                        let mut injected_now: Vec<LoadedTheme> = Vec::new();
-                        for theme in &theme_report.injected {
-                            match managed_css_script(&theme.style_id, &theme.css) {
-                                Ok(script) => {
-                                    if let Err(error) = webview.evaluate_script(&script) {
-                                        eprintln!(
-                                            "[Themes][css_injection] {}: {error}",
-                                            theme.id
-                                        );
-                                    } else {
-                                        theme_injected += 1;
-                                        injected_now.push(theme.clone());
-                                    }
-                                }
-                                Err(error) => {
-                                    eprintln!("[Themes][css_injection] {}: {error}", theme.id);
-                                }
-                            }
-                        }
-                        // Content snapshot for live diffing: only successfully
-                        // injected themes, so a failed push is retried rather
-                        // than mistaken for present.
-                        last_themes = injected_now;
-                        if theme_report.discovered > 0 || diagnostic_themes_smoke {
-                            println!(
-                                "[Themes][Metrics] discovered={} enabled={} injected={} skipped={} css_bytes={} read_ms={:.3}",
-                                theme_report.discovered,
-                                theme_report.enabled,
-                                theme_injected,
-                                theme_report.skipped.len(),
-                                theme_report.css_bytes,
-                                theme_report.read_ms,
-                            );
-                            for skipped in &theme_report.skipped {
-                                println!(
-                                    "[Themes][Skip] id={} reason={}",
-                                    skipped.id, skipped.reason
-                                );
-                            }
-                        }
-                        if diagnostic_themes_smoke || diagnostic_quickcss_smoke {
-                            // Copied for the 'static observation callback.
-                            let themes_smoke = diagnostic_themes_smoke;
-                            let quickcss_smoke = diagnostic_quickcss_smoke;
-                            if let Err(error) = webview.evaluate_script_with_callback(
-                                THEMES_SMOKE_SCRIPT,
-                                move |result| {
-                                    if themes_smoke {
-                                        println!("[Themes][Smoke] managed_styles={result}");
-                                    }
-                                    if quickcss_smoke {
-                                        println!("[QuickCss][Smoke] managed_styles={result}");
-                                    }
+                    // Phase 2C: a finished Discord document enters the
+                    // trusted pipeline only on a proven successful
+                    // navigation. The gate pairs this finish with the raw
+                    // observer outcome by document generation (see
+                    // `navigation_gate.rs`): both arrival orders resolve
+                    // correctly, and a failed or still-unknown navigation
+                    // never runs the pipeline. No reload, no retry, no
+                    // timers — a failure only skips, and the manual F5 path
+                    // still recovers through a fresh gated navigation.
+                    let generation = document_lifecycle.generation();
+                    match main_trusted_gate.on_finished(generation) {
+                        navigation_gate::FinishAction::RunPipeline => {
+                            run_trusted_load_pipeline(TrustedLoadContext {
+                                webview: &webview,
+                                profile_path: &profile_path,
+                                proxy: &proxy,
+                                generation,
+                                titlebar_plugin_start_script:
+                                    &titlebar_plugin_start_script,
+                                mod_smoke_script: &mod_smoke_script,
+                                settings_ui_probe_script: &settings_ui_probe_script,
+                                titlebar_settled_generation:
+                                    &mut titlebar_settled_generation,
+                                last_quickcss_injected: &mut last_quickcss_injected,
+                                last_quickcss_css: &mut last_quickcss_css,
+                                last_theme_style_ids: &mut last_theme_style_ids,
+                                last_themes: &mut last_themes,
+                                flags: TrustedLoadFlags {
+                                    bare_page: diagnostic_bare_page,
+                                    themes_smoke: diagnostic_themes_smoke,
+                                    quickcss_smoke: diagnostic_quickcss_smoke,
+                                    mod_smoke: diagnostic_mod_smoke,
+                                    interaction: diagnostic_interaction,
+                                    settings_smoke: diagnostic_settings_smoke,
+                                    settings_mutation_smoke:
+                                        diagnostic_settings_mutation_smoke,
+                                    settings_set_smoke: diagnostic_settings_set_smoke,
+                                    getlang_smoke: diagnostic_getlang_smoke,
+                                    app_version_smoke: diagnostic_app_version_smoke,
+                                    plugin_storage_smoke: diagnostic_plugin_storage_smoke,
+                                    theme_install_smoke: diagnostic_theme_install_smoke,
+                                    theme_write_smoke: diagnostic_theme_write_smoke,
+                                    theme_import_smoke: diagnostic_theme_import_smoke,
+                                    theme_set_enabled_smoke:
+                                        diagnostic_theme_set_enabled_smoke,
+                                    theme_list_smoke: diagnostic_theme_list_smoke,
+                                    backup_save_smoke: diagnostic_backup_save_smoke,
+                                    backup_restore_smoke:
+                                        diagnostic_backup_restore_smoke,
+                                    shelter_loader_probe: diagnostic_shelter_loader_probe,
+                                    settings_boot_smoke: diagnostic_settings_boot_smoke,
+                                    legcord_protocol_smoke:
+                                        diagnostic_legcord_protocol_smoke,
+                                    settings_ui_smoke: diagnostic_settings_ui_smoke,
+                                    permissions_smoke: diagnostic_permissions_smoke,
+                                    mutation_stage: mutation_smoke_stage,
+                                    mutation_before: mutation_smoke_before,
+                                    settings_set_stage: settings_set_smoke_stage,
+                                    settings_set_before: settings_set_smoke_before,
                                 },
-                            ) {
-                                eprintln!("[Themes][Smoke] observation failed: {error}");
-                            }
+                            });
                         }
-                        // DEV-only read-only observation of every active mod's
-                        // real page-world global, managed style, and adapter
-                        // state. Observation only: no request, no injection.
-                        if diagnostic_mod_smoke {
-                            if let Err(error) = webview.evaluate_script_with_callback(
-                                &mod_smoke_script,
-                                |result| println!("[Mods][Smoke] {result}"),
-                            ) {
-                                eprintln!("[Mods][Smoke] observation failed: {error}");
-                            }
+                        navigation_gate::FinishAction::SkipFailed => {
+                            // The outcome arrived first and the navigation
+                            // failed: the pipeline never ran for it.
+                            println!(
+                                "{}",
+                                main_trusted_gate.format_skip_log("main", generation)
+                            );
                         }
-                        if diagnostic_interaction {
-                            if let Err(error) = webview.evaluate_script(INTERACTION_PROBE_SCRIPT) {
-                                eprintln!("[Renderer][Interaction] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_settings_smoke {
-                            if let Err(error) = webview.evaluate_script(SETTINGS_SMOKE_SCRIPT) {
-                                eprintln!("[Settings][Smoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_settings_mutation_smoke {
-                            if mutation_smoke_stage == 0 {
-                                if let Err(error) =
-                                    webview.evaluate_script(SETTINGS_MUTATION_SMOKE_SCRIPT)
-                                {
-                                    eprintln!("[Settings][MutationSmoke] probe failed: {error}");
-                                }
-                            } else if mutation_smoke_stage == 1 {
-                                let restore = SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE.replace(
-                                    "__LEGCORD_MUTATION_RESTORE_VALUE__",
-                                    if mutation_smoke_before { "true" } else { "false" },
-                                );
-                                if let Err(error) = webview.evaluate_script(&restore) {
-                                    eprintln!("[Settings][MutationSmoke] restore failed: {error}");
-                                }
-                            }
-                        }
-                        if diagnostic_settings_set_smoke {
-                            if settings_set_smoke_stage == 0 {
-                                if let Err(error) =
-                                    webview.evaluate_script(SETTINGS_SET_SMOKE_SCRIPT)
-                                {
-                                    eprintln!("[Settings][SetSmoke] probe failed: {error}");
-                                }
-                            } else if settings_set_smoke_stage == 1 {
-                                let restore = SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE.replace(
-                                    "__LEGCORD_SETTINGS_SET_RESTORE_VALUE__",
-                                    if settings_set_smoke_before {
-                                        "true"
-                                    } else {
-                                        "false"
-                                    },
-                                );
-                                if let Err(error) = webview.evaluate_script(&restore) {
-                                    eprintln!("[Settings][SetSmoke] restore failed: {error}");
-                                }
-                            }
-                        }
-                        if diagnostic_getlang_smoke {
-                            if let Err(error) = webview.evaluate_script(GETLANG_SMOKE_SCRIPT) {
-                                eprintln!("[Localization][Smoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_app_version_smoke {
-                            if let Err(error) = webview.evaluate_script(APP_VERSION_SMOKE_SCRIPT) {
-                                eprintln!("[App][Smoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_plugin_storage_smoke {
-                            if let Err(error) = webview.evaluate_script(PLUGIN_STORAGE_SMOKE_SCRIPT) {
-                                eprintln!("[PluginStorage][Smoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_theme_install_smoke {
-                            if let Err(error) = webview.evaluate_script(THEME_INSTALL_SMOKE_SCRIPT) {
-                                eprintln!("[Themes][InstallSmoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_theme_write_smoke {
-                            if let Err(error) = webview.evaluate_script(THEME_WRITE_SMOKE_SCRIPT) {
-                                eprintln!("[Themes][WriteSmoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_theme_import_smoke {
-                            if let Err(error) = webview.evaluate_script(THEME_IMPORT_SMOKE_SCRIPT) {
-                                eprintln!("[Themes][ImportSmoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_theme_set_enabled_smoke {
-                            if let Err(error) =
-                                webview.evaluate_script(THEME_SET_ENABLED_SMOKE_SCRIPT)
-                            {
-                                eprintln!("[Themes][SetEnabledSmoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_theme_list_smoke {
-                            if let Err(error) = webview.evaluate_script(THEME_LIST_SMOKE_SCRIPT) {
-                                eprintln!("[Themes][ListSmoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_backup_save_smoke {
-                            if let Err(error) = webview.evaluate_script(BACKUP_SAVE_SMOKE_SCRIPT) {
-                                eprintln!("[Backup][SaveSmoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_backup_restore_smoke {
-                            if let Err(error) = webview.evaluate_script(BACKUP_RESTORE_SMOKE_SCRIPT)
-                            {
-                                eprintln!("[Backup][RestoreSmoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_shelter_loader_probe {
-                            if let Err(error) = webview.evaluate_script(SHELTER_LOADER_PROBE_SCRIPT) {
-                                eprintln!("[ShelterLoader][Probe] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_settings_boot_smoke {
-                            if let Err(error) = webview.evaluate_script(SETTINGS_BOOT_SMOKE_SCRIPT) {
-                                eprintln!("[SettingsBoot][Smoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_legcord_protocol_smoke {
-                            if let Err(error) = webview.evaluate_script(LEGCORD_PROTOCOL_SMOKE_SCRIPT)
-                            {
-                                eprintln!("[LegcordProtocol][Smoke] probe failed: {error}");
-                            } else {
-                                // One-shot delayed readback: subresource loads
-                                // settle asynchronously, so the flags are read
-                                // ~5 s later on the event loop (DEV only).
-                                let readback_proxy = proxy.clone();
-                                if let Err(error) = thread::Builder::new()
-                                    .name("legcord-protocol-smoke-readback".to_owned())
-                                    .spawn(move || {
-                                        thread::sleep(Duration::from_millis(5000));
-                                        queue_event(
-                                            &readback_proxy,
-                                            NativeEvent::LegcordProtocolSmokeReadback,
-                                        );
-                                    })
-                                {
-                                    eprintln!(
-                                        "[LegcordProtocol][Smoke] readback timer failed: {error}"
-                                    );
-                                }
-                            }
-                        }
-                        if diagnostic_settings_ui_smoke {
-                            if let Err(error) = webview.evaluate_script(&settings_ui_probe_script) {
-                                eprintln!("[SettingsUi][Smoke] probe failed: {error}");
-                            }
-                        }
-                        if diagnostic_permissions_smoke {
-                            if let Err(error) = webview.evaluate_script(PERMISSIONS_SMOKE_SCRIPT) {
-                                eprintln!("[Permissions][Smoke] probe failed: {error}");
-                            } else {
-                                // One-shot delayed readback: media and
-                                // geolocation settle asynchronously, so the
-                                // flags are read ~8 s later (DEV only).
-                                let readback_proxy = proxy.clone();
-                                if let Err(error) = thread::Builder::new()
-                                    .name("legcord-permissions-smoke-readback".to_owned())
-                                    .spawn(move || {
-                                        thread::sleep(Duration::from_millis(8000));
-                                        queue_event(
-                                            &readback_proxy,
-                                            NativeEvent::PermissionsSmokeReadback,
-                                        );
-                                    })
-                                {
-                                    eprintln!(
-                                        "[Permissions][Smoke] readback timer failed: {error}"
-                                    );
-                                }
-                            }
+                        navigation_gate::FinishAction::AwaitingOutcome => {
+                            // The outcome has not arrived yet: the finish is
+                            // stashed and the observer arm will resolve it.
+                            println!(
+                                "{}",
+                                main_trusted_gate.format_awaiting_log("main", generation)
+                            );
                         }
                     }
                 }
@@ -9624,5 +9852,46 @@ mod tests {
         // policy decision still feeds on the process-failure record.
         let decide_needle = ["main_recovery", "decide"].join(".");
         assert_eq!(source.matches(&decide_needle).count(), 1);
+    }
+
+    #[test]
+    fn trusted_load_gating_wiring() {
+        // Phase 2C: the trusted Discord pipeline runs only for a proven
+        // successful navigation. Wry's page-load subscription and the
+        // recovery path are untouched; the gate pairs finishes with raw
+        // outcomes by generation; failures only skip (no reload/retry).
+        let source = include_str!("main.rs");
+        // Wry's callbacks stay registered and functional.
+        assert!(source.contains("with_on_page_load_handler"));
+        assert!(source.contains("PageLoadEvent::Started"));
+        assert!(source.contains("PageLoadEvent::Finished"));
+        // Every navigation attempt still resets the document lifecycle
+        // and still releases the recovery single-flight guard.
+        assert!(source.contains("document_lifecycle.begin_document()"));
+        assert!(source.contains("main_recovery.on_page_load_started()"));
+        // The gate exists per main WebView and degrades only when the
+        // observer registration failed.
+        assert!(source.contains("navigation_gate::NavigationGate::new"));
+        assert!(source.contains("main_nav_observer_active"));
+        // Finishes consult the gate; outcomes resolve through it.
+        assert!(source.contains("main_trusted_gate.on_finished(generation)"));
+        // Only the authoritative success flag reaches the gate — HTTP
+        // and error metadata never decide.
+        assert!(source.contains("main_trusted_gate.on_outcome(event.is_success)"));
+        // New navigations supersede pending finishes and stored outcomes.
+        assert!(source.contains("main_trusted_gate.on_started("));
+        // The extracted pipeline runs from exactly the two resolution
+        // sites (finish-first and outcome-first orders). The needle is
+        // joined so this assertion's own text cannot self-count.
+        let run_needle = ["run_trusted_load_pipeline(TrustedLoad", "Context"].join("");
+        assert_eq!(source.matches(&run_needle).count(), 2);
+        // Failure diagnostics are fixed-vocabulary and sanitized.
+        assert!(source.contains("format_skip_log"));
+        assert!(source.contains("format_awaiting_log"));
+        assert!(source.contains("format_stranded_log"));
+        // Still no automatic reload anywhere near the gate: the single
+        // host-side reload belongs to the recovery decision only.
+        let reload_needle = ["match webview", "reload()"].join(".");
+        assert_eq!(source.matches(&reload_needle).count(), 1);
     }
 }
