@@ -10,6 +10,7 @@ mod mod_substrate;
 mod new_window;
 mod permissions;
 mod plugin_storage;
+mod process_failure;
 mod protocol;
 mod quick_css;
 mod settings;
@@ -53,6 +54,7 @@ use legcord_protocol::scheme::create_environment as create_legcord_webview_envir
 use legcord_protocol::{build_namespace_roots, extend_csp_for_legcord, register_legcord_protocol};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use plugin_storage::{read_plugin_file, write_plugin_file};
+use process_failure::ProcessFailedEvent;
 use protocol::{
     parse_bridge_message, validate_mod_bundle_id, window_state_event_json, AppVersionResponse,
     BackupRestoredResponse, BackupSavedResponse, BridgeCommand, BridgeError, BridgeEvent,
@@ -2674,6 +2676,12 @@ enum NativeEvent {
         url: String,
         kind: new_window::PopupKind,
     },
+    /// Sanitized WebView2 process-failure record (Phase 1 observer). The
+    /// COM callback owns only primitives; this payload carries the role,
+    /// per-instance id, kind, reason, and exit code — never URLs, page
+    /// data, or interface objects. Observability only: no recovery rides
+    /// on this event yet.
+    ProcessFailed(ProcessFailedEvent),
     /// DEV-only delayed readback for the legcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
     /// subresource loads have settled before the host reads the flags.
@@ -2874,6 +2882,13 @@ struct PopupChild {
     window: Arc<tao::window::Window>,
     #[allow(dead_code)]
     webview: WebView,
+    /// Slot generation assigned at creation; scopes the child observer's
+    /// per-instance id and counters. Never reused across children.
+    instance_id: u64,
+    /// Phase 1 process-failure subscription: the CoreWebView2 clone plus
+    /// its registration token, removed before the slot is dropped.
+    #[cfg(target_os = "windows")]
+    process_failed: Option<(ICoreWebView2, i64)>,
 }
 
 /// Builds the single managed child for an approved popup (P0.4).
@@ -2903,6 +2918,7 @@ fn create_popup_child(
     roots: &crate::legcord_protocol::NamespaceRoots,
     downloads_dir: &std::path::Path,
     always_on_top: bool,
+    instance_id: u64,
 ) -> Result<PopupChild, String> {
     let (visible, initial_url) = match kind {
         new_window::PopupKind::AboutBlank => (true, "about:blank"),
@@ -2921,6 +2937,9 @@ fn create_popup_child(
     let child_window = Arc::new(child_window);
     let allow_blob = kind == new_window::PopupKind::Ics;
     let child_ipc_proxy = ipc_proxy.clone();
+    // The builder IPC closure below takes `child_ipc_proxy`; the observer
+    // keeps its own clone (same event loop).
+    let child_observer_proxy = child_ipc_proxy.clone();
     let mut builder = WebViewBuilder::new_with_web_context(web_context);
     #[cfg(target_os = "windows")]
     {
@@ -2976,12 +2995,41 @@ fn create_popup_child(
             eprintln!("[Popup][Permissions] registration failed: {error}");
         }
     }
+    // Phase 1 process-failure observer (observability only). A
+    // registration failure is logged loudly but must not block the
+    // child: the pre-observer behavior (no visibility) is the fallback.
+    #[cfg(target_os = "windows")]
+    let process_failed = {
+        let core_webview2: ICoreWebView2 = child_webview.webview();
+        match process_failure::register(
+            &core_webview2,
+            process_failure::WebViewRole::Child,
+            instance_id,
+            &child_observer_proxy,
+        ) {
+            Ok(token) => {
+                println!(
+                    "[WebView][ProcessFailed] observer registered role=child instance={instance_id}"
+                );
+                Some((core_webview2, token))
+            }
+            Err(error) => {
+                eprintln!(
+                    "[WebView][ProcessFailed] observer registration failed role=child: {error}"
+                );
+                None
+            }
+        }
+    };
     if visible {
         child_window.set_visible(true);
     }
     Ok(PopupChild {
         window: child_window,
         webview: child_webview,
+        instance_id,
+        #[cfg(target_os = "windows")]
+        process_failed,
     })
 }
 
@@ -4717,6 +4765,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     // about:blank / hidden ICS). Repeated requests focus the live child;
     // child close clears the slot; parent shutdown drops it via RAII.
     let mut popup_child: Option<PopupChild> = None;
+    // Slot generation for the managed child: each created child takes the
+    // next id, so observer records and counters never alias across
+    // children sharing the slot over a process lifetime.
+    let mut popup_generation: u64 = 0;
+    // Phase 1 process-failure observer for the main WebView
+    // (observability only): the CoreWebView2 clone plus its registration
+    // token, removed on application shutdown. Registration failure only
+    // loses visibility; boot continues exactly as before.
+    #[cfg(target_os = "windows")]
+    let mut main_process_failed: Option<(ICoreWebView2, i64)> = {
+        let core_webview2: ICoreWebView2 = webview.webview();
+        // `ipc_proxy` is moved into the builder IPC closure below; the
+        // sibling popup proxy (same event loop) forwards observer records.
+        let observer_proxy = popup_ipc_proxy.clone();
+        match process_failure::register(
+            &core_webview2,
+            process_failure::WebViewRole::Main,
+            0,
+            &observer_proxy,
+        ) {
+            Ok(token) => {
+                println!("[WebView][ProcessFailed] observer registered role=main instance=0");
+                Some((core_webview2, token))
+            }
+            Err(error) => {
+                eprintln!(
+                    "[WebView][ProcessFailed] observer registration failed role=main: {error}"
+                );
+                None
+            }
+        }
+    };
+    // Per-instance failure counters: main lives for the process, child
+    // resets with every new child.
+    let mut main_process_failed_counters = process_failure::ProcessFailedCounters::default();
+    let mut child_process_failed_counters = process_failure::ProcessFailedCounters::default();
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -4733,8 +4817,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .as_ref()
                     .is_some_and(|child| child.window.id() == window_id)
                 {
-                    println!("[Popup] child closed; clearing single slot");
-                    popup_child = None;
+                    // Child teardown: remove the Phase 1 observer first so
+                    // no callback can target the slot being dropped, then
+                    // drop the slot (destroying the child WebView).
+                    if let Some(child) = popup_child.take() {
+                        #[cfg(target_os = "windows")]
+                        if let Some((core_webview2, token)) = child.process_failed {
+                            process_failure::unregister(&core_webview2, token);
+                        }
+                        println!(
+                            "[Popup] child closed instance={}; clearing single slot",
+                            child.instance_id
+                        );
+                    }
                     return;
                 }
                 println!("[Native] Close requested; shutting down WebView");
@@ -4765,6 +4860,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                         snapshot.stale_discarded,
                         snapshot.order_repairs,
                     );
+                }
+                println!(
+                    "[WebView][ProcessFailed] final main_total={} child_total={}",
+                    main_process_failed_counters.total, child_process_failed_counters.total,
+                );
+                // Application shutdown: remove observer subscriptions before
+                // the loop exits so no callback can target a dead loop.
+                // Remaining windows/WebViews drop via RAII afterwards.
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some((core_webview2, token)) = main_process_failed.take() {
+                        process_failure::unregister(&core_webview2, token);
+                    }
+                    if let Some(child) = popup_child.take() {
+                        if let Some((core_webview2, token)) = child.process_failed {
+                            process_failure::unregister(&core_webview2, token);
+                        }
+                    }
                 }
                 *control_flow = ControlFlow::Exit;
             }
@@ -4803,6 +4916,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap_or(false);
                 #[cfg(target_os = "windows")]
                 let environment = popup_environment.clone();
+                popup_generation += 1;
+                let child_instance = popup_generation;
                 match create_popup_child(
                     target,
                     kind,
@@ -4816,13 +4931,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &popup_roots,
                     &downloads_dir,
                     always_on_top,
+                    child_instance,
                 ) {
                     Ok(child) => {
-                        println!("[Popup] child opened {kind:?}: {url}");
+                        println!(
+                            "[Popup] child opened {kind:?} instance={}: {url}",
+                            child.instance_id
+                        );
+                        // Fresh slot generation, fresh counters: records
+                        // from a previous child must never alias this one.
+                        child_process_failed_counters =
+                            process_failure::ProcessFailedCounters::default();
                         popup_child = Some(child);
                     }
                     Err(error) => eprintln!("[Popup] child failed: {error} url={url}"),
                 }
+            }
+            Event::UserEvent(NativeEvent::ProcessFailed(event)) => {
+                // Phase 1 observer: count per instance and log the
+                // sanitized record. Deliberately no recovery here — no
+                // reload, no navigation, no window changes.
+                match event.role {
+                    process_failure::WebViewRole::Main => {
+                        main_process_failed_counters.record(event.kind)
+                    }
+                    process_failure::WebViewRole::Child => {
+                        child_process_failed_counters.record(event.kind)
+                    }
+                }
+                println!("{}", process_failure::format_log(&event));
             }
             Event::UserEvent(NativeEvent::PageLoadStarted) => {
                 document_lifecycle.begin_document();
@@ -5546,6 +5683,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 response_count += 1;
                             }
                             BridgeCommand::WindowQuit(_) => {
+                                // Renderer-initiated quit takes the same
+                                // shutdown path as CloseRequested: remove
+                                // observer subscriptions before exiting.
+                                println!(
+                                    "[WebView][ProcessFailed] final main_total={} child_total={}",
+                                    main_process_failed_counters.total,
+                                    child_process_failed_counters.total,
+                                );
+                                #[cfg(target_os = "windows")]
+                                {
+                                    if let Some((core_webview2, token)) =
+                                        main_process_failed.take()
+                                    {
+                                        process_failure::unregister(&core_webview2, token);
+                                    }
+                                    if let Some(child) = popup_child.take() {
+                                        if let Some((core_webview2, token)) = child.process_failed
+                                        {
+                                            process_failure::unregister(&core_webview2, token);
+                                        }
+                                    }
+                                }
                                 *control_flow = ControlFlow::Exit;
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_quit", &received_at);
                                 response_count += 1;
