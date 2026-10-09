@@ -6,6 +6,7 @@ mod downloads;
 mod folders;
 mod legcord_protocol;
 mod localization;
+mod main_webview;
 mod mod_substrate;
 mod navigation_completed;
 mod navigation_gate;
@@ -88,20 +89,10 @@ use themes::{
     LoadedTheme,
 };
 #[cfg(target_os = "windows")]
-use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
-    ICoreWebView2_2, COREWEBVIEW2_WEB_RESOURCE_CONTEXT,
-};
-#[cfg(target_os = "windows")]
-use webview2_com::WebResourceRequestedEventHandler;
-#[cfg(target_os = "windows")]
-use windows::{
-    core::{Interface, BOOL, HSTRING, PWSTR},
-    Win32::System::Com::IStream,
-};
+use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Environment};
 use wry::{
     http::{Request, Uri},
-    NewWindowResponse, PageLoadEvent, WebContext, WebView, WebViewBuilder,
+    NewWindowResponse, WebContext, WebView, WebViewBuilder,
 };
 #[cfg(target_os = "windows")]
 use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
@@ -4698,429 +4689,62 @@ fn main() -> Result<(), Box<dyn Error>> {
         "[Native] Document-start script: {} bytes",
         initialization_script.len()
     );
-    let mut webview_builder = WebViewBuilder::new_with_web_context(&mut web_context);
-    // Adopt the pre-registered environment (P0.2). wry uses a
-    // caller-provided environment verbatim instead of creating its own.
-    #[cfg(target_os = "windows")]
-    {
-        webview_builder = webview_builder.with_environment(webview_env);
-    }
-    // P0.5: host-owned downloads directory, no dialog, never overwrite.
-    webview_builder = apply_download_handlers(webview_builder, downloads_dir.clone());
-    // Two-phase boot: the initial document is the empty `about:blank`
-    // (committed synchronously inside `build()`, before any
-    // WebResourceRequested filter can exist), then the host navigates to
-    // Discord AFTER both interception filters are registered below. Without
-    // this, the first Discord document races filter registration and would
-    // keep Discord's original CSP (no `legcord:` allowance) until a reload.
-    let webview_builder = webview_builder
-        .with_url("about:blank")
-        .with_initialization_script_for_main_only(&initialization_script, true)
-        .with_navigation_handler(|url| {
-            let allowed = is_allowed_navigation(&url);
-            println!(
-                "[Navigation] {} {url}",
-                if allowed { "allow" } else { "block" }
-            );
-            allowed
-        })
-        .with_new_window_req_handler(move |url, _features| {
-            // Renderer window features (size/position) are deliberately
-            // ignored: every child option is host-owned (see
-            // `create_popup_child`). Decision order mirrors Electron
-            // (`src/discord/window.ts:214-264`) with the documented
-            // hardening: parsed classification, no sticky bypass.
-            match new_window::decide(&url) {
-                decision @ (new_window::Decision::AllowAboutBlank
-                | new_window::Decision::AllowIcs
-                | new_window::Decision::AllowDiscordPopout) => {
-                    let kind = new_window::popup_kind_for(decision)
-                        .expect("allow decision must map to a popup kind");
-                    println!("[Popup] approved {kind:?}: {url}");
-                    queue_event(
-                        &popup_proxy,
-                        NativeEvent::PopupRequested {
-                            url: url.clone(),
-                            kind,
-                        },
-                    );
-                    NewWindowResponse::Deny
-                }
-                new_window::Decision::ExternalOpen => {
-                    match new_window::open_external_url(&url) {
-                        Ok(()) => println!("[Popup] external open: {url}"),
-                        Err(error) => eprintln!("[Popup] external open failed: {error} url={url}"),
-                    }
-                    NewWindowResponse::Deny
-                }
-                // Unknown custom schemes: deny with a log instead of
-                // Electron's modal + sticky bypass (documented P0.4
-                // hardening; no new settings key). Dangerous and malformed
-                // values deny the same way, never reaching the shell.
-                new_window::Decision::ConfirmExternal | new_window::Decision::Deny => {
-                    println!("[Popup] denied: {url}");
-                    NewWindowResponse::Deny
-                }
-            }
-        })
-        .with_on_page_load_handler(move |event, url| {
-            let event_name = match &event {
-                PageLoadEvent::Started => "started",
-                PageLoadEvent::Finished => "finished",
-            };
-            println!("[Navigation] {event_name}: {url}");
-            match event {
-                PageLoadEvent::Started => {
-                    queue_event(&load_proxy, NativeEvent::PageLoadStarted);
-                }
-                PageLoadEvent::Finished => {
-                    queue_event(&load_proxy, NativeEvent::PageLoadFinished(url));
-                }
-            }
-        })
-        .with_ipc_handler(move |request: Request<String>| {
-            if !is_trusted_bridge_origin(request.uri()) {
-                eprintln!(
-                    "[Bridge] rejected message from untrusted origin: {}",
-                    request.uri()
-                );
-                return;
-            }
-
-            match parse_bridge_message(request.body()) {
-                Ok(BridgeMessage::Request(request)) => queue_event(
-                    &ipc_proxy,
-                    NativeEvent::BridgeRequest(request, Instant::now()),
-                ),
-                Ok(BridgeMessage::Event(event)) => {
-                    queue_event(&ipc_proxy, NativeEvent::BridgeEvent(event));
-                }
-                Err(error) => eprintln!("[Bridge] rejected invalid message: {error}"),
-            }
-        });
-
-    let webview = webview_builder.build(&window_for_webview)?;
+    // Phase 2F: exactly one main WebView construction through the
+    // host-owned helper. Per-WebView wry wiring lives in
+    // `main_webview::main_webview_builder`; process-lifetime setup
+    // (event loop, WebContext, environment, watchers, workers, caches)
+    // is untouched. The instance id is threaded through so a future
+    // replacement can take a fresh id; the boot value stays 0.
+    let mut main_lifecycle = main_webview::MainWebviewLifecycle::new();
+    let main_instance_id = main_lifecycle
+        .record_initial()
+        .expect("initial main WebView builds exactly once");
+    debug_assert_eq!(main_instance_id, MAIN_INSTANCE_ID);
+    debug_assert_eq!(main_instance_id, main_webview::INITIAL_MAIN_INSTANCE_ID);
+    // The lifecycle owns the single-boot invariant: exactly one
+    // construction, the boot id live, and a reserved fresh id a future
+    // replacement (later milestone) will take. `is_stale` is exercised in
+    // tests; the event loop keeps using the free-function id check on the
+    // copied `main_instance_id` below so no shared state crosses threads.
+    debug_assert_eq!(main_lifecycle.construction_count(), 1);
+    debug_assert_eq!(main_lifecycle.active_instance(), Some(main_instance_id));
+    debug_assert_ne!(
+        main_lifecycle.next_instance_id(),
+        main_webview::INITIAL_MAIN_INSTANCE_ID
+    );
+    debug_assert!(!main_lifecycle.is_stale(main_instance_id));
+    let webview = {
+        let builder = main_webview::main_webview_builder(
+            &mut web_context,
+            #[cfg(target_os = "windows")]
+            webview_env,
+            &initialization_script,
+            downloads_dir.clone(),
+            ipc_proxy,
+            load_proxy,
+            popup_proxy,
+            main_instance_id,
+        );
+        builder.build(&window_for_webview)?
+    };
     println!("[Native] WebView2 prototype started");
     println!("[Native] Persistent DEV profile: {WEBVIEW_PROFILE}");
 
-    // Register legcord:// protocol handler
-    // The roots are kept for the P0.4 popup child, which registers the
-    // same protocol on its own core WebView (registration is per-WebView,
-    // not per-environment).
+    // Per-WebView content interceptions (Phase 2F helper): the
+    // `legcord://` registration, the permission policy, and the CSP
+    // request filter. Runs after `build()` and before the initial Discord
+    // navigation, so the first document is intercepted like every later
+    // one. Returns the namespace roots for the P0.4 popup child
+    // (registration is per-WebView, not per-environment).
     #[cfg(target_os = "windows")]
-    let popup_roots = {
-        let core_webview2: ICoreWebView2 = webview.webview();
-        let bundle_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("ts-out");
-        let user_data_dir = std::path::PathBuf::from(WEBVIEW_PROFILE);
-        let roots = build_namespace_roots(&bundle_dir, &user_data_dir);
-        if let Err(e) = register_legcord_protocol(&core_webview2, roots.clone()) {
-            eprintln!("[LegcordProtocol] Failed to register protocol handler: {e}");
-        } else {
-            println!("[LegcordProtocol] Custom scheme handler registered");
-        }
-        // Native permission policy (P0.3): exact-origin allowlist for
-        // microphone/camera/notifications, explicit deny for everything
-        // else, request-scoped (no profile persistence). A registration
-        // failure is logged loudly but must not block boot: permissions
-        // are not boot-required, and the pre-P0.3 behavior (browser
-        // default) is strictly worse but not a startup crash.
-        if let Err(e) = permissions::register(&core_webview2) {
-            eprintln!("[Permissions] Failed to register permission handler: {e}");
-        } else {
-            println!("[Permissions] Permission handler registered (discord.com: mic/camera/notifications)");
-        }
-        roots
-    };
-
-    // Register WebResourceRequested handler to modify CSP header for Discord main document
-    // This reproduces Electron's setupNoCSP() behavior by intercepting the main document response
-    // and adding badges.vencord.dev to the connect-src directive.
-    #[cfg(target_os = "windows")]
-    {
-        let core_webview2: ICoreWebView2 = webview.webview();
-        // Add filter for main frame document resources on discord.com
-        let filter = HSTRING::from("https://discord.com/*");
-        if let Ok(webview2) = core_webview2.cast::<ICoreWebView2_2>() {
-            unsafe {
-                webview2
-                    .AddWebResourceRequestedFilter(
-                        &filter,
-                        COREWEBVIEW2_WEB_RESOURCE_CONTEXT(1), // DOCUMENT
-                    )
-                    .ok();
-            }
-        }
-        // Get environment for creating WebResourceResponse
-        let env: ICoreWebView2Environment = if let Ok(wv2) = core_webview2.cast::<ICoreWebView2_2>()
-        {
-            unsafe { wv2.Environment().unwrap() }
-        } else {
-            eprintln!("[CSP] Failed to get ICoreWebView2_2 for environment");
-            return Ok(()); // Early return from main
-        };
-        // Register WebResourceRequested handler
-        let handler = WebResourceRequestedEventHandler::create(Box::new(
-            move |_sender: Option<ICoreWebView2>,
-                  args: Option<ICoreWebView2WebResourceRequestedEventArgs>| {
-                let Some(args) = args else {
-                    return Ok(());
-                };
-                let request = match unsafe { args.Request() } {
-                    Ok(r) => r,
-                    Err(_) => return Ok(()),
-                };
-                let uri = {
-                    let mut uri = PWSTR::null();
-                    if unsafe { request.Uri(&mut uri) }.is_err() {
-                        return Ok(());
-                    }
-                    unsafe { uri.to_string().unwrap_or_default() }
-                };
-                // Only process main document navigation to /app
-                if !uri.starts_with("https://discord.com/app") {
-                    return Ok(());
-                }
-                // Get deferral to handle asynchronously
-                let deferral = match unsafe { args.GetDeferral() } {
-                    Ok(d) => d,
-                    Err(_) => return Ok(()),
-                };
-                // Extract all request data in the main thread (COM interfaces are not Send)
-                let method = {
-                    let mut m = PWSTR::null();
-                    if unsafe { request.Method(&mut m) }.is_err() {
-                        let _ = unsafe { deferral.Complete() };
-                        return Ok(());
-                    }
-                    unsafe { m.to_string().unwrap_or_else(|_| "GET".to_string()) }
-                };
-                let headers = match unsafe { request.Headers() } {
-                    Ok(h) => h,
-                    Err(_) => {
-                        let _ = unsafe { deferral.Complete() };
-                        return Ok(());
-                    }
-                };
-                let mut request_headers = Vec::new();
-                let iter = match unsafe { headers.GetIterator() } {
-                    Ok(i) => i,
-                    Err(_) => {
-                        let _ = unsafe { deferral.Complete() };
-                        return Ok(());
-                    }
-                };
-                let mut has_current = BOOL::default();
-                if unsafe { iter.HasCurrentHeader(&mut has_current) }.is_err() {
-                    let _ = unsafe { deferral.Complete() };
-                    return Ok(());
-                }
-                while has_current.as_bool() {
-                    let mut key = PWSTR::null();
-                    let mut value = PWSTR::null();
-                    if unsafe { iter.GetCurrentHeader(&mut key, &mut value) }.is_err() {
-                        break;
-                    }
-                    let key_str = unsafe { key.to_string().unwrap_or_default() };
-                    let val_str = unsafe { value.to_string().unwrap_or_default() };
-                    // Skip headers that WebView2 will set automatically
-                    if !matches!(
-                        key_str.to_lowercase().as_str(),
-                        "host" | "connection" | "accept-encoding"
-                    ) {
-                        request_headers.push((key_str, val_str));
-                    }
-                    if unsafe { iter.MoveNext(&mut has_current) }.is_err() {
-                        break;
-                    }
-                }
-                // Get request body if present
-                let body = match unsafe { request.Content() } {
-                    Ok(content) => {
-                        let mut body_bytes = Vec::new();
-                        if let Ok(stream) = content.cast::<IStream>() {
-                            let mut buffer = [0u8; 8192];
-                            loop {
-                                let mut read = 0u32;
-                                unsafe {
-                                    if stream
-                                        .Read(
-                                            buffer.as_mut_ptr() as *mut _,
-                                            buffer.len() as u32,
-                                            Some(&mut read),
-                                        )
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                                if read == 0 {
-                                    break;
-                                }
-                                body_bytes.extend_from_slice(&buffer[..read as usize]);
-                            }
-                        }
-                        if body_bytes.is_empty() {
-                            None
-                        } else {
-                            Some(body_bytes)
-                        }
-                    }
-                    Err(_) => None,
-                };
-                // Forward the request using ureq (synchronously in handler)
-                let mut req = ureq::request(&method, &uri);
-                // Copy request headers (pre-extracted)
-                for (key_str, val_str) in request_headers {
-                    req = req.set(&key_str, &val_str);
-                }
-                let response = if let Some(body) = body {
-                    req.send_bytes(&body)
-                } else {
-                    req.call()
-                };
-                let response = match response {
-                    Ok(r) => r,
-                    Err(error) => {
-                        // Forwarding failed: leave the original response
-                        // untouched (fail-closed, never stripped) and note it.
-                        // Without forwarding, neither the badges patch nor
-                        // the legcord: scheme allowance can apply.
-                        eprintln!("[CSP] document forward failed: {error}");
-                        let _ = unsafe { deferral.Complete() };
-                        return Ok(());
-                    }
-                };
-                // Build response headers, modifying CSP
-                let mut headers_map = String::new();
-                let mut csp_modified = false;
-                // ureq Response uses header() method, not headers()
-                let mut header_names = Vec::new();
-                // Collect known header names from the response
-                for name in [
-                    "content-security-policy",
-                    "content-type",
-                    "cache-control",
-                    "expires",
-                    "etag",
-                    "last-modified",
-                    "server",
-                    "date",
-                    "vary",
-                    "x-content-type-options",
-                    "x-frame-options",
-                    "strict-transport-security",
-                    "referrer-policy",
-                    "permissions-policy",
-                    "cross-origin-opener-policy",
-                    "cross-origin-resource-policy",
-                    "cross-origin-embedder-policy",
-                ] {
-                    if let Some(val) = response.header(name) {
-                        header_names.push((name.to_string(), val.to_string()));
-                    }
-                }
-                for (name_str, val_str) in header_names {
-                    if name_str.to_lowercase() == "content-security-policy" {
-                        let mut csp = val_str.to_string();
-                        // P0.2: WebView2 custom schemes participate in CSP (no
-                        // bypassCSP parity), so allow legcord: in exactly the
-                        // directives traced consumers need (default/script/
-                        // style/img/media/connect). Preservation + badges
-                        // patch below stay unchanged in behavior.
-                        csp = extend_csp_for_legcord(&csp);
-                        if !csp.contains("badges.vencord.dev") {
-                            csp = if let Some(pos) = csp.to_lowercase().find("connect-src") {
-                                let after = &csp[pos..];
-                                let end = after.find(';').unwrap_or(after.len());
-                                let directive = &after[..end].trim();
-                                if !directive.contains("badges.vencord.dev") {
-                                    csp.replacen(
-                                        directive,
-                                        &format!("{} https://badges.vencord.dev", directive),
-                                        1,
-                                    )
-                                } else {
-                                    csp
-                                }
-                            } else {
-                                format!("{}; connect-src https://badges.vencord.dev", csp)
-                            };
-                        }
-                        // Any CSP-bearing Discord response is now modified
-                        // (badges and/or legcord:), never removed.
-                        csp_modified = true;
-                        let legcord_sources = csp.matches("legcord:").count();
-                        println!(
-                            "[CSP] document policy extended badges={} legcord_sources={legcord_sources}",
-                            csp.contains("badges.vencord.dev")
-                        );
-                        headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));
-                    } else {
-                        headers_map.push_str(&format!("{}: {}\r\n", name_str, val_str));
-                    }
-                }
-                // If no CSP header existed, add one
-                if !csp_modified {
-                    headers_map.push_str(
-                        "content-security-policy: connect-src https://badges.vencord.dev\r\n",
-                    );
-                }
-                let status = response.status();
-                // ureq 2.x: read body as string then convert to bytes
-                let text = response.into_string().unwrap_or_default();
-                let body_bytes = text.into_bytes();
-                // Create WebResourceResponse
-                let status_hstring = HSTRING::from(
-                    http::StatusCode::from_u16(status)
-                        .unwrap()
-                        .canonical_reason()
-                        .unwrap_or("OK"),
-                );
-                let headers_hstring = HSTRING::from(headers_map);
-                let stream = if !body_bytes.is_empty() {
-                    // Create IStream from bytes using SHCreateMemStream
-                    let mut stream: Option<IStream> = None;
-                    unsafe {
-                        if let Some(s) =
-                            windows::Win32::UI::Shell::SHCreateMemStream(Some(&body_bytes))
-                        {
-                            stream = Some(s);
-                        }
-                    }
-                    stream
-                } else {
-                    None
-                };
-                if let Ok(web_response) = unsafe {
-                    env.CreateWebResourceResponse(
-                        stream.as_ref(),
-                        status as i32,
-                        &status_hstring,
-                        &headers_hstring,
-                    )
-                } {
-                    let _ = unsafe { args.SetResponse(&web_response) };
-                }
-                let _ = unsafe { deferral.Complete() };
-                Ok(())
-            },
-        ));
-        let mut token = 0i64;
-        unsafe {
-            let _ = core_webview2.add_WebResourceRequested(&handler, &mut token);
-        }
-        println!("[CSP] WebResourceRequested handler registered for Discord main document (CSP modification)");
-    }
+    let popup_roots =
+        main_webview::attach_main_content_filters(&webview, &profile_path, WEBVIEW_PROFILE);
     // Second boot phase (P0.2): navigate to Discord only after both
     // WebResourceRequested filters exist, so the first Discord document is
     // intercepted like every later one. `about:blank` has no CSP of its own
     // and the navigation handler allows only it plus HTTPS Discord hosts.
-    if let Err(error) =
-        webview.evaluate_script(&format!("window.location.href = \"{DISCORD_URL}\";"))
-    {
-        return Err(format!("initial Discord navigation failed: {error}").into());
+    if let Err(error) = main_webview::navigate_to_discord(&webview, DISCORD_URL) {
+        return Err(error.into());
     }
     println!("[Native] Initial navigation: {DISCORD_URL}");
     let mut smoke_reloads_remaining: u32 = std::env::var("LEGCORD_NATIVE_SMOKE_RELOAD")
@@ -5234,66 +4858,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     // next id, so observer records and counters never alias across
     // children sharing the slot over a process lifetime.
     let mut popup_generation: u64 = 0;
-    // Phase 1 process-failure observer for the main WebView
-    // (observability only): the CoreWebView2 clone plus its registration
-    // token, removed on application shutdown. Registration failure only
-    // loses visibility; boot continues exactly as before.
+    // Phase 1 + 2B per-instance observers for the main WebView
+    // (observability only), via the host-owned helper. Each is one raw-COM
+    // subscription whose callback forwards sanitized primitives; the
+    // CoreWebView2 clones plus tokens are removed on shutdown.
+    // Registration failure only loses visibility; boot continues exactly
+    // as before. The builder moved `ipc_proxy` into its IPC closure, so
+    // the sibling popup proxy (same event loop) forwards observer records.
     #[cfg(target_os = "windows")]
-    let mut main_process_failed: Option<(ICoreWebView2, i64)> = {
-        let core_webview2: ICoreWebView2 = webview.webview();
-        // `ipc_proxy` is moved into the builder IPC closure below; the
-        // sibling popup proxy (same event loop) forwards observer records.
+    let (main_process_failed_opt, main_navigation_completed_opt) = {
         let observer_proxy = popup_ipc_proxy.clone();
-        match process_failure::register(
-            &core_webview2,
-            process_failure::WebViewRole::Main,
-            0,
-            &observer_proxy,
-        ) {
-            Ok(token) => {
-                println!("[WebView][ProcessFailed] observer registered role=main instance=0");
-                Some((core_webview2, token))
-            }
-            Err(error) => {
-                eprintln!(
-                    "[WebView][ProcessFailed] observer registration failed role=main: {error}"
-                );
-                None
-            }
-        }
+        main_webview::attach_main_observers(&webview, main_instance_id, &observer_proxy)
     };
+    #[cfg(target_os = "windows")]
+    let mut main_process_failed = main_process_failed_opt;
     // Per-instance failure counters: main lives for the process, child
     // resets with every new child.
     let mut main_process_failed_counters = process_failure::ProcessFailedCounters::default();
     let mut child_process_failed_counters = process_failure::ProcessFailedCounters::default();
-    // Phase 2B navigation-completed observer for the main WebView
-    // (observability only): the CoreWebView2 clone plus its registration
-    // token, removed on application shutdown. A second, additive
-    // `NavigationCompleted` subscription — wry's own page-load handler is
-    // untouched. Registration failure only loses visibility; boot
-    // continues exactly as before.
     #[cfg(target_os = "windows")]
-    let mut main_navigation_completed: Option<(ICoreWebView2, i64)> = {
-        let core_webview2: ICoreWebView2 = webview.webview();
-        let observer_proxy = popup_ipc_proxy.clone();
-        match navigation_completed::register(
-            &core_webview2,
-            process_failure::WebViewRole::Main,
-            0,
-            &observer_proxy,
-        ) {
-            Ok(token) => {
-                println!("[WebView][NavigationCompleted] observer registered role=main instance=0");
-                Some((core_webview2, token))
-            }
-            Err(error) => {
-                eprintln!(
-                    "[WebView][NavigationCompleted] observer registration failed role=main: {error}"
-                );
-                None
-            }
-        }
-    };
+    let mut main_navigation_completed = main_navigation_completed_opt;
     // Per-instance navigation counters: main lives for the process, child
     // resets with every new child. Observe-only: no budget, no guard.
     let mut main_navigation_counters = navigation_completed::NavigationCompletedCounters::default();
@@ -5309,11 +4893,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(not(target_os = "windows"))]
     let main_nav_observer_active = false;
     let mut main_trusted_gate =
-        navigation_gate::NavigationGate::new(MAIN_INSTANCE_ID, main_nav_observer_active);
+        navigation_gate::NavigationGate::new(main_instance_id, main_nav_observer_active);
     // Phase 2A bounded main-renderer recovery: per-main-WebView budget and
     // single-flight guard (see `recovery.rs`). Scoped to the main
     // instance; child records never reach it.
-    let mut main_recovery = MainRendererRecovery::new(MAIN_INSTANCE_ID);
+    let mut main_recovery = MainRendererRecovery::new(main_instance_id);
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -5403,12 +4987,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Remaining windows/WebViews drop via RAII afterwards.
                 #[cfg(target_os = "windows")]
                 {
-                    if let Some((core_webview2, token)) = main_process_failed.take() {
-                        process_failure::unregister(&core_webview2, token);
-                    }
-                    if let Some((core_webview2, token)) = main_navigation_completed.take() {
-                        navigation_completed::unregister(&core_webview2, token);
-                    }
+                    main_webview::detach_main_observers(
+                        main_process_failed.take(),
+                        main_navigation_completed.take(),
+                    );
                     if let Some(child) = popup_child.take() {
                         if let Some((core_webview2, token)) = child.process_failed {
                             process_failure::unregister(&core_webview2, token);
@@ -5544,10 +5126,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // unaffected by load state).
                 match event.role {
                     process_failure::WebViewRole::Main => {
-                        if navigation_completed::is_stale(&event, MAIN_INSTANCE_ID) {
+                        if navigation_completed::is_stale(&event, main_instance_id) {
                             println!(
                                 "{}",
-                                navigation_completed::format_stale_log(&event, MAIN_INSTANCE_ID)
+                                navigation_completed::format_stale_log(&event, main_instance_id)
                             );
                             return;
                         }
@@ -6128,16 +5710,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 );
                                 #[cfg(target_os = "windows")]
                                 {
-                                    if let Some((core_webview2, token)) =
-                                        main_process_failed.take()
-                                    {
-                                        process_failure::unregister(&core_webview2, token);
-                                    }
-                                    if let Some((core_webview2, token)) =
-                                        main_navigation_completed.take()
-                                    {
-                                        navigation_completed::unregister(&core_webview2, token);
-                                    }
+                                    main_webview::detach_main_observers(
+                                        main_process_failed.take(),
+                                        main_navigation_completed.take(),
+                                    );
                                     if let Some(child) = popup_child.take() {
                                         if let Some((core_webview2, token)) = child.process_failed
                                         {
@@ -9831,27 +9407,38 @@ mod tests {
     fn navigation_observer_coexists_with_wry_page_load_path() {
         // Phase 2B is a SECOND raw-COM `NavigationCompleted` subscription:
         // wry's own page-load callback must keep firing `PageLoadFinished`
-        // when the observer is registered. Both registrations stay present
-        // in the shipped wiring, and the observer adds no reload path.
-        let source = include_str!("main.rs");
-        // Wry's page-load subscription is untouched.
-        assert!(source.contains("with_on_page_load_handler"));
-        assert!(source.contains("PageLoadEvent::Finished"));
-        assert!(source.contains("NativeEvent::PageLoadFinished"));
-        // The raw-COM observer is additive, for main and child.
-        assert!(source.contains("navigation_completed::register"));
-        assert!(source.contains("navigation_completed::unregister"));
-        assert!(source.contains("NativeEvent::NavigationCompleted"));
-        assert!(source.contains("remove_NavigationCompleted"));
+        // when the observer is registered. Phase 2F factors the main
+        // WebView's wry wiring plus both observers into the host-owned
+        // helper; the child keeps its direct registrations. Both
+        // registrations stay present in the shipped wiring, and the
+        // observer adds no reload path.
+        let main_source = include_str!("main.rs");
+        let helper_source = include_str!("main_webview.rs");
+        // The main WebView builds exactly once through the helper, which
+        // owns the wry page-load subscription and both observer attach /
+        // detach entry points.
+        assert!(main_source.contains("main_webview::main_webview_builder"));
+        assert!(main_source.contains("main_webview::attach_main_observers"));
+        assert!(main_source.contains("main_webview::detach_main_observers"));
+        assert!(helper_source.contains("with_on_page_load_handler"));
+        assert!(main_source.contains("NativeEvent::PageLoadFinished"));
+        // The raw-COM observer is additive, for main (helper) and child
+        // (direct). The child path is untouched by the refactor.
+        assert!(helper_source.contains("navigation_completed::register"));
+        assert!(main_source.contains("navigation_completed::register"));
+        assert!(main_source.contains("navigation_completed::unregister"));
+        assert!(main_source.contains("NativeEvent::NavigationCompleted"));
+        assert!(main_source.contains("remove_NavigationCompleted"));
         // No new reload path: the single host-side `reload()` still belongs
         // to the Phase 2A recovery decision only. (Needles are joined at
         // runtime so this assertion's own source text cannot self-count.)
         let reload_needle = ["match webview", "reload()"].join(".");
-        assert_eq!(source.matches(&reload_needle).count(), 1);
+        assert_eq!(main_source.matches(&reload_needle).count(), 1);
+        assert_eq!(helper_source.matches(&reload_needle).count(), 0);
         // The navigation event never reaches the recovery budget: the only
         // policy decision still feeds on the process-failure record.
         let decide_needle = ["main_recovery", "decide"].join(".");
-        assert_eq!(source.matches(&decide_needle).count(), 1);
+        assert_eq!(main_source.matches(&decide_needle).count(), 1);
     }
 
     #[test]
@@ -9860,19 +9447,26 @@ mod tests {
         // successful navigation. Wry's page-load subscription and the
         // recovery path are untouched; the gate pairs finishes with raw
         // outcomes by generation; failures only skip (no reload/retry).
+        // Phase 2F threads the helper-owned instance id through the gate
+        // and recovery instead of a hardcoded constant (same value, 0).
         let source = include_str!("main.rs");
-        // Wry's callbacks stay registered and functional.
-        assert!(source.contains("with_on_page_load_handler"));
-        assert!(source.contains("PageLoadEvent::Started"));
-        assert!(source.contains("PageLoadEvent::Finished"));
+        let helper_source = include_str!("main_webview.rs");
+        // Wry's callbacks live in the per-instance helper now and stay
+        // registered and functional.
+        assert!(helper_source.contains("with_on_page_load_handler"));
+        assert!(source.contains("NativeEvent::PageLoadFinished"));
         // Every navigation attempt still resets the document lifecycle
         // and still releases the recovery single-flight guard.
         assert!(source.contains("document_lifecycle.begin_document()"));
         assert!(source.contains("main_recovery.on_page_load_started()"));
         // The gate exists per main WebView and degrades only when the
-        // observer registration failed.
+        // observer registration failed. The boot records exactly one
+        // construction with the preserved initial identity.
         assert!(source.contains("navigation_gate::NavigationGate::new"));
         assert!(source.contains("main_nav_observer_active"));
+        assert!(source.contains("MainWebviewLifecycle::new"));
+        assert!(source.contains("record_initial()"));
+        assert!(source.contains("main_instance_id"));
         // Finishes consult the gate; outcomes resolve through it.
         assert!(source.contains("main_trusted_gate.on_finished(generation)"));
         // Only the authoritative success flag reaches the gate — HTTP
