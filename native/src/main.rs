@@ -13,6 +13,7 @@ mod plugin_storage;
 mod process_failure;
 mod protocol;
 mod quick_css;
+mod recovery;
 mod settings;
 mod settings_boot;
 mod settings_plugin;
@@ -66,6 +67,7 @@ use protocol::{
     ThemeWrittenResponse, ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
+use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
 use serde::Serialize;
 use settings::{apply_block_power_saving, apply_settings_set, load_settings};
 use tao::{
@@ -2676,11 +2678,12 @@ enum NativeEvent {
         url: String,
         kind: new_window::PopupKind,
     },
-    /// Sanitized WebView2 process-failure record (Phase 1 observer). The
-    /// COM callback owns only primitives; this payload carries the role,
-    /// per-instance id, kind, reason, and exit code — never URLs, page
-    /// data, or interface objects. Observability only: no recovery rides
-    /// on this event yet.
+    /// Sanitized WebView2 process-failure record (Phase 1 observer, Phase
+    /// 2A bounded main-renderer recovery). The COM callback owns only
+    /// primitives; this payload carries the role, per-instance id, kind,
+    /// reason, and exit code — never URLs, page data, or interface objects.
+    /// Main `RenderProcessExited` records may approve one host-side reload
+    /// through the recovery budget; every other record stays observe-only.
     ProcessFailed(ProcessFailedEvent),
     /// DEV-only delayed readback for the legcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
@@ -4801,6 +4804,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // resets with every new child.
     let mut main_process_failed_counters = process_failure::ProcessFailedCounters::default();
     let mut child_process_failed_counters = process_failure::ProcessFailedCounters::default();
+    // Phase 2A bounded main-renderer recovery: per-main-WebView budget and
+    // single-flight guard (see `recovery.rs`). Scoped to the main
+    // instance; child records never reach it.
+    let mut main_recovery = MainRendererRecovery::new(MAIN_INSTANCE_ID);
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -4864,6 +4871,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!(
                     "[WebView][ProcessFailed] final main_total={} child_total={}",
                     main_process_failed_counters.total, child_process_failed_counters.total,
+                );
+                println!(
+                    "[WebView][Recovery] final attempts_in_window={} in_flight={}",
+                    main_recovery.attempts_in_window(Instant::now()),
+                    main_recovery.is_in_flight(),
                 );
                 // Application shutdown: remove observer subscriptions before
                 // the loop exits so no callback can target a dead loop.
@@ -4949,8 +4961,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Event::UserEvent(NativeEvent::ProcessFailed(event)) => {
                 // Phase 1 observer: count per instance and log the
-                // sanitized record. Deliberately no recovery here — no
-                // reload, no navigation, no window changes.
+                // sanitized record for both roles. Phase 2A adds bounded
+                // recovery for main renderer exits only: one host-side
+                // reload per decision, inside a per-WebView budget. Child
+                // records keep observe-only behavior; unresponsive,
+                // frame-exit, browser-process, and navigation failures
+                // never reload here (separate milestones).
                 match event.role {
                     process_failure::WebViewRole::Main => {
                         main_process_failed_counters.record(event.kind)
@@ -4960,11 +4976,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 println!("{}", process_failure::format_log(&event));
+                if event.role == process_failure::WebViewRole::Main {
+                    let decision = main_recovery.decide(&event, Instant::now());
+                    println!("{}", recovery::format_log(&decision, &event));
+                    if matches!(
+                        decision,
+                        recovery::RecoveryDecision::ReloadRequested { .. }
+                    ) {
+                        match webview.reload() {
+                            Ok(()) => {
+                                println!("{}", recovery::format_reload_result(true, None));
+                            }
+                            Err(error) => {
+                                main_recovery.on_reload_error();
+                                println!(
+                                    "{}",
+                                    recovery::format_reload_result(
+                                        false,
+                                        Some(&error.to_string())
+                                    )
+                                );
+                            }
+                        }
+                    }
+                }
             }
             Event::UserEvent(NativeEvent::PageLoadStarted) => {
                 document_lifecycle.begin_document();
                 request_tracker.clear();
                 pending_mods.clear();
+                // Phase 2A: `Started` is WebView2 `ContentLoading` — a live
+                // renderer began loading new content — so an approved reload
+                // has taken effect and the single-flight guard releases. The
+                // attempt history is untouched: budget and cooldown still
+                // bound the next decision.
+                main_recovery.on_page_load_started();
                 page_load_started_at = Some(Instant::now());
                 println!(
                     "[Navigation] new document generation={} (bridge state reset)",
@@ -4972,6 +5018,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 );
             }
             Event::UserEvent(NativeEvent::PageLoadFinished(url)) => {
+                // Phase 2A: deliberately no recovery state change here. Wry
+                // forwards NavigationCompleted as Finished even for failed
+                // navigations (IsSuccess unchecked), so Finished cannot
+                // prove the reload recovered anything; only Started
+                // (ContentLoading) releases the single-flight guard.
                 // One host-owned ShowWindow at the native-ready point: the
                 // first finished non-boot document that passes the
                 // navigation clamp. Hidden startup is preserved until then.
