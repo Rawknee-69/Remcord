@@ -11,6 +11,7 @@ scripts/spdx-license.txt
 # Local-only performance profiling artifacts and machine-specific captures.
 docs/performance/baseline/raw/
 docs/performance/baseline/runs/
+docs/performance/native/runs/
 *.etl
 *.trace
 *.heapsnapshot
