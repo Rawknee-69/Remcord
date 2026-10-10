@@ -2,6 +2,7 @@ mod app;
 mod backup;
 mod browser_recovery;
 mod bundles;
+mod child_recovery;
 mod css_watch;
 mod downloads;
 mod environment_observer;
@@ -2679,7 +2680,9 @@ enum NativeEvent {
     /// primitives; this payload carries the role, per-instance id, kind,
     /// reason, and exit code — never URLs, page data, or interface objects.
     /// Main `RenderProcessExited` records may approve one host-side reload
-    /// through the recovery budget; every other record stays observe-only.
+    /// through the recovery budget; child `RenderProcessExited` records
+    /// close the managed child through the Phase 2H policy; every other
+    /// record stays observe-only.
     ProcessFailed(ProcessFailedEvent),
     /// Sanitized WebView2 navigation-completion record (Phase 2B observer;
     /// Phase 2C gating). The COM callback owns only primitives; this
@@ -4894,6 +4897,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // about:blank / hidden ICS). Repeated requests focus the live child;
     // child close clears the slot; parent shutdown drops it via RAII.
     let mut popup_child: Option<PopupChild> = None;
+    // True once the main shutdown path has started (main-window
+    // `CloseRequested` or renderer-initiated `window.quit`). Late
+    // `ProcessFailed` records must not tear anything down afterwards.
+    let mut shutdown_started = false;
     // Slot generation for the managed child: each created child takes the
     // next id, so observer records and counters never alias across
     // children sharing the slot over a process lifetime.
@@ -4981,6 +4988,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     return;
                 }
                 println!("[Native] Close requested; shutting down WebView");
+                shutdown_started = true;
                 println!(
                     "[Bridge][Metrics] messages_in={incoming_messages} requests={request_count} events={event_count} responses={response_count}"
                 );
@@ -5124,18 +5132,99 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Phase 1 observer: count per instance and log the
                 // sanitized record for both roles. Phase 2A adds bounded
                 // recovery for main renderer exits only: one host-side
-                // reload per decision, inside a per-WebView budget. Child
-                // records keep observe-only behavior; unresponsive,
-                // frame-exit, browser-process, and navigation failures
-                // never reload here (separate milestones).
-                match event.role {
-                    process_failure::WebViewRole::Main => {
-                        main_process_failed_counters.record(event.kind)
+                // reload per decision, inside a per-WebView budget. Phase
+                // 2H closes the managed child on its own renderer exit;
+                // unresponsive, frame-exit, browser-process, and navigation
+                // failures never reload or close here.
+                if event.role == process_failure::WebViewRole::Child {
+                    let live_child_instance =
+                        popup_child.as_ref().map(|child| child.instance_id);
+                    // Phase 2H policy first: stale records (an older child
+                    // instance, or no live child at all) are dropped before
+                    // counting so they can never alias the live slot's
+                    // totals or close it. This mirrors the
+                    // `NavigationCompleted` child arm below.
+                    let decision =
+                        child_recovery::decide(&event, live_child_instance, shutdown_started);
+                    match &decision {
+                        child_recovery::ChildExitDecision::Ignore {
+                            reason:
+                                child_recovery::ChildExitIgnoreReason::NoLiveChild,
+                        } => {
+                            println!(
+                                "{} stale no_live_child",
+                                process_failure::format_log(&event)
+                            );
+                            return;
+                        }
+                        child_recovery::ChildExitDecision::Ignore {
+                            reason: child_recovery::ChildExitIgnoreReason::Stale { .. },
+                        } => {
+                            println!("{}", child_recovery::format_log(&decision, &event));
+                            return;
+                        }
+                        _ => {}
                     }
-                    process_failure::WebViewRole::Child => {
-                        child_process_failed_counters.record(event.kind)
+                    child_process_failed_counters.record(event.kind);
+                    println!("{}", process_failure::format_log(&event));
+                    // A confirmed child renderer exit closes and drops that
+                    // child on this thread. Nothing else here closes,
+                    // reloads, recreates, spends either recovery budget, or
+                    // retries a download.
+                    match decision {
+                        child_recovery::ChildExitDecision::Close { instance_id } => {
+                            println!("{}", child_recovery::format_log(&decision, &event));
+                            // Mark closing by clearing the slot first, and
+                            // only when it still refers to that exact
+                            // instance: a duplicate collapses into a no-op
+                            // and a late record can never clear a newer
+                            // replacement (including across browser
+                            // recovery, which drops the previous child).
+                            let still_live = popup_child
+                                .as_ref()
+                                .is_some_and(|child| child.instance_id == instance_id);
+                            if !still_live {
+                                // Unreachable on the event-loop thread (the
+                                // slot cannot change mid-arm), but fail
+                                // closed: never clear a slot that no longer
+                                // refers to this instance.
+                                println!(
+                                    "[Popup][ChildExit] ignore role=child instance={instance_id} kind=RenderProcessExited reason=stale"
+                                );
+                                return;
+                            }
+                            if let Some(child) = popup_child.take() {
+                                // Invalidate the child's callbacks first so
+                                // no late callback can target the slot being
+                                // dropped. Best-effort: already-dead COM
+                                // objects only log, never propagate.
+                                #[cfg(target_os = "windows")]
+                                if let Some((core_webview2, token)) = child.process_failed {
+                                    process_failure::unregister(&core_webview2, token);
+                                }
+                                #[cfg(target_os = "windows")]
+                                if let Some((core_webview2, token)) = child.navigation_completed {
+                                    navigation_completed::unregister(&core_webview2, token);
+                                }
+                                // Dropping the slot destroys the child
+                                // WebView/controller and closes its native
+                                // window; its download handlers drop with
+                                // it, so a pending hidden-ICS download is
+                                // dropped without ever claiming completion.
+                                println!(
+                                    "[Popup] child closed after renderer exit instance={instance_id}; clearing single slot"
+                                );
+                                // `child` (WebView/controller + native
+                                // window) drops here, at scope end.
+                            }
+                        }
+                        decision @ child_recovery::ChildExitDecision::Ignore { .. } => {
+                            println!("{}", child_recovery::format_log(&decision, &event));
+                        }
                     }
+                    return;
                 }
+                main_process_failed_counters.record(event.kind);
                 println!("{}", process_failure::format_log(&event));
                 if event.role == process_failure::WebViewRole::Main {
                     let decision = main_recovery.decide(&event, Instant::now());
@@ -5856,6 +5945,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 // Renderer-initiated quit takes the same
                                 // shutdown path as CloseRequested: remove
                                 // observer subscriptions before exiting.
+                                shutdown_started = true;
                                 println!(
                                     "[WebView][ProcessFailed] final main_total={} child_total={}",
                                     main_process_failed_counters.total,
