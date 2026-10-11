@@ -2234,12 +2234,14 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     const cssText = __REMCORD_TITLEBAR_CSS__;
     const wanted = ["base"];
     if (remcord.platform === "win32") {
-      body.setAttribute("class", "platform-win");
+      // Never overwrite the body class attribute: Discord owns it, and a
+      // full overwrite would drop Discord classes and force a style recalc.
+      body.classList.add("platform-win");
       wanted.push("win");
     } else if (remcord.platform === "darwin") {
       wanted.push("darwin");
     } else {
-      body.setAttribute("class", "platform-linux");
+      body.classList.add("platform-linux");
       wanted.push("linux");
     }
     // Inline <style> nodes from build-embedded text (no subresource fetch:

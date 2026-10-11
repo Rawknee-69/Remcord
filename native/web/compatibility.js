@@ -49,11 +49,57 @@
         return result;
     }
 
+    // Error-forward flood guard: identical consecutive renderer errors
+    // (chatty WebRTC/Discord internals during voice/screenshare, repeated
+    // mod-boot logs) collapse into one host event plus a repeat count, and
+    // sustained floods of distinct messages are capped per window with an
+    // overflow summary. Kinds and first-seen messages are preserved; only
+    // exact duplicates collapse and only over-cap distinct messages drop —
+    // and both are counted exactly in the flushed summary, never silently.
+    // Counters are observable via the overflow summaries in host logs.
+    const rendererErrorFlood = { key: "", repeats: 0, dropped: 0, sent: 0, windowStart: 0 };
+    const RENDERER_ERROR_FLOOD_WINDOW_MS = 5000;
+    const RENDERER_ERROR_FLOOD_CAP = 20;
     function reportRendererError(kind, message) {
         try {
+            const text = String(message);
+            const key = `${kind}\n${text}`;
+            const now = Date.now();
+            if (now - rendererErrorFlood.windowStart > RENDERER_ERROR_FLOOD_WINDOW_MS) {
+                rendererErrorFlood.windowStart = now;
+                rendererErrorFlood.sent = 0;
+            }
+            if (key === rendererErrorFlood.key) {
+                rendererErrorFlood.repeats += 1;
+                return;
+            }
+            if (rendererErrorFlood.repeats > 0 || rendererErrorFlood.dropped > 0) {
+                // Flush the collapsed/dropped run before the new distinct
+                // message so host logs keep exact counts, never silent drops.
+                const collapsed = rendererErrorFlood.repeats;
+                const dropped = rendererErrorFlood.dropped;
+                rendererErrorFlood.repeats = 0;
+                rendererErrorFlood.dropped = 0;
+                sendEvent({
+                    type: "renderer_error",
+                    payload: {
+                        kind: "error_flood_summary",
+                        message: truncateUtf8(
+                            `collapsed ${collapsed} duplicate(s), capped ${dropped} (kind=${kind})`,
+                            2048,
+                        ),
+                    },
+                });
+            }
+            rendererErrorFlood.key = key;
+            if (rendererErrorFlood.sent >= RENDERER_ERROR_FLOOD_CAP) {
+                rendererErrorFlood.dropped += 1;
+                return;
+            }
+            rendererErrorFlood.sent += 1;
             sendEvent({
                 type: "renderer_error",
-                payload: { kind, message: truncateUtf8(message, 2048) },
+                payload: { kind, message: truncateUtf8(text, 2048) },
             });
         } catch {
             console.error("[Remcord native] renderer error could not be sent to the host", {

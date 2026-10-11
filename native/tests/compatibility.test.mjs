@@ -960,6 +960,24 @@ test("window operations require their capability", () => {
     );
 });
 
+test("identical consecutive renderer errors collapse with exact counts", () => {
+    const { window, context } = createRuntime();
+    vm.runInContext(
+        "console.error('same failure');console.error('same failure');console.error('same failure');",
+        context,
+    );
+    let reports = window.messages.filter((message) => message.event?.type === "renderer_error");
+    assert.equal(reports.length, 1);
+    assert.match(reports[0].event.payload.message, /same failure/);
+    // A distinct message flushes the collapsed run as a summary first.
+    vm.runInContext("console.error('different failure');", context);
+    reports = window.messages.filter((message) => message.event?.type === "renderer_error");
+    assert.equal(reports.length, 3);
+    assert.equal(reports[1].event.payload.kind, "error_flood_summary");
+    assert.match(reports[1].event.payload.message, /collapsed 2 duplicate\(s\)/);
+    assert.match(reports[2].event.payload.message, /different failure/);
+});
+
 test("requests only the shared bundle capability with the registered mod id", async () => {
     const { window } = createRuntime();
     const request = window.remcord.native.getVencordBundle();
