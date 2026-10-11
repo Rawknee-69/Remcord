@@ -23,7 +23,7 @@ $package = Get-Content -Raw (Join-Path $RepoRoot "package.json") | ConvertFrom-J
 # 1. Unique installer ID, GUID-shaped, not Electron's.
 $guid = [regex]::Match($code, '#define AppIdValue "([0-9A-Fa-f-]{36})"').Groups[1].Value
 Check ($guid -ne "") "AppId define present and GUID-shaped"
-Check ($code -match "AppId=\{\{#AppIdValue\}\}") "Setup consumes the defined AppId"
+Check ($code -match "AppId=\{\{\{#AppIdValue\}\}\}") "Setup consumes the defined AppId"
 Check ($code -notmatch "app\.legcord\.Legcord") "no Electron appId reference in code"
 Check ($iss -match "app\.legcord\.Legcord") "difference from Electron appId documented in comments"
 

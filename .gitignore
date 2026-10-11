@@ -12,6 +12,9 @@ scripts/spdx-license.txt
 docs/performance/baseline/raw/
 docs/performance/baseline/runs/
 docs/performance/native/runs/
+# Local installer build outputs (rebuilt by native/installer/build-installer.ps1).
+native/installer/stage/
+native/installer/dist/
 *.etl
 *.trace
 *.heapsnapshot

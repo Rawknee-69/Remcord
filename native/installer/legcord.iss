@@ -38,7 +38,7 @@
 #define InstallLeaf "LegcordNative"
 
 [Setup]
-AppId={{#AppIdValue}}
+AppId={{{#AppIdValue}}}
 AppName=Legcord Native
 AppVersion={#AppVersion}
 AppVerName=Legcord Native {#AppVersion}
