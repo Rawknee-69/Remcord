@@ -256,3 +256,184 @@ test("Electron path keeps the synchronous setConfig contract", async () => {
         restoreConsole();
     }
 });
+
+test("native toggle reacts immediately, then converges to the host value", async () => {
+    let resolveHost!: (result: { key: string; value: unknown }) => void;
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return new Promise<{ key: string; value: unknown }>((resolve) => {
+                    resolveHost = resolve;
+                });
+            },
+        },
+        seed: { mods: [] },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // Click: Vencord toggle on.
+        helpers.toggleMod("vencord", true);
+        // Immediate reaction — the UI must flip before the host responds.
+        assert.deepEqual(storeSettings().mods, ["vencord"]);
+        assert.deepEqual(calls.nativeSet, [["mods", ["vencord"]]]);
+        // Host confirms: UI converges, restart is requested.
+        resolveHost({ key: "mods", value: ["vencord"] });
+        await tick();
+        await tick();
+        assert.deepEqual(storeSettings().mods, ["vencord"]);
+        assert.equal(helpers.isRestartRequired, true);
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native toggle reverts on host rejection without newly requesting restart", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                const error = new Error("Native bridge request failed");
+                (error as unknown as { code: string }).code = "REQUEST_TIMEOUT";
+                return Promise.reject(error);
+            },
+        },
+        seed: { mods: [] },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // isRestartRequired is monotonic (once true it stays true until the
+        // restart modal runs), so assert rejection adds no NEW request.
+        const flagBefore = helpers.isRestartRequired;
+        // Click: Equicord toggle on, host times out.
+        helpers.toggleMod("equicord", true);
+        // Immediate flip first (click-to-state), then revert on failure.
+        assert.deepEqual(storeSettings().mods, ["equicord"]);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet, [["mods", ["equicord"]]]);
+        assert.deepEqual(storeSettings().mods, []);
+        assert.equal(helpers.isRestartRequired, flagBefore);
+        assert.equal(calls.warnings.length, 1);
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("toggleMod supports shelter and custom instead of silently ignoring them", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return Promise.resolve({ key, value });
+            },
+        },
+        seed: { mods: [] },
+    });
+    try {
+        const helpers = await loadHelpers();
+        helpers.toggleMod("shelter", true);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet[0], ["mods", ["shelter"]]);
+        storeSettings().mods = ["shelter"];
+        calls.nativeSet.length = 0;
+        // Custom is independent: it adds without touching shelter.
+        helpers.toggleMod("custom", true);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet[0], ["mods", ["shelter", "custom"]]);
+        // Disabling removes only that id.
+        calls.nativeSet.length = 0;
+        storeSettings().mods = ["vencord", "custom"];
+        helpers.toggleMod("custom", false);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet[0], ["mods", ["vencord"]]);
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native Remcord-owned flag reacts immediately and restores after reload", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return Promise.resolve({ key, value });
+            },
+        },
+        seed: { extendedPluginAbilities: false },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // Correct operation name (wire key) and payload.
+        helpers.setConfig("extendedPluginAbilities", true);
+        assert.equal(storeSettings().extendedPluginAbilities, true);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet, [["extended_plugin_abilities", true]]);
+        assert.equal(storeSettings().extendedPluginAbilities, true);
+        // State restoration after a normal reload: a fresh document seeded
+        // from the persisted value renders the same state.
+        const persisted = storeSettings().extendedPluginAbilities;
+        installGlobals({
+            runtime: "webview2",
+            settingsImpl: {
+                set: (key: string, value: unknown) => Promise.resolve({ key, value }),
+            },
+            seed: { extendedPluginAbilities: persisted },
+        });
+        assert.equal(storeSettings().extendedPluginAbilities, true);
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("unsupported settings stay disabled instead of rendering a broken control", async () => {
+    installGlobals({});
+    try {
+        const helpers = await loadHelpers();
+        for (const key of ["csp", "quickCss", "windowStyle", "keybinds", "noBundleUpdates", "modCache"]) {
+            assert.equal(helpers.isSettingWritableNatively(key), false, `${key} must be disabled natively`);
+        }
+        assert.equal(helpers.isSettingWritableNatively("mods"), true);
+        assert.equal(helpers.isNativeSettingsSetAvailable(), false);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("duplicate toggles never duplicate ids and each click dispatches once", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return Promise.resolve({ key, value });
+            },
+        },
+        seed: { mods: ["vencord"] },
+    });
+    try {
+        const helpers = await loadHelpers();
+        helpers.toggleMod("vencord", true);
+        helpers.toggleMod("vencord", true);
+        await tick();
+        await tick();
+        assert.equal(calls.nativeSet.length, 2);
+        assert.deepEqual(calls.nativeSet[0], ["mods", ["vencord"]]);
+        assert.deepEqual(calls.nativeSet[1], ["mods", ["vencord"]]);
+        assert.deepEqual(storeSettings().mods, ["vencord"]);
+    } finally {
+        restoreConsole();
+    }
+});

@@ -206,18 +206,29 @@ interface NativeBlockPowerSavingSettings {
 
 /**
  * Native WebView2 path for the ONE allowlisted `blockPowerSavingInVoiceChat`
- * mutation (Phase C-3). Awaits the typed async
- * `settings.set_block_power_saving_in_voice_chat` capability and only then
- * updates local store state from the host-confirmed value, so the renderer
- * never holds stale state. A rejected mutation leaves local state untouched.
- * The Electron path stays in `setConfig` above, unchanged.
+ * mutation (Phase C-3). Updates local state OPTIMISTICALLY so the toggle
+ * reacts immediately, then converges to the host-confirmed value; a rejected
+ * mutation reverts and rethrows so the caller reports honestly. The Electron
+ * path stays in `setConfig` above, unchanged.
  */
 export async function setBlockPowerSavingInVoiceChat(value: boolean): Promise<boolean> {
-    const nativeSet = (window.remcord as unknown as { settings: NativeBlockPowerSavingSettings }).settings
-        .setBlockPowerSavingInVoiceChat;
-    const applied = await nativeSet(value);
+    const previous = store.settings.blockPowerSavingInVoiceChat;
     withPreservedSettingsScroll(() => {
         // Mutate in place — do NOT replace store.settings (that remounts the page and jumps scroll).
+        store.settings.blockPowerSavingInVoiceChat = value;
+    });
+    const nativeSet = (window.remcord as unknown as { settings: NativeBlockPowerSavingSettings }).settings
+        .setBlockPowerSavingInVoiceChat;
+    let applied: boolean;
+    try {
+        applied = await nativeSet(value);
+    } catch (error) {
+        withPreservedSettingsScroll(() => {
+            store.settings.blockPowerSavingInVoiceChat = previous;
+        });
+        throw error;
+    }
+    withPreservedSettingsScroll(() => {
         store.settings.blockPowerSavingInVoiceChat = applied;
         console.log("blockPowerSavingInVoiceChat", ":", store.settings.blockPowerSavingInVoiceChat);
         isRestartRequired = true;
@@ -257,10 +268,12 @@ export function isNativeSettingsSetAvailable(): boolean {
 }
 
 /**
- * Native WebView2 path for the closed `settings.set` allowlist. Awaits the
- * typed async capability and only then updates local store state from the
- * host-confirmed value, so the renderer never holds stale state. A rejected
- * mutation leaves local state untouched. The Electron path stays in
+ * Native WebView2 path for the closed `settings.set` allowlist. Updates local
+ * store state OPTIMISTICALLY so every supported toggle reacts immediately,
+ * then converges to the host-confirmed value; a rejected mutation reverts to
+ * the previous value and rethrows so the caller can report honestly (the
+ * caller owns the warning — this helper never warns itself, keeping exactly
+ * one warning per failed mutation). The Electron path stays in
  * `setConfig`/`toggleMod` above, unchanged.
  */
 export async function setNativeSetting<K extends NativeSettingsSetKey>(
@@ -268,10 +281,24 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
     value: Settings[K],
     shouldRestart?: boolean,
 ): Promise<Settings[K]> {
-    const nativeSet = (window.remcord as unknown as { settings: NativeSettingsSet }).settings.set;
-    const applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[]);
+    const previous = (store.settings as Record<string, unknown>)[key as string];
+    // Immediate reaction: mutate in place — do NOT replace store.settings
+    // (that remounts the page and jumps scroll).
     withPreservedSettingsScroll(() => {
-        // Mutate in place — do NOT replace store.settings (that remounts the page and jumps scroll).
+        (store.settings as Record<string, unknown>)[key as string] = value;
+    });
+    const nativeSet = (window.remcord as unknown as { settings: NativeSettingsSet }).settings.set;
+    let applied: { key: string; value: boolean | string[] };
+    try {
+        applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[]);
+    } catch (error) {
+        withPreservedSettingsScroll(() => {
+            (store.settings as Record<string, unknown>)[key as string] = previous;
+        });
+        throw error;
+    }
+    withPreservedSettingsScroll(() => {
+        // Converge to the host-confirmed value instead of holding stale data.
         (store.settings as Record<string, unknown>)[key] = applied.value;
         console.log(key, ":", store.settings[key]);
         if (shouldRestart) {
@@ -615,15 +642,21 @@ function removeMod(array: ValidMods[], filter: ValidMods) {
 }
 
 export function toggleMod(mod: ValidMods, enabled: boolean) {
-    const currentMods = store.settings.mods as ValidMods[];
-    // Native WebView2 persists through the closed async allowlist (the
-    // restart flag is set from the host-confirmed value); Electron keeps the
-    // original synchronous setConfig.
+    const currentMods = (store.settings.mods ?? []) as ValidMods[];
+    // Native WebView2 persists through the closed async allowlist (immediate
+    // optimistic reaction with revert-on-rejection inside `setNativeSetting`;
+    // the restart flag is set only from the host-confirmed value); Electron
+    // keeps the original synchronous setConfig.
     const writeMods = (next: ValidMods[]) => {
         if (isNativeSettingsSetAvailable()) {
             void setNativeSetting("mods", next, true).catch(() =>
                 console.warn("[Remcord] Could not update mods in the native shell."),
             );
+        } else if (isNativeWebView()) {
+            // Native shell without the capability: route through the honest
+            // setConfigNative path (optimistic with revert, restart flag only
+            // on success) instead of setting a bogus restart flag up front.
+            setConfig("mods", next, true);
         } else {
             isRestartRequired = true;
             setConfig("mods", next);
@@ -632,11 +665,15 @@ export function toggleMod(mod: ValidMods, enabled: boolean) {
     if (enabled) {
         // Dedupe the id being enabled too: re-enabling an already-enabled
         // mod previously appended a duplicate entry (observed as
-        // `["equicord", "equicord"]` in a real profile).
+        // `["equicord", "equicord"]` in a real profile). Vencord and Equicord
+        // stay mutually exclusive (both publish the `Vencord` page global);
+        // shelter/custom are independent and dedupe without exclusions.
         if (mod === "vencord") {
             writeMods([...removeMod(removeMod(currentMods, "equicord"), "vencord"), "vencord"]);
         } else if (mod === "equicord") {
             writeMods([...removeMod(removeMod(currentMods, "vencord"), "equicord"), "equicord"]);
+        } else {
+            writeMods([...removeMod(currentMods, mod), mod]);
         }
     } else {
         writeMods(removeMod(currentMods, mod));

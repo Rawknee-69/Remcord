@@ -631,7 +631,11 @@ export function SettingsPage() {
                             // Native WebView2 uses the allowlisted async mutation;
                             // Electron keeps the original synchronous setConfig.
                             if (isNativeWebView()) {
-                                void setBlockPowerSavingInVoiceChat(e);
+                                void setBlockPowerSavingInVoiceChat(e).catch(() =>
+                                    console.warn(
+                                        "[Remcord] Could not update blockPowerSavingInVoiceChat in the native shell.",
+                                    ),
+                                );
                             } else {
                                 setConfig("blockPowerSavingInVoiceChat", e, true);
                             }
