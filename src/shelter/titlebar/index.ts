@@ -112,65 +112,130 @@ function injectButtonControls() {
 }
 
 /**
- * Native-shell full titlebar: the frameless window has no OS caption, so
- * Remcord draws its own slim strip across the whole top edge (wordmark on
- * the left, window controls top-right). The strip is a drag handle
- * everywhere except on the buttons; Discord's own content is pushed below
- * it so nothing is covered and no Discord click is stolen.
+ * Native-shell header label: the frameless window draws no caption of its
+ * own, so Remcord signs Discord's existing top-bar title instead of taking
+ * vertical space with a separate strip. The label is appended inside the
+ * header title element (e.g. beside "Friends"), inheriting its alignment so
+ * both read as one centered title. Returns the title element, or null when
+ * no suitable header exists (Discord DOM drift): callers degrade to
+ * controls-only rather than guessing.
  */
-function injectNativeTitlebar() {
-    if (!document.getElementById("remcordTitlebar")) {
-        const nav = document.createElement("div");
-        nav.innerHTML = titlebarOverlayHTML;
-        nav.id = "remcordTitlebar";
-        document.body.prepend(nav);
+const REMCORD_HEADER_LABEL_ID = "remcordHeaderLabel";
+let headerObserver: MutationObserver | null = null;
+let labelRetryTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopLabelRetry() {
+    if (labelRetryTimer !== null) {
+        clearInterval(labelRetryTimer);
+        labelRetryTimer = null;
     }
-    injectButtonControls();
-    const strip = document.querySelector("#remcordTitlebar .titlebar") as HTMLElement | null;
-    const appMount = document.getElementById("app-mount");
-    if (strip && appMount) {
-        // The stock strip is roomier than a native caption needs to be:
-        // trim ~5px so it reads as a slim caption bar, then push Discord's
-        // content below the trimmed height.
-        const natural = strip.offsetHeight > 0 ? strip.offsetHeight : 30;
-        const height = Math.max(20, natural - 5);
-        strip.style.height = `${height}px`;
-        const applied = strip.offsetHeight > 0 ? strip.offsetHeight : height;
-        appMount.style.marginTop = `${applied}px`;
-        // Never clobber an inline height Discord itself set.
-        if (!appMount.style.height) {
-            appMount.style.height = `calc(100vh - ${applied}px)`;
-        }
-    }
-    const ops = nativeWindowOps();
-    if (typeof ops.drag === "function" && strip && !strip.dataset.remcordDragBound) {
-        strip.dataset.remcordDragBound = "1";
-        strip.addEventListener("mousedown", (event) => {
-            const target = event.target as HTMLElement | null;
-            if (target?.closest("#minimize,#maximize,#quit")) return;
-            if (event.button !== 0) return;
-            event.preventDefault();
-            ops.drag!();
-        });
-    }
+    (window as unknown as { __remcordHeaderLabelDone?: boolean }).__remcordHeaderLabelDone = true;
 }
 
-function resetNativeTitlebarPush() {
-    const appMount = document.getElementById("app-mount");
-    appMount?.style.removeProperty("margin-top");
-    // Only remove the compensation we added; leave Discord's own inline
-    // height (if any) untouched.
-    if (appMount?.style.height.startsWith("calc(100vh -")) {
-        appMount.style.removeProperty("height");
+/** Attach the drag handle to a header element (once per node). */
+function bindHeaderDrag(header: HTMLElement) {
+    const ops = nativeWindowOps();
+    if (typeof ops.drag !== "function" || header.dataset.remcordDragBound) return;
+    header.dataset.remcordDragBound = "1";
+    header.addEventListener("mousedown", (event) => {
+        const target = event.target as HTMLElement | null;
+        if (
+            target?.closest(
+                "#minimize,#maximize,#quit,a,button,[role='button'],input,textarea,[role='textbox'],[contenteditable='true']",
+            )
+        )
+            return;
+        if (event.button !== 0) return;
+        event.preventDefault();
+        ops.drag!();
+    });
+}
+
+/** Watch the label's parent for childList swaps (React title updates wipe
+ * unknown children): re-insert on the next mutation. Scoped to the header
+ * node only — chat churn elsewhere never reaches this callback. */
+function watchHeaderLabel(header: HTMLElement) {
+    if (headerObserver) headerObserver.disconnect();
+    headerObserver = new MutationObserver(() => {
+        if (!document.getElementById(REMCORD_HEADER_LABEL_ID)) ensureHeaderLabel();
+    });
+    headerObserver.observe(header, { childList: true, subtree: false });
+}
+
+/**
+ * Ensure the label exists, is bound, and is watched. Returns true when the
+ * label is present afterwards. Re-queries Discord's header from scratch
+ * whenever the span is missing, so a replaced header node is adopted
+ * instead of mourned.
+ */
+function ensureHeaderLabel(): boolean {
+    const live = document.getElementById(REMCORD_HEADER_LABEL_ID);
+    if (live) {
+        const parent = live.parentElement as HTMLElement | null;
+        if (parent) {
+            bindHeaderDrag(parent);
+            watchHeaderLabel(parent);
+        }
+        return true;
+    }
+    // Discord obfuscates its classes: try the title slot first (exact
+    // inline alignment beside e.g. "Friends"), then wider top-bar
+    // containers as fallback (label still lands in the top bar).
+    const selectors = ['div[class*="title"]', 'div[class*="toolbar"]', 'div[class*="header"]', "header"];
+    for (const selector of selectors) {
+        const titles = document.querySelectorAll(selector);
+        for (const el of Array.from(titles)) {
+            const header = el as HTMLElement;
+            // The label is a sibling span, never an input child: containers
+            // that happen to hold a search box elsewhere are still fine.
+            if ((header.textContent ?? "").trim().length === 0) continue;
+            // Top bar only: never sign a title halfway down the page.
+            try {
+                if (header.getBoundingClientRect().top > 150) continue;
+            } catch {
+                continue;
+            }
+            const label = document.createElement("span");
+            label.id = REMCORD_HEADER_LABEL_ID;
+            label.textContent = " \u2502 Remcord";
+            label.style.cssText = "opacity:0.75;user-select:none;cursor:default;white-space:nowrap;";
+            header.append(label);
+            bindHeaderDrag(header);
+            watchHeaderLabel(header);
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Native-shell titlebar assembly: working controls plus the inline header
+ * label. No separate strip, no layout push, no extra vertical space: the
+ * window chrome lives inside Discord's own top bar. Discord's header may
+ * mount after the plugin starts, so a bounded retry (3s) covers late
+ * mounts; React title swaps are healed by the header observer.
+ */
+function injectNativeTitlebar() {
+    injectButtonControls();
+    if (ensureHeaderLabel()) {
+        stopLabelRetry();
+        return;
+    }
+    // Each host (re)start gets its own retry budget: a previous pass may
+    // have given up before Discord mounted its header.
+    (window as unknown as { __remcordHeaderLabelDone?: boolean }).__remcordHeaderLabelDone = false;
+    if (labelRetryTimer === null) {
+        let attempts = 0;
+        labelRetryTimer = setInterval(() => {
+            attempts += 1;
+            if (ensureHeaderLabel() || attempts >= 6) stopLabelRetry();
+        }, 1000);
     }
 }
 
 function layerPush(payload: { type: string; component: string }) {
     console.log(payload.component);
     if (payload.component === "USER_SETTINGS") {
-        // The native shell already draws its own persistent strip: never
-        // stack a second one when the settings layer opens.
-        if (document.getElementById("remcordTitlebar")) return;
         const elem = document.createElement("div");
         elem.innerHTML = titlebarOverlayHTML;
         elem.id = "remcordTitlebar";
@@ -186,9 +251,9 @@ function layerPop() {
 export function onLoad() {
     log("Remcord Titlebar Controller");
     // The native shell is always frameless, independent of the
-    // Electron-consumed `windowStyle` value: draw the full titlebar strip
-    // (drag handle + working controls, Discord content pushed below) for
-    // every style. The overlay subscriptions below still apply so
+    // Electron-consumed `windowStyle` value: sign Discord's own top-bar
+    // title and inject working controls, without taking any extra vertical
+    // space. The overlay subscriptions below still apply so
     // settings-layer chrome keeps working.
     const native = isNativeShell();
     if (native) {
@@ -222,9 +287,18 @@ export function onUnload() {
     dispatcher.unsubscribe("LAYER_PUSH", layerPush);
     dispatcher.unsubscribe("LAYER_POP", layerPop);
     // The host stale-sweep also covers these, but an unload must not leave
-    // dead controls (or their listeners) behind in either shell. The native
-    // content push is removed too so no gap is left behind.
+    // dead controls (or their listeners) behind in either shell. Timers and
+    // observers die here too — never a retry loop or a watcher left
+    // running.
+    if (labelRetryTimer !== null) {
+        clearInterval(labelRetryTimer);
+        labelRetryTimer = null;
+    }
+    if (headerObserver) {
+        headerObserver.disconnect();
+        headerObserver = null;
+    }
     document.getElementById("remcordNavControls")?.remove();
     document.getElementById("remcordTitlebar")?.remove();
-    resetNativeTitlebarPush();
+    document.getElementById(REMCORD_HEADER_LABEL_ID)?.remove();
 }
