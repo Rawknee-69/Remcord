@@ -16,7 +16,7 @@
     "packageQuick": "pnpm run build && electron-builder --dir",
     "lint": "biome check",
     "lint:fix": "biome check --write",
-    "test": "node --experimental-strip-types --import ./tests/register-ts.mjs --test tests/screenshare-previews.test.ts tests/rpc-blacklist-cache.test.ts tests/settings-scroll-restoration.test.ts tests/shelter-plugin-lifecycle.test.ts tests/native-folders-dispatch.test.ts tests/native-themes-dispatch.test.ts tests/native-backup-dispatch.test.ts",
+    "test": "node --experimental-strip-types --import ./tests/register-ts.mjs --test tests/screenshare-previews.test.ts tests/rpc-blacklist-cache.test.ts tests/settings-scroll-restoration.test.ts tests/shelter-plugin-lifecycle.test.ts tests/native-folders-dispatch.test.ts tests/native-themes-dispatch.test.ts tests/native-backup-dispatch.test.ts tests/update-feed.test.ts tests/custom-bundles.test.ts tests/meta-repo.test.ts tests/arrpc-vendor.test.ts",
     "postinstall": "electron-builder install-app-deps",
     "CIbuild": "pnpm run build && electron-builder --linux zip && electron-builder --windows zip && electron-builder --macos zip",
     "updateMeta": "node --experimental-strip-types scripts/utils/updateMeta.ts"
@@ -52,7 +52,7 @@
   "dependencies": {
     "@jellybrick/dbus-next": "^0.11.1",
     "adm-zip": "^0.6.0",
-    "arrpc": "github:Legcord/arrpc#efe7589762470d32b9ba10d529be5acc23cd0e19",
+    "arrpc": "file:vendor/arrpc",
     "electron-context-menu": "^4.1.2",
     "electron-is-dev": "^3.0.1",
     "electron-updater": "^6.8.9",

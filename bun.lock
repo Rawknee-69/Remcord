@@ -7,7 +7,7 @@
       "dependencies": {
         "@jellybrick/dbus-next": "^0.11.1",
         "adm-zip": "^0.6.0",
-        "arrpc": "github:Legcord/arrpc#efe7589762470d32b9ba10d529be5acc23cd0e19",
+        "arrpc": "file:vendor/arrpc",
         "electron-context-menu": "^4.1.2",
         "electron-is-dev": "^3.0.1",
         "electron-updater": "^6.8.9",
@@ -436,7 +436,7 @@
 
     "array-union": ["array-union@2.1.0", "", {}, "sha512-HGyxoOTYUyCM6stUe6EJgnd4EoewAI7zMdfqO+kGjnlZmBDz/cR5pf8r/cR4Wq60sL/p0IkcjUEEPwS3GFrIyw=="],
 
-    "arrpc": ["arrpc@github:Legcord/arrpc#efe7589", { "dependencies": { "koffi": "^2.12.0", "ws": "^8.18.0" }, "bin": { "arrpc": "src/index.js" } }, "Legcord-arrpc-efe7589", "sha512-qsFEvEDs6kmhc6uMqh08MgUj3IsWyIBuHlI16E6YtNQj/+DPoEvDnjeYCBZZrfhEge8qe0Q1PLPOd2CSD0BJJA=="],
+    "arrpc": ["arrpc@file:vendor/arrpc", { "dependencies": { "koffi": "^2.12.0", "ws": "^8.18.0" } }],
 
     "asn1js": ["asn1js@3.0.10", "", { "dependencies": { "pvtsutils": "^1.3.6", "pvutils": "^1.1.5", "tslib": "^2.8.1" } }, "sha512-S2s3aOytiKdFRdulw2qPE51MzjzVOisppcVv7jVFR+Kw0kxwvFrDcYA0h7Ndqbmj0HkMIXYWaoj7fli8kgx1eg=="],
 

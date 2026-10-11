@@ -18,8 +18,8 @@ importers:
         specifier: ^0.6.0
         version: 0.6.0
       arrpc:
-        specifier: github:Legcord/arrpc#efe7589762470d32b9ba10d529be5acc23cd0e19
-        version: https://codeload.github.com/Legcord/arrpc/tar.gz/efe7589762470d32b9ba10d529be5acc23cd0e19
+        specifier: file:vendor/arrpc
+        version: file:vendor/arrpc
       electron-context-menu:
         specifier: ^4.1.2
         version: 4.1.2
@@ -1222,10 +1222,9 @@ packages:
     resolution: {integrity: sha512-HGyxoOTYUyCM6stUe6EJgnd4EoewAI7zMdfqO+kGjnlZmBDz/cR5pf8r/cR4Wq60sL/p0IkcjUEEPwS3GFrIyw==}
     engines: {node: '>=8'}
 
-  arrpc@https://codeload.github.com/Legcord/arrpc/tar.gz/efe7589762470d32b9ba10d529be5acc23cd0e19:
-    resolution: {gitHosted: true, integrity: sha512-oxxPz88l9/VDvmgkepTGlhstBkt2kAO4SqxUjRu+pql4mQ2GSagDCjsYv4Lg3KnuazbuqRkl0K5KzOUzdBBJZQ==, tarball: https://codeload.github.com/Legcord/arrpc/tar.gz/efe7589762470d32b9ba10d529be5acc23cd0e19}
+  arrpc@file:vendor/arrpc:
+    resolution: {directory: vendor/arrpc, type: directory}
     version: 3.5.0
-    hasBin: true
 
   asn1js@3.0.10:
     resolution: {integrity: sha512-S2s3aOytiKdFRdulw2qPE51MzjzVOisppcVv7jVFR+Kw0kxwvFrDcYA0h7Ndqbmj0HkMIXYWaoj7fli8kgx1eg==}
@@ -3955,7 +3954,7 @@ snapshots:
 
   array-union@2.1.0: {}
 
-  arrpc@https://codeload.github.com/Legcord/arrpc/tar.gz/efe7589762470d32b9ba10d529be5acc23cd0e19:
+  arrpc@file:vendor/arrpc:
     dependencies:
       koffi: 2.16.3
       ws: 8.21.1
