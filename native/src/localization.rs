@@ -30,7 +30,7 @@ pub const MAX_LANG_VALUE_BYTES: usize = 4 * 1024;
 /// Maximum accepted language code length (generous BCP 47 bound).
 pub const MAX_LANG_CODE_BYTES: usize = 32;
 
-include!(concat!(env!("OUT_DIR"), "/legcord_lang/lang_catalogs.rs"));
+include!(concat!(env!("OUT_DIR"), "/remcord_lang/lang_catalogs.rs"));
 
 fn parsed_catalogs() -> &'static HashMap<&'static str, HashMap<String, String>> {
     static CATALOGS: OnceLock<HashMap<&'static str, HashMap<String, String>>> = OnceLock::new();
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn missing_keys_return_empty_string_like_electron() {
         let profile = unique_profile_dir("missing");
-        let found = lookup(&profile, "legcord-native-no-such-key");
+        let found = lookup(&profile, "remcord-native-no-such-key");
         assert_eq!(found.value, "");
         assert_eq!(found.lang, "en-US");
     }

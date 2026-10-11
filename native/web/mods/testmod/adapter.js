@@ -7,16 +7,16 @@
     // This file is never included in the native document-start script, never
     // touches Discord UI, and never submits account state.
     if (window.location.origin !== "https://discord.com") return;
-    const substrate = window.__legcordNativeModSubstrate;
+    const substrate = window.__remcordNativeModSubstrate;
     if (!substrate) return;
 
     substrate.createModAdapter({
         capability: "mod.test.get_bundle",
         requestBundle: (native) => native.getTestModBundle(),
         requestTimeoutMs: 5000,
-        adapterFlag: "__legcordNativeTestModAdapter",
-        stateName: "__legcordNativeTestMod",
-        bootstrapEvent: "legcord-native:testmod-bootstrap",
+        adapterFlag: "__remcordNativeTestModAdapter",
+        stateName: "__remcordNativeTestMod",
+        bootstrapEvent: "remcord-native:testmod-bootstrap",
         expectedMarker: "testmod-bootstrap-executed",
         resultEvent: "testmod_bootstrap_result",
         ackEvent: "testmod_response_ack",

@@ -3,7 +3,7 @@
     "use strict";
 
     if (window.location.origin !== "https://discord.com") return;
-    const substrate = window.__legcordNativeModSubstrate;
+    const substrate = window.__remcordNativeModSubstrate;
     if (!substrate) {
         try {
             window.ipc.postMessage(
@@ -39,9 +39,9 @@
         capability: "mod.get_bundle",
         requestBundle: (native) => native.getModBundle("equicord"),
         requestTimeoutMs: 120_000,
-        adapterFlag: "__legcordNativeEquicordAdapter",
-        stateName: "__legcordNativeEquicord",
-        bootstrapEvent: "legcord-native:equicord-bootstrap",
+        adapterFlag: "__remcordNativeEquicordAdapter",
+        stateName: "__remcordNativeEquicord",
+        bootstrapEvent: "remcord-native:equicord-bootstrap",
         expectedMarker: "equicord-bootstrap-executed",
         // The host injects Equicord's stylesheet and reports its own result;
         // this adapter therefore names NO CSS event. The host's CSS result

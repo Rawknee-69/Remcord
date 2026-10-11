@@ -395,7 +395,7 @@ mod tests {
     fn loaded(id: &str, css: &str) -> LoadedTheme {
         LoadedTheme {
             id: id.to_owned(),
-            style_id: format!("legcord-native-theme-{id}"),
+            style_id: format!("remcord-native-theme-{id}"),
             css: css.to_owned(),
             css_bytes: css.len(),
         }
@@ -407,7 +407,7 @@ mod tests {
             .expect("system clock must advance")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "legcord-native-livecss-test-{}-{}",
+            "remcord-native-livecss-test-{}-{}",
             std::process::id(),
             nanos
         ));
@@ -618,7 +618,7 @@ mod tests {
         assert!(diff.updated.is_empty() && diff.added.is_empty());
         assert_eq!(
             diff.removed_style_ids,
-            vec!["legcord-native-theme-zulu".to_owned()]
+            vec!["remcord-native-theme-zulu".to_owned()]
         );
         assert!(diff.is_structural());
     }

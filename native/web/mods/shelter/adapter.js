@@ -3,7 +3,7 @@
     "use strict";
 
     if (window.location.origin !== "https://discord.com") return;
-    const substrate = window.__legcordNativeModSubstrate;
+    const substrate = window.__remcordNativeModSubstrate;
     if (!substrate) {
         try {
             window.ipc.postMessage(
@@ -43,9 +43,9 @@
         capability: "mod.get_bundle",
         requestBundle: (native) => native.getModBundle("shelter"),
         requestTimeoutMs: 180_000,
-        adapterFlag: "__legcordNativeShelterAdapter",
-        stateName: "__legcordNativeShelter",
-        bootstrapEvent: "legcord-native:shelter-bootstrap",
+        adapterFlag: "__remcordNativeShelterAdapter",
+        stateName: "__remcordNativeShelter",
+        bootstrapEvent: "remcord-native:shelter-bootstrap",
         expectedMarker: "shelter-bootstrap-executed",
         resultEvent: "mod_bootstrap_result",
         ackEvent: "mod_response_ack",

@@ -73,7 +73,7 @@ const equicordAdapterCode = stripComments(equicordAdapter);
 function createBootstrap(capabilities, settingsBoot = defaultSettingsBoot(), hostPlatform = defaultHostPlatform()) {
     return bootstrapTemplate
         .replace(
-            "__LEGCORD_BOOT_SNAPSHOT__",
+            "__REMCORD_BOOT_SNAPSHOT__",
             JSON.stringify({
                 runtime: "webview2",
                 platform: "win32",
@@ -81,8 +81,8 @@ function createBootstrap(capabilities, settingsBoot = defaultSettingsBoot(), hos
                 capabilities,
             }),
         )
-        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", JSON.stringify(settingsBoot))
-        .replace("__LEGCORD_HOST_PLATFORM__", JSON.stringify(hostPlatform));
+        .replace("__REMCORD_SETTINGS_BOOT_SNAPSHOT__", JSON.stringify(settingsBoot))
+        .replace("__REMCORD_HOST_PLATFORM__", JSON.stringify(hostPlatform));
 }
 
 /** Minimal host platform fixture, mirroring the host builder. */
@@ -212,7 +212,7 @@ function createSyntheticModRuntime(capabilities = ["mod.test.get_bundle"]) {
 
 function respondPing(window, request, payload) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -226,7 +226,7 @@ function respondPing(window, request, payload) {
 
 function respondVencord(window, request, payload = {}) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -256,9 +256,9 @@ function respondVencord(window, request, payload = {}) {
 /** The per-mod wire identity each adapter must use, keyed by logical id. */
 const MOD_WIRE = {
     vencord: {
-        stateName: "__legcordNativeVencord",
-        adapterFlag: "__legcordNativeVencordAdapter",
-        domEvent: "legcord-native:vencord-bootstrap",
+        stateName: "__remcordNativeVencord",
+        adapterFlag: "__remcordNativeVencordAdapter",
+        domEvent: "remcord-native:vencord-bootstrap",
         marker: "vencord-bootstrap-executed",
         version: "b52ed36",
         // Legacy Vencord-named event family (byte-identical to Phase A).
@@ -270,9 +270,9 @@ const MOD_WIRE = {
         cssInjectionMs: 2,
     },
     shelter: {
-        stateName: "__legcordNativeShelter",
-        adapterFlag: "__legcordNativeShelterAdapter",
-        domEvent: "legcord-native:shelter-bootstrap",
+        stateName: "__remcordNativeShelter",
+        adapterFlag: "__remcordNativeShelterAdapter",
+        domEvent: "remcord-native:shelter-bootstrap",
         marker: "shelter-bootstrap-executed",
         // Header-less artifact: the host reports a content digest, not a banner.
         version: "sha256-ba858e9cfb83503f",
@@ -285,9 +285,9 @@ const MOD_WIRE = {
         cssInjectionMs: null,
     },
     equicord: {
-        stateName: "__legcordNativeEquicord",
-        adapterFlag: "__legcordNativeEquicordAdapter",
-        domEvent: "legcord-native:equicord-bootstrap",
+        stateName: "__remcordNativeEquicord",
+        adapterFlag: "__remcordNativeEquicordAdapter",
+        domEvent: "remcord-native:equicord-bootstrap",
         marker: "equicord-bootstrap-executed",
         version: "1489c0e2a4435d854d7343a5cfb0abb894772318",
         resultEvent: "mod_bootstrap_result",
@@ -302,7 +302,7 @@ const MOD_WIRE = {
 function respondMod(window, request, modId, payload = {}) {
     const wire = MOD_WIRE[modId];
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -349,7 +349,7 @@ function dispatchBootstrap(window, request, modId, overrides = {}) {
 
 function respondSettings(window, request, settings = {}, extra = {}) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -431,7 +431,7 @@ test("settings.getConfig rejects host failures without a snapshot", async () => 
     const pending = window.legcord.settings.getConfig();
     const message = window.messages.find((entry) => entry.command?.type === "settings_get_config");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -480,7 +480,7 @@ function createMutationRuntime(
 
 function respondMutation(window, request, value = true, extra = {}) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -564,7 +564,7 @@ test("the mutation setter rejects host failures without applying state", async (
     const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
     const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -624,7 +624,7 @@ test("the migrated caller updates local state only from the host-confirmed value
         (entry) => entry.command?.type === "settings_set_block_power_saving",
     );
     failing.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: failedMessage.request_id,
@@ -644,7 +644,7 @@ function createSettingsSetRuntime(capabilities = ["bridge.ping", "settings.get_c
 
 function respondSettingsSet(window, request, key, value, extra = {}) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -796,7 +796,7 @@ test("window-state events converge local reads and body attributes without polli
     assert.equal(window.legcord.window.isNormal(), true);
 
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:window-state", {
+        new FakeCustomEvent("remcord-native:window-state", {
             detail: { version: 1, focused: true, maximized: true },
         }),
     );
@@ -807,7 +807,7 @@ test("window-state events converge local reads and body attributes without polli
     assert.equal(attributes.has("unFocused"), false);
 
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:window-state", {
+        new FakeCustomEvent("remcord-native:window-state", {
             detail: { version: 1, focused: false, maximized: false },
         }),
     );
@@ -817,14 +817,14 @@ test("window-state events converge local reads and body attributes without polli
     assert.equal(attributes.get("unFocused"), "");
 
     // Malformed details are ignored: no listener throw, no state change.
-    window.dispatchEvent(new FakeCustomEvent("legcord-native:window-state", { detail: null }));
+    window.dispatchEvent(new FakeCustomEvent("remcord-native:window-state", { detail: null }));
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:window-state", {
+        new FakeCustomEvent("remcord-native:window-state", {
             detail: { version: 2, focused: true, maximized: true },
         }),
     );
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:window-state", {
+        new FakeCustomEvent("remcord-native:window-state", {
             detail: { version: 1, focused: "yes", maximized: true },
         }),
     );
@@ -965,7 +965,7 @@ test("an unregistered but well-formed id is refused by the host registry", async
         const message = window.messages.filter((entry) => entry.command?.type === "mod_get_bundle").pop();
         assert.deepEqual(message.command.payload, { mod_id: unregistered });
         window.dispatchEvent(
-            new FakeCustomEvent("legcord-native:response", {
+            new FakeCustomEvent("remcord-native:response", {
                 detail: {
                     version: 1,
                     request_id: message.request_id,
@@ -1043,7 +1043,7 @@ test("propagates a typed bundle failure without reclassifying it as adapter init
     vm.runInContext(vencordAdapter, context);
     const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -1055,7 +1055,7 @@ test("propagates a typed bundle failure without reclassifying it as adapter init
     );
     await Promise.resolve();
     await Promise.resolve();
-    assert.equal(window.__legcordNativeVencord.status, "failed");
+    assert.equal(window.__remcordNativeVencord.status, "failed");
     assert.equal(
         window.messages.some((message) => message.event?.type === "vencord_adapter_error"),
         false,
@@ -1073,7 +1073,7 @@ test("denies Vencord startup when the boot snapshot does not grant the capabilit
         window.messages.some((message) => message.event?.type === "vencord_adapter_error"),
         true,
     );
-    assert.equal(window.__legcordNativeVencord.status, "failed");
+    assert.equal(window.__remcordNativeVencord.status, "failed");
 });
 
 test("Vencord adapter executes once and marks only the bootstrap result", async () => {
@@ -1083,10 +1083,10 @@ test("Vencord adapter executes once and marks only the bootstrap result", async 
     const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
     assert.ok(request);
     assert.equal(window.messages.filter((message) => message.command?.type === "mod_get_bundle").length, 1);
-    assert.equal(window.__legcordNativeVencord.status, "pending");
+    assert.equal(window.__remcordNativeVencord.status, "pending");
 
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:vencord-bootstrap", {
+        new FakeCustomEvent("remcord-native:vencord-bootstrap", {
             detail: {
                 request_id: request.request_id,
                 ok: true,
@@ -1100,9 +1100,9 @@ test("Vencord adapter executes once and marks only the bootstrap result", async 
     respondVencord(window, request);
     await Promise.resolve();
     await Promise.resolve();
-    assert.equal(window.__legcordNativeVencord.status, "executed");
-    assert.equal(window.__legcordNativeVencord.marker, "vencord-bootstrap-executed");
-    assert.equal(window.__legcordNativeVencord.executionCount, 1);
+    assert.equal(window.__remcordNativeVencord.status, "executed");
+    assert.equal(window.__remcordNativeVencord.marker, "vencord-bootstrap-executed");
+    assert.equal(window.__remcordNativeVencord.executionCount, 1);
     const bootstrapResult = window.messages.find((message) => message.event?.type === "vencord_bootstrap_result");
     assert.equal(bootstrapResult.event.payload.local_storage_api, "available");
     assert.equal(bootstrapResult.event.payload.settings_state, "missing");
@@ -1117,8 +1117,8 @@ test("a fresh document gets independent Vencord bootstrap state", () => {
     vm.runInContext(vencordAdapter, firstDocument.context);
     const secondDocument = createRuntime();
     vm.runInContext(vencordAdapter, secondDocument.context);
-    assert.notEqual(firstDocument.window.__legcordNativeVencord, secondDocument.window.__legcordNativeVencord);
-    assert.equal(secondDocument.window.__legcordNativeVencord.status, "pending");
+    assert.notEqual(firstDocument.window.__remcordNativeVencord, secondDocument.window.__remcordNativeVencord);
+    assert.equal(secondDocument.window.__remcordNativeVencord.status, "pending");
     assert.equal(
         secondDocument.window.messages.filter((message) => message.command?.type === "mod_get_bundle").length,
         1,
@@ -1147,7 +1147,7 @@ test("a reloaded document re-requests the known bundle through the shared capabi
     const lateRequest = firstDocument.window.legcord.native.getModBundle("vencord");
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await assert.rejects(lateRequest, /document was disposed/);
-    assert.equal(secondDocument.window.__legcordNativeVencord.status, "pending");
+    assert.equal(secondDocument.window.__remcordNativeVencord.status, "pending");
     respondVencord(secondDocument.window, secondRequest, { mod_id: "equicord" });
     await Promise.resolve();
     await Promise.resolve();
@@ -1156,7 +1156,7 @@ test("a reloaded document re-requests the known bundle through the shared capabi
     // registry id is not Vencord: a cross-mod bundle can never be
     // acknowledged as a Vencord bootstrap even with a perfect marker.
     secondDocument.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:vencord-bootstrap", {
+        new FakeCustomEvent("remcord-native:vencord-bootstrap", {
             detail: {
                 request_id: secondRequest.request_id,
                 ok: true,
@@ -1167,12 +1167,12 @@ test("a reloaded document re-requests the known bundle through the shared capabi
             },
         }),
     );
-    assert.equal(secondDocument.window.__legcordNativeVencord.status, "executed");
+    assert.equal(secondDocument.window.__remcordNativeVencord.status, "executed");
     respondVencord(secondDocument.window, secondRequest, { mod_id: "equicord" });
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    assert.match(secondDocument.window.__legcordNativeVencord.error, /not for Vencord/);
+    assert.match(secondDocument.window.__remcordNativeVencord.error, /not for Vencord/);
     assert.equal(
         secondDocument.window.messages.some((message) => message.event?.type === "vencord_response_ack"),
         false,
@@ -1182,12 +1182,12 @@ test("a reloaded document re-requests the known bundle through the shared capabi
 
 test("the substrate factory is idempotent and shared by every adapter", () => {
     const { window, context } = createRuntime();
-    const factory = window.__legcordNativeModSubstrate;
+    const factory = window.__remcordNativeModSubstrate;
     assert.ok(factory);
     assert.equal(typeof factory.createModAdapter, "function");
     assert.equal(Object.isFrozen(factory), true);
     vm.runInContext(modSubstrate, context);
-    assert.equal(window.__legcordNativeModSubstrate, factory);
+    assert.equal(window.__remcordNativeModSubstrate, factory);
 });
 
 // ---------------------------------------------------------------------------
@@ -1350,7 +1350,7 @@ for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
         vm.runInContext(adapter, context);
         const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
         window.dispatchEvent(
-            new FakeCustomEvent("legcord-native:response", {
+            new FakeCustomEvent("remcord-native:response", {
                 detail: {
                     version: 1,
                     request_id: request.request_id,
@@ -1413,7 +1413,7 @@ test("Shelter's descriptor needs no CSS stage and reports null CSS metadata", ()
     // The host answers with both CSS fields null, which the facade accepts.
     const [result] = window.messages.filter((message) => message.event?.type === "mod_bootstrap_result");
     assert.equal(result.event.payload.ok, true);
-    assert.equal(window.__legcordNativeShelter.status, "executed");
+    assert.equal(window.__remcordNativeShelter.status, "executed");
     // Shelter's own adapter declares no CSS vocabulary at all: there is no
     // stylesheet to inject and no empty style element to manufacture.
     assert.doesNotMatch(shelterAdapterCode, /cssResultEvent/);
@@ -1431,7 +1431,7 @@ test("Equicord's descriptor carries a real CSS stage and stylesheet size", async
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    const state = window.__legcordNativeEquicord;
+    const state = window.__remcordNativeEquicord;
     assert.equal(state.status, "executed");
     assert.equal(state.cssBytes, 217092);
     assert.equal(state.cssInjectionMs, 5);
@@ -1466,11 +1466,11 @@ test("the mod_bundle response schema distinguishes no-CSS from CSS", async () =>
 
 test("the shared factory serves Shelter and Equicord without Vencord identifiers", () => {
     for (const code of [shelterAdapterCode, equicordAdapterCode]) {
-        assert.match(code, /__legcordNativeModSubstrate/);
+        assert.match(code, /__remcordNativeModSubstrate/);
         assert.match(code, /substrate\.createModAdapter\(/);
         // Neither adapter reaches into Vencord's identity or state: they use
         // only the shared factory and their own names.
-        assert.doesNotMatch(code, /__legcordNativeVencord/);
+        assert.doesNotMatch(code, /__remcordNativeVencord/);
         assert.doesNotMatch(code, /vencord-bootstrap-executed/);
         assert.doesNotMatch(code, /getModBundle\("vencord"\)/);
         assert.doesNotMatch(code, /legcord-native-vencord/);
@@ -1481,7 +1481,7 @@ test("the shared factory serves Shelter and Equicord without Vencord identifiers
 test("a synthetic second mod runs the full substrate cycle without Vencord", async () => {
     const { window, host } = createSyntheticModRuntime();
     assert.equal(window.__legcordNativeTestMod.status, "pending");
-    assert.equal(window.__legcordNativeVencord, undefined);
+    assert.equal(window.__remcordNativeVencord, undefined);
 
     window.dispatchEvent(
         new FakeCustomEvent("legcord-native:testmod-bootstrap", {
@@ -1535,7 +1535,7 @@ function createLangRuntime(capabilities = ["bridge.ping", "localization.get_lang
 
 function respondLang(window, request, value = "Go back to the Discord app", lang = "en-US") {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -1611,7 +1611,7 @@ test("getLang rejects host failures with the typed error", async () => {
     const pending = window.legcord.getLang("invite-goBackToApp");
     const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -1658,7 +1658,7 @@ function createAppRuntime(capabilities = ["bridge.ping", "app.get_version"]) {
 
 function respondAppVersion(window, request, version = "1.3.0") {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -1731,7 +1731,7 @@ test("app.get_version rejects host failures with the typed error", async () => {
     const pending = window.legcord.native.getVersion();
     const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -1850,7 +1850,7 @@ const BUNDLE_FIXTURE = [
 
 function respondBundlesList(window, request, bundles = BUNDLE_FIXTURE) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -1948,7 +1948,7 @@ test("backup.list_bundles rejects host failures with the typed error", async () 
     const pending = window.legcord.backup.listBundles();
     const message = window.messages.find((entry) => entry.command?.type === "bundles_list");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -2012,7 +2012,7 @@ const BACKUP_SAVE_PAYLOAD = JSON.stringify({
 
 function respondBackupSaved(window, request, payload = { canceled: false, bytes: 2048 }) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -2055,7 +2055,7 @@ test("backup.save maps typed host failures to the Electron error shape", async (
     const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
     const message = window.messages.find((entry) => entry.command?.type === "backup_save");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -2172,7 +2172,7 @@ const BACKUP_RESTORE_ENVELOPE = {
 
 function respondBackupRestored(window, request, payload = { canceled: false, client_mods: BACKUP_RESTORE_ENVELOPE }) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -2214,7 +2214,7 @@ test("backup.restore maps typed host failures to the Electron error shape", asyn
     const pending = window.legcord.backup.restore();
     const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -2324,7 +2324,7 @@ function createFoldersRuntime(capabilities = ["bridge.ping", "folders.open", "fo
 
 function respondFoldersOpened(window, request, location = "themes") {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -2338,7 +2338,7 @@ function respondFoldersOpened(window, request, location = "themes") {
 
 function respondThemeFolderOpened(window, request, id = "my-theme") {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -2452,7 +2452,7 @@ test("folder responses reject mismatched echoes and path-bearing members", async
     const pendingPath = withPath.window.legcord.folders.openTheme("my-theme");
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "folders_open_theme");
     withPath.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messagePath.request_id,
@@ -2477,7 +2477,7 @@ test("folder requests reject host failures with the typed error", async () => {
     const pendingReveal = window.legcord.folders.open("themes");
     const messageReveal = window.messages.find((entry) => entry.command?.type === "folders_open");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messageReveal.request_id,
@@ -2492,7 +2492,7 @@ test("folder requests reject host failures with the typed error", async () => {
     const pendingOpen = window.legcord.folders.openTheme("my-theme");
     const messageOpen = window.messages.find((entry) => entry.command?.type === "folders_open_theme");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messageOpen.request_id,
@@ -2546,7 +2546,7 @@ const INSTALL_FIXTURE_CSS = "/**\n * @name Midnight Harbor\n * @author Harbor Li
 
 function respondThemeInstalled(window, request, payload = { id: "Midnight-Harbor-BD", enabled: false }) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -2639,7 +2639,7 @@ test("themes.install_code rejects malformed install responses", async () => {
     const pendingPath = withPath.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_install_code");
     withPath.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messagePath.request_id,
@@ -2665,7 +2665,7 @@ test("themes.install_code rejects host failures with the typed error", async () 
     const pending = window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const message = window.messages.find((entry) => entry.command?.type === "theme_install_code");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -2714,7 +2714,7 @@ const WRITE_FIXTURE_CSS = ":root{\n  --legcord-native-write-probe: second;\n}\n"
 
 function respondThemeWritten(window, request, payload = { id: "my-theme", enabled: true }) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -2786,7 +2786,7 @@ test("themes.write_css rejects mismatched echoes and foreign members", async () 
     const pendingPath = withPath.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_write_css");
     withPath.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messagePath.request_id,
@@ -2811,7 +2811,7 @@ test("themes.write_css rejects mismatched echoes and foreign members", async () 
     const pendingBool = noBool.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const messageBool = noBool.window.messages.find((entry) => entry.command?.type === "theme_write_css");
     noBool.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messageBool.request_id,
@@ -2832,7 +2832,7 @@ test("themes.write_css rejects host failures with the typed error", async () => 
     const pending = window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const message = window.messages.find((entry) => entry.command?.type === "theme_write_css");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -2892,7 +2892,7 @@ function createImportRuntime(capabilities = ["bridge.ping", "themes.import_files
 
 function respondThemeImported(window, request, payload = { canceled: false, imported: 1, failed: 0 }) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -2978,7 +2978,7 @@ test("themes.import_files rejects malformed summaries without path leakage", asy
     const pendingPath = withPath.window.legcord.themes.importFiles();
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_import_files");
     withPath.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messagePath.request_id,
@@ -2999,7 +2999,7 @@ test("themes.import_files maps host failures to typed errors", async () => {
     const pending = window.legcord.themes.importFiles();
     const message = window.messages.find((entry) => entry.command?.type === "theme_import_files");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -3055,7 +3055,7 @@ function createEnableRuntime(capabilities = ["bridge.ping", "themes.set_enabled"
 
 function respondThemeEnabled(window, request, payload = { id: "my-theme", enabled: true }) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -3140,7 +3140,7 @@ test("themes.set_enabled rejects echo mismatches and path ridealongs", async () 
     const pendingPath = withPath.window.legcord.themes.setEnabled("my-theme", true);
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     withPath.window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: messagePath.request_id,
@@ -3161,7 +3161,7 @@ test("themes.set_enabled maps host failures to typed errors", async () => {
     const pending = window.legcord.themes.setEnabled("my-theme", true);
     const message = window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: message.request_id,
@@ -3218,7 +3218,7 @@ const LIST_FIXTURE = [
 
 function respondThemesList(window, request, themes = LIST_FIXTURE) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -3349,7 +3349,7 @@ function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_stora
 function respondPluginRead(window, request, data = "hello legcord") {
     const bytes = new TextEncoder().encode(data).length;
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -3363,7 +3363,7 @@ function respondPluginRead(window, request, data = "hello legcord") {
 
 function respondPluginWrite(window, request, payloadBytes = 5) {
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:response", {
+        new FakeCustomEvent("remcord-native:response", {
             detail: {
                 version: 1,
                 request_id: request.request_id,
@@ -3469,7 +3469,7 @@ test("pluginStorage propagates typed host failures", async () => {
         const pending = window.legcord.pluginStorage.readFile("p", "a.txt");
         const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
         window.dispatchEvent(
-            new FakeCustomEvent("legcord-native:response", {
+            new FakeCustomEvent("remcord-native:response", {
                 detail: {
                     version: 1,
                     request_id: message.request_id,

@@ -32,8 +32,8 @@
 //!   `addTheme` unconditionally). Enabled-vs-disabled is therefore observable
 //!   as style-present vs style-absent.
 //! - Style identity preserves Electron's `legcord-quick-css` verbatim. It
-//!   collides with no native style (`legcord-native-vencord-css`,
-//!   `legcord-native-theme-*`, `legcord-native-prototype-css`), so keeping the
+//!   collides with no native style (`remcord-native-vencord-css`,
+//!   `remcord-native-theme-*`, `remcord-native-prototype-css`), so keeping the
 //!   exact id is safe and maximally compatible.
 //! - Cascade position: Quick CSS is pushed BEFORE themes in the same document
 //!   load (Electron calls `initQuickCss` before the theme loop; Vencord CSS
@@ -209,7 +209,7 @@ mod tests {
             .expect("system clock must advance")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "legcord-native-quickcss-test-{}-{}",
+            "remcord-native-quickcss-test-{}-{}",
             std::process::id(),
             nanos
         ));
@@ -236,9 +236,9 @@ mod tests {
         assert_eq!(QUICK_CSS_STYLE_ID, "legcord-quick-css");
         assert_eq!(QUICK_CSS_FILE, "quickCss.css");
         // No native managed style uses this identity.
-        assert_ne!(QUICK_CSS_STYLE_ID, "legcord-native-vencord-css");
-        assert_ne!(QUICK_CSS_STYLE_ID, "legcord-native-prototype-css");
-        assert!(!QUICK_CSS_STYLE_ID.starts_with("legcord-native-theme-"));
+        assert_ne!(QUICK_CSS_STYLE_ID, "remcord-native-vencord-css");
+        assert_ne!(QUICK_CSS_STYLE_ID, "remcord-native-prototype-css");
+        assert!(!QUICK_CSS_STYLE_ID.starts_with("remcord-native-theme-"));
     }
 
     #[test]

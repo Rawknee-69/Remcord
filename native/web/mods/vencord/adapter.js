@@ -3,7 +3,7 @@
     "use strict";
 
     if (window.location.origin !== "https://discord.com") return;
-    const substrate = window.__legcordNativeModSubstrate;
+    const substrate = window.__remcordNativeModSubstrate;
     if (!substrate) {
         try {
             window.ipc.postMessage(
@@ -28,9 +28,9 @@
         capability: "mod.get_bundle",
         requestBundle: (native) => native.getModBundle("vencord"),
         requestTimeoutMs: 120_000,
-        adapterFlag: "__legcordNativeVencordAdapter",
-        stateName: "__legcordNativeVencord",
-        bootstrapEvent: "legcord-native:vencord-bootstrap",
+        adapterFlag: "__remcordNativeVencordAdapter",
+        stateName: "__remcordNativeVencord",
+        bootstrapEvent: "remcord-native:vencord-bootstrap",
         expectedMarker: "vencord-bootstrap-executed",
         resultEvent: "vencord_bootstrap_result",
         ackEvent: "vencord_response_ack",

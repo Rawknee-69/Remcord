@@ -476,7 +476,7 @@ mod tests {
             .expect("system clock must advance")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "legcord-native-theme-import-test-{}-{}",
+            "remcord-native-theme-import-test-{}-{}",
             std::process::id(),
             nanos
         ));
@@ -776,7 +776,7 @@ mod tests {
 
     /// Live Windows dialog validation (gated: opens a real modal picker).
     ///
-    /// Run explicitly with `LEGCORD_NATIVE_PICKER_UI_TEST=1`; ordinary
+    /// Run explicitly with `REMCORD_NATIVE_PICKER_UI_TEST=1`; ordinary
     /// `cargo test` skips it so no dialog ever appears in unattended runs.
     /// The picker runs on its own STA thread exactly like the production
     /// worker (COM initialized once for that thread); this thread polls for
@@ -788,9 +788,9 @@ mod tests {
     /// returns before `Show`).
     #[test]
     fn live_dialog_shows_translated_chrome_and_cancels_silently() {
-        if std::env::var("LEGCORD_NATIVE_PICKER_UI_TEST").as_deref() != Ok("1") {
+        if std::env::var("REMCORD_NATIVE_PICKER_UI_TEST").as_deref() != Ok("1") {
             eprintln!(
-                "SKIP: live dialog test needs LEGCORD_NATIVE_PICKER_UI_TEST=1 (opens a real modal picker)"
+                "SKIP: live dialog test needs REMCORD_NATIVE_PICKER_UI_TEST=1 (opens a real modal picker)"
             );
             return;
         }
@@ -880,9 +880,9 @@ mod tests {
     /// behavior is the same code path with one item.
     #[test]
     fn live_dialog_selects_files_and_installs_through_the_shared_installer() {
-        if std::env::var("LEGCORD_NATIVE_PICKER_UI_TEST").as_deref() != Ok("1") {
+        if std::env::var("REMCORD_NATIVE_PICKER_UI_TEST").as_deref() != Ok("1") {
             eprintln!(
-                "SKIP: live dialog test needs LEGCORD_NATIVE_PICKER_UI_TEST=1 (opens a real modal picker)"
+                "SKIP: live dialog test needs REMCORD_NATIVE_PICKER_UI_TEST=1 (opens a real modal picker)"
             );
             return;
         }

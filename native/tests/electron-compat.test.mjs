@@ -605,7 +605,7 @@ test("the native backup save preserves the Electron archive and dialog contract"
     assert.match(nativeBackup, /bundles\//);
     assert.match(nativeBackup, /BACKUP_VERSION: u8 = 1/);
     assert.match(nativeBackup, /backup-dialogSave-title/);
-    assert.match(nativeBackup, /legcord-backup-/);
+    assert.match(nativeBackup, /remcord-backup-/);
     assert.match(nativeBackup, /BUNDLE_FILES/);
     // Bounds and link policy are explicit and stricter than Electron.
     assert.match(nativeBackup, /MAX_BACKUP_FILE_BYTES/);
@@ -639,7 +639,7 @@ test("the native backup restore preserves the Electron restore contract", () => 
     // The dialog is host-owned with the translated open title; the renderer
     // request is exactly empty.
     assert.match(nativeBackup, /backup-dialogOpen-title/);
-    assert.match(nativeBackup, /Open Legcord backup/);
+    assert.match(nativeBackup, /Open Remcord backup/);
     assert.match(nativeProtocol, /BackupRestore/);
     assert.match(nativeProtocol, /backup_restore/);
     assert.match(nativeProtocol, /BackupRestored/);
@@ -658,7 +658,7 @@ test("the native backup restore preserves the Electron restore contract", () => 
     assert.match(nativeBackup, /merge_settings_blob/);
     assert.match(nativeBackup, /custom\.js.*DATA ONLY|DATA ONLY/);
     // The restore worker is dedicated and STA-owned, like the save worker.
-    assert.match(nativeMain, /legcord-backup-restore-sta/);
+    assert.match(nativeMain, /remcord-backup-restore-sta/);
     assert.match(nativeMain, /BackupRestoreReady/);
     // Electron behavior stays untouched: the Map-buffered apply path, the
     // shallow-merge settings restore, and the renderer clientMods applier.
@@ -895,7 +895,7 @@ test("native theme install is CSS-text-only with no network or dialog surface", 
     // member, no install-from-URL shape.
     const installFacade = nativeFacade.slice(
         nativeFacade.indexOf("function installThemeFromCode"),
-        nativeFacade.indexOf('window.addEventListener("legcord-native:response"'),
+        nativeFacade.indexOf('window.addEventListener("remcord-native:response"'),
     );
     assert.ok(installFacade.length > 0);
     assert.match(installFacade, /requireCapability\("themes\.install_code"\)/);
@@ -947,7 +947,7 @@ test("native theme write resolves the manifest file with no editor surface", () 
     // no path, filename, URL, destination, or enablement member.
     const writeFacade = nativeFacade.slice(
         nativeFacade.indexOf("function writeThemeCss"),
-        nativeFacade.indexOf('window.addEventListener("legcord-native:response"'),
+        nativeFacade.indexOf('window.addEventListener("remcord-native:response"'),
     );
     assert.ok(writeFacade.length > 0);
     assert.match(writeFacade, /requireCapability\("themes\.write_css"\)/);

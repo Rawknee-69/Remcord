@@ -1,17 +1,17 @@
 [package]
-name = "legcord"
+name = "remcord"
 version = "1.3.0"
 edition = "2021"
 rust-version = "1.85"
 publish = false
-description = "Legcord is a custom client designed to enhance your Discord experience while keeping everything lightweight."
+description = "Remcord is a custom client designed to enhance your Discord experience while keeping everything lightweight."
 
 [package.metadata.winres]
-# Display name differs in case from the package/exe name (`legcord`).
-ProductName = "Legcord"
-OriginalFilename = "legcord.exe"
+# Display name differs in case from the package/exe name (`remcord`).
+ProductName = "Remcord"
+OriginalFilename = "remcord.exe"
 # Set explicitly: must match the package description verbatim.
-FileDescription = "Legcord is a custom client designed to enhance your Discord experience while keeping everything lightweight."
+FileDescription = "Remcord is a custom client designed to enhance your Discord experience while keeping everything lightweight."
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

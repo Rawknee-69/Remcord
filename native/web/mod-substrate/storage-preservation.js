@@ -30,7 +30,7 @@
             }
         }
     } catch {}
-    Object.defineProperty(window, "__legcordNativeStorageAtDocumentStart", {
+    Object.defineProperty(window, "__remcordNativeStorageAtDocumentStart", {
         configurable: false,
         enumerable: false,
         value: Object.freeze({

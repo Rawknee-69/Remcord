@@ -117,7 +117,7 @@ const VENCORD_MOD: ModDescriptor = ModDescriptor {
         url: "https://github.com/Vendicated/Vencord/releases/download/devbuild/browser.css",
         file: "vencord.css",
         max_bytes: 8 * 1024 * 1024,
-        style_element_id: "legcord-native-vencord-css",
+        style_element_id: "remcord-native-vencord-css",
         result_event: "vencord_css_result",
     }),
     allowed_hosts: &["github.com", "release-assets.githubusercontent.com"],
@@ -131,8 +131,8 @@ const VENCORD_MOD: ModDescriptor = ModDescriptor {
     enabling: ModEnabling::SettingsMods,
     success_marker: "vencord-bootstrap-executed",
     settings_key: Some("VencordSettings"),
-    bootstrap_dom_event: "legcord-native:vencord-bootstrap",
-    storage_context_global: "__legcordNativeVencordStorageAtExecution",
+    bootstrap_dom_event: "remcord-native:vencord-bootstrap",
+    storage_context_global: "__remcordNativeVencordStorageAtExecution",
     log_tag: "Mod:Vencord",
 };
 
@@ -177,7 +177,7 @@ const SHELTER_MOD: ModDescriptor = ModDescriptor {
     page_global: "shelter",
     page_global_requires: Some("plugins"),
     page_global_readiness: PageGlobalReadiness::Awaited {
-        ready_global: "__legcordNativeShelterPageReady",
+        ready_global: "__remcordNativeShelterPageReady",
         // Shelter waits for `#app-mount` to render, so the global appears well
         // after bundle evaluation. The pre-bundle trap resolves the normal case
         // with no polling; the 250 ms poll is only a bounded fallback.
@@ -187,8 +187,8 @@ const SHELTER_MOD: ModDescriptor = ModDescriptor {
     enabling: ModEnabling::AlwaysEnabled,
     success_marker: "shelter-bootstrap-executed",
     settings_key: None,
-    bootstrap_dom_event: "legcord-native:shelter-bootstrap",
-    storage_context_global: "__legcordNativeShelterStorageAtExecution",
+    bootstrap_dom_event: "remcord-native:shelter-bootstrap",
+    storage_context_global: "__remcordNativeShelterStorageAtExecution",
     log_tag: "Mod:Shelter",
 };
 
@@ -214,7 +214,7 @@ const EQUICORD_MOD: ModDescriptor = ModDescriptor {
         url: "https://github.com/Equicord/Equicord/releases/download/latest/browser.css",
         file: "equicord.css",
         max_bytes: 8 * 1024 * 1024,
-        style_element_id: "legcord-native-equicord-css",
+        style_element_id: "remcord-native-equicord-css",
         // The mod-agnostic CSS result event, with the host-supplied mod id
         // echoed back so the host can refuse a result claimed for another mod.
         result_event: "mod_css_result",
@@ -230,8 +230,8 @@ const EQUICORD_MOD: ModDescriptor = ModDescriptor {
     enabling: ModEnabling::SettingsMods,
     success_marker: "equicord-bootstrap-executed",
     settings_key: Some("EquicordSettings"),
-    bootstrap_dom_event: "legcord-native:equicord-bootstrap",
-    storage_context_global: "__legcordNativeEquicordStorageAtExecution",
+    bootstrap_dom_event: "remcord-native:equicord-bootstrap",
+    storage_context_global: "__remcordNativeEquicordStorageAtExecution",
     log_tag: "Mod:Equicord",
 };
 
@@ -255,32 +255,32 @@ const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD, SHELTER_MOD, EQUICORD_MOD];
 
 /// DEV diagnostic: force a mod's adapter OFF regardless of `settings.mods`, so
 /// a "native without <mod>" control run needs no profile edit.
-const MOD_ADAPTER_OVERRIDE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_MODS";
+const MOD_ADAPTER_OVERRIDE_ENV: &str = "REMCORD_NATIVE_DIAGNOSTIC_MODS";
 /// DEV-only: enable the post-load mod runtime observation.
-const MOD_SMOKE_ENV: &str = "LEGCORD_NATIVE_MOD_SMOKE";
-const SETTINGS_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SMOKE";
-const SETTINGS_MUTATION_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
-const SETTINGS_SET_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_SET_SMOKE";
-const GETLANG_SMOKE_ENV: &str = "LEGCORD_NATIVE_GETLANG_SMOKE";
-const APP_VERSION_SMOKE_ENV: &str = "LEGCORD_NATIVE_APP_VERSION_SMOKE";
-const PLUGIN_STORAGE_SMOKE_ENV: &str = "LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
-const THEME_INSTALL_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_INSTALL_SMOKE";
-const THEME_WRITE_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_WRITE_SMOKE";
-const THEME_IMPORT_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_IMPORT_SMOKE";
-const THEME_SET_ENABLED_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
-const THEME_LIST_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEME_LIST_SMOKE";
-const BACKUP_SAVE_SMOKE_ENV: &str = "LEGCORD_NATIVE_BACKUP_SAVE_SMOKE";
-const BACKUP_RESTORE_SMOKE_ENV: &str = "LEGCORD_NATIVE_BACKUP_RESTORE_SMOKE";
-const SHELTER_LOADER_PROBE_ENV: &str = "LEGCORD_NATIVE_LOADER_PROBE";
-const SETTINGS_BOOT_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE";
-const SETTINGS_UI_SMOKE_ENV: &str = "LEGCORD_NATIVE_SETTINGS_UI_SMOKE";
-const FOLDERS_SMOKE_ENV: &str = "LEGCORD_NATIVE_FOLDERS_SMOKE";
-const LEGCORD_PROTOCOL_SMOKE_ENV: &str = "LEGCORD_NATIVE_LEGCORD_PROTOCOL_SMOKE";
-const PERMISSIONS_SMOKE_ENV: &str = "LEGCORD_NATIVE_PERMISSIONS_SMOKE";
-const THEMES_SMOKE_ENV: &str = "LEGCORD_NATIVE_THEMES_SMOKE";
-const QUICKCSS_SMOKE_ENV: &str = "LEGCORD_NATIVE_QUICKCSS_SMOKE";
-const BARE_PAGE_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
-const INTERACTION_DIAGNOSTIC_ENV: &str = "LEGCORD_NATIVE_DIAGNOSTIC_INTERACTION";
+const MOD_SMOKE_ENV: &str = "REMCORD_NATIVE_MOD_SMOKE";
+const SETTINGS_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_SMOKE";
+const SETTINGS_MUTATION_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
+const SETTINGS_SET_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_SET_SMOKE";
+const GETLANG_SMOKE_ENV: &str = "REMCORD_NATIVE_GETLANG_SMOKE";
+const APP_VERSION_SMOKE_ENV: &str = "REMCORD_NATIVE_APP_VERSION_SMOKE";
+const PLUGIN_STORAGE_SMOKE_ENV: &str = "REMCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
+const THEME_INSTALL_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_INSTALL_SMOKE";
+const THEME_WRITE_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_WRITE_SMOKE";
+const THEME_IMPORT_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_IMPORT_SMOKE";
+const THEME_SET_ENABLED_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
+const THEME_LIST_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_LIST_SMOKE";
+const BACKUP_SAVE_SMOKE_ENV: &str = "REMCORD_NATIVE_BACKUP_SAVE_SMOKE";
+const BACKUP_RESTORE_SMOKE_ENV: &str = "REMCORD_NATIVE_BACKUP_RESTORE_SMOKE";
+const SHELTER_LOADER_PROBE_ENV: &str = "REMCORD_NATIVE_LOADER_PROBE";
+const SETTINGS_BOOT_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_BOOT_SMOKE";
+const SETTINGS_UI_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_UI_SMOKE";
+const FOLDERS_SMOKE_ENV: &str = "REMCORD_NATIVE_FOLDERS_SMOKE";
+const REMCORD_PROTOCOL_SMOKE_ENV: &str = "REMCORD_NATIVE_REMCORD_PROTOCOL_SMOKE";
+const PERMISSIONS_SMOKE_ENV: &str = "REMCORD_NATIVE_PERMISSIONS_SMOKE";
+const THEMES_SMOKE_ENV: &str = "REMCORD_NATIVE_THEMES_SMOKE";
+const QUICKCSS_SMOKE_ENV: &str = "REMCORD_NATIVE_QUICKCSS_SMOKE";
+const BARE_PAGE_ENV: &str = "REMCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
+const INTERACTION_DIAGNOSTIC_ENV: &str = "REMCORD_NATIVE_DIAGNOSTIC_INTERACTION";
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
     runtime: "webview2",
     platform: "win32",
@@ -344,9 +344,9 @@ fn mod_adapter_script(descriptor: &ModDescriptor) -> Option<&'static str> {
 /// adds no capability and no renderer surface.
 fn adapter_state_name(descriptor: &ModDescriptor) -> Option<&'static str> {
     const STATE_NAMES: &[(&str, &str)] = &[
-        ("vencord", "__legcordNativeVencord"),
-        ("shelter", "__legcordNativeShelter"),
-        ("equicord", "__legcordNativeEquicord"),
+        ("vencord", "__remcordNativeVencord"),
+        ("shelter", "__remcordNativeShelter"),
+        ("equicord", "__remcordNativeEquicord"),
     ];
     STATE_NAMES
         .iter()
@@ -362,7 +362,7 @@ fn adapter_state_name(descriptor: &ModDescriptor) -> Option<&'static str> {
 ///    Electron's `getConfig("mods").includes(<id>)` gate exactly; the authoritative
 ///    settings snapshot is read from the same place the settings capability
 ///    reads it, so corrupt settings fail closed to "no extra mods".
-/// 2. An optional DEV diagnostic allowlist (`LEGCORD_NATIVE_DIAGNOSTIC_MODS`),
+/// 2. An optional DEV diagnostic allowlist (`REMCORD_NATIVE_DIAGNOSTIC_MODS`),
 ///    used to run "native with X" against "native without X" control runs
 ///    without editing the DEV profile.
 fn resolve_active_mods(
@@ -397,17 +397,17 @@ const STORAGE_START_DIAGNOSTIC_SCRIPT: &str =
     include_str!("../web/mod-substrate/storage-preservation.js");
 const CSS_INJECTION_SCRIPT: &str = r#"
 (() => {
-  const id = "legcord-native-prototype-css";
+  const id = "remcord-native-prototype-css";
   let style = document.getElementById(id);
   if (!style) {
     style = document.createElement("style");
     style.id = id;
     (document.head || document.documentElement).appendChild(style);
   }
-  style.textContent = ":root { --legcord-native-prototype-css: ready; }";
+  style.textContent = ":root { --remcord-native-prototype-css: ready; }";
   window.legcord.native.reportCss(
     getComputedStyle(document.documentElement)
-      .getPropertyValue("--legcord-native-prototype-css")
+      .getPropertyValue("--remcord-native-prototype-css")
       .trim()
   );
 })();
@@ -422,28 +422,28 @@ const BRIDGE_PROBE_SCRIPT: &str = r#"
     api.boot.protocol_version !== 1 ||
     api.native.supports("bridge.ping") !== true
   ) {
-    console.error("[Legcord native DEV] compatibility facade or boot snapshot is unavailable");
+    console.error("[Remcord native DEV] compatibility facade or boot snapshot is unavailable");
     return;
   }
 
   try {
     api.native.requireCapability("filesystem");
-    console.error("[Legcord native DEV] unsupported filesystem capability was accepted");
+    console.error("[Remcord native DEV] unsupported filesystem capability was accepted");
     return;
   } catch (error) {
     if (error.code !== "UNSUPPORTED_CAPABILITY") {
-      console.error("[Legcord native DEV] unsupported capability failed unexpectedly", error);
+      console.error("[Remcord native DEV] unsupported capability failed unexpectedly", error);
       return;
     }
   }
 
-  document.documentElement.dataset.legcordNativeCompatibility = "ready";
+  document.documentElement.dataset.remcordNativeCompatibility = "ready";
   api.native.ping("discord-load")
     .then((result) => {
-      document.documentElement.dataset.legcordNativeBridge = result.message;
-      console.info("[Legcord native DEV] bridge round-trip succeeded");
+      document.documentElement.dataset.remcordNativeBridge = result.message;
+      console.info("[Remcord native DEV] bridge round-trip succeeded");
     })
-    .catch((error) => console.error("[Legcord native DEV] bridge round-trip failed", error));
+    .catch((error) => console.error("[Remcord native DEV] bridge round-trip failed", error));
 })();
 "#;
 
@@ -546,7 +546,7 @@ const RENDERER_HEALTH_SCRIPT: &str = r#"
       ? "present"
       : "missing",
     storageConstructor: typeof Storage,
-    documentStartStorage: window.__legcordNativeStorageAtDocumentStart || null,
+    documentStartStorage: window.__remcordNativeStorageAtDocumentStart || null,
     hasBody: Boolean(document.body),
     hasAppMount: Boolean(document.getElementById("app-mount")),
     hasLoginForm: Boolean(document.querySelector('input[type="email"], input[name="email"], input[type="password"]')),
@@ -559,8 +559,8 @@ const RENDERER_HEALTH_SCRIPT: &str = r#"
 
 const INTERACTION_PROBE_SCRIPT: &str = r#"
 (() => {
-  if (Object.hasOwn(window, "__legcordNativeInteractionProbe")) return;
-  Object.defineProperty(window, "__legcordNativeInteractionProbe", { value: true });
+  if (Object.hasOwn(window, "__remcordNativeInteractionProbe")) return;
+  Object.defineProperty(window, "__remcordNativeInteractionProbe", { value: true });
   const report = (phase) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "interaction_probe", payload: { phase } } })
   );
@@ -643,7 +643,7 @@ const INTERACTION_PROBE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only localization smoke probe (`LEGCORD_NATIVE_GETLANG_SMOKE=1`).
+/// DEV-only localization smoke probe (`REMCORD_NATIVE_GETLANG_SMOKE=1`).
 /// Exercises the exact lookup the invite back-button caller performs:
 /// `window.legcord.getLang("invite-goBackToApp")`, plus a missing key to
 /// verify Electron's empty-string behavior. Reported as one typed
@@ -664,7 +664,7 @@ const GETLANG_SMOKE_SCRIPT: &str = r#"
       return;
     }
     const valid = getLang.call(window.legcord, "invite-goBackToApp");
-    const missing = getLang.call(window.legcord, "legcord-native-missing-key-probe");
+    const missing = getLang.call(window.legcord, "remcord-native-missing-key-probe");
     if (!(valid instanceof Promise) || !(missing instanceof Promise)) {
       fail("localization facade is not asynchronous");
       return;
@@ -685,7 +685,7 @@ const GETLANG_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only app-version smoke probe (`LEGCORD_NATIVE_APP_VERSION_SMOKE=1`).
+/// DEV-only app-version smoke probe (`REMCORD_NATIVE_APP_VERSION_SMOKE=1`).
 /// Exercises the exact read the migrated update-checker caller performs:
 /// `window.legcord.native.getVersion()` — the async replacement for the
 /// synchronous `window.legcord.version` Electron read. Reported as one typed
@@ -725,7 +725,7 @@ const APP_VERSION_SMOKE_SCRIPT: &str = r#"
 "#;
 
 /// DEV-only plugin-storage smoke probe
-/// (`LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Exercises the exact public
+/// (`REMCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Exercises the exact public
 /// third-party contract (`window.legcord.pluginStorage.writeFile/readFile`,
 /// the native replacement for Electron's `window.legcord.fs` over
 /// `pluginWriteFile`/`pluginReadFile`): write a fixture under a temporary
@@ -735,9 +735,9 @@ const APP_VERSION_SMOKE_SCRIPT: &str = r#"
 /// `stage: "write_read"`. Never touches real user plugin namespaces.
 const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
 (() => {
-  const PLUGIN_ID = "legcordNativeProbe";
+  const PLUGIN_ID = "remcordNativeProbe";
   const REL_PATH = "smoke/note.txt";
-  const CONTENT = "legcord-native-plugin-storage-smoke-v1";
+  const CONTENT = "remcord-native-plugin-storage-smoke-v1";
   const probe = (payload) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "plugin_storage_probe", payload } })
   );
@@ -787,9 +787,9 @@ const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only theme install smoke probe (`LEGCORD_NATIVE_THEME_INSTALL_SMOKE=1`).
-/// Installs one disposable fixture (`LegcordNativeSmoke` →
-/// `LegcordNativeSmoke-BD`, disabled by Electron parity so the loader skips
+/// DEV-only theme install smoke probe (`REMCORD_NATIVE_THEME_INSTALL_SMOKE=1`).
+/// Installs one disposable fixture (`RemcordSmoke` →
+/// `RemcordSmoke-BD`, disabled by Electron parity so the loader skips
 /// it and nothing visual changes) through the real `themes.install_code`
 /// capability, verifies the id/enabled/bytes contract, then blocks three
 /// attack shapes (missing marker, traversal `@name`, oversized CSS).
@@ -800,7 +800,7 @@ const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
 /// (uninstall is a deferred slice).
 const THEME_INSTALL_SMOKE_SCRIPT: &str = r#"
 (() => {
-  const FIXTURE_CSS = "/**\n * @name LegcordNativeSmoke\n * @author Legcord Native Probe\n * @version 0.0.0\n */\n:root {\n  --legcord-native-install-probe: 1;\n}\n";
+  const FIXTURE_CSS = "/**\n * @name RemcordSmoke\n * @author Remcord Probe\n * @version 0.0.0\n */\n:root {\n  --remcord-native-install-probe: 1;\n}\n";
   const FETCH_URL = "https://raw.githubusercontent.com/BetterDiscord/themes/main/README.md";
   const probe = (payload) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "theme_install_probe", payload } })
@@ -848,7 +848,7 @@ const THEME_INSTALL_SMOKE_SCRIPT: &str = r#"
       const attacksBlocked = [blockedMarker, blockedTraversal, blockedOversized].filter(Boolean).length;
       const fetchObserved = await observeFetch();
       const contract = installed
-        && installed.id === "LegcordNativeSmoke-BD"
+        && installed.id === "RemcordSmoke-BD"
         && installed.enabled === false
         && installed.css_bytes === FIXTURE_CSS.length;
       probe({
@@ -868,9 +868,9 @@ const THEME_INSTALL_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only theme write smoke probe (`LEGCORD_NATIVE_THEME_WRITE_SMOKE=1`).
+/// DEV-only theme write smoke probe (`REMCORD_NATIVE_THEME_WRITE_SMOKE=1`).
 /// Replaces the CSS of a manually pre-placed ENABLED fixture
-/// (`LegcordWriteProbe`, whose `manifest.theme` is deliberately NOT
+/// (`RemcordWriteProbe`, whose `manifest.theme` is deliberately NOT
 /// `src.css`) through the real `themes.write_css` capability, then proves
 /// the new value is reflected via `getComputedStyle` with exactly one
 /// managed style node. Writes a second value to prove repeated atomic
@@ -880,10 +880,10 @@ const THEME_INSTALL_SMOKE_SCRIPT: &str = r#"
 /// fixture is removed by hand after validation (uninstall is deferred).
 const THEME_WRITE_SMOKE_SCRIPT: &str = r#"
 (() => {
-  const THEME_ID = "LegcordWriteProbe";
-  const FIRST_CSS = ":root{\n  --legcord-native-write-probe: first;\n}\n";
-  const SECOND_CSS = ":root{\n  --legcord-native-write-probe: second;\n}\n";
-  const STYLE_ID = "legcord-native-theme-LegcordWriteProbe";
+  const THEME_ID = "RemcordWriteProbe";
+  const FIRST_CSS = ":root{\n  --remcord-native-write-probe: first;\n}\n";
+  const SECOND_CSS = ":root{\n  --remcord-native-write-probe: second;\n}\n";
+  const STYLE_ID = "remcord-native-theme-RemcordWriteProbe";
   const probe = (payload) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "theme_write_probe", payload } })
   );
@@ -901,7 +901,7 @@ const THEME_WRITE_SMOKE_SCRIPT: &str = r#"
     }
   };
   const probeVar = () => getComputedStyle(document.documentElement)
-    .getPropertyValue("--legcord-native-write-probe").trim();
+    .getPropertyValue("--remcord-native-write-probe").trim();
   const styleCount = () => document.querySelectorAll('style[id="' + STYLE_ID + '"]').length;
   const waitFor = async (condition) => {
     for (let attempt = 0; attempt < 50; attempt++) {
@@ -928,7 +928,7 @@ const THEME_WRITE_SMOKE_SCRIPT: &str = r#"
       const reflectedSecond = await waitFor(() => probeVar() === "second");
       const singleSecond = styleCount() === 1;
       const blockedTraversal = await expectReject(themes.writeCss("../escape", FIRST_CSS));
-      const blockedUnknown = await expectReject(themes.writeCss("legcord-native-no-such-theme", FIRST_CSS));
+      const blockedUnknown = await expectReject(themes.writeCss("remcord-native-no-such-theme", FIRST_CSS));
       const blockedOversized = await expectReject(themes.writeCss(THEME_ID, "x".repeat(1048577)));
       const attacksBlocked = [blockedTraversal, blockedUnknown, blockedOversized].filter(Boolean).length;
       const contract = first && first.id === THEME_ID && first.enabled === true
@@ -951,7 +951,7 @@ const THEME_WRITE_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only theme import smoke probe (`LEGCORD_NATIVE_THEME_IMPORT_SMOKE=1`).
+/// DEV-only theme import smoke probe (`REMCORD_NATIVE_THEME_IMPORT_SMOKE=1`).
 /// Opens the REAL host picker through the `themes.import_files` capability
 /// and reports the bounded summary as one typed `theme_import_probe` event
 /// per document with `stage: "import"`. Completion installs through the
@@ -1005,7 +1005,7 @@ const THEME_IMPORT_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only theme enable smoke probe (`LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE=1`).
+/// DEV-only theme enable smoke probe (`REMCORD_NATIVE_THEME_SET_ENABLED_SMOKE=1`).
 /// Flips a disposable theme's flag through the real `themes.set_enabled`
 /// capability, proves the managed style node appears carrying the exact
 /// installed CSS bytes, proves a same-state flip changes nothing, installs
@@ -1017,10 +1017,10 @@ const THEME_IMPORT_SMOKE_SCRIPT: &str = r#"
 /// (uninstall is a deferred slice).
 const THEME_SET_ENABLED_SMOKE_SCRIPT: &str = r#"
 (() => {
-  const THEME_ID = "LegcordEnableProbe-BD";
-  const THEME_CSS = "/**\n * @name LegcordEnableProbe\n * @version 0.0.0\n */\n:root {\n  --legcord-native-enable-probe: 1;\n}\n";
-  const SECOND_ID = "LegcordSecondProbe-BD";
-  const SECOND_CSS = "/**\n * @name LegcordSecondProbe\n * @version 0.0.0\n */\n:root {\n  --legcord-native-second-probe: 2;\n}\n";
+  const THEME_ID = "RemcordEnableProbe-BD";
+  const THEME_CSS = "/**\n * @name RemcordEnableProbe\n * @version 0.0.0\n */\n:root {\n  --remcord-native-enable-probe: 1;\n}\n";
+  const SECOND_ID = "RemcordSecondProbe-BD";
+  const SECOND_CSS = "/**\n * @name RemcordSecondProbe\n * @version 0.0.0\n */\n:root {\n  --remcord-native-second-probe: 2;\n}\n";
   const probe = (payload) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "theme_set_enabled_probe", payload } })
   );
@@ -1037,13 +1037,13 @@ const THEME_SET_ENABLED_SMOKE_SCRIPT: &str = r#"
       return true;
     }
   };
-  const styleId = (id) => "legcord-native-theme-" + id;
+  const styleId = (id) => "remcord-native-theme-" + id;
   const nodeBytes = (id) => {
     const node = document.getElementById(styleId(id));
     return node ? (node.textContent || "").length : -1;
   };
   const probeVar = () => getComputedStyle(document.documentElement)
-    .getPropertyValue("--legcord-native-enable-probe").trim();
+    .getPropertyValue("--remcord-native-enable-probe").trim();
   const singleNode = (id) => document.querySelectorAll('style[id="' + styleId(id) + '"]').length === 1;
   const waitFor = async (condition) => {
     for (let attempt = 0; attempt < 50; attempt++) {
@@ -1105,7 +1105,7 @@ const THEME_SET_ENABLED_SMOKE_SCRIPT: &str = r#"
       // Second fixture stays enabled (its directory is removed by hand
       // after validation, like every disposable fixture).
       const blockedTraversal = await expectReject(themes.setEnabled("../escape", true));
-      const blockedUnknown = await expectReject(themes.setEnabled("legcord-native-no-such-theme", true));
+      const blockedUnknown = await expectReject(themes.setEnabled("remcord-native-no-such-theme", true));
       const blockedFlag = await expectReject(themes.setEnabled(THEME_ID, "yes"));
       const attacksBlocked = [blockedTraversal, blockedUnknown, blockedFlag].filter(Boolean).length;
       const contract = turnedOn && turnedOn.id === THEME_ID && turnedOn.enabled === true;
@@ -1128,7 +1128,7 @@ const THEME_SET_ENABLED_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only theme list smoke probe (`LEGCORD_NATIVE_THEME_LIST_SMOKE=1`).
+/// DEV-only theme list smoke probe (`REMCORD_NATIVE_THEME_LIST_SMOKE=1`).
 /// Inventories the host themes root through the real `themes.list`
 /// capability and verifies the bounded display shape (array, entry keys,
 /// id pattern, string bounds, boolean state), then reports the count plus
@@ -1185,7 +1185,7 @@ const THEME_LIST_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only backup save probe (`LEGCORD_NATIVE_BACKUP_SAVE_SMOKE=1`).
+/// DEV-only backup save probe (`REMCORD_NATIVE_BACKUP_SAVE_SMOKE=1`).
 /// Runs the REAL `backup.save` capability with a fixed all-includes payload
 /// and a small synthetic clientMods envelope through the host dialog; user
 /// completion or dismissal resolves the bounded outcome as one typed
@@ -1247,7 +1247,7 @@ const BACKUP_SAVE_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only backup restore probe (`LEGCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`).
+/// DEV-only backup restore probe (`REMCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`).
 /// Opens the REAL host picker through the `backup.restore` capability and
 /// reports the bounded outcome as one typed `backup_restore_probe` event per
 /// document with `stage: "restore"`. Completion validates, stages, commits,
@@ -1304,14 +1304,14 @@ const BACKUP_RESTORE_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only Shelter plugin-loader probe (`LEGCORD_NATIVE_LOADER_PROBE=1`).
+/// DEV-only Shelter plugin-loader probe (`REMCORD_NATIVE_LOADER_PROBE=1`).
 /// Verifies the exact upstream `shelter.plugins` entry points a future
 /// native settings-plugin loader needs — `addLocalPlugin`, `startPlugin`,
 /// `stopPlugin`, `removePlugin` — and asserts the URL-based
 /// `ensureLoaderPlugin` is NOT exposed on the public plugins object (it is
 /// omitted upstream, so no URL-selected loading surface is reachable).
 /// It then round-trips one synthetic plugin with host-fixed id and source
-/// (`legcord-loader-probe`, `({onLoad(){}})`) through add/start/stop/remove
+/// (`remcord-loader-probe`, `({onLoad(){}})`) through add/start/stop/remove
 /// and proves removal behaviorally (a clean registry rejects a fresh start).
 /// The throw-chain reads no reactive store: upstream throws on taken,
 /// missing, or already-running ids, so a zero-throw run verifies the cycle
@@ -1330,7 +1330,7 @@ const BACKUP_RESTORE_SMOKE_SCRIPT: &str = r#"
 /// plugin.
 const SHELTER_LOADER_PROBE_SCRIPT: &str = r#"
 (() => {
-  const PROBE_ID = "legcord-loader-probe";
+  const PROBE_ID = "remcord-loader-probe";
   const PROBE_JS = "({onLoad(){}})";
   const probe = (payload) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "shelter_loader_probe", payload } })
@@ -1374,7 +1374,7 @@ const SHELTER_LOADER_PROBE_SCRIPT: &str = r#"
         // Not present: nothing to clear.
       }
       plugins.addLocalPlugin(PROBE_ID, {
-        js: PROBE_JS, manifest: { name: "Legcord Loader Probe" }, update: false,
+        js: PROBE_JS, manifest: { name: "Remcord Loader Probe" }, update: false,
       });
       plugins.startPlugin(PROBE_ID);
       plugins.stopPlugin(PROBE_ID);
@@ -1416,7 +1416,7 @@ const SHELTER_LOADER_PROBE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only settings boot snapshot probe (`LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`).
+/// DEV-only settings boot snapshot probe (`REMCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`).
 /// Observes the live `window.legcord.settingsBoot` surface in the document:
 /// exactly the seven approved members, the `settingsSource` enum consistent
 /// with a null/non-null config, array/object shapes, both narrow functions
@@ -1481,9 +1481,9 @@ const SETTINGS_BOOT_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// DEV-only settings UI workflow probe (`LEGCORD_NATIVE_SETTINGS_UI_SMOKE=1`).
+/// DEV-only settings UI workflow probe (`REMCORD_NATIVE_SETTINGS_UI_SMOKE=1`).
 /// Drives the real executing settings UI end to end in the page: opens Discord
-/// user settings via the gear button, asserts the Legcord section registered
+/// user settings via the gear button, asserts the Remcord section registered
 /// (proving the plugin did not unload on missing sync APIs), opens the Themes
 /// page, enables ClearVision (asserting the persisted disabled baseline
 /// first), asserts the managed style node appears, enables a second fixture
@@ -1500,16 +1500,16 @@ const SETTINGS_BOOT_SMOKE_SCRIPT: &str = r#"
 /// with the exact step named; it never builds more bridge surface to proceed.
 const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
 (() => {
-  const STAGE_KEY = "legcord-settings-ui-stage";
-  const NONCE_KEY = "legcord-settings-ui-nonce";
-  const RUN_NONCE = "__LEGCORD_SETTINGS_UI_RUN_NONCE__";
+  const STAGE_KEY = "remcord-settings-ui-stage";
+  const NONCE_KEY = "remcord-settings-ui-nonce";
+  const RUN_NONCE = "__REMCORD_SETTINGS_UI_RUN_NONCE__";
   const probe = (stage, ok, detail, error) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "settings_ui_probe", payload: { stage, ok, detail: String(detail || "").slice(0, 512), error: error ? String((error && error.message) || error).slice(0, 256) : null } } })
   );
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const visible = (el) => !!el && el.getClientRects().length > 0;
-  const themeStyleCount = () => document.querySelectorAll('style[id^="legcord-native-theme-"]').length;
-  const themeStylePresent = (id) => !!document.getElementById("legcord-native-theme-" + id);
+  const themeStyleCount = () => document.querySelectorAll('style[id^="remcord-native-theme-"]').length;
+  const themeStylePresent = (id) => !!document.getElementById("remcord-native-theme-" + id);
   function findGear() {
     // Exact label only: anything fuzzier grabs Server/Channel Settings
     // lookalikes whose clicks never open the User Settings modal.
@@ -1655,7 +1655,7 @@ const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
     // node is a silent no-op. Report which method (if any) opens the modal.
     // The modal is detected by its dialog layer (Discord restores the last
     // settings section, so the default "My Account" header is NOT always
-    // showing): open = a visible dialog containing "My Account" or "Legcord".
+    // showing): open = a visible dialog containing "My Account" or "Remcord".
     function settingsDialog() {
       const dialogs = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(visible);
       return dialogs[dialogs.length - 1] || null;
@@ -1663,7 +1663,7 @@ const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
     const modalOpen = () => {
       const dlg = settingsDialog();
       if (!dlg) return false;
-      return !!findText(dlg, "My Account") || !!findText(dlg, "Legcord");
+      return !!findText(dlg, "My Account") || !!findText(dlg, "Remcord");
     };
     let openedBy = null;
     let disabledSeen = false;
@@ -1857,14 +1857,14 @@ const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
 /// nonce into the template. Fails fast on an unspliced placeholder.
 fn settings_ui_probe_script(nonce: u64) -> Result<String, String> {
     let script =
-        SETTINGS_UI_PROBE_TEMPLATE.replace("__LEGCORD_SETTINGS_UI_RUN_NONCE__", &nonce.to_string());
-    if script.contains("__LEGCORD_SETTINGS_UI_RUN_NONCE__") {
+        SETTINGS_UI_PROBE_TEMPLATE.replace("__REMCORD_SETTINGS_UI_RUN_NONCE__", &nonce.to_string());
+    if script.contains("__REMCORD_SETTINGS_UI_RUN_NONCE__") {
         return Err("settings UI probe script has an unspliced nonce".to_owned());
     }
     Ok(script)
 }
 /// DEV-only legcord:// protocol smoke probe
-/// (`LEGCORD_NATIVE_LEGCORD_PROTOCOL_SMOKE=1`). Loads three real bundle
+/// (`REMCORD_NATIVE_REMCORD_PROTOCOL_SMOKE=1`). Loads three real bundle
 /// resources that exist on disk through real WebView2 subresource/fetch
 /// paths and records the outcome in document dataset flags the host reads
 /// back:
@@ -1878,37 +1878,37 @@ fn settings_ui_probe_script(nonce: u64) -> Result<String, String> {
 ///   a TypeError here proves the handler served while reporting the CORS
 ///   posture honestly)
 ///
-/// The host logs one `[LegcordProtocol][Smoke]` line per document; no bridge
+/// The host logs one `[RemcordProtocol][Smoke]` line per document; no bridge
 /// event, no new capability, no script execution of the fetched bytes.
-const LEGCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
+const REMCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
 (() => {
   try {
     const root = document.documentElement;
-    if (root.dataset.legcordProtocolSmoke === "started") return;
-    root.dataset.legcordProtocolSmoke = "started";
-    root.dataset.legcordProtocolCss = "pending";
-    root.dataset.legcordProtocolImg = "pending";
-    root.dataset.legcordProtocolPlugin = "pending";
+    if (root.dataset.remcordProtocolSmoke === "started") return;
+    root.dataset.remcordProtocolSmoke = "started";
+    root.dataset.remcordProtocolCss = "pending";
+    root.dataset.remcordProtocolImg = "pending";
+    root.dataset.remcordProtocolPlugin = "pending";
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href = "legcord://assets/css/discord.css";
-    link.onload = () => { root.dataset.legcordProtocolCss = "loaded"; };
-    link.onerror = () => { root.dataset.legcordProtocolCss = "error"; };
+    link.onload = () => { root.dataset.remcordProtocolCss = "loaded"; };
+    link.onerror = () => { root.dataset.remcordProtocolCss = "error"; };
     (document.head || document.documentElement).appendChild(link);
     const img = new Image();
-    img.onload = () => { root.dataset.legcordProtocolImg = "loaded"; };
-    img.onerror = () => { root.dataset.legcordProtocolImg = "error"; };
+    img.onload = () => { root.dataset.remcordProtocolImg = "loaded"; };
+    img.onerror = () => { root.dataset.remcordProtocolImg = "error"; };
     img.src = "legcord://assets/desktop.png";
     // Distinguish CSP blocks from scheme/network failures: a
     // securitypolicyviolation naming a legcord:// URI proves the scheme
     // resolved and CSP refused it; silence + error proves the request never
     // reached the handler.
-    root.dataset.legcordProtocolCsp = "none";
+    root.dataset.remcordProtocolCsp = "none";
     document.addEventListener("securitypolicyviolation", (event) => {
       try {
         const blocked = String(event.blockedURI || "");
         if (blocked.indexOf("legcord://") === 0) {
-          root.dataset.legcordProtocolCsp =
+          root.dataset.remcordProtocolCsp =
             String(event.violatedDirective || "unknown").slice(0, 48)
             + "|" + blocked.slice(0, 80);
         }
@@ -1916,26 +1916,26 @@ const LEGCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
     });
     // CORS posture observation: a no-cors fetch that resolves opaque proves
     // the handler served bytes while a cors-mode rejection stands.
-    root.dataset.legcordProtocolNoCors = "pending";
+    root.dataset.remcordProtocolNoCors = "pending";
     fetch("legcord://plugins/settings/plugin.js", { method: "GET", mode: "no-cors" }).then(
-      () => { root.dataset.legcordProtocolNoCors = "resolved"; },
+      () => { root.dataset.remcordProtocolNoCors = "resolved"; },
       (error) => {
-        root.dataset.legcordProtocolNoCors =
+        root.dataset.remcordProtocolNoCors =
           "rejected:" + String((error && error.name) || error).slice(0, 32);
       },
     );
     fetch("legcord://plugins/settings/plugin.js", { method: "GET" }).then(
       (response) => {
-        root.dataset.legcordProtocolPlugin =
+        root.dataset.remcordProtocolPlugin =
           "http-" + response.status + "-bytes-" + (response.headers.get("content-type") || "no-mime");
       },
       (error) => {
-        root.dataset.legcordProtocolPlugin =
+        root.dataset.remcordProtocolPlugin =
           "fetch-rejected:" + String((error && error.name) || error).slice(0, 64);
       },
     );
   } catch (error) {
-    document.documentElement.dataset.legcordProtocolSmoke =
+    document.documentElement.dataset.remcordProtocolSmoke =
       "probe-failed:" + String((error && error.message) || error).slice(0, 64);
   }
 })();
@@ -1944,21 +1944,21 @@ const LEGCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
 /// Reads back the DEV-only legcord:// probe dataset flags. Returns JSON
 /// through the evaluate callback (like the renderer health probe), never
 /// through the typed bridge.
-const LEGCORD_PROTOCOL_SMOKE_READBACK_SCRIPT: &str = r#"
+const REMCORD_PROTOCOL_SMOKE_READBACK_SCRIPT: &str = r#"
 (() => {
   const root = document.documentElement;
   return JSON.stringify({
-    smoke: root.dataset.legcordProtocolSmoke || "absent",
-    css: root.dataset.legcordProtocolCss || "absent",
-    img: root.dataset.legcordProtocolImg || "absent",
-    plugin: root.dataset.legcordProtocolPlugin || "absent",
-    csp: root.dataset.legcordProtocolCsp || "absent",
-    nocors: root.dataset.legcordProtocolNoCors || "absent",
+    smoke: root.dataset.remcordProtocolSmoke || "absent",
+    css: root.dataset.remcordProtocolCss || "absent",
+    img: root.dataset.remcordProtocolImg || "absent",
+    plugin: root.dataset.remcordProtocolPlugin || "absent",
+    csp: root.dataset.remcordProtocolCsp || "absent",
+    nocors: root.dataset.remcordProtocolNoCors || "absent",
   });
 })()
 "#;
 
-/// DEV-only permissions smoke probe (`LEGCORD_NATIVE_PERMISSIONS_SMOKE=1`).
+/// DEV-only permissions smoke probe (`REMCORD_NATIVE_PERMISSIONS_SMOKE=1`).
 /// Triggers one real request per exercised kind from the trusted document
 /// and records the renderer-observed outcome in dataset flags the host
 /// reads back; the host log carries the authoritative kind/origin/decision
@@ -2041,31 +2041,31 @@ const PERMISSIONS_SMOKE_READBACK_SCRIPT: &str = r#"
   });
 })()
 "#;
-/// DEV-only themes observation (`LEGCORD_NATIVE_THEMES_SMOKE=1`,
-/// `LEGCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
+/// DEV-only themes observation (`REMCORD_NATIVE_THEMES_SMOKE=1`,
+/// `REMCORD_NATIVE_QUICKCSS_SMOKE=1`). Theme and Quick CSS injection are host
 /// pushes: the renderer never requests their CSS, so this probe only observes
 /// the managed `<style>` nodes the host injected at document load. It returns
 /// JSON through the evaluate callback (like the renderer health probe), never
 /// through the typed bridge. `order_probe` reports the computed value of the
-/// harmless `--legcord-native-order-probe` custom property the DEV fixtures
+/// harmless `--remcord-native-order-probe` custom property the DEV fixtures
 /// set in both Quick CSS and themes, proving cascade order (later stylesheets
 /// win on equal specificity).
 const THEMES_SMOKE_SCRIPT: &str = r#"
 (() => {
   const head = document.head;
   const headOrder = head ? [...head.querySelectorAll("style")].map((node) => node.id) : [];
-  const nodes = [...document.querySelectorAll('style[id^="legcord-native-theme-"]')]
+  const nodes = [...document.querySelectorAll('style[id^="remcord-native-theme-"]')]
     .map((node) => ({ id: node.id, bytes: (node.textContent || "").length }));
   const quickCssNode = document.getElementById("legcord-quick-css");
   return JSON.stringify({
     count: nodes.length,
     themes: nodes,
     head_style_order: headOrder,
-    vencord_present: headOrder.includes("legcord-native-vencord-css"),
+    vencord_present: headOrder.includes("remcord-native-vencord-css"),
     quickcss_present: Boolean(quickCssNode),
     quickcss_bytes: quickCssNode ? (quickCssNode.textContent || "").length : 0,
     order_probe: getComputedStyle(document.documentElement)
-      .getPropertyValue("--legcord-native-order-probe")
+      .getPropertyValue("--remcord-native-order-probe")
       .trim(),
   });
 })()
@@ -2091,19 +2091,19 @@ struct BootWindowState {
     maximized: bool,
 }
 
-/// Closed registry id for the real Legcord settings plugin. It matches the
+/// Closed registry id for the real Remcord settings plugin. It matches the
 /// `"legcord-settings"` key Electron pins in the Shelter injector map
 /// (`src/discord/preload/mods/shelter.mts`), so host logs and the Electron
 /// contract name the same plugin. The renderer never supplies this id: the
 /// host splices it into the fixed start script below.
 const SETTINGS_PLUGIN_ID: &str = "legcord-settings";
 
-/// Fixed manifest for the real Legcord settings plugin registration. Only the
+/// Fixed manifest for the real Remcord settings plugin registration. Only the
 /// name is carried (the loader-probe precedent); the renderer supplies no
 /// manifest, id, source, or update flag.
 const SETTINGS_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Settings"}"#;
 
-/// Host-built start script for the real Legcord settings plugin, evaluated
+/// Host-built start script for the real Remcord settings plugin, evaluated
 /// once per document after Shelter's own bootstrap marker proves
 /// `window.shelter.plugins` exists. It registers the embedded artifact
 /// through the same closed add/start lifecycle the loader probe proved
@@ -2111,8 +2111,8 @@ const SETTINGS_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Settings"}"#;
 /// and returns a plain status string the host logs — never plugin source,
 /// paths, or URLs.
 ///
-/// `__LEGCORD_SETTINGS_PLUGIN_JS__` is spliced as a JSON-encoded string
-/// literal (never interpolated raw); `__LEGCORD_SETTINGS_PLUGIN_MANIFEST__`
+/// `__REMCORD_SETTINGS_PLUGIN_JS__` is spliced as a JSON-encoded string
+/// literal (never interpolated raw); `__REMCORD_SETTINGS_PLUGIN_MANIFEST__`
 /// is spliced as fixed JSON.
 const SETTINGS_PLUGIN_START_TEMPLATE: &str = r#"
 (() => {
@@ -2127,8 +2127,8 @@ const SETTINGS_PLUGIN_START_TEMPLATE: &str = r#"
       plugins.removePlugin(ID);
     } catch (ignored) {}
     plugins.addLocalPlugin(ID, {
-      js: __LEGCORD_SETTINGS_PLUGIN_JS__,
-      manifest: __LEGCORD_SETTINGS_PLUGIN_MANIFEST__,
+      js: __REMCORD_SETTINGS_PLUGIN_JS__,
+      manifest: __REMCORD_SETTINGS_PLUGIN_MANIFEST__,
       update: false,
     });
     plugins.startPlugin(ID);
@@ -2146,12 +2146,12 @@ fn settings_plugin_start_script() -> Result<String, String> {
     let js = serde_json::to_string(settings_plugin::artifact().js)
         .map_err(|error| format!("settings plugin artifact cannot be serialized: {error}"))?;
     let script = SETTINGS_PLUGIN_START_TEMPLATE
-        .replace("__LEGCORD_SETTINGS_PLUGIN_JS__", &js)
+        .replace("__REMCORD_SETTINGS_PLUGIN_JS__", &js)
         .replace(
-            "__LEGCORD_SETTINGS_PLUGIN_MANIFEST__",
+            "__REMCORD_SETTINGS_PLUGIN_MANIFEST__",
             SETTINGS_PLUGIN_MANIFEST_JSON,
         );
-    if script.contains("__LEGCORD_SETTINGS_PLUGIN_") {
+    if script.contains("__REMCORD_SETTINGS_PLUGIN_") {
         return Err("settings plugin start script has an unspliced placeholder".to_owned());
     }
     if !script.contains(SETTINGS_PLUGIN_ID) {
@@ -2160,7 +2160,7 @@ fn settings_plugin_start_script() -> Result<String, String> {
     Ok(script)
 }
 
-/// Per-document guard for one real Legcord Shelter plugin start (settings,
+/// Per-document guard for one real Remcord Shelter plugin start (settings,
 /// titlebar, …). The plugin may start at most once per document generation:
 /// the guard compares against the live generation, so reloads start fresh
 /// and replays are refused. Threaded as one bundle to keep the bootstrap
@@ -2181,19 +2181,19 @@ fn settings_plugin_start_due(started_generation: Option<u64>, current_generation
     started_generation != Some(current_generation)
 }
 
-/// Closed registry id for the real Legcord titlebar plugin. It matches the
+/// Closed registry id for the real Remcord titlebar plugin. It matches the
 /// `"legcord-titlebar"` key Electron pins in the Shelter injector map
 /// (`src/discord/preload/mods/shelter.mts`), so host logs and the Electron
 /// contract name the same plugin. The renderer never supplies this id: the
 /// host splices it into the fixed start script below.
 const TITLEBAR_PLUGIN_ID: &str = "legcord-titlebar";
 
-/// Fixed manifest for the real Legcord titlebar plugin registration. Only the
+/// Fixed manifest for the real Remcord titlebar plugin registration. Only the
 /// name is carried (the loader-probe precedent); the renderer supplies no
 /// manifest, id, source, or update flag.
 const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Titlebar Controller"}"#;
 
-/// Host-built start script for the real Legcord titlebar plugin, evaluated
+/// Host-built start script for the real Remcord titlebar plugin, evaluated
 /// once per document after Shelter's own bootstrap marker proves
 /// `window.shelter.plugins` exists (same trigger as the settings plugin).
 /// It registers the embedded artifact through the same closed add/start
@@ -2210,9 +2210,9 @@ const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Titlebar Control
 /// `window.legcord.window.*` operations the plugin already calls; no new
 /// RPC is added.
 ///
-/// `__LEGCORD_TITLEBAR_PLUGIN_JS__` is spliced as a JSON-encoded string
-/// literal (never interpolated raw); `__LEGCORD_TITLEBAR_PLUGIN_MANIFEST__`
-/// is spliced as fixed JSON; `__LEGCORD_TITLEBAR_CSS__` is spliced as a
+/// `__REMCORD_TITLEBAR_PLUGIN_JS__` is spliced as a JSON-encoded string
+/// literal (never interpolated raw); `__REMCORD_TITLEBAR_PLUGIN_MANIFEST__`
+/// is spliced as fixed JSON; `__REMCORD_TITLEBAR_CSS__` is spliced as a
 /// JSON object of build-embedded stylesheet texts keyed `base`/`win`/
 /// `darwin`/`linux` (never paths or URLs).
 const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
@@ -2229,7 +2229,7 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     const body = document.body;
     if (!body) return "titlebar-failed: no document body";
     body.setAttribute("legcord-platform", legcord.platform);
-    const cssText = __LEGCORD_TITLEBAR_CSS__;
+    const cssText = __REMCORD_TITLEBAR_CSS__;
     const wanted = ["base"];
     if (legcord.platform === "win32") {
       body.setAttribute("class", "platform-win");
@@ -2244,16 +2244,16 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     // fetched sheets stop reaching the host after a reload, which silently
     // unstyles link-based sheets). Legacy link sheets from older builds are removed; style nodes are deduped and refreshed per
     // document, so reloads converge instead of stacking.
-    for (const stale of document.querySelectorAll('link[data-legcord-titlebar-css]')) {
+    for (const stale of document.querySelectorAll('link[data-remcord-titlebar-css]')) {
       stale.remove();
     }
     for (const key of wanted) {
       const text = cssText && cssText[key];
       if (typeof text !== "string" || text.length === 0) return "titlebar-failed: missing " + key + " css";
-      let node = document.querySelector('style[data-legcord-titlebar-css="' + key + '"]');
+      let node = document.querySelector('style[data-remcord-titlebar-css="' + key + '"]');
       if (!node) {
         node = document.createElement("style");
-        node.setAttribute("data-legcord-titlebar-css", key);
+        node.setAttribute("data-remcord-titlebar-css", key);
         document.head.appendChild(node);
       }
       if (node.textContent !== text) node.textContent = text;
@@ -2270,8 +2270,8 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
       plugins.removePlugin(ID);
     } catch (ignored) {}
     plugins.addLocalPlugin(ID, {
-      js: __LEGCORD_TITLEBAR_PLUGIN_JS__,
-      manifest: __LEGCORD_TITLEBAR_PLUGIN_MANIFEST__,
+      js: __REMCORD_TITLEBAR_PLUGIN_JS__,
+      manifest: __REMCORD_TITLEBAR_PLUGIN_MANIFEST__,
       update: false,
     });
     plugins.startPlugin(ID);
@@ -2280,7 +2280,7 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     // count is steady-state truthful here, unlike link load timing. The host
     // re-runs this same idempotent script at document finish (settle pass).
     const controls = document.querySelectorAll('#legcordNavControls').length;
-    const styles = Array.from(document.querySelectorAll('style[data-legcord-titlebar-css]'));
+    const styles = Array.from(document.querySelectorAll('style[data-remcord-titlebar-css]'));
     const platform = document.body.getAttribute("legcord-platform") || "none";
     const ready = document.readyState || "unknown";
     if (controls < 1) {
@@ -2312,13 +2312,13 @@ fn titlebar_plugin_start_script() -> Result<String, String> {
     let css_json = serde_json::to_string(&css)
         .map_err(|error| format!("titlebar stylesheets cannot be serialized: {error}"))?;
     let script = TITLEBAR_PLUGIN_START_TEMPLATE
-        .replace("__LEGCORD_TITLEBAR_PLUGIN_JS__", &js)
+        .replace("__REMCORD_TITLEBAR_PLUGIN_JS__", &js)
         .replace(
-            "__LEGCORD_TITLEBAR_PLUGIN_MANIFEST__",
+            "__REMCORD_TITLEBAR_PLUGIN_MANIFEST__",
             TITLEBAR_PLUGIN_MANIFEST_JSON,
         )
-        .replace("__LEGCORD_TITLEBAR_CSS__", &css_json);
-    if script.contains("__LEGCORD_TITLEBAR_PLUGIN_") || script.contains("__LEGCORD_TITLEBAR_CSS__")
+        .replace("__REMCORD_TITLEBAR_CSS__", &css_json);
+    if script.contains("__REMCORD_TITLEBAR_PLUGIN_") || script.contains("__REMCORD_TITLEBAR_CSS__")
     {
         return Err("titlebar plugin start script has an unspliced placeholder".to_owned());
     }
@@ -2328,7 +2328,7 @@ fn titlebar_plugin_start_script() -> Result<String, String> {
     Ok(script)
 }
 
-/// DEV-only settings smoke probe (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`).
+/// DEV-only settings smoke probe (`REMCORD_NATIVE_SETTINGS_SMOKE=1`).
 /// Exercises the exact read the migrated Shelter power caller performs:
 /// `window.legcord.settings.getConfig()` → `blockPowerSavingInVoiceChat`.
 /// The result is reported through the typed `settings_probe` event so the
@@ -2374,7 +2374,7 @@ const SETTINGS_SMOKE_SCRIPT: &str = r#"
 "#;
 
 /// DEV-only settings mutation smoke probe
-/// (`LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1`). Exercises the exact
+/// (`REMCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1`). Exercises the exact
 /// write the migrated Shelter settings caller performs: read the current
 /// `blockPowerSavingInVoiceChat` via `getConfig`, flip it via the
 /// allowlisted `setBlockPowerSavingInVoiceChat`, then re-read via
@@ -2430,12 +2430,12 @@ const SETTINGS_MUTATION_SMOKE_SCRIPT: &str = r#"
 "#;
 
 /// DEV-only restore stage of the mutation smoke probe. The host formats
-/// `__LEGCORD_MUTATION_RESTORE_VALUE__` with the pre-mutation value before
+/// `__REMCORD_MUTATION_RESTORE_VALUE__` with the pre-mutation value before
 /// evaluating: read the post-reload value (proving the mutation survived),
 /// write the original back, re-read, and report `stage: "restored"`.
 const SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE: &str = r#"
 (() => {
-  const RESTORE_TO = __LEGCORD_MUTATION_RESTORE_VALUE__;
+  const RESTORE_TO = __REMCORD_MUTATION_RESTORE_VALUE__;
   const probe = (payload) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "settings_mutation_probe", payload } })
   );
@@ -2477,7 +2477,7 @@ const SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE: &str = r#"
 })();
 "#;
 
-/// DEV-only settings.set smoke probe (`LEGCORD_NATIVE_SETTINGS_SET_SMOKE=1`).
+/// DEV-only settings.set smoke probe (`REMCORD_NATIVE_SETTINGS_SET_SMOKE=1`).
 /// Exercises the closed `settings.set` allowlist through the side-effect-free
 /// `support_banner_dismissed` flag: block three attack shapes (unknown key,
 /// wrong value type, key↔variant mismatch), flip the flag, re-read via
@@ -2557,14 +2557,14 @@ const SETTINGS_SET_SMOKE_SCRIPT: &str = r#"
 "#;
 
 /// DEV-only restore stage of the settings.set smoke probe. The host formats
-/// `__LEGCORD_SETTINGS_SET_RESTORE_VALUE__` with the pre-mutation value
+/// `__REMCORD_SETTINGS_SET_RESTORE_VALUE__` with the pre-mutation value
 /// before evaluating: read the post-reload value (proving the mutation
 /// survived), write the original back, re-read, and report `stage:
 /// "restored"`. The three attack shapes were proven blocked in the mutated
 /// stage, so this stage reports the same count.
 const SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE: &str = r#"
 (() => {
-  const RESTORE_TO = __LEGCORD_SETTINGS_SET_RESTORE_VALUE__;
+  const RESTORE_TO = __REMCORD_SETTINGS_SET_RESTORE_VALUE__;
   const KEY = "support_banner_dismissed";
   const probe = (payload) => window.ipc.postMessage(
     JSON.stringify({ version: 1, event: { type: "settings_set_probe", payload } })
@@ -2664,7 +2664,7 @@ enum NativeEvent {
         received_at: Instant,
         result: Result<RestoreSummary, BackupFailure>,
     },
-    /// One DEV-only window chrome smoke step (`LEGCORD_NATIVE_WINDOW_SMOKE=1`).
+    /// One DEV-only window chrome smoke step (`REMCORD_NATIVE_WINDOW_SMOKE=1`).
     /// Drives the shipped renderer facade through the real typed bridge and
     /// logs the resulting native state. Never present in normal runs.
     #[allow(dead_code)]
@@ -2705,7 +2705,7 @@ enum NativeEvent {
     /// DEV-only delayed readback for the legcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
     /// subresource loads have settled before the host reads the flags.
-    LegcordProtocolSmokeReadback,
+    RemcordProtocolSmokeReadback,
     /// DEV-only delayed readback for the permissions smoke probe. Fired
     /// once per document ~8 s after the probe started, so the async media
     /// and geolocation settlements have landed before the host reads back.
@@ -2807,12 +2807,12 @@ fn initialization_script(
     let _: serde_json::Value = serde_json::from_str(settings_boot_json)?;
     let _: serde_json::Value = serde_json::from_str(host_platform_json)?;
     let compatibility = COMPATIBILITY_SCRIPT
-        .replace("__LEGCORD_BOOT_SNAPSHOT__", &snapshot)
-        .replace("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__", settings_boot_json)
-        .replace("__LEGCORD_HOST_PLATFORM__", host_platform_json);
-    if compatibility.contains("__LEGCORD_BOOT_SNAPSHOT__")
-        || compatibility.contains("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__")
-        || compatibility.contains("__LEGCORD_HOST_PLATFORM__")
+        .replace("__REMCORD_BOOT_SNAPSHOT__", &snapshot)
+        .replace("__REMCORD_SETTINGS_BOOT_SNAPSHOT__", settings_boot_json)
+        .replace("__REMCORD_HOST_PLATFORM__", host_platform_json);
+    if compatibility.contains("__REMCORD_BOOT_SNAPSHOT__")
+        || compatibility.contains("__REMCORD_SETTINGS_BOOT_SNAPSHOT__")
+        || compatibility.contains("__REMCORD_HOST_PLATFORM__")
     {
         return Err(serde::de::Error::custom(
             "document-start facade is missing a boot snapshot splice",
@@ -2849,14 +2849,14 @@ where
 /// or configuration is touched, and nothing is retried.
 #[cfg(target_os = "windows")]
 fn report_missing_runtime() {
-    const MESSAGE: &str = "Legcord needs the Microsoft Edge WebView2 Evergreen Runtime to run, and none was found on this PC.\n\nInstall the Evergreen Runtime from Microsoft's official WebView2 page, then start Legcord again. Your Legcord data was not changed.";
+    const MESSAGE: &str = "Remcord needs the Microsoft Edge WebView2 Evergreen Runtime to run, and none was found on this PC.\n\nInstall the Evergreen Runtime from Microsoft's official WebView2 page, then start Remcord again. Your Remcord data was not changed.";
     eprintln!("[Runtime] {MESSAGE}");
     use windows::{
         core::{HSTRING, PCWSTR},
         Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK},
     };
     let text = HSTRING::from(MESSAGE);
-    let caption = HSTRING::from("Legcord");
+    let caption = HSTRING::from("Remcord");
     unsafe {
         MessageBoxW(
             None,
@@ -3202,7 +3202,7 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
                 }
             } else if ctx.flags.mutation_stage == 1 {
                 let restore = SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE.replace(
-                    "__LEGCORD_MUTATION_RESTORE_VALUE__",
+                    "__REMCORD_MUTATION_RESTORE_VALUE__",
                     if ctx.flags.mutation_before {
                         "true"
                     } else {
@@ -3221,7 +3221,7 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
                 }
             } else if ctx.flags.settings_set_stage == 1 {
                 let restore = SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE.replace(
-                    "__LEGCORD_SETTINGS_SET_RESTORE_VALUE__",
+                    "__REMCORD_SETTINGS_SET_RESTORE_VALUE__",
                     if ctx.flags.settings_set_before {
                         "true"
                     } else {
@@ -3294,8 +3294,8 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
             }
         }
         if ctx.flags.legcord_protocol_smoke {
-            if let Err(error) = ctx.webview.evaluate_script(LEGCORD_PROTOCOL_SMOKE_SCRIPT) {
-                eprintln!("[LegcordProtocol][Smoke] probe failed: {error}");
+            if let Err(error) = ctx.webview.evaluate_script(REMCORD_PROTOCOL_SMOKE_SCRIPT) {
+                eprintln!("[RemcordProtocol][Smoke] probe failed: {error}");
             } else {
                 // One-shot delayed readback: subresource loads
                 // settle asynchronously, so the flags are read
@@ -3305,10 +3305,10 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
                     .name("legcord-protocol-smoke-readback".to_owned())
                     .spawn(move || {
                         thread::sleep(Duration::from_millis(5000));
-                        queue_event(&readback_proxy, NativeEvent::LegcordProtocolSmokeReadback);
+                        queue_event(&readback_proxy, NativeEvent::RemcordProtocolSmokeReadback);
                     })
                 {
-                    eprintln!("[LegcordProtocol][Smoke] readback timer failed: {error}");
+                    eprintln!("[RemcordProtocol][Smoke] readback timer failed: {error}");
                 }
             }
         }
@@ -3398,7 +3398,7 @@ fn create_popup_child(
         new_window::PopupKind::DiscordPopout => (true, url),
     };
     let child_window = WindowBuilder::new()
-        .with_title("Legcord")
+        .with_title("Remcord")
         .with_inner_size(Size::Logical(LogicalSize::new(800.0, 600.0)))
         .with_visible(false)
         .with_always_on_top(always_on_top && kind == new_window::PopupKind::DiscordPopout)
@@ -3459,7 +3459,7 @@ fn create_popup_child(
     {
         let core_webview2: ICoreWebView2 = child_webview.webview();
         if let Err(error) = register_legcord_protocol(&core_webview2, roots.clone()) {
-            eprintln!("[Popup][LegcordProtocol] registration failed: {error}");
+            eprintln!("[Popup][RemcordProtocol] registration failed: {error}");
         }
         if let Err(error) = permissions::register(&core_webview2) {
             eprintln!("[Popup][Permissions] registration failed: {error}");
@@ -3540,7 +3540,7 @@ fn create_popup_child(
 /// for this thread (STA, as the Common Item Dialog requires — never once per
 /// request), and picker jobs are processed sequentially for determinism and
 /// bounded memory.
-const THEME_IMPORT_WORKER_NAME: &str = "legcord-theme-import-sta";
+const THEME_IMPORT_WORKER_NAME: &str = "remcord-theme-import-sta";
 
 /// One theme-import picker job for the dedicated STA worker thread. The
 /// renderer supplies nothing: the picker configuration is host-owned and the
@@ -3558,7 +3558,7 @@ struct ThemeImportJob {
 /// this thread (STA, as the Common Item Dialog requires — never once per
 /// request), and save jobs are processed sequentially for determinism and
 /// bounded memory.
-const BACKUP_SAVE_WORKER_NAME: &str = "legcord-backup-save-sta";
+const BACKUP_SAVE_WORKER_NAME: &str = "remcord-backup-save-sta";
 
 /// One backup-save job for the dedicated STA worker thread. The renderer
 /// supplies only the validated include flags plus the bounded clientMods
@@ -3639,7 +3639,7 @@ fn run_backup_save_job(job: &BackupSaveJob) -> Result<BackupSaveSummary, BackupF
 /// the save path keeps the two lifecycles (write-new-archive vs
 /// overwrite-profile) isolated: a stuck save dialog can never block a
 /// restore and vice versa.
-const BACKUP_RESTORE_WORKER_NAME: &str = "legcord-backup-restore-sta";
+const BACKUP_RESTORE_WORKER_NAME: &str = "remcord-backup-restore-sta";
 
 /// One backup-restore job for the dedicated STA worker thread. The renderer
 /// supplies nothing: the dialog, the picked path, validation, staging, and
@@ -3702,7 +3702,7 @@ fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
             let serialized =
                 serde_json::to_string(&serialized).expect("a JSON string must serialize to JSON");
             let script = format!(
-                "window.dispatchEvent(new CustomEvent('legcord-native:response', {{ detail: JSON.parse({serialized}) }}));"
+                "window.dispatchEvent(new CustomEvent('remcord-native:response', {{ detail: JSON.parse({serialized}) }}));"
             );
             if let Err(error) = webview.evaluate_script(&script) {
                 eprintln!("[Bridge] Could not deliver response to renderer: {error}");
@@ -3729,7 +3729,7 @@ fn send_window_state_event(webview: &WebView, focused: bool, maximized: bool) {
     match serde_json::to_string(&detail) {
         Ok(serialized) => {
             let script = format!(
-                "window.dispatchEvent(new CustomEvent('legcord-native:window-state', {{ detail: JSON.parse({serialized}) }}));"
+                "window.dispatchEvent(new CustomEvent('remcord-native:window-state', {{ detail: JSON.parse({serialized}) }}));"
             );
             if let Err(error) = webview.evaluate_script(&script) {
                 eprintln!("[Window] Could not deliver window state to renderer: {error}");
@@ -4149,7 +4149,7 @@ fn handle_mod_bootstrap_result(
             }
         }
     }
-    // Real Legcord settings plugin (3d-2): Shelter's own marker proves
+    // Real Remcord settings plugin (3d-2): Shelter's own marker proves
     // `window.shelter.plugins` exists, so the host now registers the
     // embedded settings artifact through the same closed add/start lifecycle
     // the loader probe proved. Gated to Shelter, once per document
@@ -4182,7 +4182,7 @@ fn handle_mod_bootstrap_result(
                 }
             }
         }
-        // Real Legcord titlebar plugin: same trigger, same closed lifecycle,
+        // Real Remcord titlebar plugin: same trigger, same closed lifecycle,
         // own generation guard so a settings replay can never start (or skip)
         // the titlebar. Failure is loud but never blocks the document.
         if let Some(start) = titlebar_plugin_start {
@@ -4261,7 +4261,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let proxy = event_loop.create_proxy();
 
     let window = WindowBuilder::new()
-        .with_title("Legcord")
+        .with_title("Remcord")
         .with_inner_size(Size::Logical(LogicalSize::new(835.0, 600.0)))
         .with_min_inner_size(Size::Logical(LogicalSize::new(400.0, 300.0)))
         .with_decorations(false)
@@ -4276,8 +4276,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Release blocker 2: the profile root is resolved per build, never
     // hardcoded. Debug takes the isolated DEV profile; release takes
-    // `%LOCALAPPDATA%\LegcordNative`; an explicit absolute
-    // `LEGCORD_NATIVE_PROFILE_DIR` wins in both. Any failure fails startup
+    // `%LOCALAPPDATA%\Remcord`; an explicit absolute
+    // `REMCORD_NATIVE_PROFILE_DIR` wins in both. Any failure fails startup
     // — never a silent fallback to another product's data.
     let resolved_profile = profile::resolve_for_build(
         cfg!(debug_assertions),
@@ -4347,7 +4347,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         match create_legcord_webview_environment(&profile_path) {
             Ok(env) => {
                 println!(
-                    "[LegcordProtocol] scheme registered: legcord (authority, secure, https://discord.com)"
+                    "[RemcordProtocol] scheme registered: legcord (authority, secure, https://discord.com)"
                 );
                 env
             }
@@ -4360,7 +4360,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // it unchanged for the existing fail-fast behavior.
                 if runtime_check == webview_runtime::RuntimeCheck::Absent {
                     report_missing_runtime();
-                    return Err("WebView2 Evergreen Runtime is not installed; install it from Microsoft and start Legcord again".into());
+                    return Err("WebView2 Evergreen Runtime is not installed; install it from Microsoft and start Remcord again".into());
                 }
                 return Err(error);
             }
@@ -4778,7 +4778,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ),
             Ok(_) => eprintln!("[Folders][Smoke] traversal unexpectedly resolved"),
         }
-        match resolve_theme_folder(&profile_path, "legcord-native-no-such-theme") {
+        match resolve_theme_folder(&profile_path, "remcord-native-no-such-theme") {
             Err(failure) => println!(
                 "[Folders][Smoke] unknown theme rejected code={} (no OS effect)",
                 failure.code
@@ -4796,9 +4796,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("[QuickCss][Smoke] native Quick CSS smoke observation enabled");
     }
     let diagnostic_legcord_protocol_smoke =
-        std::env::var(LEGCORD_PROTOCOL_SMOKE_ENV).is_ok_and(|value| value == "1");
+        std::env::var(REMCORD_PROTOCOL_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_legcord_protocol_smoke {
-        println!("[LegcordProtocol][Smoke] legcord:// protocol smoke probe enabled");
+        println!("[RemcordProtocol][Smoke] legcord:// protocol smoke probe enabled");
     }
     let diagnostic_permissions_smoke =
         std::env::var(PERMISSIONS_SMOKE_ENV).is_ok_and(|value| value == "1");
@@ -4933,7 +4933,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(error.into());
     }
     println!("[Native] Initial navigation: {DISCORD_URL}");
-    let mut smoke_reloads_remaining: u32 = std::env::var("LEGCORD_NATIVE_SMOKE_RELOAD")
+    let mut smoke_reloads_remaining: u32 = std::env::var("REMCORD_NATIVE_SMOKE_RELOAD")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0);
@@ -5004,7 +5004,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut request_count = 0_u64;
     let mut event_count = 0_u64;
     let mut response_count = 0_u64;
-    // Real Legcord settings plugin (3d-2): host-built start script plus the
+    // Real Remcord settings plugin (3d-2): host-built start script plus the
     // per-document guard, both moved into the event-loop closure below.
     let settings_plugin_start_script =
         settings_plugin_start_script().expect("settings plugin start script must build");
@@ -5014,7 +5014,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut settings_plugin_started_generation = None::<u64>;
     let mut settings_plugin_start_count = 0_u64;
-    // Real Legcord titlebar plugin: same host-built script plus per-document
+    // Real Remcord titlebar plugin: same host-built script plus per-document
     // guard as the settings plugin, moved into the event-loop closure below.
     // Started from the same Shelter bootstrap trigger, right after settings.
     let titlebar_plugin_start_script =
@@ -5768,15 +5768,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
-            Event::UserEvent(NativeEvent::LegcordProtocolSmokeReadback) => {
+            Event::UserEvent(NativeEvent::RemcordProtocolSmokeReadback) => {
                 if diagnostic_legcord_protocol_smoke {
                     if let Err(error) = webview.evaluate_script_with_callback(
-                        LEGCORD_PROTOCOL_SMOKE_READBACK_SCRIPT,
+                        REMCORD_PROTOCOL_SMOKE_READBACK_SCRIPT,
                         |result| {
-                            println!("[LegcordProtocol][Smoke] subresources={result}");
+                            println!("[RemcordProtocol][Smoke] subresources={result}");
                         },
                     ) {
-                        eprintln!("[LegcordProtocol][Smoke] readback failed: {error}");
+                        eprintln!("[RemcordProtocol][Smoke] readback failed: {error}");
                     }
                 }
             }
@@ -8103,7 +8103,7 @@ mod tests {
         lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, settings_plugin_start_due,
         settings_plugin_start_script, settings_ui_probe_script, startup_visibility,
         titlebar_plugin_start_script, StartupVisibility, EQUICORD_MOD, KNOWN_MODS,
-        LEGCORD_PROTOCOL_SMOKE_SCRIPT, PERMISSIONS_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
+        PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
         SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
         TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
     };
@@ -8159,15 +8159,15 @@ mod tests {
             )
             .unwrap();
             assert!(
-                !script.contains("__LEGCORD_BOOT_SNAPSHOT__"),
+                !script.contains("__REMCORD_BOOT_SNAPSHOT__"),
                 "boot placeholder must be spliced"
             );
             assert!(
-                !script.contains("__LEGCORD_SETTINGS_BOOT_SNAPSHOT__"),
+                !script.contains("__REMCORD_SETTINGS_BOOT_SNAPSHOT__"),
                 "settings boot placeholder must be spliced"
             );
             assert!(
-                !script.contains("__LEGCORD_HOST_PLATFORM__"),
+                !script.contains("__REMCORD_HOST_PLATFORM__"),
                 "host platform placeholder must be spliced"
             );
             let snapshot_at = script
@@ -8210,16 +8210,16 @@ mod tests {
             "legcord://plugins/settings/plugin.js",
         ] {
             assert!(
-                LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains(fixed),
+                REMCORD_PROTOCOL_SMOKE_SCRIPT.contains(fixed),
                 "probe must reference the fixed bundle URL {fixed}"
             );
         }
-        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains("eval("));
-        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains("new Function"));
-        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains("innerHTML"));
+        assert!(!REMCORD_PROTOCOL_SMOKE_SCRIPT.contains("eval("));
+        assert!(!REMCORD_PROTOCOL_SMOKE_SCRIPT.contains("new Function"));
+        assert!(!REMCORD_PROTOCOL_SMOKE_SCRIPT.contains("innerHTML"));
         // No query/fragment: the resolver hardens by rejecting them.
-        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains('?'));
-        assert!(!LEGCORD_PROTOCOL_SMOKE_SCRIPT.contains('#'));
+        assert!(!REMCORD_PROTOCOL_SMOKE_SCRIPT.contains('?'));
+        assert!(!REMCORD_PROTOCOL_SMOKE_SCRIPT.contains('#'));
     }
 
     #[test]
@@ -8271,7 +8271,7 @@ mod tests {
             );
         }
         let script = settings_plugin_start_script().expect("the start script must build");
-        assert!(!script.contains("__LEGCORD_SETTINGS_PLUGIN_"));
+        assert!(!script.contains("__REMCORD_SETTINGS_PLUGIN_"));
         assert!(script.contains("legcord-settings"));
         assert!(script.contains("Legcord Settings"));
         // The embedded artifact travels with the script (a distinctive boot
@@ -8302,8 +8302,8 @@ mod tests {
             "titlebar-started:controls-missing",
             "titlebar-failed",
             "legcord-platform",
-            "data-legcord-titlebar-css",
-            "__LEGCORD_TITLEBAR_CSS__",
+            "data-remcord-titlebar-css",
+            "__REMCORD_TITLEBAR_CSS__",
         ] {
             assert!(
                 TITLEBAR_PLUGIN_START_TEMPLATE.contains(token),
@@ -8329,8 +8329,8 @@ mod tests {
             );
         }
         let script = titlebar_plugin_start_script().expect("the start script must build");
-        assert!(!script.contains("__LEGCORD_TITLEBAR_PLUGIN_"));
-        assert!(!script.contains("__LEGCORD_TITLEBAR_CSS__"));
+        assert!(!script.contains("__REMCORD_TITLEBAR_PLUGIN_"));
+        assert!(!script.contains("__REMCORD_TITLEBAR_CSS__"));
         assert!(script.contains("legcord-titlebar"));
         assert!(script.contains("Legcord Titlebar Controller"));
         // The embedded artifact travels with the script (a structural member
@@ -8346,9 +8346,9 @@ mod tests {
     fn settings_ui_probe_script_carries_a_spliced_run_nonce() {
         let first = settings_ui_probe_script(11).expect("probe script must build");
         let second = settings_ui_probe_script(22).expect("probe script must build");
-        assert!(!first.contains("__LEGCORD_SETTINGS_UI_RUN_NONCE__"));
+        assert!(!first.contains("__REMCORD_SETTINGS_UI_RUN_NONCE__"));
         assert!(first.contains("const RUN_NONCE = \"11\""));
-        assert!(!second.contains("__LEGCORD_SETTINGS_UI_RUN_NONCE__"));
+        assert!(!second.contains("__REMCORD_SETTINGS_UI_RUN_NONCE__"));
         assert!(
             first != second,
             "distinct nonces must build distinct scripts"
@@ -8380,12 +8380,12 @@ mod tests {
         )
         .unwrap();
         assert!(with_adapter.contains("native.getModBundle"));
-        assert!(with_adapter.contains("__legcordNativeVencordAdapter"));
-        assert!(with_adapter.contains("__legcordNativeModSubstrate"));
+        assert!(with_adapter.contains("__remcordNativeVencordAdapter"));
+        assert!(with_adapter.contains("__remcordNativeModSubstrate"));
         assert!(without_adapter.contains("        getModBundle,"));
         assert!(without_adapter.contains("        getVencordBundle,"));
-        assert!(without_adapter.contains("__legcordNativeModSubstrate"));
-        assert!(!without_adapter.contains("__legcordNativeVencordAdapter"));
+        assert!(without_adapter.contains("__remcordNativeModSubstrate"));
+        assert!(!without_adapter.contains("__remcordNativeVencordAdapter"));
     }
 
     #[test]
@@ -8393,9 +8393,9 @@ mod tests {
         // The adapter appended for a mod must be that mod's file and no other:
         // one mod's identity can never be substituted for another's.
         let expectations = [
-            ("vencord", "__legcordNativeVencordAdapter"),
-            ("shelter", "__legcordNativeShelterAdapter"),
-            ("equicord", "__legcordNativeEquicordAdapter"),
+            ("vencord", "__remcordNativeVencordAdapter"),
+            ("shelter", "__remcordNativeShelterAdapter"),
+            ("equicord", "__remcordNativeEquicordAdapter"),
         ];
         for (id, own_flag) in expectations {
             let script = initialization_script(
@@ -8440,7 +8440,7 @@ mod tests {
             crate::app::test_fixture_json(),
         )
         .unwrap();
-        assert!(script.contains("__legcordNativeStorageAtDocumentStart"));
+        assert!(script.contains("__remcordNativeStorageAtDocumentStart"));
         assert!(script.contains("Window.prototype"));
         assert!(script.contains("defineProperty(Window.prototype, \"localStorage\""));
     }
@@ -8458,7 +8458,7 @@ mod tests {
         assert_eq!(vencord.js_file, "vencord.js");
         let vencord_css = vencord.css.expect("Vencord ships CSS");
         assert_eq!(vencord_css.file, "vencord.css");
-        assert_eq!(vencord_css.style_element_id, "legcord-native-vencord-css");
+        assert_eq!(vencord_css.style_element_id, "remcord-native-vencord-css");
         assert_eq!(vencord.page_global, "Vencord");
         assert_eq!(vencord.success_marker, "vencord-bootstrap-executed");
         assert_eq!(vencord.settings_key, Some("VencordSettings"));
@@ -8842,13 +8842,13 @@ mod tests {
         )
         .unwrap();
         assert!(css.contains("document.head"));
-        assert!(css.contains("legcord-native-vencord-css"));
+        assert!(css.contains("remcord-native-vencord-css"));
         assert!(css.contains("vencord_css_result"));
         assert!(css.contains(r#"body::after{content:\"ok\"}"#));
 
         let context = mod_execution_context_script(&VENCORD_MOD);
         assert!(context.contains("VencordSettings"));
-        assert!(context.contains("__legcordNativeVencordStorageAtExecution"));
+        assert!(context.contains("__remcordNativeVencordStorageAtExecution"));
 
         let marker = mod_marker_script(&VENCORD_MOD, "request-1", 1.5).unwrap();
         assert!(marker.contains("globalThis.Vencord"));
@@ -8862,13 +8862,13 @@ mod tests {
         let equicord_css = EQUICORD_MOD.css.unwrap();
         let equicord_script =
             mod_css_script(&EQUICORD_MOD, &equicord_css, "request-1", ".vc{}").unwrap();
-        assert!(equicord_script.contains("legcord-native-equicord-css"));
+        assert!(equicord_script.contains("remcord-native-equicord-css"));
         // Equicord reports through the MOD-AGNOSTIC CSS event family and
         // echoes its own host-supplied id, so the host can refuse a result
         // claimed for another mod. Vencord's legacy event name is untouched.
         assert!(equicord_script.contains("mod_css_result"));
         assert!(equicord_script.contains("mod_id: \"equicord\""));
-        assert!(!equicord_script.contains("legcord-native-vencord-css"));
+        assert!(!equicord_script.contains("remcord-native-vencord-css"));
         assert!(!equicord_script.contains("vencord_css_result"));
         // Shelter declares no stylesheet, so no CSS script is ever built for it.
         assert!(SHELTER_MOD.css.is_none());
@@ -9037,13 +9037,13 @@ mod tests {
         // The restore script carries exactly one host-formatted boolean;
         // it cannot name a key, path, or second field.
         assert!(super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE
-            .contains("__LEGCORD_MUTATION_RESTORE_VALUE__"));
+            .contains("__REMCORD_MUTATION_RESTORE_VALUE__"));
         assert!(super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE
             .contains("setBlockPowerSavingInVoiceChat(RESTORE_TO)"));
         assert!(!super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE.contains("setConfig("));
         let rendered = super::SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE
-            .replace("__LEGCORD_MUTATION_RESTORE_VALUE__", "false");
-        assert!(!rendered.contains("__LEGCORD_MUTATION_RESTORE_VALUE__"));
+            .replace("__REMCORD_MUTATION_RESTORE_VALUE__", "false");
+        assert!(!rendered.contains("__REMCORD_MUTATION_RESTORE_VALUE__"));
         assert!(rendered.contains("const RESTORE_TO = false;"));
     }
 
@@ -9095,10 +9095,10 @@ mod tests {
             assert!(!template.contains("localStorage"));
         }
         assert!(super::SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE
-            .contains("__LEGCORD_SETTINGS_SET_RESTORE_VALUE__"));
+            .contains("__REMCORD_SETTINGS_SET_RESTORE_VALUE__"));
         let rendered = super::SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE
-            .replace("__LEGCORD_SETTINGS_SET_RESTORE_VALUE__", "false");
-        assert!(!rendered.contains("__LEGCORD_SETTINGS_SET_RESTORE_VALUE__"));
+            .replace("__REMCORD_SETTINGS_SET_RESTORE_VALUE__", "false");
+        assert!(!rendered.contains("__REMCORD_SETTINGS_SET_RESTORE_VALUE__"));
         assert!(rendered.contains("const RESTORE_TO = false;"));
     }
 
@@ -9233,14 +9233,14 @@ mod tests {
         assert!(!script.contains("addTheme"));
         assert!(!script.contains("removeTheme"));
         assert!(!script.contains("quickCss"));
-        assert!(!script.contains("legcord-native-theme"));
+        assert!(!script.contains("remcord-native-theme"));
     }
 
     #[test]
     fn themes_smoke_observation_only_reads_managed_dom_nodes() {
-        assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-native-theme-"));
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("remcord-native-theme-"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("querySelectorAll"));
-        assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-native-vencord-css"));
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("remcord-native-vencord-css"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-quick-css"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("order-probe"));
         // Null-safe in a headless early document: a missing head yields an
@@ -9314,7 +9314,7 @@ mod tests {
     fn plugin_storage_smoke_probe_uses_only_the_typed_capability() {
         assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("pluginStorage"));
         assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("plugin_storage_probe"));
-        assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("legcordNativeProbe"));
+        assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("remcordNativeProbe"));
         assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("../escape.txt"));
         assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("sendSync"));
         // The probe asserts the generic facade is ABSENT (`window.legcord.fs
@@ -9381,7 +9381,7 @@ mod tests {
     fn backup_save_runs_on_a_dedicated_named_worker() {
         // The modal save dialog must never run on the WebView/UI thread: the
         // save contract lives on BACKUP_SAVE_WORKER_NAME's documented worker.
-        assert_eq!(super::BACKUP_SAVE_WORKER_NAME, "legcord-backup-save-sta");
+        assert_eq!(super::BACKUP_SAVE_WORKER_NAME, "remcord-backup-save-sta");
         assert_ne!(
             super::BACKUP_SAVE_WORKER_NAME,
             super::THEME_IMPORT_WORKER_NAME
@@ -9410,7 +9410,7 @@ mod tests {
         // from the save lifecycle.
         assert_eq!(
             super::BACKUP_RESTORE_WORKER_NAME,
-            "legcord-backup-restore-sta"
+            "remcord-backup-restore-sta"
         );
         assert_ne!(
             super::BACKUP_RESTORE_WORKER_NAME,
@@ -9503,7 +9503,7 @@ mod tests {
     fn folders_smoke_probe_is_env_gated_like_other_probes() {
         // The DEV-only probe must stay behind its documented env flag and
         // must never run unconditionally.
-        assert_eq!(super::FOLDERS_SMOKE_ENV, "LEGCORD_NATIVE_FOLDERS_SMOKE");
+        assert_eq!(super::FOLDERS_SMOKE_ENV, "REMCORD_NATIVE_FOLDERS_SMOKE");
     }
 
     #[test]
@@ -9548,11 +9548,11 @@ mod tests {
     fn theme_install_smoke_probe_reports_through_the_typed_probe_event() {
         assert_eq!(
             super::THEME_INSTALL_SMOKE_ENV,
-            "LEGCORD_NATIVE_THEME_INSTALL_SMOKE"
+            "REMCORD_NATIVE_THEME_INSTALL_SMOKE"
         );
         assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("installFromCode"));
         assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("theme_install_probe"));
-        assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("LegcordNativeSmoke"));
+        assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("RemcordSmoke"));
         // The probe installs through the capability and observes one fetch;
         // it never fetches theme code for installation.
         assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("fetch_observed"));
@@ -9602,11 +9602,11 @@ mod tests {
     fn theme_write_smoke_probe_reports_reflection_through_the_typed_probe_event() {
         assert_eq!(
             super::THEME_WRITE_SMOKE_ENV,
-            "LEGCORD_NATIVE_THEME_WRITE_SMOKE"
+            "REMCORD_NATIVE_THEME_WRITE_SMOKE"
         );
         assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("writeCss"));
         assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("theme_write_probe"));
-        assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("LegcordWriteProbe"));
+        assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("RemcordWriteProbe"));
         // The probe proves in-WebView reflection and single-node updates;
         // it never launches an editor or fetches code.
         assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("getComputedStyle"));
@@ -9663,14 +9663,14 @@ mod tests {
         // named worker owns the dialog plus the sequential ingestion. The
         // name is pinned so logs stay greppable; the single-COM-init STA
         // contract lives on THEME_IMPORT_WORKER_NAME's documented worker.
-        assert_eq!(super::THEME_IMPORT_WORKER_NAME, "legcord-theme-import-sta");
+        assert_eq!(super::THEME_IMPORT_WORKER_NAME, "remcord-theme-import-sta");
     }
 
     #[test]
     fn theme_import_smoke_probe_opens_the_real_picker_through_the_capability() {
         assert_eq!(
             super::THEME_IMPORT_SMOKE_ENV,
-            "LEGCORD_NATIVE_THEME_IMPORT_SMOKE"
+            "REMCORD_NATIVE_THEME_IMPORT_SMOKE"
         );
         assert!(super::THEME_IMPORT_SMOKE_SCRIPT.contains("importFiles"));
         assert!(super::THEME_IMPORT_SMOKE_SCRIPT.contains("theme_import_probe"));
@@ -9730,7 +9730,7 @@ mod tests {
     fn theme_set_enabled_smoke_probe_flips_through_the_capability() {
         assert_eq!(
             super::THEME_SET_ENABLED_SMOKE_ENV,
-            "LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE"
+            "REMCORD_NATIVE_THEME_SET_ENABLED_SMOKE"
         );
         assert!(super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("setEnabled"));
         assert!(super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("theme_set_enabled_probe"));
@@ -9786,7 +9786,7 @@ mod tests {
     fn theme_list_smoke_probe_inventories_through_the_capability() {
         assert_eq!(
             super::THEME_LIST_SMOKE_ENV,
-            "LEGCORD_NATIVE_THEME_LIST_SMOKE"
+            "REMCORD_NATIVE_THEME_LIST_SMOKE"
         );
         assert!(super::THEME_LIST_SMOKE_SCRIPT.contains("listThemes"));
         assert!(super::THEME_LIST_SMOKE_SCRIPT.contains("theme_list_probe"));
@@ -9804,14 +9804,14 @@ mod tests {
     fn shelter_loader_probe_covers_only_the_public_loader_surface() {
         assert_eq!(
             super::SHELTER_LOADER_PROBE_ENV,
-            "LEGCORD_NATIVE_LOADER_PROBE"
+            "REMCORD_NATIVE_LOADER_PROBE"
         );
         assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("shelter_loader_probe"));
         assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("addLocalPlugin"));
         assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("startPlugin"));
         assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("stopPlugin"));
         assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("removePlugin"));
-        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("legcord-loader-probe"));
+        assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("remcord-loader-probe"));
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("installedPlugins"));
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("loadedPlugins"));
         // The throw-chain reads no reactive store: Shelter serves registry

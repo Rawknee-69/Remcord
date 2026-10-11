@@ -1,4 +1,4 @@
-//! Exact Legcord settings Shelter plugin artifact for the native shell.
+//! Exact Remcord settings Shelter plugin artifact for the native shell.
 //!
 //! The artifact is authored in `src/shelter/settings/`, compiled by the
 //! existing JS pipeline (`pnpm build:plugins` → `lune ci`), and embedded at
@@ -14,7 +14,7 @@
 
 include!(concat!(
     env!("OUT_DIR"),
-    "/legcord_settings_plugin/settings_plugin.rs"
+    "/remcord_settings_plugin/settings_plugin.rs"
 ));
 
 /// Maximum accepted artifact size in bytes (mirrors the `build.rs` embed
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn foreign_plugin_name_is_rejected() {
         let embedded = artifact();
-        assert!(validate_artifact(embedded.js, "Legcord Power").is_err());
+        assert!(validate_artifact(embedded.js, "Remcord Power").is_err());
     }
 
     #[test]

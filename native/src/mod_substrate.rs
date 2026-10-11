@@ -666,7 +666,7 @@ pub fn mod_execution_context_script(descriptor: &ModDescriptor) -> String {
       }});
     }}
   }} catch (error) {{
-    console.error("[Legcord native][mods] page-global observation trap was unavailable", error);
+    console.error("[Remcord native][mods] page-global observation trap was unavailable", error);
   }}
 "#
             )
@@ -1020,7 +1020,7 @@ pub fn managed_css_script(style_id: &str, css: &str) -> Result<String, serde_jso
     }}
     return true;
   }} catch (error) {{
-    console.error("[Legcord native][themes] managed CSS injection failed", error);
+    console.error("[Remcord native][themes] managed CSS injection failed", error);
     return true;
   }}
   }};
@@ -1067,7 +1067,7 @@ pub fn managed_css_order_script(ordered_ids: &[&str]) -> Result<String, serde_js
       if (style) root.appendChild(style);
     }}
   }} catch (error) {{
-    console.error("[Legcord native][themes] managed CSS order failed", error);
+    console.error("[Remcord native][themes] managed CSS order failed", error);
   }}
 }})();"#
     ))
@@ -1089,7 +1089,7 @@ pub fn managed_css_remove_script(style_id: &str) -> Result<String, serde_json::E
     const style = document.getElementById({style_id});
     if (style) style.remove();
   }} catch (error) {{
-    console.error("[Legcord native][themes] managed CSS removal failed", error);
+    console.error("[Remcord native][themes] managed CSS removal failed", error);
   }}
 }})();"#
     ))
@@ -1135,7 +1135,7 @@ mod tests {
                 url: "https://github.com/example/TestMod/releases/download/devbuild/browser.css",
                 file: "testmod.css",
                 max_bytes: 256 * 1024,
-                style_element_id: "legcord-native-testmod-css",
+                style_element_id: "remcord-native-testmod-css",
                 result_event: "testmod_css_result",
             }),
             allowed_hosts: &["github.com", "release-assets.githubusercontent.com"],
@@ -1149,8 +1149,8 @@ mod tests {
             enabling: ModEnabling::SettingsMods,
             success_marker: "testmod-bootstrap-executed",
             settings_key: Some("TestModSettings"),
-            bootstrap_dom_event: "legcord-native:testmod-bootstrap",
-            storage_context_global: "__legcordNativeTestModStorageAtExecution",
+            bootstrap_dom_event: "remcord-native:testmod-bootstrap",
+            storage_context_global: "__remcordNativeTestModStorageAtExecution",
             log_tag: "Mod:TestMod",
         }
     }
@@ -1176,15 +1176,15 @@ mod tests {
             page_global: "headerless",
             page_global_requires: Some("plugins"),
             page_global_readiness: PageGlobalReadiness::Awaited {
-                ready_global: "__legcordNativeHeaderlessPageReady",
+                ready_global: "__remcordNativeHeaderlessPageReady",
                 timeout_ms: 120_000,
                 poll_ms: 250,
             },
             enabling: ModEnabling::AlwaysEnabled,
             success_marker: "headerless-bootstrap-executed",
             settings_key: None,
-            bootstrap_dom_event: "legcord-native:headerless-bootstrap",
-            storage_context_global: "__legcordNativeHeaderlessStorageAtExecution",
+            bootstrap_dom_event: "remcord-native:headerless-bootstrap",
+            storage_context_global: "__remcordNativeHeaderlessStorageAtExecution",
             log_tag: "Mod:Headerless",
         }
     }
@@ -1288,7 +1288,7 @@ mod tests {
             "{context}"
         );
         assert!(
-            context.contains("__legcordNativeHeaderlessPageReady"),
+            context.contains("__remcordNativeHeaderlessPageReady"),
             "{context}"
         );
         assert!(
@@ -1310,9 +1310,9 @@ mod tests {
             marker.contains(r#"typeof value.plugins === "undefined""#),
             "{marker}"
         );
-        assert!(marker.contains("__legcordNativeHeaderlessPageReady"));
+        assert!(marker.contains("__remcordNativeHeaderlessPageReady"));
         assert!(marker.contains("headerless-bootstrap-executed"));
-        assert!(marker.contains("legcord-native:headerless-bootstrap"));
+        assert!(marker.contains("remcord-native:headerless-bootstrap"));
         // Bounded, coarse, and self-clearing: exactly one interval and one
         // deadline, both cleared as soon as the single verdict is dispatched.
         assert_eq!(marker.matches("setInterval").count(), 1, "{marker}");
@@ -1336,7 +1336,7 @@ mod tests {
         // The settings-key read belongs to the PRE-execution snapshot, not the
         // marker: the marker only reports the state it recorded there.
         assert!(sync.contains("TestModSettings"));
-        assert!(sync_marker.contains("__legcordNativeTestModStorageAtExecution"));
+        assert!(sync_marker.contains("__remcordNativeTestModStorageAtExecution"));
     }
 
     #[test]
@@ -1354,7 +1354,7 @@ mod tests {
         })
         .is_err());
         assert!(validate_descriptor(&ModDescriptor {
-            bootstrap_dom_event: "legcord-native:bootstrap\");evil();//",
+            bootstrap_dom_event: "remcord-native:bootstrap\");evil();//",
             ..headerless_descriptor()
         })
         .is_err());
@@ -1364,7 +1364,7 @@ mod tests {
                 url: "https://raw.githubusercontent.com/example/builds/main/x.css",
                 file: "../escape.css",
                 max_bytes: 1024,
-                style_element_id: "legcord-native-x-css",
+                style_element_id: "remcord-native-x-css",
                 result_event: "x_css_result",
             }),
             ..test_descriptor()
@@ -1373,7 +1373,7 @@ mod tests {
         // A readiness bound that is not a coarse, bounded poll.
         assert!(validate_descriptor(&ModDescriptor {
             page_global_readiness: PageGlobalReadiness::Awaited {
-                ready_global: "__legcordNativeXPageReady",
+                ready_global: "__remcordNativeXPageReady",
                 timeout_ms: 1000,
                 poll_ms: 5,
             },
@@ -1382,7 +1382,7 @@ mod tests {
         .is_err());
         assert!(validate_descriptor(&ModDescriptor {
             page_global_readiness: PageGlobalReadiness::Awaited {
-                ready_global: "__legcordNativeXPageReady",
+                ready_global: "__remcordNativeXPageReady",
                 timeout_ms: 1000,
                 poll_ms: 600_000,
             },
@@ -1455,7 +1455,7 @@ mod tests {
         // Retrieval downloads the fixed release asset when no cached file
         // exists; the disk-cache read path is only taken for present files,
         // so an absent artifact cannot masquerade as a validated bundle.
-        let profile = std::env::temp_dir().join("legcord-native-substrate-absent-cache");
+        let profile = std::env::temp_dir().join("remcord-native-substrate-absent-cache");
         let _ = std::fs::remove_dir_all(&profile);
         std::fs::create_dir_all(&profile).expect("temp profile");
         assert!(!profile.join("testmod.js").exists());
@@ -1547,7 +1547,7 @@ mod tests {
             r#"body::after{content:"ok"}"#,
         )
         .unwrap();
-        assert!(css.contains("legcord-native-testmod-css"));
+        assert!(css.contains("remcord-native-testmod-css"));
         assert!(css.contains("testmod_css_result"));
         assert!(css.contains(r#"body::after{content:\"ok\"}"#));
         assert!(css.contains("getElementById"));
@@ -1556,12 +1556,12 @@ mod tests {
 
         let context = mod_execution_context_script(&descriptor);
         assert!(context.contains("TestModSettings"));
-        assert!(context.contains("__legcordNativeTestModStorageAtExecution"));
+        assert!(context.contains("__remcordNativeTestModStorageAtExecution"));
 
         let marker = mod_marker_script(&descriptor, "request-1", 1.5).unwrap();
         assert!(marker.contains("globalThis.TestMod"));
         assert!(marker.contains("testmod-bootstrap-executed"));
-        assert!(marker.contains("legcord-native:testmod-bootstrap"));
+        assert!(marker.contains("remcord-native:testmod-bootstrap"));
         assert!(!marker.contains("eval("));
         assert!(!marker.contains("new Function"));
         assert!(!css.contains("eval("));
@@ -1571,9 +1571,9 @@ mod tests {
     #[test]
     fn managed_css_scripts_use_a_stable_identity_without_an_eval_surface() {
         let inject =
-            managed_css_script("legcord-native-theme-demo", r#"body::after{content:"ok"}"#)
+            managed_css_script("remcord-native-theme-demo", r#"body::after{content:"ok"}"#)
                 .unwrap();
-        assert!(inject.contains("legcord-native-theme-demo"));
+        assert!(inject.contains("remcord-native-theme-demo"));
         assert!(inject.contains(r#"body::after{content:\"ok\"}"#));
         assert!(inject.contains("getElementById"));
         // One stable element reused, never duplicated: exactly one creation
@@ -1592,8 +1592,8 @@ mod tests {
         // No request correlation: a host push has no renderer request id.
         assert!(!inject.contains("requestId"));
 
-        let remove = managed_css_remove_script("legcord-native-theme-demo").unwrap();
-        assert!(remove.contains("legcord-native-theme-demo"));
+        let remove = managed_css_remove_script("remcord-native-theme-demo").unwrap();
+        assert!(remove.contains("remcord-native-theme-demo"));
         assert!(remove.contains(".remove()"));
         assert!(!remove.contains("createElement"));
         assert!(!remove.contains("eval("));
@@ -1607,17 +1607,17 @@ mod tests {
     fn managed_css_order_script_reorders_only_host_listed_styles() {
         let order = managed_css_order_script(&[
             "legcord-quick-css",
-            "legcord-native-theme-alpha",
-            "legcord-native-theme-zulu",
+            "remcord-native-theme-alpha",
+            "remcord-native-theme-zulu",
         ])
         .unwrap();
         assert!(order.contains("legcord-quick-css"));
-        assert!(order.contains("legcord-native-theme-alpha"));
-        assert!(order.contains("legcord-native-theme-zulu"));
+        assert!(order.contains("remcord-native-theme-alpha"));
+        assert!(order.contains("remcord-native-theme-zulu"));
         // Relative order in the script matches the cascade order argument.
         let quick = order.find("legcord-quick-css").unwrap();
-        let alpha = order.find("legcord-native-theme-alpha").unwrap();
-        let zulu = order.find("legcord-native-theme-zulu").unwrap();
+        let alpha = order.find("remcord-native-theme-alpha").unwrap();
+        let zulu = order.find("remcord-native-theme-zulu").unwrap();
         assert!(quick < alpha && alpha < zulu);
         assert!(order.contains("getElementById"));
         assert!(order.contains("appendChild"));

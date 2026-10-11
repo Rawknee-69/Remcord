@@ -308,9 +308,9 @@ pub fn attach_main_content_filters(
     let _ = profile_path;
     let roots = super::build_namespace_roots(&bundle_dir, &user_data_dir);
     if let Err(e) = super::register_legcord_protocol(&core_webview2, roots.clone()) {
-        eprintln!("[LegcordProtocol] Failed to register protocol handler: {e}");
+        eprintln!("[RemcordProtocol] Failed to register protocol handler: {e}");
     } else {
-        println!("[LegcordProtocol] Custom scheme handler registered");
+        println!("[RemcordProtocol] Custom scheme handler registered");
     }
     // Native permission policy (P0.3): exact-origin allowlist for
     // microphone/camera/notifications, explicit deny for everything

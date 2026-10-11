@@ -3,7 +3,7 @@
     "use strict";
 
     if (window.location.origin !== "https://discord.com") return;
-    if (Object.hasOwn(window, "__legcordNativeModSubstrate")) return;
+    if (Object.hasOwn(window, "__remcordNativeModSubstrate")) return;
 
     /**
      * Generic document-start adapter factory for native client mods.
@@ -139,7 +139,7 @@
         };
     }
 
-    Object.defineProperty(window, "__legcordNativeModSubstrate", {
+    Object.defineProperty(window, "__remcordNativeModSubstrate", {
         configurable: false,
         enumerable: false,
         value: Object.freeze({ createModAdapter }),

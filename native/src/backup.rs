@@ -22,7 +22,7 @@
 //!   `bundles/<name>` for the 7 fixed `BUNDLE_FILES` (bundles flag). Missing
 //!   files/directories are silently skipped; filesystem order is used.
 //! - Dialog: `showSaveDialog` with translated title, no `defaultPath` beyond
-//!   `Documents/legcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter;
+//!   `Documents/remcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter;
 //!   cancellation returns `{ ok: false, error: "CANCELLED" }`; `.zip` is
 //!   appended when missing; the buffer is written with `writeFileSync`.
 //!
@@ -103,7 +103,7 @@
 //!   `bundles/<name>` for the 7 fixed `BUNDLE_FILES` (bundles flag). Missing
 //!   files/directories are silently skipped; filesystem order is used.
 //! - Dialog: `showSaveDialog` with translated title, no `defaultPath` beyond
-//!   `Documents/legcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter;
+//!   `Documents/remcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter;
 //!   cancellation returns `{ ok: false, error: "CANCELLED" }`; `.zip` is
 //!   appended when missing; the buffer is written with `writeFileSync`.
 //!
@@ -175,7 +175,7 @@ pub const MAX_SHELTER_NODES: usize = 65_536;
 /// serves). The renderer supplies none of the dialog strings.
 pub const DIALOG_TITLE_KEY: &str = "backup-dialogSave-title";
 /// Fallback title, byte-identical to the embedded `en-US` catalog value.
-pub const FALLBACK_DIALOG_TITLE: &str = "Save Legcord backup";
+pub const FALLBACK_DIALOG_TITLE: &str = "Save Remcord backup";
 /// Save-dialog file-type display name, mirroring the Electron filter.
 pub const DIALOG_FILTER_NAME: &str = "ZIP";
 /// Save-dialog file-type spec, mirroring the Electron `zip` extension.
@@ -428,10 +428,14 @@ pub fn utc_today() -> String {
     created_at_now()[..10].to_owned()
 }
 
-/// Default save filename for a UTC date: `legcord-backup-YYYY-MM-DD.zip`
+/// Default save filename for a UTC date: `remcord-backup-YYYY-MM-DD.zip`
 /// (Electron `defaultPath` basename semantics; the host owns the directory).
+/// Restore compatibility: archives saved under the legacy
+/// `legcord-backup-YYYY-MM-DD.zip` default (Electron or older native builds)
+/// use the identical ZIP format and remain fully restore-compatible — the
+/// restore picker reads any user-picked `.zip`, never just this default.
 pub fn default_backup_filename(utc_date: &str) -> String {
-    format!("legcord-backup-{utc_date}.zip")
+    format!("remcord-backup-{utc_date}.zip")
 }
 
 /// Append `.zip` when the selected filename lacks it (case-insensitive),
@@ -776,14 +780,28 @@ pub enum SavePickerOutcome {
 
 /// Resolve the host-owned save-dialog configuration: translated title plus the
 /// UTC-date default filename. The renderer influences none of this.
+///
+/// Product identity: the embedded catalogs are Electron's verbatim
+/// translations (e.g. en-US "Save Legcord backup"). Host dialog titles are
+/// Remcord product surfaces, so the looked-up title is rebranded at
+/// presentation (`rebrand_dialog_title`); translation structure and every
+/// other catalog string stay byte-identical for `getLang` parity.
 pub fn save_dialog_config(profile_dir: &Path) -> (String, String) {
     let found = crate::localization::lookup(profile_dir, DIALOG_TITLE_KEY);
     let title = if found.value.is_empty() {
         FALLBACK_DIALOG_TITLE.to_owned()
     } else {
-        found.value
+        rebrand_dialog_title(&found.value)
     };
     (title, default_backup_filename(&utc_today()))
+}
+
+/// Rebrand one host dialog title at presentation: the Electron catalogs name
+/// the old product, while host dialogs are Remcord surfaces. A literal
+/// product-name substitution preserves every translation's structure without
+/// forking the catalogs or touching `getLang` parity.
+fn rebrand_dialog_title(title: &str) -> String {
+    title.replace("Legcord", "Remcord")
 }
 
 /// Show the host-owned backup save picker and return its outcome.
@@ -928,7 +946,7 @@ pub fn write_backup_file(target: &Path, zip_bytes: &[u8]) -> Result<u64, BackupF
         return Err(failure("BACKUP_FAILED", "backup file cannot be written"));
     }
     let temp_name = format!(
-        ".legcord-backup-{}.tmp",
+        ".remcord-backup-{}.tmp",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
@@ -1009,7 +1027,7 @@ pub const MAX_RESTORE_SETTINGS_BYTES: usize = 256 * 1024;
 /// serves). The renderer supplies none of the dialog strings.
 pub const DIALOG_OPEN_TITLE_KEY: &str = "backup-dialogOpen-title";
 /// Fallback title, byte-identical to the embedded `en-US` catalog value.
-pub const FALLBACK_DIALOG_OPEN_TITLE: &str = "Open Legcord backup";
+pub const FALLBACK_DIALOG_OPEN_TITLE: &str = "Open Remcord backup";
 
 /// Reserved Windows device-stem check for archive directory names that do
 /// NOT pass through `validate_relative_path` (theme ids and runtime-plugin
@@ -1424,7 +1442,7 @@ fn create_staging_dir() -> Result<PathBuf, BackupFailure> {
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "legcord-backup-restore-{}-{}-{}",
+        "remcord-backup-restore-{}-{}-{}",
         std::process::id(),
         nanos,
         STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -2027,13 +2045,15 @@ pub fn restore_profile_from_picked_file(
 }
 
 /// Resolve the host-owned restore-dialog configuration: translated title
-/// only. The renderer influences none of this.
+/// only. The renderer influences none of this. The looked-up title is
+/// rebranded at presentation (see `save_dialog_config`): the catalogs stay
+/// verbatim for `getLang` parity while the host dialog shows Remcord.
 pub fn restore_dialog_config(profile_dir: &Path) -> String {
     let found = crate::localization::lookup(profile_dir, DIALOG_OPEN_TITLE_KEY);
     if found.value.is_empty() {
         FALLBACK_DIALOG_OPEN_TITLE.to_owned()
     } else {
-        found.value
+        rebrand_dialog_title(&found.value)
     }
 }
 
@@ -2192,7 +2212,7 @@ mod tests {
             .expect("system clock must advance")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "legcord-native-backup-test-{}-{tag}-{nanos}",
+            "remcord-native-backup-test-{}-{tag}-{nanos}",
             std::process::id(),
         ));
         std::fs::create_dir_all(&dir).expect("must create temp profile");
@@ -2323,7 +2343,7 @@ mod tests {
     fn default_filename_and_extension_match_electron() {
         assert_eq!(
             default_backup_filename("2026-10-07"),
-            "legcord-backup-2026-10-07.zip"
+            "remcord-backup-2026-10-07.zip"
         );
         assert_eq!(ensure_zip_extension("backup"), "backup.zip");
         assert_eq!(ensure_zip_extension("backup.zip"), "backup.zip");
@@ -2593,21 +2613,21 @@ mod tests {
 
     /// Live Windows dialog validation (gated: opens a real modal saver).
     ///
-    /// Run explicitly with `LEGCORD_NATIVE_BACKUP_SAVE_UI_TEST=1`; ordinary
+    /// Run explicitly with `REMCORD_NATIVE_BACKUP_SAVE_UI_TEST=1`; ordinary
     /// `cargo test` skips it so no dialog ever appears in unattended runs.
     /// The picker runs on its own STA thread exactly like the production
     /// worker (COM initialized once for that thread); this thread polls for
     /// the dialog window by its translated title, asserts the filename field
-    /// carries the UTC-date default (`legcord-backup-YYYY-MM-DD.zip` —
+    /// carries the UTC-date default (`remcord-backup-YYYY-MM-DD.zip` —
     /// proving `SetFileName` applied), then dismisses with `WM_CLOSE` and
     /// requires a silent `Canceled` outcome. Dialog appearance itself proves
     /// `SetTitle`/`SetFileTypes`/`SetFileTypeIndex`/`SetDefaultExtension`
     /// all succeeded (any failure returns before `Show`).
     #[test]
     fn live_dialog_shows_translated_title_default_filename_and_cancels_silently() {
-        if std::env::var("LEGCORD_NATIVE_BACKUP_SAVE_UI_TEST").as_deref() != Ok("1") {
+        if std::env::var("REMCORD_NATIVE_BACKUP_SAVE_UI_TEST").as_deref() != Ok("1") {
             eprintln!(
-                "SKIP: live dialog test needs LEGCORD_NATIVE_BACKUP_SAVE_UI_TEST=1 (opens a real modal saver)"
+                "SKIP: live dialog test needs REMCORD_NATIVE_BACKUP_SAVE_UI_TEST=1 (opens a real modal saver)"
             );
             return;
         }
@@ -2630,11 +2650,11 @@ mod tests {
             let _dialog_guard = UI_DIALOG_LOCK.lock().expect("ui dialog lock must hold");
             let profile = temp_profile("ui");
             let (title, default_filename) = save_dialog_config(&profile);
-            assert!(default_filename.starts_with("legcord-backup-"));
+            assert!(default_filename.starts_with("remcord-backup-"));
             assert!(default_filename.ends_with(".zip"));
             let (done_tx, done_rx) = mpsc::channel();
             std::thread::Builder::new()
-                .name("legcord-backup-save-ui-test-sta".to_owned())
+                .name("remcord-backup-save-ui-test-sta".to_owned())
                 .spawn(move || {
                     let com_init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
                     let com_owned = com_init == windows::core::HRESULT(0);
@@ -2750,7 +2770,7 @@ mod restore_tests {
             .expect("system clock must advance")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "legcord-native-restore-test-{}-{tag}-{nanos}",
+            "remcord-native-restore-test-{}-{tag}-{nanos}",
             std::process::id(),
         ));
         std::fs::create_dir_all(&dir).expect("must create temp profile");
@@ -3622,9 +3642,28 @@ mod restore_tests {
         // No lang.json: the embedded en-US catalog applies.
         let profile = restore_profile("dialog");
         assert_eq!(restore_dialog_config(&profile), FALLBACK_DIALOG_OPEN_TITLE);
-        assert_eq!(restore_dialog_config(&profile), "Open Legcord backup");
+        assert_eq!(restore_dialog_config(&profile), "Open Remcord backup");
         assert_eq!(DIALOG_OPEN_TITLE_KEY, "backup-dialogOpen-title");
         std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn dialog_titles_rebrand_the_catalog_product_name_at_presentation() {
+        // The embedded catalogs stay verbatim (getLang parity); host dialogs
+        // rebrand at presentation so no Remcord surface shows the old name.
+        assert_eq!(
+            rebrand_dialog_title("Open Legcord backup"),
+            "Open Remcord backup"
+        );
+        assert_eq!(
+            rebrand_dialog_title("Save Legcord backup"),
+            "Save Remcord backup"
+        );
+        assert_eq!(
+            rebrand_dialog_title("Select a theme you want to import"),
+            "Select a theme you want to import"
+        );
+        assert_eq!(rebrand_dialog_title(""), "");
     }
 
     #[test]

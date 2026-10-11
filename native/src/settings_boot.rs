@@ -1,4 +1,4 @@
-//! Synchronous settings boot snapshot for the Legcord settings plugin.
+//! Synchronous settings boot snapshot for the Remcord settings plugin.
 //!
 //! The real settings plugin (`src/shelter/settings/index.ts::onLoad`) reads
 //! five synchronous members before any async work: `getConfig()` (whole
@@ -116,7 +116,7 @@ mod tests {
             .expect("system time must be available")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "legcord-settings-boot-{tag}-{nanos}-{}",
+            "remcord-settings-boot-{tag}-{nanos}-{}",
             std::process::id()
         ))
     }

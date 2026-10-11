@@ -5,12 +5,12 @@
 //!
 //! - Debug/DEV: the isolated DEV profile (`DEV_PROFILE_DIR`), preserving
 //!   the established development behavior. Never the Electron profile.
-//! - Release: `%LOCALAPPDATA%\LegcordNative` — a stable, writable,
+//! - Release: `%LOCALAPPDATA%\Remcord` — a stable, writable,
 //!   per-user, machine-local directory. Machine-local (not roaming) fits
 //!   the WebView2 user-data caches living beneath it, and the leaf
-//!   (`LegcordNative`) can never alias Electron's `%APPDATA%\legcord`
+//!   (`Remcord`) can never alias Electron's `%APPDATA%\legcord`
 //!   profile (roaming, different leaf and different root).
-//! - Explicit override (`LEGCORD_NATIVE_PROFILE_DIR`, absolute path only):
+//! - Explicit override (`REMCORD_NATIVE_PROFILE_DIR`, absolute path only):
 //!   honored in both builds for safe isolated testing (e.g. a temp
 //!   directory). The renderer never supplies this: it is read once from
 //!   the host process environment at startup.
@@ -29,19 +29,19 @@
 use std::path::PathBuf;
 
 /// The isolated DEV profile. Debug builds only; never a release fallback.
-pub const DEV_PROFILE_DIR: &str = r"E:\Legcord.webview-dev-user-data";
+pub const DEV_PROFILE_DIR: &str = r"E:\Remcord.webview-dev-user-data";
 /// Explicit host-side profile override (absolute path). Both builds.
-pub const PROFILE_OVERRIDE_ENV: &str = "LEGCORD_NATIVE_PROFILE_DIR";
+pub const PROFILE_OVERRIDE_ENV: &str = "REMCORD_NATIVE_PROFILE_DIR";
 /// Leaf of the release profile under `%LOCALAPPDATA%`. Distinct from
 /// Electron's `%APPDATA%\legcord` by root and by leaf.
-pub const RELEASE_PROFILE_LEAF: &str = "LegcordNative";
+pub const RELEASE_PROFILE_LEAF: &str = "Remcord";
 
 /// Which configuration a resolved profile came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileKind {
     /// Debug default: the isolated DEV profile.
     Dev,
-    /// Release default: `%LOCALAPPDATA%\LegcordNative`.
+    /// Release default: `%LOCALAPPDATA%\Remcord`.
     Release,
     /// Explicit absolute override via [`PROFILE_OVERRIDE_ENV`].
     Override,
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn release_selects_localappdata_legcordnative() {
+    fn release_selects_localappdata_remcord() {
         let overridden = resolve_for_build(false, Some(r"C:\Temp\native-override"), None)
             .expect("override wins");
         assert_eq!(overridden.kind, ProfileKind::Override);
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(resolved.kind, ProfileKind::Release);
         assert_eq!(
             resolved.path,
-            PathBuf::from(r"C:\Users\Test\AppData\Local\LegcordNative")
+            PathBuf::from(r"C:\Users\Test\AppData\Local\Remcord")
         );
     }
 
@@ -180,7 +180,7 @@ mod tests {
             resolve_for_build(false, None, Some(r"C:\Users\Test\AppData\Local")).expect("release");
         assert_eq!(
             release.path.file_name().and_then(|n| n.to_str()),
-            Some("LegcordNative")
+            Some("Remcord")
         );
         assert!(!release
             .path
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn ensure_creates_only_the_root_and_reports_failure() {
         let root = std::env::temp_dir().join(format!(
-            "legcord-profile-test-{}-{}",
+            "remcord-profile-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -270,7 +270,7 @@ mod tests {
         // Binary name and crate version are the release identity; both must
         // match the product metadata (package.json), enforced at build time
         // in build.rs and pinned here against drift.
-        assert_eq!(env!("CARGO_PKG_NAME"), "legcord");
+        assert_eq!(env!("CARGO_PKG_NAME"), "remcord");
         let manifest: serde_json::Value = serde_json::from_str(include_str!("../../package.json"))
             .expect("package.json must parse");
         let product_version = manifest

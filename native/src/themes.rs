@@ -69,7 +69,7 @@ pub const MAX_THEME_CSS_BYTES: usize = 1024 * 1024;
 /// Byte prefix for every native-managed theme style element. The raw theme id
 /// is never used as a DOM id so native styles cannot collide with Discord
 /// node ids (Electron reuses the raw id; this namespacing is deliberate).
-pub const THEME_STYLE_ID_PREFIX: &str = "legcord-native-theme-";
+pub const THEME_STYLE_ID_PREFIX: &str = "remcord-native-theme-";
 
 fn is_valid_theme_id_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
@@ -1184,7 +1184,7 @@ mod tests {
             .expect("system clock must advance")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "legcord-native-themes-test-{}-{}",
+            "remcord-native-themes-test-{}-{}",
             std::process::id(),
             nanos
         ));

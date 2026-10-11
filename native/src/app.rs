@@ -22,14 +22,14 @@
 /// are dotted triples well under this; the bound only rejects absurd values.
 pub const MAX_APP_VERSION_BYTES: usize = 64;
 
-include!(concat!(env!("OUT_DIR"), "/legcord_app/app_version.rs"));
+include!(concat!(env!("OUT_DIR"), "/remcord_app/app_version.rs"));
 
 /// Electron parity for `getVersion()`: dev builds report `"0.0.0"`.
 pub fn app_version(is_dev: bool) -> &'static str {
     if is_dev {
         "0.0.0"
     } else {
-        LEGCORD_APP_VERSION
+        REMCORD_APP_VERSION
     }
 }
 
@@ -162,19 +162,19 @@ pub fn test_fixture_json() -> &'static str {
 mod tests {
     use super::{
         app_version, current_app_version, os_version_string, validate_os_release, validate_version,
-        LEGCORD_APP_VERSION,
+        REMCORD_APP_VERSION,
     };
 
     #[test]
     fn embeds_the_package_json_version() {
-        assert!(!LEGCORD_APP_VERSION.is_empty());
-        assert!(LEGCORD_APP_VERSION.len() <= 32);
-        assert!(LEGCORD_APP_VERSION
+        assert!(!REMCORD_APP_VERSION.is_empty());
+        assert!(REMCORD_APP_VERSION.len() <= 32);
+        assert!(REMCORD_APP_VERSION
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+')));
         // The repository version is a dotted triple; the embedded value must
         // keep that shape so the update checker comparison keeps working.
-        let parts: Vec<&str> = LEGCORD_APP_VERSION.split('.').collect();
+        let parts: Vec<&str> = REMCORD_APP_VERSION.split('.').collect();
         assert!(parts.len() >= 2);
         assert!(parts.iter().all(|part| !part.is_empty()));
     }
@@ -184,7 +184,7 @@ mod tests {
         // Mirrors `getVersion()`: `isDev` serves "0.0.0" instead of the
         // packaged version.
         assert_eq!(app_version(true), "0.0.0");
-        assert_eq!(app_version(false), LEGCORD_APP_VERSION);
+        assert_eq!(app_version(false), REMCORD_APP_VERSION);
     }
 
     #[test]
@@ -194,7 +194,7 @@ mod tests {
         // version. The exact branch is covered by
         // `dev_builds_report_zero_like_electron_is_dev`.
         let current = current_app_version();
-        assert!(current == "0.0.0" || current == LEGCORD_APP_VERSION);
+        assert!(current == "0.0.0" || current == REMCORD_APP_VERSION);
         assert!(validate_version(current).is_ok());
     }
 

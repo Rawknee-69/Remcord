@@ -3,9 +3,9 @@
     "use strict";
 
     const startedAt = performance.now();
-    const bootSnapshot = __LEGCORD_BOOT_SNAPSHOT__;
-    const settingsBootData = __LEGCORD_SETTINGS_BOOT_SNAPSHOT__;
-    const hostPlatformData = __LEGCORD_HOST_PLATFORM__;
+    const bootSnapshot = __REMCORD_BOOT_SNAPSHOT__;
+    const settingsBootData = __REMCORD_SETTINGS_BOOT_SNAPSHOT__;
+    const hostPlatformData = __REMCORD_HOST_PLATFORM__;
     const protocolVersion = 1;
     const pending = new Map();
     const textEncoder = new TextEncoder();
@@ -23,7 +23,7 @@
 
     function nextId() {
         sequence += 1;
-        return `legcord-${Date.now().toString(36)}-${sequence}`;
+        return `remcord-${Date.now().toString(36)}-${sequence}`;
     }
 
     function post(message) {
@@ -56,7 +56,7 @@
                 payload: { kind, message: truncateUtf8(message, 2048) },
             });
         } catch {
-            console.error("[Legcord native] renderer error could not be sent to the host", {
+            console.error("[Remcord native] renderer error could not be sent to the host", {
                 kind,
                 message,
             });
@@ -668,7 +668,7 @@
         );
     }
 
-    window.addEventListener("legcord-native:response", (event) => {
+    window.addEventListener("remcord-native:response", (event) => {
         const response = event.detail;
         if (!response || response.version !== protocolVersion || typeof response.request_id !== "string") {
             return;
@@ -1074,7 +1074,7 @@
     let windowFocused = snapshot.window?.focused === true;
     let windowMaximized = snapshot.window?.maximized === true;
 
-    window.addEventListener("legcord-native:window-state", (event) => {
+    window.addEventListener("remcord-native:window-state", (event) => {
         const detail = event?.detail;
         if (!detail || typeof detail !== "object") return;
         if (detail.version !== protocolVersion) return;

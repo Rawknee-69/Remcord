@@ -1,4 +1,4 @@
-//! Exact Legcord titlebar Shelter plugin artifact for the native shell.
+//! Exact Remcord titlebar Shelter plugin artifact for the native shell.
 //!
 //! The artifact is authored in `src/shelter/titlebar/`, compiled by the
 //! existing JS pipeline (`pnpm build:plugins` → `lune ci`), and embedded at
@@ -15,12 +15,12 @@
 
 include!(concat!(
     env!("OUT_DIR"),
-    "/legcord_titlebar_plugin/titlebar_plugin.rs"
+    "/remcord_titlebar_plugin/titlebar_plugin.rs"
 ));
 
 include!(concat!(
     env!("OUT_DIR"),
-    "/legcord_titlebar_plugin/titlebar_css.rs"
+    "/remcord_titlebar_plugin/titlebar_css.rs"
 ));
 
 /// Maximum accepted artifact size in bytes (mirrors the `build.rs` embed

@@ -293,7 +293,7 @@ pub struct BackupRestoreRequest {}
 /// Empty request for the `window.show` capability: reveal the single host
 /// window (restore when minimized, clear skip-taskbar where supported, show,
 /// focus). There is deliberately NO window id, handle, coordinate, style, or
-/// message parameter: the host owns the one Legcord window. Any extra field
+/// message parameter: the host owns the one Remcord window. Any extra field
 /// is rejected.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -367,57 +367,57 @@ pub enum BridgeEvent {
     VencordResponseAck(VencordResponseAck),
     InteractionProbe(InteractionProbe),
     /// DEV-only diagnostic posted by the settings smoke probe
-    /// (`LEGCORD_NATIVE_SETTINGS_SMOKE=1`). Never sent by shipped adapters.
+    /// (`REMCORD_NATIVE_SETTINGS_SMOKE=1`). Never sent by shipped adapters.
     SettingsProbe(SettingsProbe),
     /// DEV-only diagnostic posted by the settings mutation smoke probe
-    /// (`LEGCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_SETTINGS_MUTATION_SMOKE=1`). Never sent by shipped
     /// adapters.
     SettingsMutationProbe(SettingsMutationProbe),
     /// DEV-only diagnostic posted by the settings set smoke probe
-    /// (`LEGCORD_NATIVE_SETTINGS_SET_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_SETTINGS_SET_SMOKE=1`). Never sent by shipped
     /// adapters. `key` is the allowlisted wire key exercised
     /// (`support_banner_dismissed`); `attacks_blocked` counts the
     /// unknown-key / wrong-type / extra-member attempts the facade or host
     /// rejected. The probe never carries settings values or host paths.
     SettingsSetProbe(SettingsSetProbe),
     /// DEV-only diagnostic posted by the localization smoke probe
-    /// (`LEGCORD_NATIVE_GETLANG_SMOKE=1`). Never sent by shipped adapters.
+    /// (`REMCORD_NATIVE_GETLANG_SMOKE=1`). Never sent by shipped adapters.
     GetLangProbe(GetLangProbe),
     /// DEV-only diagnostic posted by the app-version smoke probe
-    /// (`LEGCORD_NATIVE_APP_VERSION_SMOKE=1`). Never sent by shipped code.
+    /// (`REMCORD_NATIVE_APP_VERSION_SMOKE=1`). Never sent by shipped code.
     AppVersionProbe(AppVersionProbe),
     /// DEV-only diagnostic posted by the plugin-storage smoke probe
-    /// (`LEGCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Never sent by shipped
     /// code.
     PluginStorageProbe(PluginStorageProbe),
     /// DEV-only diagnostic posted by the theme install smoke probe
-    /// (`LEGCORD_NATIVE_THEME_INSTALL_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_THEME_INSTALL_SMOKE=1`). Never sent by shipped
     /// code.
     ThemeInstallProbe(ThemeInstallProbe),
     /// DEV-only diagnostic posted by the theme write smoke probe
-    /// (`LEGCORD_NATIVE_THEME_WRITE_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_THEME_WRITE_SMOKE=1`). Never sent by shipped
     /// code.
     ThemeWriteProbe(ThemeWriteProbe),
     /// DEV-only diagnostic posted by the theme import smoke probe
-    /// (`LEGCORD_NATIVE_THEME_IMPORT_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_THEME_IMPORT_SMOKE=1`). Never sent by shipped
     /// code.
     ThemeImportProbe(ThemeImportProbe),
     /// DEV-only diagnostic posted by the theme enable smoke probe
-    /// (`LEGCORD_NATIVE_THEME_SET_ENABLED_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_THEME_SET_ENABLED_SMOKE=1`). Never sent by shipped
     /// code.
     ThemeSetEnabledProbe(ThemeSetEnabledProbe),
     /// DEV-only diagnostic posted by the theme list smoke probe
-    /// (`LEGCORD_NATIVE_THEME_LIST_SMOKE=1`). Never sent by shipped code.
+    /// (`REMCORD_NATIVE_THEME_LIST_SMOKE=1`). Never sent by shipped code.
     ThemeListProbe(ThemeListProbe),
     /// DEV-only diagnostic posted by the backup save probe
-    /// (`LEGCORD_NATIVE_BACKUP_SAVE_SMOKE=1`). Never sent by shipped code.
+    /// (`REMCORD_NATIVE_BACKUP_SAVE_SMOKE=1`). Never sent by shipped code.
     BackupSaveProbe(BackupSaveProbe),
     /// DEV-only diagnostic posted by the backup restore probe
-    /// (`LEGCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`). Never sent by shipped
+    /// (`REMCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`). Never sent by shipped
     /// code.
     BackupRestoreProbe(BackupRestoreProbe),
     /// DEV-only diagnostic posted by the Shelter loader probe
-    /// (`LEGCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
+    /// (`REMCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
     ShelterLoaderProbe(ShelterLoaderProbe),
     /// Shipped one-way event posted by the `settingsBoot.setLang(locale)`
     /// boot-surface function. Fire-and-forget like Electron's
@@ -434,10 +434,10 @@ pub enum BridgeEvent {
     /// document reload. This boundary is documented, not hidden.
     SettingsBootRestart(SettingsBootRestart),
     /// DEV-only diagnostic posted by the settings boot snapshot smoke probe
-    /// (`LEGCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`). Never sent by shipped code.
+    /// (`REMCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`). Never sent by shipped code.
     SettingsBootProbe(SettingsBootProbe),
     /// DEV-only staged report from the settings UI workflow probe
-    /// (`LEGCORD_NATIVE_SETTINGS_UI_SMOKE=1`). Never sent by shipped code.
+    /// (`REMCORD_NATIVE_SETTINGS_UI_SMOKE=1`). Never sent by shipped code.
     /// `stage` names the workflow step reached (`begin`, `gear`, `open`,
     /// `themes`, `cards`, `enable`, `second`, `disable`, `import`, `folder`,
     /// `reload`, `verify`, `restore`, `done`); `detail` carries small
@@ -1128,7 +1128,7 @@ pub struct WindowStateEvent {
 }
 
 /// Serializes one `window_state` host event detail for delivery as a
-/// `legcord-native:window-state` CustomEvent. The shape is fixed by
+/// `remcord-native:window-state` CustomEvent. The shape is fixed by
 /// construction; the renderer re-validates every field before applying it.
 pub fn window_state_event_json(focused: bool, maximized: bool) -> String {
     serde_json::json!({
@@ -1334,7 +1334,7 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // (`deny_unknown_fields` already rejected any
                 // renderer-supplied member: no window id, handle,
                 // coordinate, style, message, or process selector can cross).
-                // The host acts on the one Legcord window only.
+                // The host acts on the one Remcord window only.
                 BridgeCommand::WindowShow(_)
                 | BridgeCommand::WindowHide(_)
                 | BridgeCommand::WindowMinimize(_)
