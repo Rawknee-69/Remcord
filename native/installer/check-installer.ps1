@@ -1,4 +1,4 @@
-# Static packaging checks for the native Windows installer (§6).
+# Static packaging checks for the native Remcord Windows installer (§6).
 # Runs WITHOUT the Inno compiler: validates the .iss definition, the
 # staged file set, and separation from production Electron. Fails on the
 # first violation. Content checks ignore `;` comment lines (comments may
@@ -15,21 +15,22 @@ function Check([bool] $ok, [string] $name) {
     if ($ok) { Write-Host "ok: $name" } else { $script:failures += $name; Write-Host "FAIL: $name" }
 }
 $native = Join-Path $RepoRoot "native"
-$issPath = Join-Path $native "installer/legcord.iss"
+$issPath = Join-Path $native "installer/remcord.iss"
 $iss = Get-Content -Raw -LiteralPath $issPath
 $code = (($iss -split "`r?`n") | Where-Object { -not $_.TrimStart().StartsWith(";") }) -join "`n"
 $package = Get-Content -Raw (Join-Path $RepoRoot "package.json") | ConvertFrom-Json
 
-# 1. Unique installer ID, GUID-shaped, not Electron's.
+# 1. Stable installer ID: the GUID the native product shipped with, so a
+# Remcord setup upgrades the already-installed native product in place.
 $guid = [regex]::Match($code, '#define AppIdValue "([0-9A-Fa-f-]{36})"').Groups[1].Value
-Check ($guid -ne "") "AppId define present and GUID-shaped"
+Check ($guid -eq "5F76ADED-7123-4C1A-931E-625935D39BA6") "AppId stable across the rebrand"
 Check ($code -match "AppId=\{\{\{#AppIdValue\}\}\}") "Setup consumes the defined AppId"
 Check ($code -notmatch "app\.legcord\.Legcord") "no Electron appId reference in code"
 Check ($iss -match "app\.legcord\.Legcord") "difference from Electron appId documented in comments"
 
 # 2. Install-path separation.
 $leaf = [regex]::Match($code, '#define InstallLeaf "([A-Za-z0-9]+)"').Groups[1].Value
-Check ($leaf -eq "LegcordNative") "install leaf is LegcordNative"
+Check ($leaf -eq "Remcord") "install leaf is Remcord"
 Check ($code -match "DefaultDirName=\{localappdata\}\\Programs\\\{#InstallLeaf\}") "dedicated per-user install dir"
 Check ($code -match "PrivilegesRequired=lowest") "no administrator requirement"
 Check ($code -match "UsePreviousAppDir=yes") "in-place upgrade scoped to previous dir"
@@ -37,33 +38,34 @@ Check ($code -match "CloseApplications=yes") "running instance handled gracefull
 Check (-not ($code -match "taskkill|TerminateProcess|/IM ")) "no image-name process killing"
 Check ($code -match "RestartApplications=no") "no forced application restart"
 
-# 3. Electron/DEV paths appear ONLY inside the [Code] refusal guard.
+# 3. Electron/legacy/DEV paths appear ONLY inside the [Code] refusal guard.
 $head = ($code -split "\[Code\]")[0]
 $tail = ($code -split "\[Code\]")[-1]
-foreach ($needle in @("Programs\Legcord", "webview-dev-user-data", "appdata}\legcord", "localappdata}\LegcordNative")) {
+foreach ($needle in @("Programs\Legcord", "webview-dev-user-data", "appdata}\legcord", "localappdata}\Remcord", "localappdata}\LegcordNative")) {
     Check ($head.ToLowerInvariant().IndexOf($needle.ToLowerInvariant()) -lt 0) "installer head free of '$needle'"
 }
-Check ($tail -match "LegcordNative" -and $tail -match "Programs\\Legcord") "refusal guard names the protected locations"
+Check ($tail -match "Remcord" -and $tail -match "Programs\\Legcord") "refusal guard names the protected locations"
+Check ($tail -match "LegcordNative") "refusal guard names the legacy native locations"
 Check ($code -match "function NextButtonClick") "directory refusal guard present"
 Check ($code -match "IsForbiddenDir") "forbidden-dir predicate present"
 
 # 4. Uninstall scope: entry present, profile never listed for deletion.
-Check ($code -match "UninstallDisplayName=Legcord Native") "distinct uninstall entry"
-Check ($code -match "UninstallDisplayIcon=\{app\}\\legcord\.exe") "uninstall icon from installed exe"
+Check ($code -match "UninstallDisplayName=Remcord") "distinct uninstall entry"
+Check ($code -match "UninstallDisplayIcon=\{app\}\\remcord\.exe") "uninstall icon from installed exe"
 Check (-not ($code -match "\[UninstallDelete\]")) "no UninstallDelete section (profile cannot be listed)"
-Check (-not ($head -match "localappdata\}\\LegcordNative")) "profile dir absent outside refusal guard"
+Check (-not ($head -match "localappdata\}\\Remcord")) "profile dir absent outside refusal guard"
 
 # 5. Version metadata: single source (package.json via /DAppVersion).
 Check ($code -match "#error AppVersion must be passed") "unversioned compile refused"
 $setupName = [regex]::Match($code, "OutputBaseFilename=(\S+)").Groups[1].Value
-Check ($setupName -like "LegcordNative-Setup-*") "predictable versioned setup filename"
+Check ($setupName -like "Remcord-Setup-*") "predictable versioned setup filename"
 
 # 6. File set: exactly the staged exe + license; icon from repo asset.
-Check ($code -match 'Source: "stage\\legcord\.exe"') "packages staged exe only"
+Check ($code -match 'Source: "stage\\remcord\.exe"') "packages staged exe only"
 Check ($code -match 'Source: "stage\\license\.txt"') "packages license only"
 Check (([regex]::Matches($code, 'Source: "')).Count -eq 2) "no additional packaged files"
 Check ($code -match "SetupIconFile=" -and $code -match "build\\icon\.ico") "setup icon from repo asset"
-Check ($code -match 'Name: "\{autoprograms\}\\Legcord Native"') "distinct Start Menu label"
+Check ($code -match 'Name: "\{autoprograms\}\\Remcord"') "distinct Start Menu label"
 
 # 7. Out of scope stays out (documents blockers, not silent gaps).
 Check (-not ($code -match "signtool")) "no signing claims in installer"
@@ -78,11 +80,12 @@ Check ($code -match "https://developer\.microsoft\.com/microsoft-edge/webview2/"
 Check (-not ($code -match "DownloadPage|IDPDownload|InternetReadFile|URLDownloadToFile|bitsadmin|Invoke-WebRequest|curl\.exe|Start-Process.*http")) "no silent download machinery"
 
 # 8. Cross-check live product metadata when a release exe exists.
-$exe = Join-Path $native "target/release/legcord.exe"
+$exe = Join-Path $native "target/release/remcord.exe"
 if (Test-Path -LiteralPath $exe -PathType Leaf) {
     $info = (Get-Item -LiteralPath $exe).VersionInfo
     Check ($info.ProductVersion -eq $package.version) "exe ProductVersion matches package.json ($($package.version))"
-    Check ($info.OriginalFilename -eq "legcord.exe") "exe OriginalFilename is legcord.exe"
+    Check ($info.ProductName -eq "Remcord") "exe ProductName is Remcord"
+    Check ($info.OriginalFilename -eq "remcord.exe") "exe OriginalFilename is remcord.exe"
 } else {
     Write-Host "skip: no release exe built yet (run build-installer.ps1)"
 }
