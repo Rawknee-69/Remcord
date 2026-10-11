@@ -1,4 +1,4 @@
-import type { LegcordPluginInfo } from "../../../@types/legcordWindow.js";
+import type { RemcordPluginInfo } from "../../../@types/remcordWindow.js";
 import classes from "./PluginCard.module.css";
 
 const {
@@ -7,7 +7,7 @@ const {
 } = shelter;
 
 export function PluginCard(props: {
-    plugin: LegcordPluginInfo;
+    plugin: RemcordPluginInfo;
     busy: boolean;
     onToggle: (enabled: boolean) => void;
     onReload: () => void;

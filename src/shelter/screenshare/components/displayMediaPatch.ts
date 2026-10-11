@@ -10,20 +10,20 @@ type DisplayMediaPatchState = {
     interceptor: DisplayMediaInterceptor;
 };
 
-const patchRegistryKey = Symbol.for("legcord.screenshare.getDisplayMediaPatch");
+const patchRegistryKey = Symbol.for("remcord.screenshare.getDisplayMediaPatch");
 
 function getPatchRegistry(): WeakMap<MediaDevices, DisplayMediaPatchState> {
     const existing = Reflect.get(globalThis, patchRegistryKey) as unknown;
     if (existing === undefined) {
         const registry = new WeakMap<MediaDevices, DisplayMediaPatchState>();
         if (!Reflect.set(globalThis, patchRegistryKey, registry)) {
-            throw new Error("Unable to register the Legcord screenshare patch");
+            throw new Error("Unable to register the Remcord screenshare patch");
         }
         return registry;
     }
 
     if (!(existing instanceof WeakMap)) {
-        throw new TypeError("Invalid Legcord screenshare patch registry");
+        throw new TypeError("Invalid Remcord screenshare patch registry");
     }
     return existing as WeakMap<MediaDevices, DisplayMediaPatchState>;
 }

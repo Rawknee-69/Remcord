@@ -12,11 +12,11 @@ export function setRestartRequired() {
 }
 
 export function refreshSettings() {
-    store.settings = window.legcord.settings.getConfig();
+    store.settings = window.remcord.settings.getConfig();
 }
 
 export function refreshThemes() {
-    store.themes = window.legcord.themes.getThemes();
+    store.themes = window.remcord.themes.getThemes();
 }
 
 /** Nearest scrollable ancestor — Discord's settings content scroller. */
@@ -123,13 +123,13 @@ export function setConfig<K extends keyof Settings>(key: K, value: Settings[K], 
         if (shouldRestart) {
             isRestartRequired = true;
         }
-        window.legcord.settings.setConfig(key, value);
+        window.remcord.settings.setConfig(key, value);
     });
 }
 
 /** True when running under the native WebView2 shell (Phase C-3+). */
 export function isNativeWebView(): boolean {
-    return (window.legcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2";
+    return (window.remcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2";
 }
 
 /** Minimal native settings mutation shape for this caller. */
@@ -146,7 +146,7 @@ interface NativeBlockPowerSavingSettings {
  * The Electron path stays in `setConfig` above, unchanged.
  */
 export async function setBlockPowerSavingInVoiceChat(value: boolean): Promise<boolean> {
-    const nativeSet = (window.legcord as unknown as { settings: NativeBlockPowerSavingSettings }).settings
+    const nativeSet = (window.remcord as unknown as { settings: NativeBlockPowerSavingSettings }).settings
         .setBlockPowerSavingInVoiceChat;
     const applied = await nativeSet(value);
     withPreservedSettingsScroll(() => {
@@ -185,7 +185,7 @@ interface NativeSettingsSet {
  */
 export function isNativeSettingsSetAvailable(): boolean {
     if (!isNativeWebView()) return false;
-    const settings = (window.legcord as unknown as { settings?: Partial<NativeSettingsSet> }).settings;
+    const settings = (window.remcord as unknown as { settings?: Partial<NativeSettingsSet> }).settings;
     return typeof settings?.set === "function";
 }
 
@@ -201,7 +201,7 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
     value: Settings[K],
     shouldRestart?: boolean,
 ): Promise<Settings[K]> {
-    const nativeSet = (window.legcord as unknown as { settings: NativeSettingsSet }).settings.set;
+    const nativeSet = (window.remcord as unknown as { settings: NativeSettingsSet }).settings.set;
     const applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[]);
     withPreservedSettingsScroll(() => {
         // Mutate in place — do NOT replace store.settings (that remounts the page and jumps scroll).
@@ -231,7 +231,7 @@ interface NativeFolders {
  */
 function nativeFolders(): NativeFolders | undefined {
     if (!isNativeWebView()) return undefined;
-    const folders = (window.legcord as unknown as { folders?: NativeFolders }).folders;
+    const folders = (window.remcord as unknown as { folders?: NativeFolders }).folders;
     if (typeof folders?.open !== "function" || typeof folders?.openTheme !== "function") return undefined;
     return folders;
 }
@@ -249,7 +249,7 @@ export function revealFolderNative(location: NativeFolderLocation): boolean {
     if (!folders) return false;
     void folders
         .open(location)
-        .catch(() => console.warn(`[Legcord] Could not reveal the ${location} folder in the native shell.`));
+        .catch(() => console.warn(`[Remcord] Could not reveal the ${location} folder in the native shell.`));
     return true;
 }
 
@@ -263,7 +263,7 @@ export function openThemeFolderNative(id: string): boolean {
     if (!folders) return false;
     void folders
         .openTheme(id)
-        .catch(() => console.warn("[Legcord] Could not open the theme folder in the native shell."));
+        .catch(() => console.warn("[Remcord] Could not open the theme folder in the native shell."));
     return true;
 }
 
@@ -292,7 +292,7 @@ export interface NativeThemeImportResult {
  */
 function nativeThemes(): Record<string, unknown> | undefined {
     if (!isNativeWebView()) return undefined;
-    const themes = (window.legcord as unknown as { themes?: Record<string, unknown> }).themes;
+    const themes = (window.remcord as unknown as { themes?: Record<string, unknown> }).themes;
     if (!themes || typeof themes !== "object") return undefined;
     return themes;
 }
@@ -361,14 +361,14 @@ export function toThemeManifest(entry: unknown): import("../../@types/themeManif
  */
 export async function loadNativeThemes(): Promise<import("../../@types/themeManifest.js").ThemeManifest[]> {
     const listThemes = nativeThemes()?.listThemes as (() => Promise<unknown>) | undefined;
-    if (typeof listThemes !== "function") throw new Error("[Legcord] Native theme list is unavailable.");
+    if (typeof listThemes !== "function") throw new Error("[Remcord] Native theme list is unavailable.");
     let raw: unknown;
     try {
         raw = await listThemes();
     } catch {
-        throw new Error("[Legcord] Could not load themes in the native shell.");
+        throw new Error("[Remcord] Could not load themes in the native shell.");
     }
-    if (!Array.isArray(raw)) throw new Error("[Legcord] Could not load themes in the native shell.");
+    if (!Array.isArray(raw)) throw new Error("[Remcord] Could not load themes in the native shell.");
     const themes: import("../../@types/themeManifest.js").ThemeManifest[] = [];
     for (const entry of raw) {
         const manifest = toThemeManifest(entry);
@@ -397,11 +397,11 @@ export async function refreshNativeThemes(): Promise<void> {
  */
 export async function setNativeThemeEnabled(id: string, enabled: boolean): Promise<void> {
     const setEnabled = nativeThemes()?.setEnabled as ((id: string, enabled: boolean) => Promise<unknown>) | undefined;
-    if (typeof setEnabled !== "function") throw new Error("[Legcord] Native theme toggle is unavailable.");
+    if (typeof setEnabled !== "function") throw new Error("[Remcord] Native theme toggle is unavailable.");
     try {
         await setEnabled(id, enabled);
     } catch {
-        throw new Error("[Legcord] Could not update the theme in the native shell.");
+        throw new Error("[Remcord] Could not update the theme in the native shell.");
     }
 }
 
@@ -427,7 +427,7 @@ export async function importNativeThemes(): Promise<NativeThemeImportResult | nu
         }
         return { canceled: result.canceled, imported: result.imported, failed: result.failed };
     } catch {
-        console.warn("[Legcord] Could not import themes in the native shell.");
+        console.warn("[Remcord] Could not import themes in the native shell.");
         return { canceled: true, imported: 0, failed: 0 };
     }
 }
@@ -440,7 +440,7 @@ export async function importNativeThemes(): Promise<NativeThemeImportResult | nu
 export type BackupRestoreOutcome = { ok: true; clientMods: unknown } | { ok: false; error: string };
 
 /**
- * Minimal native backup namespace (Phase D4-3). `legcordWindow.d.ts` stays
+ * Minimal native backup namespace (Phase D4-3). `remcordWindow.d.ts` stays
  * Electron-shaped (`restore(): Promise<string>`); the native object result
  * is described only here, at the single restore call site that consumes it.
  * No generic filesystem/dialog API.
@@ -453,14 +453,14 @@ interface NativeBackupNamespace {
 /**
  * Native backup namespace when the WebView2 shell grants it, `undefined`
  * otherwise. Gated on BOTH the existing `isNativeWebView` environment check
- * AND function presence: an Electron `window.legcord.backup` also carries
+ * AND function presence: an Electron `window.remcord.backup` also carries
  * `save`/`restore` functions (with the STRING restore shape), so the
  * environment check is what selects the native OBJECT result shape. No
  * second detection mechanism.
  */
 function nativeBackup(): NativeBackupNamespace | undefined {
     if (!isNativeWebView()) return undefined;
-    const backup = (window.legcord as unknown as { backup?: NativeBackupNamespace }).backup;
+    const backup = (window.remcord as unknown as { backup?: NativeBackupNamespace }).backup;
     if (!backup || typeof backup.save !== "function" || typeof backup.restore !== "function") {
         return undefined;
     }
@@ -478,13 +478,13 @@ export function isNativeBackupAvailable(): boolean {
  * Backup save for both shells. Exactly one call per invocation: the native
  * facade preserves the Electron signature AND result shape (`{ok:true} |
  * {ok:false, error}`), so no branch is needed — the method on
- * `window.legcord.backup` is the native capability natively and the Electron
+ * `window.remcord.backup` is the native capability natively and the Electron
  * IPC bridge otherwise. The payload is built by the caller (clientMods stay
  * renderer-built, never move into Rust). Rejections propagate; the caller
  * shows the error state so clicks never produce unhandled rejections.
  */
 export async function saveBackup(payload: string): Promise<{ ok: boolean; error?: string }> {
-    const backup = (window.legcord as unknown as { backup: NativeBackupNamespace }).backup;
+    const backup = (window.remcord as unknown as { backup: NativeBackupNamespace }).backup;
     return await backup.save(payload);
 }
 
@@ -499,7 +499,7 @@ export async function saveBackup(payload: string): Promise<{ ok: boolean; error?
  */
 export async function restoreBackupNative(): Promise<unknown> {
     const restore = nativeBackup()?.restore;
-    if (typeof restore !== "function") throw new Error("[Legcord] Native backup restore is unavailable.");
+    if (typeof restore !== "function") throw new Error("[Remcord] Native backup restore is unavailable.");
     return await restore();
 }
 
@@ -555,7 +555,7 @@ export function toggleMod(mod: ValidMods, enabled: boolean) {
     const writeMods = (next: ValidMods[]) => {
         if (isNativeSettingsSetAvailable()) {
             void setNativeSetting("mods", next, true).catch(() =>
-                console.warn("[Legcord] Could not update mods in the native shell."),
+                console.warn("[Remcord] Could not update mods in the native shell."),
             );
         } else {
             isRestartRequired = true;
@@ -574,7 +574,7 @@ export function toggleMod(mod: ValidMods, enabled: boolean) {
 }
 
 export function isMinWindowsVersion(major: number, minor: number, build: number) {
-    const [sys_major, sys_minor, sys_build] = window.legcord.osRelease
+    const [sys_major, sys_minor, sys_build] = window.remcord.osRelease
         .split(".")
         .map((val, _, __) => Number.parseInt(val, 10));
     return sys_major >= major && sys_minor >= minor && sys_build >= build;

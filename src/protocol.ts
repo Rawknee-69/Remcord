@@ -4,7 +4,7 @@ import { app, net, protocol } from "electron";
 
 protocol.registerSchemesAsPrivileged([
     {
-        scheme: "legcord",
+        scheme: "remcord",
         privileges: {
             standard: true,
             secure: true,
@@ -17,10 +17,10 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 void app.whenReady().then(() => {
-    // Legcord custom internal protocol
-    protocol.handle("legcord", (req) => {
-        if (req.url.startsWith("legcord://plugins/")) {
-            const url = req.url.replace("legcord://plugins/", "").split("/");
+    // Remcord custom internal protocol
+    protocol.handle("remcord", (req) => {
+        if (req.url.startsWith("remcord://plugins/")) {
+            const url = req.url.replace("remcord://plugins/", "").split("/");
             const filePath = path.join(import.meta.dirname, "plugins", `/${url[0]}/${url[1]}`);
             if (filePath.includes("..")) {
                 return new Response("bad", {
@@ -29,8 +29,8 @@ void app.whenReady().then(() => {
                 });
             }
             return net.fetch(Url.pathToFileURL(filePath).toString());
-        } else if (req.url.startsWith("legcord://html/")) {
-            const file = req.url.replace("legcord://html/", "");
+        } else if (req.url.startsWith("remcord://html/")) {
+            const file = req.url.replace("remcord://html/", "");
             const filePath = path.join(import.meta.dirname, "html", `${file}`);
             if (filePath.includes("..")) {
                 return new Response("bad", {
@@ -39,8 +39,8 @@ void app.whenReady().then(() => {
                 });
             }
             return net.fetch(Url.pathToFileURL(filePath).toString());
-        } else if (req.url.startsWith("legcord://js/")) {
-            const file = req.url.replace("legcord://js/", "");
+        } else if (req.url.startsWith("remcord://js/")) {
+            const file = req.url.replace("remcord://js/", "");
             const filePath = path.join(import.meta.dirname, "js", `${file}`);
             if (filePath.includes("..")) {
                 return new Response("bad", {
@@ -49,8 +49,8 @@ void app.whenReady().then(() => {
                 });
             }
             return net.fetch(Url.pathToFileURL(filePath).toString());
-        } else if (req.url.startsWith("legcord://assets/")) {
-            const file = req.url.replace("legcord://assets/", "");
+        } else if (req.url.startsWith("remcord://assets/")) {
+            const file = req.url.replace("remcord://assets/", "");
             const filePath = path.join(import.meta.dirname, "assets", "app", `${file}`);
             if (filePath.includes("..")) {
                 return new Response("bad", {
@@ -59,8 +59,8 @@ void app.whenReady().then(() => {
                 });
             }
             return net.fetch(Url.pathToFileURL(filePath).toString());
-        } else if (req.url.startsWith("legcord://css/")) {
-            const file = req.url.replace("legcord://css/", "");
+        } else if (req.url.startsWith("remcord://css/")) {
+            const file = req.url.replace("remcord://css/", "");
             const filePath = path.join(import.meta.dirname, "css", `${file}`);
             if (filePath.includes("..")) {
                 return new Response("bad", {
@@ -69,8 +69,8 @@ void app.whenReady().then(() => {
                 });
             }
             return net.fetch(Url.pathToFileURL(filePath).toString());
-        } else if (req.url.startsWith("legcord://local/")) {
-            const file = req.url.replace("legcord://local/", "");
+        } else if (req.url.startsWith("remcord://local/")) {
+            const file = req.url.replace("remcord://local/", "");
             const userDataPath = path.join(app.getPath("userData"), "userAssets");
             const filePath = path.normalize(path.join(userDataPath, `${file}`));
             if (!filePath.startsWith(userDataPath)) {

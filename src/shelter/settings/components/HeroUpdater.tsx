@@ -4,17 +4,16 @@ import classes from "./HeroUpdater.module.css";
 const {
     ui: { Button, ButtonSizes, Header, HeaderTags, Text, ButtonColors },
 } = shelter;
-const LOGO_URL = "https://github.com/Legcord/Branding/raw/main/assets/legcord-banner.png";
 
 async function getLocalVersion(): Promise<string> {
-    // Native WebView2 has no synchronous `window.legcord.version` read: use
+    // Native WebView2 has no synchronous `window.remcord.version` read: use
     // the typed async `app.get_version` capability instead. Electron keeps
     // the original synchronous read below.
-    if ((window.legcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2") {
-        const native = (window.legcord as unknown as { native: { getVersion: () => Promise<string> } }).native;
+    if ((window.remcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2") {
+        const native = (window.remcord as unknown as { native: { getVersion: () => Promise<string> } }).native;
         return await native.getVersion();
     }
-    return window.legcord.version;
+    return window.remcord.version;
 }
 
 async function checkForUpdates() {
@@ -48,7 +47,6 @@ export const HeroUpdater = () => {
 
     return (
         <div class={classes.hero}>
-            <img src={LOGO_URL} alt="Logo" style={{ width: "160px", "margin-bottom": "1rem" }} />
             <Header tag={HeaderTags.H3}>Update Checker</Header>
             <Text>Check if a new version is available and download updates easily.</Text>
             {updateAvailable() === null && (

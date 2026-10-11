@@ -138,7 +138,7 @@ if (!app.requestSingleInstanceLock() && getConfig("multiInstance") === false) {
     // kill if 2nd instance
     app.quit();
 } else {
-    app.setAppUserModelId("app.legcord.Legcord");
+    app.setAppUserModelId("app.remcord.Remcord");
 
     const enableFeatures = new Set(app.commandLine.getSwitchValue("enable-features").split(","));
     const disableFeatures = new Set(app.commandLine.getSwitchValue("disable-features").split(","));
@@ -256,17 +256,6 @@ if (!app.requestSingleInstanceLock() && getConfig("multiInstance") === false) {
     }
     // @ts-expect-error old types
     if (getConfig("performanceMode") === "vaapi") setConfig("vaapi", true);
-    // @ts-expect-error old types
-    if (getConfig("legcordCSP") === true) {
-        setConfig("csp", "none");
-        // @ts-expect-error old types
-        setConfig("legcordCSP", undefined);
-        //@ts-expect-error old types
-    } else if (getConfig("legcordCSP") === false) {
-        setConfig("csp", "vanilla");
-        // @ts-expect-error old types
-        setConfig("legcordCSP", undefined);
-    }
     if (typeof getConfig("tray") === "boolean") {
         //@ts-expect-error
         if (getConfig("tray") === true) {

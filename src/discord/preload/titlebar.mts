@@ -26,7 +26,7 @@ function injectTitlebar(isOverlay?: boolean): void {
             elem.innerHTML = titlebarHTML;
         }
         document.body.prepend(elem);
-        addStyle("legcord://assets/css/titlebar.css");
+        addStyle("remcord://assets/css/titlebar.css");
 
         const minimize = document.getElementById("minimize");
         const maximize = document.getElementById("maximize");

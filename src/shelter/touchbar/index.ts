@@ -8,14 +8,14 @@ const {
 function updateVoiceState() {
     const { mute, deaf } = storesFlat.MediaEngineStore.getSettings();
     log(`[Touchbar] Setting voice state: mute: ${mute}, deaf: ${deaf}`);
-    window.legcord.touchbar.setVoiceState(mute, deaf);
+    window.remcord.touchbar.setVoiceState(mute, deaf);
 }
 
 function track(payload: { event: string; properties: { enabled: string } }) {
     if (payload.event === "join_voice_channel") {
-        window.legcord.touchbar.setVoiceTouchbar(true);
+        window.remcord.touchbar.setVoiceTouchbar(true);
     } else if (payload.event === "leave_voice_channel") {
-        window.legcord.touchbar.setVoiceTouchbar(false);
+        window.remcord.touchbar.setVoiceTouchbar(false);
     }
 }
 
@@ -32,15 +32,15 @@ function getAllGuilds() {
 let guildImportTimeout: ReturnType<typeof setTimeout> | undefined;
 
 export function onLoad() {
-    if (window.legcord.platform === "darwin") {
-        log("Legcord Touchbar Integration");
+    if (window.remcord.platform === "darwin") {
+        log("Remcord Touchbar Integration");
         updateVoiceState();
         dispatcher.subscribe("TRACK", track);
         dispatcher.subscribe("AUDIO_TOGGLE_SELF_MUTE", updateVoiceState);
         dispatcher.subscribe("AUDIO_TOGGLE_SELF_DEAF", updateVoiceState);
         guildImportTimeout = setTimeout(() => {
             guildImportTimeout = undefined;
-            window.legcord.touchbar.importGuilds(getAllGuilds());
+            window.remcord.touchbar.importGuilds(getAllGuilds());
         }, 5000);
     }
 }

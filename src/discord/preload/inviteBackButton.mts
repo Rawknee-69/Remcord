@@ -4,7 +4,7 @@ const { ipcRenderer } = require("electron");
 
 /** True when running under the native WebView2 shell (Phase C-2+). */
 function isNativeWebView(): boolean {
-    return (window as unknown as { legcord?: { boot?: { runtime?: unknown } } })?.legcord?.boot?.runtime === "webview2";
+    return (window as unknown as { remcord?: { boot?: { runtime?: unknown } } })?.remcord?.boot?.runtime === "webview2";
 }
 
 /**
@@ -15,7 +15,7 @@ function isNativeWebView(): boolean {
  */
 async function getBackLabel(): Promise<string> {
     if (isNativeWebView()) {
-        return await (window as unknown as { legcord: { getLang: (key: string) => Promise<string> } }).legcord.getLang(
+        return await (window as unknown as { remcord: { getLang: (key: string) => Promise<string> } }).remcord.getLang(
             "invite-goBackToApp",
         );
     }
@@ -26,12 +26,12 @@ document.addEventListener("DOMContentLoaded", () => {
     void (async () => {
         const label = (await getBackLabel()) || "Go back to the Discord app";
 
-        addStyle("legcord://assets/css/inviteBack.css");
+        addStyle("remcord://assets/css/inviteBack.css");
 
         // Injected into the page world so Discord SPA history.pushState/replaceState is visible.
         addScript(`
 (() => {
-    const BTN_ID = "legcord-invite-back";
+    const BTN_ID = "remcord-invite-back";
     const LABEL = ${JSON.stringify(label)};
 
     function isInvitePath(pathname) {

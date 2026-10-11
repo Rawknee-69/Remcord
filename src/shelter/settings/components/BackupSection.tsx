@@ -29,9 +29,9 @@ const {
 } = shelter;
 
 type IncludeOptions = {
-    legcordConfig: boolean;
-    legcordThemesAndQuickCss: boolean;
-    legcordExtensionPlugins: boolean;
+    remcordConfig: boolean;
+    remcordThemesAndQuickCss: boolean;
+    remcordExtensionPlugins: boolean;
     vencordModData: boolean;
     equicordModData: boolean;
     shelterModData: boolean;
@@ -39,9 +39,9 @@ type IncludeOptions = {
 };
 
 const defaultIncludes: IncludeOptions = {
-    legcordConfig: true,
-    legcordThemesAndQuickCss: true,
-    legcordExtensionPlugins: true,
+    remcordConfig: true,
+    remcordThemesAndQuickCss: true,
+    remcordExtensionPlugins: true,
     vencordModData: true,
     equicordModData: true,
     shelterModData: true,
@@ -80,22 +80,22 @@ function BackupOptionsModal(props: { close: () => void; onConfirm: (includes: In
                 <Header tag={HeaderTags.H5} class={classes.modalEyebrow}>
                     {t["splash-title"]}
                 </Header>
-                <SwitchItem hideBorder value={inc().legcordConfig} onChange={(v: boolean) => patch("legcordConfig", v)}>
-                    {t["backup-includeLegcordConfig"]}
+                <SwitchItem hideBorder value={inc().remcordConfig} onChange={(v: boolean) => patch("remcordConfig", v)}>
+                    {t["backup-includeRemcordConfig"]}
                 </SwitchItem>
                 <SwitchItem
                     hideBorder
-                    value={inc().legcordThemesAndQuickCss}
-                    onChange={(v: boolean) => patch("legcordThemesAndQuickCss", v)}
+                    value={inc().remcordThemesAndQuickCss}
+                    onChange={(v: boolean) => patch("remcordThemesAndQuickCss", v)}
                 >
-                    {t["backup-includeLegcordThemes"]}
+                    {t["backup-includeRemcordThemes"]}
                 </SwitchItem>
                 <SwitchItem
                     hideBorder
-                    value={inc().legcordExtensionPlugins}
-                    onChange={(v: boolean) => patch("legcordExtensionPlugins", v)}
+                    value={inc().remcordExtensionPlugins}
+                    onChange={(v: boolean) => patch("remcordExtensionPlugins", v)}
                 >
-                    {t["backup-includeLegcordPlugins"]}
+                    {t["backup-includeRemcordPlugins"]}
                 </SwitchItem>
                 <Divider mt mb />
                 <SwitchItem
@@ -249,7 +249,7 @@ export function BackupSection(props: { embedded?: boolean }) {
                     // path, which it already owns.
                     const outcome = isNativeBackupAvailable()
                         ? normalizeNativeRestoreResult(await restoreBackupNative())
-                        : parseElectronRestoreResult(await window.legcord.backup.restore());
+                        : parseElectronRestoreResult(await window.remcord.backup.restore());
                     if (!outcome.ok) {
                         if (outcome.error === "CANCELLED") {
                             showToast({

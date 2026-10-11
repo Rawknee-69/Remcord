@@ -95,8 +95,8 @@ function getRendererBootstrap(pluginId: string, pluginName: string, source: stri
     return `
 (() => {
   const g = globalThis;
-  const stores = g.__legcordPluginPatches ?? (g.__legcordPluginPatches = new WeakMap());
-  const unpatchAll = () => { g.__legcordPluginPatches = new WeakMap(); };
+  const stores = g.__remcordPluginPatches ?? (g.__remcordPluginPatches = new WeakMap());
+  const unpatchAll = () => { g.__remcordPluginPatches = new WeakMap(); };
   const patch = (type, name, parent, callback, oneTime = false) => {
     if (!parent || typeof parent[name] !== "function") throw new Error(\`Cannot patch \${String(name)}\`);
     const original = parent[name];
@@ -159,7 +159,7 @@ function getRendererBootstrap(pluginId: string, pluginName: string, source: stri
   const activate = mod.exports.activate ?? mod.exports.default ?? g.activatePlugin;
   if (typeof activate === "function") activate(api);
 })();
-//# sourceURL=legcord-plugin-renderer-${pluginId}.js
+//# sourceURL=remcord-plugin-renderer-${pluginId}.js
 `;
 }
 

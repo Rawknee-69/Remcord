@@ -5,20 +5,20 @@ const {
 
 function track(payload: { event: string; properties: { enabled: string } }) {
     if (payload.event === "join_voice_channel") {
-        window.legcord.power.setPowerSaving(true);
+        window.remcord.power.setPowerSaving(true);
     } else if (payload.event === "leave_voice_channel") {
-        window.legcord.power.setPowerSaving(false);
+        window.remcord.power.setPowerSaving(false);
     }
 }
 
 function subscribePowerTracking() {
-    log("Legcord Power Integration");
+    log("Remcord Power Integration");
     dispatcher.subscribe("TRACK", track);
 }
 
 /** True when running under the native WebView2 shell (Phase C+). */
 function isNativeWebView(): boolean {
-    return (window.legcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2";
+    return (window.remcord as unknown as { boot?: { runtime?: unknown } })?.boot?.runtime === "webview2";
 }
 
 /** Minimal native settings shape for this caller. Full snapshot documented in `native/src/settings.rs`. */
@@ -32,7 +32,7 @@ interface NativePowerSettings {
  * subscription is installed once the snapshot resolves.
  */
 async function onLoadNative(): Promise<void> {
-    const getConfig = (window.legcord as unknown as { settings: { getConfig: () => Promise<NativePowerSettings> } })
+    const getConfig = (window.remcord as unknown as { settings: { getConfig: () => Promise<NativePowerSettings> } })
         .settings.getConfig;
     const settings = await getConfig();
     if (settings.blockPowerSavingInVoiceChat !== true) return;
@@ -45,7 +45,7 @@ export function onLoad() {
         return;
     }
     // Electron path (unchanged synchronous implementation).
-    const settings = window.legcord.settings.getConfig();
+    const settings = window.remcord.settings.getConfig();
     if (!settings.blockPowerSavingInVoiceChat) return;
     subscribePowerTracking();
 }

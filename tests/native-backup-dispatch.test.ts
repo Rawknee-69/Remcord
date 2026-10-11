@@ -38,9 +38,9 @@ function installGlobals(options: {
             calls.storageWrites.push([key, value]);
         },
     });
-    const legcord: Record<string, unknown> = {};
+    const remcord: Record<string, unknown> = {};
     if (options.runtime !== undefined) {
-        legcord.boot = { runtime: options.runtime, platform: "win32", protocol_version: 1, capabilities: [] };
+        remcord.boot = { runtime: options.runtime, platform: "win32", protocol_version: 1, capabilities: [] };
     }
     // One `backup` namespace per shell: the native shell carries the OBJECT
     // restore shape, Electron the JSON-STRING shape. Same member names.
@@ -60,7 +60,7 @@ function installGlobals(options: {
                 return impl();
             };
         }
-        legcord.backup = namespace;
+        remcord.backup = namespace;
     }
     if (options.electronSaveImpl || options.electronRestoreImpl) {
         const namespace: Record<string, unknown> = {};
@@ -79,10 +79,10 @@ function installGlobals(options: {
             };
         }
         // Electron harness: no boot marker, so the gate must stay Electron.
-        if (options.runtime === undefined) legcord.backup = { ...((legcord.backup ?? {}) as object), ...namespace };
-        else legcord.electronBackup = namespace;
+        if (options.runtime === undefined) remcord.backup = { ...((remcord.backup ?? {}) as object), ...namespace };
+        else remcord.electronBackup = namespace;
     }
-    Reflect.set(globalThis, "window", { legcord });
+    Reflect.set(globalThis, "window", { remcord });
     return calls;
 }
 
@@ -92,9 +92,9 @@ async function loadHelpers() {
 
 const PAYLOAD = JSON.stringify({
     includes: {
-        legcordConfig: true,
-        legcordThemesAndQuickCss: false,
-        legcordExtensionPlugins: true,
+        remcordConfig: true,
+        remcordThemesAndQuickCss: false,
+        remcordExtensionPlugins: true,
         vencordModData: true,
         equicordModData: false,
         shelterModData: true,
@@ -161,7 +161,7 @@ test("save calls the shell backup.save exactly once with the exact payload", asy
     assert.equal(result.ok, true);
     // The include flags and clientMods survive byte-identical: no renderer
     // duplication of flag logic, no Rust-side payload construction.
-    assert.equal(JSON.parse(calls.nativeSave[0]).includes.legcordThemesAndQuickCss, false);
+    assert.equal(JSON.parse(calls.nativeSave[0]).includes.remcordThemesAndQuickCss, false);
     assert.equal(JSON.parse(calls.nativeSave[0]).clientMods.vencordLocalStorage, '{"a":1}');
 });
 

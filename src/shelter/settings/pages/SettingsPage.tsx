@@ -58,8 +58,8 @@ export function SettingsPage() {
                         "Settings are not available on a first-time launch. Please restart."}
                 </p>
                 <br />
-                <Button size={ButtonSizes.MAX} onClick={() => window.legcord.restart()}>
-                    Restart Legcord
+                <Button size={ButtonSizes.MAX} onClick={() => window.remcord.restart()}>
+                    Restart Remcord
                 </Button>
             </>
         );
@@ -227,7 +227,6 @@ export function SettingsPage() {
                         onChange={(v) => setConfig("csp", v as Settings["csp"], true)}
                         title={t["settings-csp"]}
                         note={t["settings-csp-desc"]}
-                        link="https://github.com/Legcord/Legcord/wiki/CSP-Options"
                         options={[
                             { label: t["settings-csp-none"], value: "none" },
                             { label: t["settings-csp-strict"], value: "strict" },
@@ -264,7 +263,7 @@ export function SettingsPage() {
                             // Electron keeps the original synchronous setConfig.
                             if (isNativeSettingsSetAvailable()) {
                                 void setNativeSetting("extendedPluginAbilities", e).catch(() =>
-                                    console.warn("[Legcord] Could not update the setting in the native shell."),
+                                    console.warn("[Remcord] Could not update the setting in the native shell."),
                                 );
                             } else {
                                 setConfig("extendedPluginAbilities", e);
@@ -290,7 +289,6 @@ export function SettingsPage() {
                         onChange={(v) => setConfig("windowStyle", v as Settings["windowStyle"], true)}
                         title={t["settings-theme"]}
                         note={t["settings-theme-desc"]}
-                        link="https://github.com/Legcord/Legcord/wiki/Settings-%5Bwip%5D#legcord-theme"
                         options={[
                             { label: t["settings-theme-default"], value: "default" },
                             { label: t["settings-theme-native"], value: "native" },
@@ -316,13 +314,12 @@ export function SettingsPage() {
                         onChange={(v) => setConfig("transparency", v as Settings["transparency"], true)}
                         title={t["settings-transparency"]}
                         note={t["settings-transparency-desc"]}
-                        link="https://github.com/Legcord/Legcord/wiki/Transparency-options"
                         extraItems={
                             <Show
                                 when={
                                     store.settings.transparency !== "none" &&
-                                    window.legcord.platform === "darwin" &&
-                                    Number.parseInt(window.legcord.osRelease, 10) >= 25
+                                    window.remcord.platform === "darwin" &&
+                                    Number.parseInt(window.remcord.osRelease, 10) >= 25
                                 }
                             >
                                 <div
@@ -342,7 +339,7 @@ export function SettingsPage() {
                                 label: t["settings-transparency-universal"],
                                 value: "universal",
                             },
-                            ...(window.legcord.platform === "win32" || window.legcord.platform === "darwin"
+                            ...(window.remcord.platform === "win32" || window.remcord.platform === "darwin"
                                 ? [
                                       {
                                           label: t["settings-transparency-modern"],
@@ -356,7 +353,7 @@ export function SettingsPage() {
                 </SearchableSetting>
                 <Show
                     when={
-                        window.legcord.platform === "win32" &&
+                        window.remcord.platform === "win32" &&
                         isMinWindowsVersion(10, 0, 22000) &&
                         store.settings.transparency === "modern"
                     }
@@ -367,7 +364,6 @@ export function SettingsPage() {
                             onChange={(v) => setConfig("windowMaterial", v as Settings["windowMaterial"], true)}
                             title={t["settings-material"]}
                             note={t["settings-material-desc"]}
-                            link="https://github.com/Legcord/Legcord/wiki/Settings-%5Bwip%5D#legcord-theme"
                             options={[
                                 { label: t["settings-material-mica"], value: "mica" },
                                 { label: t["settings-material-mica-alt"], value: "tabbed" },
@@ -377,7 +373,7 @@ export function SettingsPage() {
                         />
                     </SearchableSetting>
                 </Show>
-                <Show when={window.legcord.platform === "darwin"}>
+                <Show when={window.remcord.platform === "darwin"}>
                     <SearchableSetting keywords={[t["settings-bounceOnPing"], t["settings-bounceOnPing-desc"]]}>
                         <SwitchItem
                             note={t["settings-bounceOnPing-desc"]}
@@ -476,7 +472,7 @@ export function SettingsPage() {
                         {t["settings-useSystemCssEditor"]}
                     </SwitchItem>
                 </SearchableSetting>
-                <Show when={window.legcord.platform === "darwin"}>
+                <Show when={window.remcord.platform === "darwin"}>
                     <SearchableSetting
                         keywords={[t["settings-useMacSystemPicker"], t["settings-useMacSystemPicker-desc"]]}
                     >
@@ -571,7 +567,6 @@ export function SettingsPage() {
                         onChange={(v) => setConfig("performanceMode", v as Settings["performanceMode"], true)}
                         title={t["settings-prfmMode"]}
                         note={t["settings-prfmMode-desc"]}
-                        link="https://github.com/Legcord/Legcord/blob/dev/src/common/flags.ts"
                         options={[
                             { label: t["settings-prfmMode-dynamic"], value: "dynamic" },
                             { label: t["settings-prfmMode-performance"], value: "performance" },
@@ -647,7 +642,7 @@ export function SettingsPage() {
                             {t["settings-processScanning"]}
                         </SwitchItem>
                     </SearchableSetting>
-                    <Show when={window.legcord.platform === "win32"}>
+                    <Show when={window.remcord.platform === "win32"}>
                         <SearchableSetting
                             keywords={[t["settings-windowsLegacyScanning"], t["settings-windowsLegacyScanning-desc"]]}
                         >
@@ -746,7 +741,7 @@ export function SettingsPage() {
                             // Electron keeps the original synchronous setConfig.
                             if (isNativeSettingsSetAvailable()) {
                                 void setNativeSetting("showExperimentalPluginMenu", e, true).catch(() =>
-                                    console.warn("[Legcord] Could not update the setting in the native shell."),
+                                    console.warn("[Remcord] Could not update the setting in the native shell."),
                                 );
                             } else {
                                 setConfig("showExperimentalPluginMenu", e, true);
@@ -756,7 +751,7 @@ export function SettingsPage() {
                         {t["settings-showExperimentalPluginMenu"]}
                     </SwitchItem>
                 </SearchableSetting>
-                <Show when={window.legcord.platform === "linux"}>
+                <Show when={window.remcord.platform === "linux"}>
                     <SearchableSetting
                         keywords={[t["settings-venmic-deviceSelect"], t["settings-venmic-deviceSelect-desc"], "venmic"]}
                     >
@@ -909,7 +904,7 @@ export function SettingsPage() {
                         {t["settings-hardwareAcceleration"]}
                     </SwitchItem>
                 </SearchableSetting>
-                <Show when={window.legcord.platform === "darwin" || window.legcord.platform === "win32"}>
+                <Show when={window.remcord.platform === "darwin" || window.remcord.platform === "win32"}>
                     <SearchableSetting
                         keywords={[
                             t["settings-sdpH264BaselineRewrite"],
@@ -929,7 +924,7 @@ export function SettingsPage() {
                         </SwitchItem>
                     </SearchableSetting>
                 </Show>
-                <Show when={window.legcord.platform === "linux"}>
+                <Show when={window.remcord.platform === "linux"}>
                     <SearchableSetting keywords={[t["settings-vaapi"], t["settings-vaapi-desc"], "VAAPI"]}>
                         <SwitchItem
                             note={t["settings-vaapi-desc"]}
@@ -1037,7 +1032,7 @@ export function SettingsPage() {
                 </Show>
                 <div class={classes.panelActions}>
                     <SearchableSetting keywords={[t["settings-openCustomIconDialog"], "icon"]}>
-                        <Button size={ButtonSizes.MAX} onClick={window.legcord.settings.openCustomIconDialog}>
+                        <Button size={ButtonSizes.MAX} onClick={window.remcord.settings.openCustomIconDialog}>
                             {t["settings-openCustomIconDialog"]}
                         </Button>
                     </SearchableSetting>
@@ -1047,29 +1042,29 @@ export function SettingsPage() {
                             onClick={() => {
                                 // Native WebView2 reveals via the typed folders.open capability;
                                 // Electron keeps the original fire-and-forget send.
-                                if (!revealFolderNative("storage")) window.legcord.settings.openStorageFolder();
+                                if (!revealFolderNative("storage")) window.remcord.settings.openStorageFolder();
                             }}
                         >
                             {t["settings-storageFolder"]}
                         </Button>
                     </SearchableSetting>
                     <SearchableSetting keywords={[t["settings-copyDebugInfo"], "debug"]}>
-                        <Button size={ButtonSizes.MAX} onClick={window.legcord.settings.copyDebugInfo}>
+                        <Button size={ButtonSizes.MAX} onClick={window.remcord.settings.copyDebugInfo}>
                             {t["settings-copyDebugInfo"]}
                         </Button>
                     </SearchableSetting>
                     <SearchableSetting keywords={[t["settings-copyGPUInfo"], "GPU"]}>
-                        <Button size={ButtonSizes.MAX} onClick={window.legcord.settings.copyGPUInfo}>
+                        <Button size={ButtonSizes.MAX} onClick={window.remcord.settings.copyGPUInfo}>
                             {t["settings-copyGPUInfo"]}
                         </Button>
                     </SearchableSetting>
                     <SearchableSetting keywords={[t["settings-openWebRTCInternals"], "WebRTC", "internals"]}>
-                        <Button size={ButtonSizes.MAX} onClick={window.legcord.settings.openWebRTCInternals}>
+                        <Button size={ButtonSizes.MAX} onClick={window.remcord.settings.openWebRTCInternals}>
                             {t["settings-openWebRTCInternals"]}
                         </Button>
                     </SearchableSetting>
                     <SearchableSetting keywords={[t["settings-openGPUInfo"], "GPU", "chrome"]}>
-                        <Button size={ButtonSizes.MAX} onClick={window.legcord.settings.openGPUInfo}>
+                        <Button size={ButtonSizes.MAX} onClick={window.remcord.settings.openGPUInfo}>
                             {t["settings-openGPUInfo"]}
                         </Button>
                     </SearchableSetting>

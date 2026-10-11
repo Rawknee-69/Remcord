@@ -16,7 +16,7 @@ function installGlobals(options: {
 }): Calls {
     const calls: Calls = { electron: [], open: [], openTheme: [], warnings: [] };
     Reflect.set(globalThis, "shelter", { plugin: { store: { settings: {} } } });
-    const legcord: Record<string, unknown> = {
+    const remcord: Record<string, unknown> = {
         settings: {
             openStorageFolder: () => {
                 calls.electron.push("settings.openStorageFolder");
@@ -37,10 +37,10 @@ function installGlobals(options: {
         },
     };
     if (options.runtime !== undefined) {
-        legcord.boot = { runtime: options.runtime, platform: "win32", protocol_version: 1, capabilities: [] };
+        remcord.boot = { runtime: options.runtime, platform: "win32", protocol_version: 1, capabilities: [] };
     }
     if (options.folders !== false) {
-        legcord.folders = {
+        remcord.folders = {
             open: (location: string) => {
                 calls.open.push(location);
                 return options.openImpl ? options.openImpl(location) : Promise.resolve(location);
@@ -51,7 +51,7 @@ function installGlobals(options: {
             },
         };
     }
-    Reflect.set(globalThis, "window", { legcord });
+    Reflect.set(globalThis, "window", { remcord });
     const originalWarn = console.warn;
     console.warn = ((message?: unknown) => {
         calls.warnings.push(String(message));
@@ -149,7 +149,7 @@ test("native rejections are swallowed with a path-free diagnostic", async () => 
         await tick();
         assert.equal(calls.warnings.length, 2);
         for (const message of calls.warnings) {
-            assert.match(message, /^\[Legcord\] Could not (reveal|open)/);
+            assert.match(message, /^\[Remcord\] Could not (reveal|open)/);
             assert.doesNotMatch(message, /C:\\|secret|my-theme/);
         }
         assert.deepEqual(calls.electron, []);

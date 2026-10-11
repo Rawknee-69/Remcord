@@ -39,7 +39,7 @@ export function ThemesPage() {
         try {
             await refreshNativeThemes();
         } catch {
-            console.warn("[Legcord] Could not load themes in the native shell.");
+            console.warn("[Remcord] Could not load themes in the native shell.");
             setNativeError(true);
         } finally {
             setNativeLoading(false);
@@ -54,7 +54,7 @@ export function ThemesPage() {
     }
 
     function installTheme() {
-        window.legcord.themes.install(downloadUrl());
+        window.remcord.themes.install(downloadUrl());
         setDownloadUrl("");
         setTimeout(() => {
             refreshThemes();
@@ -71,7 +71,7 @@ export function ThemesPage() {
             await loadThemesOnce();
             return;
         }
-        store.themes = window.legcord.themes.refresh();
+        store.themes = window.remcord.themes.refresh();
     }
 
     async function handleImport() {
@@ -88,7 +88,7 @@ export function ThemesPage() {
             });
             return;
         }
-        window.legcord.themes.openImportPicker();
+        window.remcord.themes.openImportPicker();
     }
 
     const settings = () => store.settings as Settings;
@@ -105,9 +105,9 @@ export function ThemesPage() {
                 onChange={(e: boolean) => {
                     console.log("Toggled quick CSS", e);
                     if (e) {
-                        window.legcord.themes.enableQuickCss();
+                        window.remcord.themes.enableQuickCss();
                     } else {
-                        window.legcord.themes.disableQuickCss();
+                        window.remcord.themes.disableQuickCss();
                     }
                     setConfig("quickCss", e);
                 }}
@@ -117,7 +117,7 @@ export function ThemesPage() {
             <div class={classes.toolbar}>
                 <Button
                     size={ButtonSizes.LARGE}
-                    onClick={window.legcord.themes.openQuickCss}
+                    onClick={window.remcord.themes.openQuickCss}
                     disabled={!settings().quickCss || nativeMode()}
                 >
                     {t["themes-openQuickCss"]}
@@ -130,7 +130,7 @@ export function ThemesPage() {
                     onClick={() => {
                         // Native WebView2 reveals via the typed folders.open capability;
                         // Electron keeps the original fire-and-forget send.
-                        if (!revealFolderNative("themes")) window.legcord.settings.openThemesFolder();
+                        if (!revealFolderNative("themes")) window.remcord.settings.openThemesFolder();
                     }}
                 >
                     {t["themes-openThemesFolder"]}

@@ -45,23 +45,23 @@ function withScrollRestoration(Page: Component): Component {
 function registerSections(): (() => void)[] {
     const array = [
         registerSection("divider"),
-        registerSection("header", "Legcord"),
-        registerSection("section", "legcord-settings", "Settings", withScrollRestoration(SettingsPage), {
+        registerSection("header", "Remcord"),
+        registerSection("section", "remcord-settings", "Settings", withScrollRestoration(SettingsPage), {
             icon: SettingsSidebarIcon,
         }),
-        registerSection("section", "legcord-themes", "Themes", withScrollRestoration(ThemesPage), {
+        registerSection("section", "remcord-themes", "Themes", withScrollRestoration(ThemesPage), {
             icon: ThemesSidebarIcon,
         }),
-        registerSection("section", "legcord-keybinds", "Keybinds", withScrollRestoration(KeybindsPage), {
+        registerSection("section", "remcord-keybinds", "Keybinds", withScrollRestoration(KeybindsPage), {
             icon: KeybindsSidebarIcon,
         }),
-        registerSection("section", "legcord-games", "Games", withScrollRestoration(RegisteredGamesPage), {
+        registerSection("section", "remcord-games", "Games", withScrollRestoration(RegisteredGamesPage), {
             icon: GamesSidebarIcon,
         }),
     ];
-    if (window.legcord.settings.getConfig().showExperimentalPluginMenu) {
+    if (window.remcord.settings.getConfig().showExperimentalPluginMenu) {
         array.push(
-            registerSection("section", "legcord-plugins", "Plugins", withScrollRestoration(PluginsPage), {
+            registerSection("section", "remcord-plugins", "Plugins", withScrollRestoration(PluginsPage), {
                 icon: PluginsSidebarIcon,
             }),
         );
@@ -72,7 +72,7 @@ function registerSections(): (() => void)[] {
 function restartRequired(payload: { event: string; properties: { origin_pane: string } }) {
     if (payload.event === "settings_pane_viewed" && typeof payload.properties.origin_pane !== "undefined") {
         const pane = payload.properties.origin_pane;
-        if ((pane === "legcord-settings" || pane === "legcord-games") && isRestartRequired) {
+        if ((pane === "remcord-settings" || pane === "remcord-games") && isRestartRequired) {
             openConfirmationModal({
                 header: () => store.i18n?.["settings-restartRequired"] ?? "Restart required",
                 body: () => store.i18n?.["settings-restartRequiredBody"] ?? "A restart is required to apply changes.",
@@ -80,7 +80,7 @@ function restartRequired(payload: { event: string; properties: { origin_pane: st
                 confirmText: store.i18n?.["settings-restart"] ?? "Restart",
                 cancelText: store.i18n?.["settings-restartLater"] ?? "Later",
             }).then(
-                () => window.legcord.restart(),
+                () => window.remcord.restart(),
                 () => console.log("restart skipped"),
             );
         }
@@ -91,9 +91,9 @@ export function onLoad() {
     refreshSettings();
     refreshThemes();
     // used for restart required dialog later
-    store.i18n = window.legcord.translations;
-    log("Legcord Settings");
-    window.legcord.settings.setLang(storesFlat.LocaleStore.locale);
+    store.i18n = window.remcord.translations;
+    log("Remcord Settings");
+    window.remcord.settings.setLang(storesFlat.LocaleStore.locale);
     settingsCleanups = registerSections();
     dispatcher.subscribe("TRACK", restartRequired);
 }

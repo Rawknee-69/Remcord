@@ -36,7 +36,7 @@ export function setMenu(): void {
 
     const template: MenuItemConstructorOptions[] = [
         {
-            label: getLang("menu-legcord"),
+            label: getLang("menu-remcord"),
             submenu: [
                 { label: getLang("menu-about"), role: "about" },
                 { type: "separator" },

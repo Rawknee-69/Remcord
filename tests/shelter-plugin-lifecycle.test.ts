@@ -46,7 +46,7 @@ test("power plugin keeps one TRACK callback through three enable/reload cycles",
         flux: { dispatcher },
     });
     Reflect.set(globalThis, "window", {
-        legcord: {
+        remcord: {
             settings: { getConfig: () => ({ blockPowerSavingInVoiceChat: true }) },
             power: {
                 setPowerSaving() {
@@ -91,7 +91,7 @@ test("Touch Bar plugin removes subscriptions and pending guild imports across th
         },
     });
     Reflect.set(globalThis, "window", {
-        legcord: {
+        remcord: {
             platform: "darwin",
             touchbar: {
                 setVoiceState() {

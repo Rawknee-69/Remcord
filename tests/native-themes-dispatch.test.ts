@@ -92,12 +92,12 @@ function installGlobals(options: {
             return options.importImpl!();
         };
     }
-    const legcord: Record<string, unknown> = { themes };
+    const remcord: Record<string, unknown> = { themes };
     if (options.runtime !== undefined) {
-        legcord.boot = { runtime: options.runtime, platform: "win32", protocol_version: 1, capabilities: [] };
+        remcord.boot = { runtime: options.runtime, platform: "win32", protocol_version: 1, capabilities: [] };
     }
     Reflect.set(globalThis, "shelter", { plugin: { store: { settings: {}, themes: [] } } });
-    Reflect.set(globalThis, "window", { legcord });
+    Reflect.set(globalThis, "window", { remcord });
     const originalWarn = console.warn;
     console.warn = ((message?: unknown) => {
         calls.warnings.push(String(message));

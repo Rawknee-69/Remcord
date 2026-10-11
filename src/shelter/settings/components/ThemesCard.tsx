@@ -33,31 +33,31 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
                     if (current) setSwitchState(current.enabled);
                 });
             } catch {
-                console.warn("[Legcord] Could not update the theme in the native shell.");
+                console.warn("[Remcord] Could not update the theme in the native shell.");
                 setSwitchState(previous);
             }
             return;
         }
         setSwitchState(state);
         if (props.theme.id) {
-            window.legcord.themes.set(props.theme.id, state);
+            window.remcord.themes.set(props.theme.id, state);
         }
         refreshThemes();
     }
     function removeTheme() {
         if (props.theme.id) {
-            window.legcord.themes.uninstall(props.theme.id);
+            window.remcord.themes.uninstall(props.theme.id);
         }
         refreshThemes();
     }
     function editTheme() {
         if (props.theme.id) {
-            window.legcord.themes.edit(props.theme.id);
+            window.remcord.themes.edit(props.theme.id);
         }
     }
     function updateTheme() {
         if (props.theme.updateSrc) {
-            window.legcord.themes.install(props.theme.updateSrc);
+            window.remcord.themes.install(props.theme.updateSrc);
         }
         setTimeout(() => {
             refreshThemes();
@@ -73,7 +73,7 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
             // Native WebView2 opens via the typed folders.open_theme capability
             // (id passes through verbatim; the host owns validation).
             // Electron keeps the original fire-and-forget send.
-            if (!openThemeFolderNative(props.theme.id)) window.legcord.themes.folder(props.theme.id);
+            if (!openThemeFolderNative(props.theme.id)) window.remcord.themes.folder(props.theme.id);
         }
     }
     // Native inventory never carries updateSrc, so the update action stays
@@ -106,10 +106,10 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
                         onClick={removeTheme}
                         class={`${classes.btn} ${classes.btnDanger}`}
                     >
-                        <img class={classes.icon} alt={store.i18n["themes-delete"]} src="legcord://assets/Trash.png" />
+                        <img class={classes.icon} alt={store.i18n["themes-delete"]} src="remcord://assets/Trash.png" />
                     </button>
                     <button title={store.i18n["themes-edit"]} type="button" onClick={editTheme} class={classes.btn}>
-                        <img class={classes.icon} alt={store.i18n["themes-edit"]} src="legcord://assets/Edit.png" />
+                        <img class={classes.icon} alt={store.i18n["themes-edit"]} src="remcord://assets/Edit.png" />
                     </button>
                 </Show>
                 <Show when={showUpdate()}>
@@ -117,12 +117,12 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
                         <img
                             class={classes.icon}
                             alt={store.i18n["themes-update"]}
-                            src="legcord://assets/UpgradeArrow.png"
+                            src="remcord://assets/UpgradeArrow.png"
                         />
                     </button>
                 </Show>
                 <button title={store.i18n["themes-open"]} type="button" onClick={openThemesFolder} class={classes.btn}>
-                    <img class={classes.icon} alt={store.i18n["themes-open"]} src="legcord://assets/Folder.png" />
+                    <img class={classes.icon} alt={store.i18n["themes-open"]} src="remcord://assets/Folder.png" />
                 </button>
             </div>
         </div>

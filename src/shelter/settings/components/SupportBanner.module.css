@@ -103,6 +103,14 @@
     opacity: 0.95;
 }
 
+.aboutWordmark {
+    font-size: 30px;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    color: var(--header-primary);
+    opacity: 0.95;
+}
+
 .aboutHeader {
     text-align: center;
     margin-bottom: 24px;

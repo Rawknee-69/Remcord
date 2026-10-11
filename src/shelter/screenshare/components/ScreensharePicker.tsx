@@ -136,18 +136,18 @@ export const ScreensharePicker = (props: {
 
         patchNavigator(audio());
 
-        window.legcord.screenshare.start(source(), name(), audio());
+        window.remcord.screenshare.start(source(), name(), audio());
 
         props.close();
     }
 
     function closeAndSave() {
-        window.legcord.screenshare.start("none", "", false);
+        window.remcord.screenshare.start("none", "", false);
         props.close();
     }
 
     async function updateVenmicSource(source: Node) {
-        return await window.legcord.screenshare.venmicStart([source]);
+        return await window.remcord.screenshare.venmicStart([source]);
     }
 
     onCleanup(closeAndSave);
@@ -241,7 +241,7 @@ export const ScreensharePicker = (props: {
                         <Checkbox checked={audio()} onChange={setAudio} />
                     </div>
 
-                    <Show when={window.legcord.platform === "linux" && props.audioSources !== undefined && audio()}>
+                    <Show when={window.remcord.platform === "linux" && props.audioSources !== undefined && audio()}>
                         <Divider mt mb />
                         <Header tag={HeaderTags.H4}>Venmic</Header>
                         <Dropdown

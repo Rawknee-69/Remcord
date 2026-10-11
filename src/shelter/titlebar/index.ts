@@ -16,35 +16,35 @@ const titlebarNavControls = `
           </div>
 `;
 
-const settings = window.legcord.settings.getConfig();
+const settings = window.remcord.settings.getConfig();
 
 function injectButtonControls() {
     const elem = document.createElement("div");
     elem.innerHTML = titlebarNavControls;
-    elem.id = "legcordNavControls";
+    elem.id = "remcordNavControls";
     document.body.append(elem);
     const minimize = document.getElementById("minimize");
     const maximize = document.getElementById("maximize");
     const quit = document.getElementById("quit");
 
     minimize!.addEventListener("click", () => {
-        window.legcord.window.minimize();
+        window.remcord.window.minimize();
     });
 
     maximize!.addEventListener("click", () => {
-        if (window.legcord.window.maximized() === true) {
-            window.legcord.window.unmaximize();
+        if (window.remcord.window.maximized() === true) {
+            window.remcord.window.unmaximize();
             document.body.removeAttribute("isMaximized");
-        } else if (window.legcord.window.isNormal() === true) {
-            window.legcord.window.maximize();
+        } else if (window.remcord.window.isNormal() === true) {
+            window.remcord.window.maximize();
         }
     });
     const minimizeToTray = settings.minimizeToTray;
     quit!.addEventListener("click", () => {
         if (minimizeToTray === true) {
-            window.legcord.window.hide();
+            window.remcord.window.hide();
         } else if (minimizeToTray === false) {
-            window.legcord.window.quit();
+            window.remcord.window.quit();
         }
     });
 }
@@ -54,28 +54,28 @@ function layerPush(payload: { type: string; component: string }) {
     if (payload.component === "USER_SETTINGS") {
         const elem = document.createElement("div");
         elem.innerHTML = titlebarOverlayHTML;
-        elem.id = "legcordTitlebar";
+        elem.id = "remcordTitlebar";
         document.body.prepend(elem);
     }
 }
 
 function layerPop() {
     console.log("pop!");
-    document.getElementById("legcordTitlebar")?.remove();
+    document.getElementById("remcordTitlebar")?.remove();
 }
 
 export function onLoad() {
-    log("Legcord Titlebar Controller");
+    log("Remcord Titlebar Controller");
     if (settings.windowStyle === "default") {
         document.body.setAttribute("customTitlebar", "");
         injectButtonControls();
         return;
     }
 
-    // Native + transparency on macOS uses the same overlay chrome as "overlay" (Legcord#1095).
+    // Native + transparency on macOS uses the same overlay chrome as "overlay" (Remcord#1095).
     const overlayLike =
         settings.windowStyle === "overlay" ||
-        (settings.windowStyle === "native" && window.legcord.platform === "darwin" && settings.transparency !== "none");
+        (settings.windowStyle === "native" && window.remcord.platform === "darwin" && settings.transparency !== "none");
 
     if (overlayLike) {
         document.body.setAttribute("customTitlebar", "");

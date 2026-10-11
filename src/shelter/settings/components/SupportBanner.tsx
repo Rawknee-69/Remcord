@@ -24,7 +24,7 @@ export function SupportBanner() {
                     // Electron keeps the original synchronous setConfig.
                     if (isNativeSettingsSetAvailable()) {
                         void setNativeSetting("supportBannerDismissed", true).catch(() =>
-                            console.warn("[Legcord] Could not dismiss the banner in the native shell."),
+                            console.warn("[Remcord] Could not dismiss the banner in the native shell."),
                         );
                     } else {
                         setConfig("supportBannerDismissed", true);
@@ -52,7 +52,7 @@ export function SupportBanner() {
                     <DonateIcon /> {store.i18n["supportBanner-donate"]}
                 </button>
 
-                <button type="button" class={classes.infoButton} onClick={openAboutModal} title="About Legcord">
+                <button type="button" class={classes.infoButton} onClick={openAboutModal} title="About Remcord">
                     <InfoIcon /> {store.i18n["menu-about"]}
                 </button>
             </span>

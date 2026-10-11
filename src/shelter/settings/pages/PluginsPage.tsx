@@ -1,5 +1,5 @@
 import { createSignal, For, onMount, Show } from "solid-js";
-import type { LegcordPluginInfo } from "../../../@types/legcordWindow.js";
+import type { RemcordPluginInfo } from "../../../@types/remcordWindow.js";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { PluginCard } from "../components/PluginCard.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
@@ -16,7 +16,7 @@ function formatPluginMessage(template: string, name: string) {
 }
 
 export function PluginsPage() {
-    const [plugins, setPlugins] = createSignal<LegcordPluginInfo[]>([]);
+    const [plugins, setPlugins] = createSignal<RemcordPluginInfo[]>([]);
     const [busyIds, setBusyIds] = createSignal<string[]>([]);
     const t = () => store.i18n;
 
@@ -32,11 +32,11 @@ export function PluginsPage() {
     const isBusy = (pluginId: string) => busyIds().includes(pluginId);
 
     const refreshPlugins = async () => {
-        const list = await window.legcord.plugins.list();
+        const list = await window.remcord.plugins.list();
         setPlugins(list);
     };
 
-    const onToggle = async (plugin: LegcordPluginInfo, enabled: boolean) => {
+    const onToggle = async (plugin: RemcordPluginInfo, enabled: boolean) => {
         setBusy(plugin.id, true);
         try {
             if (enabled && !plugin.compatible) {
@@ -49,7 +49,7 @@ export function PluginsPage() {
                 });
                 return;
             }
-            const result = await window.legcord.plugins.setEnabled(plugin.id, enabled);
+            const result = await window.remcord.plugins.setEnabled(plugin.id, enabled);
             if (!result.ok) {
                 showToast({
                     title: t()["plugins-toastTitle"],
@@ -66,10 +66,10 @@ export function PluginsPage() {
         }
     };
 
-    const onReload = async (plugin: LegcordPluginInfo) => {
+    const onReload = async (plugin: RemcordPluginInfo) => {
         setBusy(plugin.id, true);
         try {
-            const result = await window.legcord.plugins.reload(plugin.id);
+            const result = await window.remcord.plugins.reload(plugin.id);
             showToast({
                 title: t()["plugins-toastTitle"],
                 content: formatPluginMessage(
@@ -100,7 +100,7 @@ export function PluginsPage() {
                     onClick={() => {
                         // Native WebView2 reveals via the typed folders.open capability;
                         // Electron keeps the original fire-and-forget send.
-                        if (!revealFolderNative("plugins")) window.legcord.plugins.openFolder();
+                        if (!revealFolderNative("plugins")) window.remcord.plugins.openFolder();
                     }}
                 >
                     {t()["plugins-openFolder"]}
@@ -114,7 +114,7 @@ export function PluginsPage() {
                         description={t()["plugins-emptyDesc"]}
                         actionLabel={t()["plugins-openFolder"]}
                         onAction={() => {
-                            if (!revealFolderNative("plugins")) window.legcord.plugins.openFolder();
+                            if (!revealFolderNative("plugins")) window.remcord.plugins.openFolder();
                         }}
                     />
                 }
