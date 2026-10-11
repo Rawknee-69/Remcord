@@ -132,6 +132,66 @@ function stopLabelRetry() {
     (window as unknown as { __remcordHeaderLabelDone?: boolean }).__remcordHeaderLabelDone = true;
 }
 
+/**
+ * Content-based fallback: walk the top band for the header title itself
+ * (e.g. "Friends") instead of trusting obfuscated class names. Cheap
+ * filters first (no layout), rect checks last; collects candidates and
+ * keeps the most specific (shortest text) so a wrapping container never
+ * beats the title it holds. Bounded walk, layout-free until the final
+ * handful of survivors.
+ */
+function scanTopBarTitle(): HTMLElement | null {
+    const skipTags = new Set(["SCRIPT", "STYLE", "SVG", "VIDEO", "AUDIO", "NOSCRIPT", "IFRAME", "CANVAS", "IMG"]);
+    let walker: TreeWalker | null = null;
+    try {
+        walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    } catch {
+        return null;
+    }
+    const candidates: HTMLElement[] = [];
+    let scanned = 0;
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+        if (++scanned > 20000) break;
+        const el = node as HTMLElement;
+        if (skipTags.has(el.tagName)) continue;
+        if (el.id === "remcordNavControls" || el.id === REMCORD_HEADER_LABEL_ID) continue;
+        if (el.children.length > 20) continue;
+        const text = (el.textContent ?? "").trim();
+        if (text.length < 3 || text.length > 80) continue;
+        if (el.querySelector("input,textarea,[contenteditable='true']")) continue;
+        candidates.push(el);
+        if (candidates.length >= 50) break;
+    }
+    let best: HTMLElement | null = null;
+    let bestLen = 81;
+    for (const el of candidates) {
+        let rect: DOMRect;
+        try {
+            rect = el.getBoundingClientRect();
+        } catch {
+            continue;
+        }
+        if (rect.top < 0 || rect.top > 150 || rect.height <= 0 || rect.height > 120 || rect.width < 80) continue;
+        const len = (el.textContent ?? "").trim().length;
+        if (len < bestLen) {
+            bestLen = len;
+            best = el;
+        }
+    }
+    return best;
+}
+
+function placeHeaderLabel(header: HTMLElement): HTMLElement {
+    const label = document.createElement("span");
+    label.id = REMCORD_HEADER_LABEL_ID;
+    label.textContent = " \u2502 Remcord";
+    label.style.cssText = "opacity:0.75;user-select:none;cursor:default;white-space:nowrap;";
+    header.append(label);
+    bindHeaderDrag(header);
+    watchHeaderLabel(header);
+    return header;
+}
 /** Attach the drag handle to a header element (once per node). */
 function bindHeaderDrag(header: HTMLElement) {
     const ops = nativeWindowOps();
@@ -195,15 +255,16 @@ function ensureHeaderLabel(): boolean {
             } catch {
                 continue;
             }
-            const label = document.createElement("span");
-            label.id = REMCORD_HEADER_LABEL_ID;
-            label.textContent = " \u2502 Remcord";
-            label.style.cssText = "opacity:0.75;user-select:none;cursor:default;white-space:nowrap;";
-            header.append(label);
-            bindHeaderDrag(header);
-            watchHeaderLabel(header);
+            placeHeaderLabel(header);
             return true;
         }
+    }
+    // Class hooks missed (obfuscated drift): fall back to finding the title
+    // by its content and position, then place there.
+    const scanned = scanTopBarTitle();
+    if (scanned) {
+        placeHeaderLabel(scanned);
+        return true;
     }
     return false;
 }
