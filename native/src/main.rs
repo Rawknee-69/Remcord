@@ -6162,11 +6162,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 response_count += 1;
                             }
                             BridgeCommand::WindowMaximize(_) => {
+                                // A maximize request while borderless
+                                // fullscreen would change nothing visible:
+                                // leave fullscreen first, then maximize
+                                // (the standard caption-button behavior).
+                                if window.fullscreen().is_some() {
+                                    window.set_fullscreen(None);
+                                    println!("[Window] fullscreen=false (maximize requested)");
+                                }
                                 window.set_maximized(true);
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_maximize", &received_at);
                                 response_count += 1;
                             }
                             BridgeCommand::WindowUnmaximize(_) => {
+                                // Same invisible-no-op hazard as maximize:
+                                // restoring while fullscreen must first leave
+                                // fullscreen to reach the normal state.
+                                if window.fullscreen().is_some() {
+                                    window.set_fullscreen(None);
+                                    println!("[Window] fullscreen=false (unmaximize requested)");
+                                }
                                 window.set_maximized(false);
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_unmaximize", &received_at);
                                 response_count += 1;
@@ -6196,6 +6211,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     Some(tao::window::Fullscreen::Borderless(None))
                                 };
                                 window.set_fullscreen(next);
+                                println!(
+                                    "[Window] fullscreen={}",
+                                    if window.fullscreen().is_some() { "true" } else { "false" }
+                                );
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_toggle_fullscreen", &received_at);
                                 response_count += 1;
                             }
