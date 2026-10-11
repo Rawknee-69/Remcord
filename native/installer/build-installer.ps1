@@ -3,8 +3,8 @@
 # Reproducible from a clean checkout plus one documented prerequisite:
 #   winget install --id JRSoftware.InnoSetup --exact   (Inno Setup 6, for ISCC.exe)
 # Fails fast with that exact instruction when ISCC.exe is not on PATH.
-# Never downloads tools silently, never requires administrator rights,
-# never touches production Electron paths (asserted before compiling).
+# Never downloads tools silently, never requires administrator rights.
+# Paths derive from this script's location; no checkout path is hardcoded.
 #
 # Steps: read product version from package.json -> cargo build --release ->
 # verify exe identity/resources -> stage exactly {remcord.exe, license.txt}
@@ -15,9 +15,13 @@
 # setup upgrades the already-installed native product in place. The install
 # leaf is Remcord; the release profile is %LOCALAPPDATA%\Remcord.
 param(
-    [string] $RepoRoot = "E:/Legcord"
+    [string] $RepoRoot = ""
 )
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $native = Split-Path -Parent $PSScriptRoot
+    $RepoRoot = Split-Path -Parent $native
+}
 $native = Join-Path $RepoRoot "native"
 $installerDir = Join-Path $native "installer"
 $stage = Join-Path $installerDir "stage"
@@ -45,17 +49,14 @@ $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
 if ($null -eq $icon -or $icon.Width -le 0) { throw "release exe carries no icon resource" }
 Write-Host "exe identity OK: remcord.exe $version (icon $($icon.Width)x$($icon.Height))"
 
-# Production-path safety: the staging and output trees must stay inside the
-# repo and far from every Electron-managed location (and from live profiles).
-$electronDirs = @(
-    (Join-Path $env:LOCALAPPDATA "Programs\Legcord"),
-    (Join-Path $env:APPDATA "legcord")
-)
+# Staging/output safety: both trees must stay inside this repository.
+# (Separation from production install/profile locations is enforced by the
+# installer's content-marker refusal guard in remcord.iss.)
 foreach ($dir in @($stage, $dist)) {
-    foreach ($prod in $electronDirs) {
-        if ($dir.StartsWith($prod, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "installer tree $dir overlaps production path $prod"
-        }
+    $full = [IO.Path]::GetFullPath($dir)
+    $root = [IO.Path]::GetFullPath($RepoRoot)
+    if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "installer tree $dir escapes repository root $root"
     }
 }
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }

@@ -61,7 +61,7 @@ if (
     process.exit(0);
 }
 
-const metaInfo = await fs.readFile("./meta/app.legcord.Legcord.metainfo.xml", "utf-8");
+const metaInfo = await fs.readFile("./meta/app.remcord.Remcord.metainfo.xml", "utf-8");
 
 const parser = new DOMParser().parseFromString(metaInfo, "text/xml");
 
@@ -101,4 +101,4 @@ const output = xmlFormat(new XMLSerializer().serializeToString(parser), {
     indentation: "  ",
 });
 
-await fs.writeFile("./meta/app.legcord.Legcord.metainfo.xml", output, "utf-8");
+await fs.writeFile("./meta/app.remcord.Remcord.metainfo.xml", output, "utf-8");

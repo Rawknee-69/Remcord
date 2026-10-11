@@ -148,7 +148,7 @@ if ($RootProcessId -gt 0) {
     $rootIds = @($RootProcessId)
 } else {
     # Match the product only by observed executable/command-line evidence; pass -RootProcessId if ambiguous.
-    $rootIds = @($allCim | Where-Object { $_.Name -match "(?i)^legcord($|\\.exe$)" -or $_.CommandLine -match '(?i)(^|[\\/ ])legcord\.exe([ ]|$)' } | Select-Object -ExpandProperty ProcessId)
+    $rootIds = @($allCim | Where-Object { $_.Name -match "(?i)^remcord($|\\.exe$)" -or $_.CommandLine -match '(?i)(^|[\\/ ])remcord\.exe([ ]|$)' } | Select-Object -ExpandProperty ProcessId)
 }
 $rootIds = @($rootIds | Where-Object { $_ -in @($allCim.ProcessId) } | Select-Object -Unique)
 $treeIds = @(if ($rootIds.Count -gt 0) { Get-DescendantProcessIds -Roots $rootIds -AllProcesses $allCim } else { @() })
@@ -182,9 +182,9 @@ $snapshot = [ordered]@{
     CapturedAt = (Get-Date).ToString("o")
     Mode = $Mode
     RunId = $RunId
-    Methodology = "Read-only process-tree snapshot. CPU is elapsed process CPU divided by $CpuSampleSeconds seconds and is summed across processes; it may exceed 100% on multicore systems. This collector neither launches nor controls LEGcord."
-    Build = [ordered]@{ Git = $git; LegcordVersion = $package.version; ElectronVersion = $package.devDependencies.electron; NodeVersion = (node --version); PackageManager = $package.packageManager }
-    System = [ordered]@{ Windows = "$($os.Caption) $($os.Version) build $($os.BuildNumber)"; CPU = Get-ValueOrUnknown $computer.SystemType; CPUModel = Get-ValueOrUnknown (Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name); RAMBytes = $computer.TotalPhysicalMemory; GPU = Get-GpuInfo; VRR = "UNKNOWN (verify in Windows Advanced Display / GPU control panel)"; HardwareAcceleration = "UNKNOWN (verify current LEGcord configuration)" }
+    Methodology = "Read-only process-tree snapshot. CPU is elapsed process CPU divided by $CpuSampleSeconds seconds and is summed across processes; it may exceed 100% on multicore systems. This collector neither launches nor controls REMCORD."
+    Build = [ordered]@{ Git = $git; RemcordVersion = $package.version; ElectronVersion = $package.devDependencies.electron; NodeVersion = (node --version); PackageManager = $package.packageManager }
+    System = [ordered]@{ Windows = "$($os.Caption) $($os.Version) build $($os.BuildNumber)"; CPU = Get-ValueOrUnknown $computer.SystemType; CPUModel = Get-ValueOrUnknown (Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name); RAMBytes = $computer.TotalPhysicalMemory; GPU = Get-GpuInfo; VRR = "UNKNOWN (verify in Windows Advanced Display / GPU control panel)"; HardwareAcceleration = "UNKNOWN (verify current REMCORD configuration)" }
     ConfigurationEvidence = Get-ConfigEvidence -Path $UserDataPath
     ProcessTree = [ordered]@{ RootPIDs = if ($rootIds.Count) { $rootIds } else { "UNKNOWN (no automatic match; rerun with -RootProcessId)" }; RootProcessStatus = if ($rootProcessStatus.Count) { $rootProcessStatus } else { "UNKNOWN" }; ProcessCount = $observedProcessCount; TotalWorkingSetBytes = $totalWorkingSet; TotalPrivateMemoryBytes = $totalPrivateMemory; TotalCpuPercentOverSample = if ($observedProcessCount -gt 0) { [math]::Round($cpuTotal, 2) } else { "UNKNOWN" }; Processes = $second }
     UnsupportedOrManualMetrics = @("Per-process GPU utilisation/memory", "frame-time percentiles and dropped frames", "long tasks/input delay", "startup milestones", "window visibility mode", "network and disk activity", "mod enabled state", "RPC enabled state")
@@ -194,4 +194,4 @@ $destination = Join-Path $OutputRoot "$RunId.json"
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
 $snapshot | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $destination -Encoding utf8
 Write-Host "Baseline snapshot written to $destination"
-if ($rootIds.Count -eq 0) { Write-Warning "No LEGcord root process was identified. Start LEGcord normally and rerun with -RootProcessId <PID> for an unambiguous tree." }
+if ($rootIds.Count -eq 0) { Write-Warning "No REMCORD root process was identified. Start REMCORD normally and rerun with -RootProcessId <PID> for an unambiguous tree." }

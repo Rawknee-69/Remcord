@@ -8,6 +8,6 @@ sleep 1
 
 x11vnc -display :99 -forever -usepw -rfbport 5900 &
 
-legcord --no-sandbox &
+remcord --no-sandbox &
 
 tail -f /dev/null

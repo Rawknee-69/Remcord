@@ -1,18 +1,25 @@
 # Static packaging checks for the native Remcord Windows installer (§6).
 # Runs WITHOUT the Inno compiler: validates the .iss definition, the
 # staged file set, and separation from production Electron. Fails on the
-# first violation. Content checks ignore `;` comment lines (comments may
-# document the very paths the code must avoid); code and comments are both
-# inspected where each matters. Rust tests alone are never treated as
-# installer proof; these checks are the script-level half (lifecycle
-# behavior still needs an isolated environment).
+# first violation. Content checks ignore `;` comment lines. Rust tests alone
+# are never treated as installer proof; these checks are the script-level
+# half (lifecycle behavior still needs an isolated environment).
+#
+# The refusal guard is verified by behavior markers, not product names, so
+# this script itself names no product generation: it asserts the guard
+# exists, covers data/profile/install markers, and keeps the install head
+# free of data locations.
 param(
-    [string] $RepoRoot = "E:/Legcord"
+    [string] $RepoRoot = ""
 )
 $ErrorActionPreference = "Stop"
 $failures = @()
 function Check([bool] $ok, [string] $name) {
     if ($ok) { Write-Host "ok: $name" } else { $script:failures += $name; Write-Host "FAIL: $name" }
+}
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $nativeProbe = Split-Path -Parent $PSScriptRoot
+    $RepoRoot = Split-Path -Parent $nativeProbe
 }
 $native = Join-Path $RepoRoot "native"
 $issPath = Join-Path $native "installer/remcord.iss"
@@ -25,8 +32,7 @@ $package = Get-Content -Raw (Join-Path $RepoRoot "package.json") | ConvertFrom-J
 $guid = [regex]::Match($code, '#define AppIdValue "([0-9A-Fa-f-]{36})"').Groups[1].Value
 Check ($guid -eq "5F76ADED-7123-4C1A-931E-625935D39BA6") "AppId stable across the rebrand"
 Check ($code -match "AppId=\{\{\{#AppIdValue\}\}\}") "Setup consumes the defined AppId"
-Check ($code -notmatch "app\.legcord\.Legcord") "no Electron appId reference in code"
-Check ($iss -match "app\.legcord\.Legcord") "difference from Electron appId documented in comments"
+Check ($code -notmatch "app\.[a-z]+\.[A-Za-z]+") "no reverse-DNS appId reference in code"
 
 # 2. Install-path separation.
 $leaf = [regex]::Match($code, '#define InstallLeaf "([A-Za-z0-9]+)"').Groups[1].Value
@@ -38,14 +44,17 @@ Check ($code -match "CloseApplications=yes") "running instance handled gracefull
 Check (-not ($code -match "taskkill|TerminateProcess|/IM ")) "no image-name process killing"
 Check ($code -match "RestartApplications=no") "no forced application restart"
 
-# 3. Electron/legacy/DEV paths appear ONLY inside the [Code] refusal guard.
+# 3. Refusal guard: content markers, never product names. Data/profile
+# locations must appear ONLY inside the [Code] guard; the [Setup] head must
+# stay free of them.
 $head = ($code -split "\[Code\]")[0]
 $tail = ($code -split "\[Code\]")[-1]
-foreach ($needle in @("Programs\Legcord", "webview-dev-user-data", "appdata}\legcord", "localappdata}\Remcord", "localappdata}\LegcordNative")) {
+foreach ($needle in @("webview-dev-user-data", "storage\settings.json", "EBWebView", "localappdata}\Remcord")) {
     Check ($head.ToLowerInvariant().IndexOf($needle.ToLowerInvariant()) -lt 0) "installer head free of '$needle'"
 }
-Check ($tail -match "Remcord" -and $tail -match "Programs\\Legcord") "refusal guard names the protected locations"
-Check ($tail -match "LegcordNative") "refusal guard names the legacy native locations"
+Check ($tail -match "webview-dev-user-data" -and $tail -match "EBWebView") "refusal guard covers profile markers"
+Check ($tail -match "storage" -and $tail -match "settings\.json") "refusal guard covers data markers"
+Check ($tail -match "DirContainsInstalledApp") "installed-app heuristic present"
 Check ($code -match "function NextButtonClick") "directory refusal guard present"
 Check ($code -match "IsForbiddenDir") "forbidden-dir predicate present"
 

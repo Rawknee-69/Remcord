@@ -7,7 +7,7 @@ import spdxLicenseList from "spdx-license-list";
 
 interface CopyrightConfig {
     upstreamName: string;
-    source: string;
+    source?: string;
     copyrightHolder: string;
     licenseId: string;
     comment: string; // optional but nice to have
@@ -32,7 +32,7 @@ function generateCopyrightFile(config: CopyrightConfig): string {
     const header = [
         "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/",
         `Upstream-Name: ${config.upstreamName}`,
-        `Source: ${config.source}`,
+        ...(config.source ? [`Source: ${config.source}`] : []),
         `Comment: ${indentText(config.comment)}`, // optional field
     ].join("\n");
 
@@ -53,9 +53,8 @@ function generateCopyrightFile(config: CopyrightConfig): string {
  */
 export default function (): string {
     const copyrightContent: string = generateCopyrightFile({
-        upstreamName: "Legcord",
-        source: "https://github.com/Legcord/Legcord",
-        copyrightHolder: `2020 - ${new Date().getFullYear()} Legcord Contributors`, // git log --reverse
+        upstreamName: "Remcord",
+        copyrightHolder: `2020 - ${new Date().getFullYear()} Remcord Contributors`, // git log --reverse
         licenseId: "OSL-3.0",
         comment: "Open-Source Discord client alternative.",
     });
