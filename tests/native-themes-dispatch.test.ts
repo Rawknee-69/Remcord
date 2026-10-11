@@ -272,7 +272,9 @@ test("native import failure never rejects and warns path-free", async () => {
     try {
         const helpers = await loadHelpers();
         const result = await helpers.importNativeThemes();
-        assert.deepEqual(result, { canceled: true, imported: 0, failed: 0 });
+        // A bridge failure is NOT a cancellation: the caller toasts an
+        // honest error for `{ canceled: false, failed: 1 }`.
+        assert.deepEqual(result, { canceled: false, imported: 0, failed: 1 });
         assert.equal(calls.warnings.length, 1);
         assert.doesNotMatch(calls.warnings[0]!, /C:\\|secret/);
     } finally {

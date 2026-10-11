@@ -651,20 +651,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_manifest_and_bad_names_with_typed_codes() {
+    fn rejects_non_manifest_and_blank_names_with_typed_codes() {
         let profile = temp_profile();
         let sources = temp_profile();
         let cases: &[(&str, &str)] = &[
             ("plain.css", ":root { --x: 1; }\n"),
             ("noname.css", "/**\n * @author Jane\n */\n:root {}\n"),
             ("empty.css", "/**\n * @name \n */\n:root {}\n"),
-            ("evil.css", "/**\n * @name ../escape\n */\n:root {}\n"),
-            ("traversal.css", "/**\n * @name ..\\escape\n */\n:root {}\n"),
-            ("spaces.css", "/**\n * @name My Big Theme\n */\n:root {}\n"),
+            ("blank.css", "/**\n * @name    \n */\n:root {}\n"),
+            ("punct.css", "/**\n * @name (!!!)\n */\n:root {}\n"),
         ];
         let expected = [
             "NOT_A_MANIFEST",
-            "INVALID_NAME",
             "INVALID_NAME",
             "INVALID_NAME",
             "INVALID_NAME",
@@ -676,7 +674,7 @@ mod tests {
         }
         let (summary, outcomes) = import_from_paths(&profile, &paths);
         assert!(!summary.canceled);
-        assert_eq!((summary.imported, summary.failed), (0, 6));
+        assert_eq!((summary.imported, summary.failed), (0, 5));
         for (outcome, code) in outcomes.iter().zip(expected.iter()) {
             assert_eq!(outcome, &FileImportOutcome::Failed(code));
         }
@@ -685,6 +683,33 @@ mod tests {
             .expect("root must list")
             .next()
             .is_none());
+        fs::remove_dir_all(&profile).ok();
+        fs::remove_dir_all(&sources).ok();
+    }
+
+    #[test]
+    fn imports_multi_word_names_with_sanitized_ids() {
+        let profile = temp_profile();
+        let sources = temp_profile();
+        // The common real-world case that previously failed every import
+        // with INVALID_NAME: multi-word @name values now sanitize.
+        let spaced = write_source(
+            &sources,
+            "spaces.css",
+            "/**\n * @name My Big Theme\n * @author Jane\n */\n:root {}\n".as_bytes(),
+        );
+        let (summary, outcomes) = import_from_paths(&profile, std::slice::from_ref(&spaced));
+        assert!(!summary.canceled);
+        assert_eq!((summary.imported, summary.failed), (1, 0));
+        assert_eq!(
+            outcomes,
+            vec![FileImportOutcome::Imported("My-Big-Theme-BD".to_owned())]
+        );
+        assert!(profile
+            .join("themes")
+            .join("My-Big-Theme-BD")
+            .join("manifest.json")
+            .is_file());
         fs::remove_dir_all(&profile).ok();
         fs::remove_dir_all(&sources).ok();
     }

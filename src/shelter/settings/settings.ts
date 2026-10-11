@@ -474,10 +474,10 @@ export async function setNativeThemeEnabled(id: string, enabled: boolean): Promi
 
 /**
  * Native host-owned import picker. Cancellation resolves `{ canceled: true }`
- * and stays silent; host failures are swallowed with a path-free warning
- * and reported as a silent cancellation so clicks never produce unhandled
- * rejections. Returns `null` when the capability is absent (caller uses the
- * Electron picker path) — exactly one path per click.
+ * and stays silent; bridge failures resolve `{ canceled: false, failed: 1 }`
+ * so the caller toasts an honest error instead of silence. Returns `null`
+ * when the capability is absent (caller uses the Electron picker path) —
+ * exactly one path per click.
  */
 export async function importNativeThemes(): Promise<NativeThemeImportResult | null> {
     const importFiles = nativeThemes()?.importFiles as (() => Promise<unknown>) | undefined;
@@ -495,7 +495,7 @@ export async function importNativeThemes(): Promise<NativeThemeImportResult | nu
         return { canceled: result.canceled, imported: result.imported, failed: result.failed };
     } catch {
         console.warn("[Remcord] Could not import themes in the native shell.");
-        return { canceled: true, imported: 0, failed: 0 };
+        return { canceled: false, imported: 0, failed: 1 };
     }
 }
 

@@ -77,15 +77,36 @@ export function ThemesPage() {
     async function handleImport() {
         if (isNativeThemeImportAvailable()) {
             const result = await importNativeThemes();
-            // Capability absent is the only `null`; otherwise exactly the
-            // native path ran (cancellation stays silent, failures warn).
-            if (!result || result.canceled || result.imported === 0) return;
+            // Capability absent is the only `null`; user cancellation stays
+            // silent. Any completed pick reports honestly: a full failure
+            // toasts an error (previously this returned silently, looking
+            // like a broken importer), a partial import names both counts.
+            if (!result || result.canceled) return;
             await loadThemesOnce();
-            showToast({
-                title: store.i18n["themes-success"],
-                content: store.i18n["themes-bdInstalled"],
-                duration: 3000,
-            });
+            if (result.failed === 0) {
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content: store.i18n["themes-bdInstalled"],
+                    duration: 3000,
+                });
+            } else if (result.imported > 0) {
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content: `${store.i18n["themes-bdInstalled"]} (${
+                        store.i18n["themes-importPartial"] ??
+                        "Some themes failed to import. Valid themes were installed; check the list."
+                    })`,
+                    duration: 4000,
+                });
+            } else {
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content:
+                        store.i18n["themes-importFailed"] ??
+                        "No themes could be imported. The files were not valid BetterDiscord themes.",
+                    duration: 4000,
+                });
+            }
             return;
         }
         window.remcord.themes.openImportPicker();

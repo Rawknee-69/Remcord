@@ -339,6 +339,8 @@
     "themes-success": "Success!",
     "themes-updated": "Theme successfully updated!",
     "themes-bdInstalled": "BD theme successfully installed!",
+    "themes-importFailed": "No themes could be imported. The files were not valid BetterDiscord themes.",
+    "themes-importPartial": "Some themes failed to import. Valid themes were installed; check the list.",
     "themes-delete": "Delete",
     "themes-edit": "Edit",
     "themes-update": "Update",

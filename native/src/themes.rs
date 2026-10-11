@@ -281,21 +281,52 @@ pub fn parse_bd_manifest(code: &str) -> Result<ParsedBdManifest, ThemeInstallFai
     Ok(manifest)
 }
 
-/// Derive the theme directory id from a parsed `@name`, mirroring
-/// Electron's `` `${name.replace(" ", "-")}-BD` `` (first space only).
-/// A missing or empty `@name` is rejected: Electron's `"null-BD"` fallback
-/// would turn invalid input into an accepted theme, so it is deliberately
-/// not reproduced.
+/// Derive the theme directory id from a parsed `@name`.
+///
+/// The name is SANITIZED, not merely validated: every run of characters
+/// outside `[A-Za-z0-9._-]` — all whitespace (not just the first space),
+/// slashes, punctuation — becomes one dash, with leading/trailing dashes
+/// trimmed. Real-world BetterDiscord names are almost all multi-word
+/// (`Midnight Harbor`, `ClearVision (v6)`); the previous first-space-only
+/// mapping rejected every one of them with `INVALID_NAME`, so legitimate
+/// imports silently failed. The sanitized stem plus the `-BD` suffix always
+/// passes [`validate_theme_id`], and the canonical-containment check in
+/// [`install_parsed_theme`] still confines the single derived component to
+/// the themes root, so traversal input (`../escape`) can only ever become a
+/// harmless flat directory name (`..-escape-BD`).
+///
+/// A missing, empty, blank, or fully-unsanitizable `@name` (e.g.
+/// punctuation-only or non-ASCII-only) is rejected: Electron's `"null-BD"`
+/// fallback would turn invalid input into an accepted theme, so it is
+/// deliberately not reproduced.
 fn derive_theme_id(name: Option<String>) -> Result<String, ThemeInstallFailure> {
     let invalid = || install_failure("INVALID_NAME", "theme name is missing or invalid");
     let name = match name {
-        Some(name) if !name.is_empty() => name,
+        Some(name) if !name.trim().is_empty() => name,
         _ => return Err(invalid()),
     };
     if name.len() > MAX_BD_NAME_BYTES {
         return Err(invalid());
     }
-    let id = format!("{}-BD", name.replacen(' ', "-", 1));
+    let mut sanitized = String::with_capacity(name.len());
+    // Start as if the previous char was a dash so leading runs trim.
+    let mut last_was_dash = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            sanitized.push(ch);
+            last_was_dash = ch == '-';
+        } else if !last_was_dash {
+            sanitized.push('-');
+            last_was_dash = true;
+        }
+    }
+    while sanitized.ends_with('-') {
+        sanitized.pop();
+    }
+    if sanitized.is_empty() {
+        return Err(invalid());
+    }
+    let id = format!("{sanitized}-BD");
     if validate_theme_id(&id).is_err() {
         return Err(invalid());
     }
@@ -430,7 +461,7 @@ pub fn install_parsed_theme(
 /// themes root.
 ///
 /// The renderer supplies only the source text: the id is derived from
-/// `@name` (validated, never sanitized), the CSS filename is the fixed
+/// `@name` (sanitized, never raw), the CSS filename is the fixed
 /// `src.css`, and `enabled` is always `false` (Electron parity — a fresh BD
 /// install starts disabled; the native loader skips it until an enable path
 /// exists). Overwriting an existing id directory is deterministic (same
@@ -1512,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn install_rejects_missing_and_evil_names_without_null_bd() {
+    fn install_rejects_missing_and_blank_names_and_sanitizes_the_rest() {
         let profile = temp_profile();
         // Missing @name: Electron would write `null-BD`; native rejects.
         let noname = "/**\n * @author Jane\n */\n:root {}\n";
@@ -1522,40 +1553,41 @@ mod tests {
                 .code,
             "INVALID_NAME"
         );
-        // Empty @name likewise.
-        let empty = "/**\n * @name \n */\n:root {}\n";
-        assert_eq!(
-            install_theme_from_code(&profile, empty)
-                .expect_err("empty name must fail")
-                .code,
-            "INVALID_NAME"
-        );
-        // Traversal, absolute, separator, and multi-space names fail id
-        // validation (multi-space keeps a raw space after first-only dash).
-        for bad in [
-            "../escape",
-            "..\\escape",
-            "a/b",
-            "a\\b",
-            "C:\\x",
-            "My Big Theme",
-        ] {
+        // Empty, blank, and fully-unsanitizable names likewise.
+        for bad in ["", "   ", " \t ", "!!!", "(!!!)", "日本語"] {
             let code = format!("/**\n * @name {bad}\n */\n:root {{}}\n");
             assert_eq!(
                 install_theme_from_code(&profile, &code)
-                    .expect_err("evil name must fail")
+                    .expect_err("blank name must fail")
                     .code,
                 "INVALID_NAME",
                 "{bad:?} must be rejected"
             );
         }
-        // Nothing was created for any rejection.
-        assert!(fs::read_dir(profile.join("themes"))
-            .expect("root must list")
-            .next()
-            .is_none());
-        // A single space becomes exactly one dash (first-only replacement,
-        // Electron parity) and installs.
+        // Hostile-looking but sanitizable names install as harmless flat
+        // directory names (canonical containment still enforced at install).
+        for (bad, id) in [
+            ("../escape", "..-escape-BD"),
+            ("..\\escape", "..-escape-BD"),
+            ("a/b", "a-b-BD"),
+            ("a\\b", "a-b-BD"),
+            ("C:\\x", "C-x-BD"),
+            // The common real-world case: multi-word names install.
+            ("My Big Theme", "My-Big-Theme-BD"),
+            ("Midnight  Harbor", "Midnight-Harbor-BD"),
+            ("  ClearVision (v6)  ", "ClearVision-v6-BD"),
+            ("a_b.c-d", "a_b.c-d-BD"),
+        ] {
+            let code = format!("/**\n * @name {bad}\n */\n:root {{}}\n");
+            let result = install_theme_from_code(&profile, &code)
+                .expect("{bad:?} must sanitize and install");
+            assert_eq!(result.id, id, "{bad:?} must sanitize to {id:?}");
+            assert!(profile.join("themes").join(id).is_dir());
+        }
+        // Nothing was created for any rejection (sanitized installs above
+        // cleaned up below).
+        fs::remove_dir_all(profile.join("themes")).ok();
+        // A single space becomes exactly one dash and installs.
         let single = "/**\n * @name has space\n */\n:root {}\n";
         let spaced = install_theme_from_code(&profile, single).expect("single space must install");
         assert_eq!(spaced.id, "has-space-BD");
