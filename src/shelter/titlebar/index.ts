@@ -129,11 +129,17 @@ function injectNativeTitlebar() {
     const strip = document.querySelector("#remcordTitlebar .titlebar") as HTMLElement | null;
     const appMount = document.getElementById("app-mount");
     if (strip && appMount) {
-        const height = strip.offsetHeight > 0 ? strip.offsetHeight : 30;
-        appMount.style.marginTop = `${height}px`;
+        // The stock strip is roomier than a native caption needs to be:
+        // trim ~5px so it reads as a slim caption bar, then push Discord's
+        // content below the trimmed height.
+        const natural = strip.offsetHeight > 0 ? strip.offsetHeight : 30;
+        const height = Math.max(20, natural - 5);
+        strip.style.height = `${height}px`;
+        const applied = strip.offsetHeight > 0 ? strip.offsetHeight : height;
+        appMount.style.marginTop = `${applied}px`;
         // Never clobber an inline height Discord itself set.
         if (!appMount.style.height) {
-            appMount.style.height = `calc(100vh - ${height}px)`;
+            appMount.style.height = `calc(100vh - ${applied}px)`;
         }
     }
     const ops = nativeWindowOps();
