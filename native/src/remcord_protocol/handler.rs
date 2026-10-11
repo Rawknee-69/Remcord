@@ -70,8 +70,7 @@ unsafe fn create_web_response(
     )
 }
 
-/// Handles a single remcord:// request (legacy legcord:// URLs arrive here
-/// through the compat filter and are rewritten by the resolver).
+/// Handles a single remcord:// request.
 unsafe fn handle_remcord_request(
     env: &ICoreWebView2Environment,
     args: &ICoreWebView2WebResourceRequestedEventArgs,
@@ -81,13 +80,8 @@ unsafe fn handle_remcord_request(
     let mut uri_ptr = windows::core::PWSTR::null();
     request.Uri(&mut uri_ptr)?;
     let uri = uri_ptr.to_string().unwrap_or_default();
-    // Narrow legacy compatibility: the old Electron scheme is rewritten into
-    // the canonical resolver (same roots, same checks). The flag is
-    // observability only — legacy URLs never gain a second policy.
-    let legacy = resolver::is_legacy_uri(&uri);
     let namespace = uri
         .strip_prefix("remcord://")
-        .or_else(|| uri.strip_prefix("legcord://"))
         .and_then(|rest| rest.split('/').next())
         .unwrap_or("unknown");
 
@@ -98,9 +92,7 @@ unsafe fn handle_remcord_request(
             let (status, message) = status_for_error(&e);
             // Rejection observability without attacker-controlled content: the
             // namespace (host-owned vocabulary) plus the safe status only.
-            println!(
-                "[RemcordProtocol] status={status} namespace={namespace} rejected=true legacy={legacy}"
-            );
+            println!("[RemcordProtocol] status={status} namespace={namespace} rejected=true");
             let body = error_body(status, message);
             let response = create_web_response(env, status, "text/html", body)?;
             args.SetResponse(&response)?;
@@ -123,7 +115,7 @@ unsafe fn handle_remcord_request(
     // Shipped observability: namespace + status + bytes + MIME only. The URI
     // path and any filesystem path never reach the log.
     println!(
-        "[RemcordProtocol] status=200 namespace={namespace} bytes={byte_count} mime={content_type} legacy={legacy}"
+        "[RemcordProtocol] status=200 namespace={namespace} bytes={byte_count} mime={content_type}"
     );
     Ok(())
 }
@@ -139,19 +131,11 @@ unsafe fn handle_remcord_request(
 ///   the same machinery the existing Discord CSP interception uses.
 /// - Origin restriction (the `AllowedOrigins` equivalent) is enforced by
 ///   layers instead of scheme options: top-level navigation is limited to
-///   HTTPS Discord hosts, popups are denied, the filters below target ONLY
-///   `remcord://*` plus the legacy `legcord://*` rewrite scope, and the
-///   Discord document CSP gains `remcord:` (canonical) and `legcord:`
-///   (legacy rewrite) in exactly the traced directives (see `csp.rs`). No
-///   `TreatAsSecure` parity is claimed: WebView2 treats the scheme per its
-///   own policy and every remcord:// response carries an explicit
-///   Content-Type.
-/// - Legacy compatibility is request-layer only: the old `legcord` scheme is
-///   NEVER registered via `CoreWebView2CustomSchemeRegistration` (the
-///   environment carries exactly one custom scheme: `remcord`). The
-///   `legcord://*` filter exists solely so old user content and the embedded
-///   upstream artifact resolve through the SAME canonical resolver, roots,
-///   and checks — rewriting, not a second surface.
+///   HTTPS Discord hosts, popups are denied, the filter below targets ONLY
+///   `remcord://*`, and the Discord document CSP gains `remcord:` in exactly
+///   the traced directives (see `csp.rs`). No `TreatAsSecure` parity is
+///   claimed: WebView2 treats the scheme per its own policy and every
+///   remcord:// response carries an explicit Content-Type.
 /// - Filters use `ICoreWebView2_22::AddWebResourceRequestedFilterWithRequestSourceKinds`
 ///   (present in the installed `webview2-com-sys 0.39.1` bindings) with one
 ///   filter per resource context actually served, so iframe/subresource
@@ -188,32 +172,26 @@ pub fn register_remcord_protocol(
         COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST,
     ];
 
-    // Narrow URI scope: the canonical `remcord://*` plus the legacy
-    // `legcord://*` rewrite scope (same handler, same resolver, same roots).
-    // The existing Discord HTTPS filter and every other interception are
-    // untouched.
-    let filters = [HSTRING::from("remcord://*"), HSTRING::from("legcord://*")];
+    // Narrow URI scope: ONLY remcord://*. The existing Discord HTTPS filter
+    // and every other interception are untouched.
+    let filter = HSTRING::from("remcord://*");
 
     // Source-kind-aware overload when the runtime supports it (iframe and
-    // subresource correctness); same narrow filters and per-context scope.
+    // subresource correctness); same narrow filter and per-context scope.
     if let Ok(webview22) = webview.cast::<ICoreWebView2_22>() {
         for context in contexts {
-            for filter in &filters {
-                unsafe {
-                    webview22.AddWebResourceRequestedFilterWithRequestSourceKinds(
-                        filter,
-                        context,
-                        COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
-                    )?;
-                }
+            unsafe {
+                webview22.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                    &filter,
+                    context,
+                    COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
+                )?;
             }
         }
     } else {
         for context in contexts {
-            for filter in &filters {
-                unsafe {
-                    webview2.AddWebResourceRequestedFilter(filter, context)?;
-                }
+            unsafe {
+                webview2.AddWebResourceRequestedFilter(&filter, context)?;
             }
         }
     }
@@ -234,14 +212,14 @@ pub fn register_remcord_protocol(
                 Err(_) => return Ok(()),
             };
 
-            // Verify it's a request in our scope (canonical or legacy rewrite).
+            // Verify it's a remcord:// request.
             let mut uri_ptr = windows::core::PWSTR::null();
             if unsafe { request.Uri(&mut uri_ptr) }.is_err() {
                 return Ok(());
             }
             let uri = unsafe { uri_ptr.to_string().unwrap_or_default() };
 
-            if !uri.starts_with("remcord://") && !resolver::is_legacy_uri(&uri) {
+            if !uri.starts_with("remcord://") {
                 return Ok(());
             }
 
@@ -363,14 +341,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_urls_resolve_through_the_same_roots() {
-        // The handler's compat scope exists so old user content keeps
-        // working: a legacy URL must land on the identical file.
-        let (_temp, roots) = setup_test_roots();
-        assert!(resolver::is_legacy_uri("legcord://plugins/test.js"));
-        let canonical = resolver::resolve_uri("remcord://plugins/test.js", &roots).unwrap();
-        let legacy = resolver::resolve_uri("legcord://plugins/test.js", &roots).unwrap();
-        assert_eq!(canonical, legacy);
+    fn handler_scope_is_canonical_only() {
+        // The request filter admits exactly one scheme; neighboring schemes
+        // never reach the resolver through this handler.
+        for uri in ["other://plugins/test.js", "http://plugins/test.js"] {
+            assert!(!uri.starts_with("remcord://"), "{uri} is out of scope");
+        }
     }
 
     #[test]

@@ -150,7 +150,7 @@ const VENCORD_MOD: ModDescriptor = ModDescriptor {
 ///   document start, same as every other client mod. Electron additionally
 ///   wraps the source in an IIFE that declares `SHELTER_INJECTOR_PLUGINS`;
 ///   natively that wrapper is deliberately NOT reproduced because the
-///   `remcord://` protocol serves local assets (legacy `legcord://` URLs rewritten by the host) while the preload plugin loader stays unimplemented,
+///   `remcord://` protocol serves local assets while the preload plugin loader stays unimplemented,
 ///   and Shelter skips the injector entirely when the global is absent.
 /// - Initialization: Shelter publishes `window.shelter` from an inner async
 ///   IIFE only after Discord's `#app-mount` exists and has children, so the
@@ -406,7 +406,7 @@ const CSS_INJECTION_SCRIPT: &str = r#"
     (document.head || document.documentElement).appendChild(style);
   }
   style.textContent = ":root { --remcord-native-prototype-css: ready; }";
-  window.legcord.native.reportCss(
+  window.remcord.native.reportCss(
     getComputedStyle(document.documentElement)
       .getPropertyValue("--remcord-native-prototype-css")
       .trim()
@@ -416,7 +416,7 @@ const CSS_INJECTION_SCRIPT: &str = r#"
 
 const BRIDGE_PROBE_SCRIPT: &str = r#"
 (() => {
-  const api = window.legcord;
+  const api = window.remcord;
   if (
     !api ||
     api.boot.runtime !== "webview2" ||
@@ -646,7 +646,7 @@ const INTERACTION_PROBE_SCRIPT: &str = r#"
 
 /// DEV-only localization smoke probe (`REMCORD_NATIVE_GETLANG_SMOKE=1`).
 /// Exercises the exact lookup the invite back-button caller performs:
-/// `window.legcord.getLang("invite-goBackToApp")`, plus a missing key to
+/// `window.remcord.getLang("invite-goBackToApp")`, plus a missing key to
 /// verify Electron's empty-string behavior. Reported as one typed
 /// `get_lang_probe` event per document.
 const GETLANG_SMOKE_SCRIPT: &str = r#"
@@ -659,13 +659,13 @@ const GETLANG_SMOKE_SCRIPT: &str = r#"
     error: String(error?.message ?? error).slice(0, 256),
   });
   try {
-    const getLang = window.legcord?.getLang;
+    const getLang = window.remcord?.getLang;
     if (typeof getLang !== "function") {
       fail("localization facade missing");
       return;
     }
-    const valid = getLang.call(window.legcord, "invite-goBackToApp");
-    const missing = getLang.call(window.legcord, "remcord-native-missing-key-probe");
+    const valid = getLang.call(window.remcord, "invite-goBackToApp");
+    const missing = getLang.call(window.remcord, "remcord-native-missing-key-probe");
     if (!(valid instanceof Promise) || !(missing instanceof Promise)) {
       fail("localization facade is not asynchronous");
       return;
@@ -688,8 +688,8 @@ const GETLANG_SMOKE_SCRIPT: &str = r#"
 
 /// DEV-only app-version smoke probe (`REMCORD_NATIVE_APP_VERSION_SMOKE=1`).
 /// Exercises the exact read the migrated update-checker caller performs:
-/// `window.legcord.native.getVersion()` — the async replacement for the
-/// synchronous `window.legcord.version` Electron read. Reported as one typed
+/// `window.remcord.native.getVersion()` — the async replacement for the
+/// synchronous `window.remcord.version` Electron read. Reported as one typed
 /// `app_version_probe` event per document.
 const APP_VERSION_SMOKE_SCRIPT: &str = r#"
 (() => {
@@ -701,12 +701,12 @@ const APP_VERSION_SMOKE_SCRIPT: &str = r#"
     error: String(error?.message ?? error).slice(0, 256),
   });
   try {
-    const getVersion = window.legcord?.native?.getVersion;
+    const getVersion = window.remcord?.native?.getVersion;
     if (typeof getVersion !== "function") {
       fail("app version facade missing");
       return;
     }
-    const pending = getVersion.call(window.legcord.native);
+    const pending = getVersion.call(window.remcord.native);
     if (!(pending instanceof Promise)) {
       fail("app version facade is not asynchronous");
       return;
@@ -727,8 +727,8 @@ const APP_VERSION_SMOKE_SCRIPT: &str = r#"
 
 /// DEV-only plugin-storage smoke probe
 /// (`REMCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Exercises the exact public
-/// third-party contract (`window.legcord.pluginStorage.writeFile/readFile`,
-/// the native replacement for Electron's `window.legcord.fs` over
+/// third-party contract (`window.remcord.pluginStorage.writeFile/readFile`,
+/// the native replacement for Electron's `window.remcord.fs` over
 /// `pluginWriteFile`/`pluginReadFile`): write a fixture under a temporary
 /// logical plugin id, read it back, verify exact bytes, then block three
 /// attack paths (traversal, absolute path, Windows drive path). Reported as
@@ -757,12 +757,12 @@ const PLUGIN_STORAGE_SMOKE_SCRIPT: &str = r#"
   };
   (async () => {
     try {
-      const storage = window.legcord?.pluginStorage;
+      const storage = window.remcord?.pluginStorage;
       if (typeof storage?.writeFile !== "function" || typeof storage?.readFile !== "function") {
         fail("plugin storage facade missing");
         return;
       }
-      if (window.legcord.fs !== undefined) {
+      if (window.remcord.fs !== undefined) {
         fail("generic fs facade must not exist");
         return;
       }
@@ -829,7 +829,7 @@ const THEME_INSTALL_SMOKE_SCRIPT: &str = r#"
   };
   (async () => {
     try {
-      const themes = window.legcord?.themes;
+      const themes = window.remcord?.themes;
       if (typeof themes?.installFromCode !== "function") {
         fail("theme install facade missing");
         return;
@@ -913,7 +913,7 @@ const THEME_WRITE_SMOKE_SCRIPT: &str = r#"
   };
   (async () => {
     try {
-      const themes = window.legcord?.themes;
+      const themes = window.remcord?.themes;
       if (typeof themes?.writeCss !== "function") {
         fail("theme write facade missing");
         return;
@@ -973,7 +973,7 @@ const THEME_IMPORT_SMOKE_SCRIPT: &str = r#"
   });
   (async () => {
     try {
-      const themes = window.legcord?.themes;
+      const themes = window.remcord?.themes;
       if (typeof themes?.importFiles !== "function") {
         fail("theme import facade missing");
         return;
@@ -1055,7 +1055,7 @@ const THEME_SET_ENABLED_SMOKE_SCRIPT: &str = r#"
   };
   (async () => {
     try {
-      const themes = window.legcord?.themes;
+      const themes = window.remcord?.themes;
       if (typeof themes?.setEnabled !== "function") {
         fail("theme enable facade missing");
         return;
@@ -1148,7 +1148,7 @@ const THEME_LIST_SMOKE_SCRIPT: &str = r#"
   });
   (async () => {
     try {
-      const themes = window.legcord?.themes;
+      const themes = window.remcord?.themes;
       if (typeof themes?.listThemes !== "function") {
         fail("failed", "theme list facade missing");
         return;
@@ -1205,7 +1205,7 @@ const BACKUP_SAVE_SMOKE_SCRIPT: &str = r#"
   });
   (async () => {
     try {
-      const backup = window.legcord?.backup;
+      const backup = window.remcord?.backup;
       if (typeof backup?.save !== "function") {
         fail("backup save facade missing");
         return;
@@ -1215,9 +1215,9 @@ const BACKUP_SAVE_SMOKE_SCRIPT: &str = r#"
       // never a rejection.
       const payload = JSON.stringify({
         includes: {
-          legcordConfig: true,
-          legcordThemesAndQuickCss: true,
-          legcordExtensionPlugins: true,
+          remcordConfig: true,
+          remcordThemesAndQuickCss: true,
+          remcordExtensionPlugins: true,
           vencordModData: true,
           equicordModData: true,
           shelterModData: true,
@@ -1270,7 +1270,7 @@ const BACKUP_RESTORE_SMOKE_SCRIPT: &str = r#"
   });
   (async () => {
     try {
-      const backup = window.legcord?.backup;
+      const backup = window.remcord?.backup;
       if (typeof backup?.restore !== "function") {
         fail("backup restore facade missing");
         return;
@@ -1418,7 +1418,7 @@ const SHELTER_LOADER_PROBE_SCRIPT: &str = r#"
 "#;
 
 /// DEV-only settings boot snapshot probe (`REMCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`).
-/// Observes the live `window.legcord.settingsBoot` surface in the document:
+/// Observes the live `window.remcord.settingsBoot` surface in the document:
 /// exactly the seven approved members, the `settingsSource` enum consistent
 /// with a null/non-null config, array/object shapes, both narrow functions
 /// present, and deep-frozen state. One typed `settings_boot_probe` event per
@@ -1443,7 +1443,7 @@ const SETTINGS_BOOT_SMOKE_SCRIPT: &str = r#"
     error: String(error?.message ?? error).slice(0, 256),
   });
   try {
-    const boot = window.legcord?.settingsBoot;
+    const boot = window.remcord?.settingsBoot;
     if (!boot || typeof boot !== "object") {
       fail("settingsBoot surface missing");
       return;
@@ -1699,7 +1699,7 @@ const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
         if (await waitFor(modalOpen, 6, 500)) openedBy = "keyboard";
       }
     }
-    // Verify the modal genuinely opened: "Legcord" alone could match an
+    // Verify the modal genuinely opened: "Remcord" alone could match an
     // unrelated surface (toast, chat text). Discord's default settings page
     // header "My Account" proves the User Settings modal is showing.
     if (!openedBy) {
@@ -1717,15 +1717,15 @@ const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
             + " buttons=" + [...document.querySelectorAll("button")].filter(visible).length;
         } catch (error) { return " forensics-failed"; }
       })();
-      probe("open", false, "disabledSeen=" + disabledSeen + " legcord=" + !!findText(document, "Legcord") + forensics, "settings modal did not open");
+      probe("open", false, "disabledSeen=" + disabledSeen + " remcord=" + !!findText(document, "Remcord") + forensics, "settings modal did not open");
       return;
     }
     probe("open", true, "settings-ui-open via=" + openedBy);
-    const legcord = await waitFor(() => findText(document, "Legcord"), 10, 500);
-    if (!legcord) { probe("open", false, "via=" + openedBy, "Legcord section missing"); return; }
+    const remcord = await waitFor(() => findText(document, "Remcord"), 10, 500);
+    if (!remcord) { probe("open", false, "via=" + openedBy, "Remcord section missing"); return; }
     const opened = await openThemesPage();
     if (!opened) {
-      probe("themes", false, "navThemes=" + countText(document, "Themes") + " legcord=" + !!findText(document, "Legcord"), "Installed Themes missing");
+      probe("themes", false, "navThemes=" + countText(document, "Themes") + " remcord=" + !!findText(document, "Remcord"), "Installed Themes missing");
       return;
     }
     probe("themes", true, "themes-page-open");
@@ -1778,7 +1778,7 @@ const SETTINGS_UI_PROBE_TEMPLATE: &str = r#"
     await sleep(2000);
     let folderOk = false;
     try {
-      const echoed = await window.legcord.folders.openTheme("ClearVision-BD");
+      const echoed = await window.remcord.folders.openTheme("ClearVision-BD");
       folderOk = echoed === "ClearVision-BD";
     } catch (error) {
       probe("folder", false, "", "folder capability failed: " + String((error && error.message) || error).slice(0, 128));
@@ -1878,11 +1878,6 @@ fn settings_ui_probe_script(nonce: u64) -> Result<String, String> {
 ///   `fetch`, observed only — CORS headers are deliberately NOT added, so
 ///   a TypeError here proves the handler served while reporting the CORS
 ///   posture honestly)
-/// - a legacy stylesheet (`legcord://assets/css/discord.css` via `<link>`,
-///   exercises the narrow legacy-URL rewrite: old user content and the
-///   embedded upstream artifact still reference the Electron scheme, which
-///   the host rewrites into the canonical resolver without registering the
-///   old scheme)
 ///
 /// The host logs one `[RemcordProtocol][Smoke]` line per document; no bridge
 /// event, no new capability, no script execution of the fetched bytes.
@@ -1895,32 +1890,25 @@ const REMCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
     root.dataset.remcordProtocolCss = "pending";
     root.dataset.remcordProtocolImg = "pending";
     root.dataset.remcordProtocolPlugin = "pending";
-    root.dataset.remcordProtocolLegacy = "pending";
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href = "remcord://assets/css/discord.css";
     link.onload = () => { root.dataset.remcordProtocolCss = "loaded"; };
     link.onerror = () => { root.dataset.remcordProtocolCss = "error"; };
     (document.head || document.documentElement).appendChild(link);
-    const legacyLink = document.createElement("link");
-    legacyLink.rel = "stylesheet";
-    legacyLink.href = "legcord://assets/css/discord.css";
-    legacyLink.onload = () => { root.dataset.remcordProtocolLegacy = "loaded"; };
-    legacyLink.onerror = () => { root.dataset.remcordProtocolLegacy = "error"; };
-    (document.head || document.documentElement).appendChild(legacyLink);
     const img = new Image();
     img.onload = () => { root.dataset.remcordProtocolImg = "loaded"; };
     img.onerror = () => { root.dataset.remcordProtocolImg = "error"; };
     img.src = "remcord://assets/desktop.png";
     // Distinguish CSP blocks from scheme/network failures: a
-    // securitypolicyviolation naming a remcord:// (or legacy legcord://) URI
-    // proves the scheme resolved and CSP refused it; silence + error proves
-    // the request never reached the handler.
+    // securitypolicyviolation naming a remcord:// URI proves the scheme
+    // resolved and CSP refused it; silence + error proves the request never
+    // reached the handler.
     root.dataset.remcordProtocolCsp = "none";
     document.addEventListener("securitypolicyviolation", (event) => {
       try {
         const blocked = String(event.blockedURI || "");
-        if (blocked.indexOf("remcord://") === 0 || blocked.indexOf("legcord://") === 0) {
+        if (blocked.indexOf("remcord://") === 0) {
           root.dataset.remcordProtocolCsp =
             String(event.violatedDirective || "unknown").slice(0, 48)
             + "|" + blocked.slice(0, 80);
@@ -1965,7 +1953,6 @@ const REMCORD_PROTOCOL_SMOKE_READBACK_SCRIPT: &str = r#"
     css: root.dataset.remcordProtocolCss || "absent",
     img: root.dataset.remcordProtocolImg || "absent",
     plugin: root.dataset.remcordProtocolPlugin || "absent",
-    legacy: root.dataset.remcordProtocolLegacy || "absent",
     csp: root.dataset.remcordProtocolCsp || "absent",
     nocors: root.dataset.remcordProtocolNoCors || "absent",
   });
@@ -2070,7 +2057,7 @@ const THEMES_SMOKE_SCRIPT: &str = r#"
   const headOrder = head ? [...head.querySelectorAll("style")].map((node) => node.id) : [];
   const nodes = [...document.querySelectorAll('style[id^="remcord-native-theme-"]')]
     .map((node) => ({ id: node.id, bytes: (node.textContent || "").length }));
-  const quickCssNode = document.getElementById("legcord-quick-css");
+  const quickCssNode = document.getElementById("remcord-quick-css");
   return JSON.stringify({
     count: nodes.length,
     themes: nodes,
@@ -2106,16 +2093,16 @@ struct BootWindowState {
 }
 
 /// Closed registry id for the real Remcord settings plugin. It matches the
-/// `"legcord-settings"` key Electron pins in the Shelter injector map
+/// `"remcord-settings"` key Electron pins in the Shelter injector map
 /// (`src/discord/preload/mods/shelter.mts`), so host logs and the Electron
 /// contract name the same plugin. The renderer never supplies this id: the
 /// host splices it into the fixed start script below.
-const SETTINGS_PLUGIN_ID: &str = "legcord-settings";
+const SETTINGS_PLUGIN_ID: &str = "remcord-settings";
 
 /// Fixed manifest for the real Remcord settings plugin registration. Only the
 /// name is carried (the loader-probe precedent); the renderer supplies no
 /// manifest, id, source, or update flag.
-const SETTINGS_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Settings"}"#;
+const SETTINGS_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Remcord Settings"}"#;
 
 /// Host-built start script for the real Remcord settings plugin, evaluated
 /// once per document after Shelter's own bootstrap marker proves
@@ -2130,7 +2117,7 @@ const SETTINGS_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Settings"}"#;
 /// is spliced as fixed JSON.
 const SETTINGS_PLUGIN_START_TEMPLATE: &str = r#"
 (() => {
-  const ID = "legcord-settings";
+  const ID = "remcord-settings";
   try {
     const plugins = window.shelter && window.shelter.plugins;
     if (!plugins) return "settings-plugin-failed: shelter plugins unavailable";
@@ -2196,16 +2183,16 @@ fn settings_plugin_start_due(started_generation: Option<u64>, current_generation
 }
 
 /// Closed registry id for the real Remcord titlebar plugin. It matches the
-/// `"legcord-titlebar"` key Electron pins in the Shelter injector map
+/// `"remcord-titlebar"` key Electron pins in the Shelter injector map
 /// (`src/discord/preload/mods/shelter.mts`), so host logs and the Electron
 /// contract name the same plugin. The renderer never supplies this id: the
 /// host splices it into the fixed start script below.
-const TITLEBAR_PLUGIN_ID: &str = "legcord-titlebar";
+const TITLEBAR_PLUGIN_ID: &str = "remcord-titlebar";
 
 /// Fixed manifest for the real Remcord titlebar plugin registration. Only the
 /// name is carried (the loader-probe precedent); the renderer supplies no
 /// manifest, id, source, or update flag.
-const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Titlebar Controller"}"#;
+const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Remcord Titlebar Controller"}"#;
 
 /// Host-built start script for the real Remcord titlebar plugin, evaluated
 /// once per document after Shelter's own bootstrap marker proves
@@ -2217,11 +2204,11 @@ const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Titlebar Control
 ///
 /// Before registration it reproduces `src/discord/preload/newTitlebar.mts`
 /// for the overlay-chrome styles: the host platform comes from the
-/// facade-owned `window.legcord.platform` (never renderer input), the body
+/// facade-owned `window.remcord.platform` (never renderer input), the body
 /// attributes and the build-embedded per-OS stylesheets are host-chosen and
 /// injected as inline `<style>` nodes (no subresource fetch, so reloads
 /// cannot silently unstyle the controls). All existing window actions flow through the typed
-/// `window.legcord.window.*` operations the plugin already calls; no new
+/// `window.remcord.window.*` operations the plugin already calls; no new
 /// RPC is added.
 ///
 /// `__REMCORD_TITLEBAR_PLUGIN_JS__` is spliced as a JSON-encoded string
@@ -2231,24 +2218,24 @@ const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Legcord Titlebar Control
 /// `darwin`/`linux` (never paths or URLs).
 const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
 (() => {
-  const ID = "legcord-titlebar";
+  const ID = "remcord-titlebar";
   try {
     const plugins = window.shelter && window.shelter.plugins;
     if (!plugins) return "titlebar-failed: shelter plugins unavailable";
     for (const name of ["addLocalPlugin", "startPlugin", "removePlugin"]) {
       if (typeof plugins[name] !== "function") return "titlebar-failed: missing " + name;
     }
-    const legcord = window.legcord;
-    if (!legcord || typeof legcord.platform !== "string") return "titlebar-failed: facade unavailable";
+    const remcord = window.remcord;
+    if (!remcord || typeof remcord.platform !== "string") return "titlebar-failed: facade unavailable";
     const body = document.body;
     if (!body) return "titlebar-failed: no document body";
-    body.setAttribute("legcord-platform", legcord.platform);
+    body.setAttribute("remcord-platform", remcord.platform);
     const cssText = __REMCORD_TITLEBAR_CSS__;
     const wanted = ["base"];
-    if (legcord.platform === "win32") {
+    if (remcord.platform === "win32") {
       body.setAttribute("class", "platform-win");
       wanted.push("win");
-    } else if (legcord.platform === "darwin") {
+    } else if (remcord.platform === "darwin") {
       wanted.push("darwin");
     } else {
       body.setAttribute("class", "platform-linux");
@@ -2256,7 +2243,7 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     }
     // Inline <style> nodes from build-embedded text (no subresource fetch:
     // fetched sheets stop reaching the host after a reload, which silently
-    // unstyles link-based sheets). Legacy link sheets from older builds are removed; style nodes are deduped and refreshed per
+    // unstyles link-based sheets). Stale link sheets are removed; style nodes are deduped and refreshed per
     // document, so reloads converge instead of stacking.
     for (const stale of document.querySelectorAll('link[data-remcord-titlebar-css]')) {
       stale.remove();
@@ -2276,7 +2263,7 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     // marker-time script runs — and the plugin's remove/unload path never
     // removes injected DOM. Drop any stale controls first so exactly one set
     // exists no matter who started the plugin earlier in this document.
-    for (const id of ["legcordNavControls", "legcordTitlebar"]) {
+    for (const id of ["remcordNavControls", "remcordTitlebar"]) {
       const stale = document.getElementById(id);
       if (stale) stale.remove();
     }
@@ -2293,9 +2280,9 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     // Styles are build-embedded text injected above (no fetch), so the node
     // count is steady-state truthful here, unlike link load timing. The host
     // re-runs this same idempotent script at document finish (settle pass).
-    const controls = document.querySelectorAll('#legcordNavControls').length;
+    const controls = document.querySelectorAll('#remcordNavControls').length;
     const styles = Array.from(document.querySelectorAll('style[data-remcord-titlebar-css]'));
-    const platform = document.body.getAttribute("legcord-platform") || "none";
+    const platform = document.body.getAttribute("remcord-platform") || "none";
     const ready = document.readyState || "unknown";
     if (controls < 1) {
       return "titlebar-started:controls-missing";
@@ -2344,7 +2331,7 @@ fn titlebar_plugin_start_script() -> Result<String, String> {
 
 /// DEV-only settings smoke probe (`REMCORD_NATIVE_SETTINGS_SMOKE=1`).
 /// Exercises the exact read the migrated Shelter power caller performs:
-/// `window.legcord.settings.getConfig()` → `blockPowerSavingInVoiceChat`.
+/// `window.remcord.settings.getConfig()` → `blockPowerSavingInVoiceChat`.
 /// The result is reported through the typed `settings_probe` event so the
 /// host log shows request/response behavior per document.
 const SETTINGS_SMOKE_SCRIPT: &str = r#"
@@ -2353,12 +2340,12 @@ const SETTINGS_SMOKE_SCRIPT: &str = r#"
     JSON.stringify({ version: 1, event: { type: "settings_probe", payload } })
   );
   try {
-    const getConfig = window.legcord?.settings?.getConfig;
+    const getConfig = window.remcord?.settings?.getConfig;
     if (typeof getConfig !== "function") {
       probe({ ok: false, source: "unavailable", payload_bytes: 0, block_power_saving: false, error: "settings facade missing" });
       return;
     }
-    const result = getConfig.call(window.legcord.settings);
+    const result = getConfig.call(window.remcord.settings);
     // Dual contract: the closed settings shim returns the snapshot value
     // synchronously while staying awaitable for the live async capability.
     if (!result || (typeof result.then !== "function" && !(result instanceof Promise))) {
@@ -2405,7 +2392,7 @@ const SETTINGS_MUTATION_SMOKE_SCRIPT: &str = r#"
     error: String(error?.message ?? error).slice(0, 256),
   });
   try {
-    const settings = window.legcord?.settings;
+    const settings = window.remcord?.settings;
     if (typeof settings?.getConfig !== "function" || typeof settings?.setBlockPowerSavingInVoiceChat !== "function") {
       fail(false, "settings mutation facade missing");
       return;
@@ -2458,7 +2445,7 @@ const SETTINGS_MUTATION_RESTORE_SCRIPT_TEMPLATE: &str = r#"
     error: String(error?.message ?? error).slice(0, 256),
   });
   try {
-    const settings = window.legcord?.settings;
+    const settings = window.remcord?.settings;
     if (typeof settings?.getConfig !== "function" || typeof settings?.setBlockPowerSavingInVoiceChat !== "function") {
       fail(false, "settings mutation facade missing");
       return;
@@ -2509,7 +2496,7 @@ const SETTINGS_SET_SMOKE_SCRIPT: &str = r#"
     attacks_blocked: 0, error: String(error?.message ?? error).slice(0, 256),
   });
   try {
-    const settings = window.legcord?.settings;
+    const settings = window.remcord?.settings;
     if (typeof settings?.getConfig !== "function" || typeof settings?.set !== "function") {
       fail("settings set facade missing");
       return;
@@ -2588,7 +2575,7 @@ const SETTINGS_SET_RESTORE_SCRIPT_TEMPLATE: &str = r#"
     attacks_blocked: 3, error: String(error?.message ?? error).slice(0, 256),
   });
   try {
-    const settings = window.legcord?.settings;
+    const settings = window.remcord?.settings;
     if (typeof settings?.getConfig !== "function" || typeof settings?.set !== "function") {
       fail("settings set facade missing");
       return;
@@ -3386,7 +3373,7 @@ struct PopupChild {
 /// only for the Discord popout. Renderer window features are never read.
 /// The child shares the main profile/session (same `WebContext` plus the
 /// same adopted `ICoreWebView2Environment`), the same document-start
-/// facade, the same bridge origin gate, the same `remcord://` registration (plus the legacy-URL rewrite filter),
+/// facade, the same bridge origin gate, the same `remcord://` registration,
 /// and the same permission policy; nested popups deny unconditionally and
 /// navigation stays clamped to Discord (plus the ICS blob shape for hidden
 /// ICS children only).
@@ -4291,61 +4278,46 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Release blocker 2: the profile root is resolved per build, never
     // hardcoded. Debug takes the isolated DEV profile; release takes
     // `%LOCALAPPDATA%\Remcord`; an explicit absolute
-    // `REMCORD_NATIVE_PROFILE_DIR` wins in both (the deprecated
-    // `LEGCORD_NATIVE_PROFILE_DIR` is honored as a fallback for existing test
-    // setups and logs a deprecation notice). Any failure fails startup
+    // `REMCORD_NATIVE_PROFILE_DIR` wins in both. Any failure fails startup
     // — never a silent fallback to another product's data.
-    let (override_raw, override_was_legacy) = profile_migration::read_override();
-    if override_was_legacy {
-        println!(
-            "[Profile] LEGCORD_NATIVE_PROFILE_DIR is deprecated; use REMCORD_NATIVE_PROFILE_DIR"
-        );
-    }
+    let override_raw = std::env::var(profile::PROFILE_OVERRIDE_ENV).ok();
     let resolved_profile = profile::resolve_for_build(
         cfg!(debug_assertions),
         override_raw.as_deref(),
         std::env::var("LOCALAPPDATA").ok().as_deref(),
     )
     .map_err(|error| format!("profile resolution failed: {error}"))?;
-    // Remcord rebrand migration: copy the old native profile into the Remcord
-    // profile once (copy-only; the old tree is never modified or deleted).
-    // Explicit overrides skip migration (isolated testing). Any migration
-    // failure fails startup — never a silent fallback to the old profile.
-    if resolved_profile.kind != profile::ProfileKind::Override {
-        let is_dev = cfg!(debug_assertions);
-        let (old_root, expected_leaf) = if is_dev {
-            (
-                PathBuf::from(profile_migration::LEGACY_DEV_DIR),
-                profile::DEV_PROFILE_DIR
-                    .rsplit('\\')
-                    .next()
-                    .unwrap_or("Remcord.webview-dev-user-data"),
-            )
-        } else {
-            let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
-            (
-                profile_migration::legacy_release_dir(&local_app_data),
-                profile::RELEASE_PROFILE_LEAF,
-            )
-        };
-        match profile_migration::migrate_native_profile(
-            &old_root,
-            &resolved_profile.path,
-            expected_leaf,
-        ) {
-            Ok(report) => {
-                if report.files_copied > 0 {
-                    println!(
-                        "[Profile][Migration] legacy profile migrated files={} bytes={} already_migrated=false",
+    // User-mediated import of a previous-generation profile (see
+    // `profile_migration`): the user selects the source once via
+    // `REMCORD_IMPORT_FROM`. Unset means no import. Any import failure fails
+    // startup — never a silent fallback anywhere.
+    let is_dev = cfg!(debug_assertions);
+    let expected_leaf = if is_dev {
+        profile::DEV_PROFILE_DIR
+            .rsplit('\\')
+            .next()
+            .unwrap_or("Remcord.webview-dev-user-data")
+    } else {
+        profile::RELEASE_PROFILE_LEAF
+    };
+    let import_source = profile_migration::read_import_source();
+    match profile_migration::import_previous_profile(
+        import_source.as_deref(),
+        &resolved_profile.path,
+        expected_leaf,
+    ) {
+        Ok(report) => {
+            if report.files_copied > 0 {
+                println!(
+                        "[Profile][Import] previous profile imported files={} bytes={} already_imported=false",
                         report.files_copied, report.bytes_copied
                     );
-                } else if report.already_migrated {
-                    println!("[Profile][Migration] already migrated; nothing to copy");
-                }
+            } else if report.already_imported {
+                println!("[Profile][Import] already imported; nothing to copy");
             }
-            Err(error) => {
-                return Err(format!("profile migration failed: {error}").into());
-            }
+        }
+        Err(error) => {
+            return Err(format!("profile import failed: {error}").into());
         }
     }
     let profile_path = resolved_profile.path;
@@ -4980,7 +4952,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // Per-WebView content interceptions (Phase 2F helper): the
-    // `remcord://` registration (plus legacy rewrite), the permission policy, and the CSP
+    // `remcord://` registration, the permission policy, and the CSP
     // request filter. Runs after `build()` and before the initial Discord
     // navigation, so the first document is intercepted like every later
     // one. Returns the namespace roots for the P0.4 popup child
@@ -5541,7 +5513,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     webview = builder.build(&window_for_webview).expect("failed to build replacement WebView");
                     println!("[BrowserRecovery] Replacement WebView built");
 
-                    // 9. Re-attach per-WebView content filters (remcord:// + legacy rewrite, permissions, CSP).
+                    // 9. Re-attach per-WebView content filters (remcord://, permissions, CSP).
                     #[cfg(target_os = "windows")]
                     {
                         let _ = main_webview::attach_main_content_filters(&webview, &profile_path, &profile_path);
@@ -8265,14 +8237,13 @@ mod tests {
     #[test]
     fn remcord_protocol_smoke_probe_uses_only_fixed_bundle_urls() {
         // The DEV probe may request exactly the host-fixed bundle URLs that
-        // exist on disk (canonical plus one legacy rewrite proof); it must
+        // exist on disk; it must
         // not accept input, execute fetched bytes, or open a generic
         // fetch/eval surface.
         for fixed in [
             "remcord://assets/css/discord.css",
             "remcord://assets/desktop.png",
             "remcord://plugins/settings/plugin.js",
-            "legcord://assets/css/discord.css",
         ] {
             assert!(
                 REMCORD_PROTOCOL_SMOKE_SCRIPT.contains(fixed),
@@ -8310,9 +8281,8 @@ mod tests {
     fn settings_plugin_start_script_is_closed_and_embedded() {
         // The template is closed: host-fixed lifecycle calls and plain status
         // strings only — no protocol, bridge, URL, or path surface of its own.
-        // (The embedded artifact legitimately carries legcord:// asset image
-        // references from the Electron UI; the host legacy-URL rewrite serves
-        // them through the canonical resolver, so they render natively.)
+        // (The embedded artifact carries remcord:// asset image references
+        // for its icons; they resolve through the canonical protocol.)
         for token in [
             "removePlugin",
             "addLocalPlugin",
@@ -8329,7 +8299,7 @@ mod tests {
             SETTINGS_PLUGIN_START_TEMPLATE.contains(SETTINGS_PLUGIN_ID),
             "template must use the closed plugin id"
         );
-        for token in ["legcord://", "postMessage", "http://", "https://"] {
+        for token in ["remcord://", "postMessage", "http://", "https://"] {
             assert!(
                 !SETTINGS_PLUGIN_START_TEMPLATE.contains(token),
                 "template must not carry {token}"
@@ -8337,8 +8307,8 @@ mod tests {
         }
         let script = settings_plugin_start_script().expect("the start script must build");
         assert!(!script.contains("__REMCORD_SETTINGS_PLUGIN_"));
-        assert!(script.contains("legcord-settings"));
-        assert!(script.contains("Legcord Settings"));
+        assert!(script.contains("remcord-settings"));
+        assert!(script.contains("Remcord Settings"));
         // The embedded artifact travels with the script (a distinctive boot
         // member proves the splice carries real plugin bytes, not padding).
         assert!(script.contains("showExperimentalPluginMenu"));
@@ -8366,7 +8336,7 @@ mod tests {
             "titlebar-started:controls-",
             "titlebar-started:controls-missing",
             "titlebar-failed",
-            "legcord-platform",
+            "remcord-platform",
             "data-remcord-titlebar-css",
             "__REMCORD_TITLEBAR_CSS__",
         ] {
@@ -8380,7 +8350,7 @@ mod tests {
             "template must use the closed plugin id"
         );
         for token in [
-            "legcord://",
+            "remcord://",
             "postMessage",
             "http://",
             "https://",
@@ -8396,11 +8366,11 @@ mod tests {
         let script = titlebar_plugin_start_script().expect("the start script must build");
         assert!(!script.contains("__REMCORD_TITLEBAR_PLUGIN_"));
         assert!(!script.contains("__REMCORD_TITLEBAR_CSS__"));
-        assert!(script.contains("legcord-titlebar"));
-        assert!(script.contains("Legcord Titlebar Controller"));
+        assert!(script.contains("remcord-titlebar"));
+        assert!(script.contains("Remcord Titlebar Controller"));
         // The embedded artifact travels with the script (a structural member
         // proves the splice carries real plugin bytes, not padding).
-        assert!(script.contains("legcordNavControls"));
+        assert!(script.contains("remcordNavControls"));
         assert!(script.contains("window-controls-container"));
         // The embedded stylesheets travel with the script (a controls rule
         // proves real CSS bytes, not padding).
@@ -9205,7 +9175,7 @@ mod tests {
         assert!(super::APP_VERSION_SMOKE_SCRIPT.contains("native?.getVersion"));
         assert!(super::APP_VERSION_SMOKE_SCRIPT.contains("app_version_probe"));
         assert!(!super::APP_VERSION_SMOKE_SCRIPT.contains("sendSync"));
-        assert!(!super::APP_VERSION_SMOKE_SCRIPT.contains("legcord.version"));
+        assert!(!super::APP_VERSION_SMOKE_SCRIPT.contains("remcord.version"));
     }
 
     #[test]
@@ -9247,8 +9217,8 @@ mod tests {
         assert!(script.contains("pluginStorage"));
         // The facade must be asynchronous and namespaced: no generic fs
         // object and no synchronous IPC emulation.
-        assert!(!script.contains("window.legcord.fs"));
-        assert!(!script.contains("legcord.fs"));
+        assert!(!script.contains("window.remcord.fs"));
+        assert!(!script.contains("remcord.fs"));
         assert!(!script.contains("sendSync"));
     }
 
@@ -9306,7 +9276,7 @@ mod tests {
         assert!(super::THEMES_SMOKE_SCRIPT.contains("remcord-native-theme-"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("querySelectorAll"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("remcord-native-vencord-css"));
-        assert!(super::THEMES_SMOKE_SCRIPT.contains("legcord-quick-css"));
+        assert!(super::THEMES_SMOKE_SCRIPT.contains("remcord-quick-css"));
         assert!(super::THEMES_SMOKE_SCRIPT.contains("order-probe"));
         // Null-safe in a headless early document: a missing head yields an
         // empty order instead of throwing.
@@ -9382,7 +9352,7 @@ mod tests {
         assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("remcordNativeProbe"));
         assert!(super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("../escape.txt"));
         assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("sendSync"));
-        // The probe asserts the generic facade is ABSENT (`window.legcord.fs
+        // The probe asserts the generic facade is ABSENT (`window.remcord.fs
         // !== undefined` check); what must never appear is a generic fs
         // method call.
         assert!(!super::PLUGIN_STORAGE_SMOKE_SCRIPT.contains("fs.readFile"));
@@ -9843,7 +9813,7 @@ mod tests {
         assert!(!script.contains("getCSS"));
         assert!(!script.contains("getCss"));
         assert!(!script.contains("updateSrc"));
-        assert!(!script.contains("legcord.fs"));
+        assert!(!script.contains("remcord.fs"));
         assert!(!script.contains("sendSync"));
     }
 
@@ -9896,7 +9866,7 @@ mod tests {
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("eval("));
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("Function("));
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("sendSync"));
-        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("legcord://"));
+        assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("remcord://"));
         assert!(!super::SHELTER_LOADER_PROBE_SCRIPT.contains("plugin.js"));
     }
 

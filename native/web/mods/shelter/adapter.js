@@ -37,7 +37,7 @@
     //    plugin map. That wrapper is deliberately NOT reproduced here: the
     //    preload plugin loader is unimplemented natively (the local-asset
     //    protocol it would load from now exists as `remcord://` with a legacy
-    //    `legcord://` rewrite), and Shelter skips the injector entirely when
+    //    `remcord://` rewrite), and Shelter skips the injector entirely when
     //    the global is absent, so omitting it is exact native behavior rather
     //    than a stub.
     substrate.createModAdapter({

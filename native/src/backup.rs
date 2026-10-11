@@ -4,7 +4,7 @@
 //! This module is the native counterpart of the Electron backup handlers in
 //! `src/common/backup.ts` (`buildBackupZipBuffer` / `applyBackupFromMap` as
 //! invoked from `src/discord/ipc.ts` `backupSave` / `backupRestore`, exposed
-//! as `window.legcord.backup.save` / `.restore` via
+//! as `window.remcord.backup.save` / `.restore` via
 //! `src/discord/preload/bridge.ts`).
 //!
 //! Traced Electron SAVE behavior (actual implementation, not declarations):
@@ -141,7 +141,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// Exact Electron `LEGCORD_BACKUP_VERSION` (`src/common/backup.ts`).
+/// Matches `REMCORD_BACKUP_VERSION` (`src/common/backup.ts`).
 pub const BACKUP_VERSION: u8 = 1;
 /// Exact Electron `MANIFEST_ENTRY`: the first archive entry.
 pub const MANIFEST_ENTRY: &str = "manifest.json";
@@ -187,12 +187,12 @@ pub const DIALOG_FILTER_SPEC: &str = "*.zip";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupIncludes {
-    #[serde(rename = "legcordConfig")]
-    pub legcord_config: bool,
-    #[serde(rename = "legcordThemesAndQuickCss")]
-    pub legcord_themes_and_quick_css: bool,
-    #[serde(rename = "legcordExtensionPlugins")]
-    pub legcord_extension_plugins: bool,
+    #[serde(rename = "remcordConfig")]
+    pub remcord_config: bool,
+    #[serde(rename = "remcordThemesAndQuickCss")]
+    pub remcord_themes_and_quick_css: bool,
+    #[serde(rename = "remcordExtensionPlugins")]
+    pub remcord_extension_plugins: bool,
     #[serde(rename = "vencordModData")]
     pub vencord_mod_data: bool,
     #[serde(rename = "equicordModData")]
@@ -430,10 +430,15 @@ pub fn utc_today() -> String {
 
 /// Default save filename for a UTC date: `remcord-backup-YYYY-MM-DD.zip`
 /// (Electron `defaultPath` basename semantics; the host owns the directory).
-/// Restore compatibility: archives saved under the legacy
-/// `legcord-backup-YYYY-MM-DD.zip` default (Electron or older native builds)
-/// use the identical ZIP format and remain fully restore-compatible — the
-/// restore picker reads any user-picked `.zip`, never just this default.
+///
+/// Previous-generation archives are NOT restore-compatible: their manifest
+/// `includes` keys predate the current schema and fail strict validation
+/// with `INVALID_BACKUP` (never a partial restore). To migrate one, open a
+/// copy of the `.zip`, rename the three product-scoped keys in
+/// `manifest.json` `includes` to `remcordConfig`,
+/// `remcordThemesAndQuickCss`, and `remcordExtensionPlugins`, re-zip, and
+/// restore the converted copy. Settings, themes, Quick CSS, plugin storage,
+/// bundles, and clientMods payloads carry over byte-identical.
 pub fn default_backup_filename(utc_date: &str) -> String {
     format!("remcord-backup-{utc_date}.zip")
 }
@@ -461,9 +466,9 @@ pub fn build_backup_manifest(
         "createdAt": created_at,
         "appVersion": app_version,
         "includes": {
-            "legcordConfig": request.includes.legcord_config,
-            "legcordThemesAndQuickCss": request.includes.legcord_themes_and_quick_css,
-            "legcordExtensionPlugins": request.includes.legcord_extension_plugins,
+            "remcordConfig": request.includes.remcord_config,
+            "remcordThemesAndQuickCss": request.includes.remcord_themes_and_quick_css,
+            "remcordExtensionPlugins": request.includes.remcord_extension_plugins,
             "vencordModData": request.includes.vencord_mod_data,
             "equicordModData": request.includes.equicord_mod_data,
             "shelterModData": request.includes.shelter_mod_data,
@@ -641,7 +646,7 @@ pub fn collect_backup_entries(
 ) -> Result<Vec<BackupEntry>, BackupFailure> {
     let mut entries = Vec::new();
     let mut total_bytes = 0usize;
-    if includes.legcord_config {
+    if includes.remcord_config {
         let path = profile_dir.join("storage").join("settings.json");
         if let Some(data) = read_bounded_file(&path, MAX_BACKUP_FILE_BYTES)? {
             push_entry(
@@ -652,7 +657,7 @@ pub fn collect_backup_entries(
             )?;
         }
     }
-    if includes.legcord_themes_and_quick_css {
+    if includes.remcord_themes_and_quick_css {
         let quick_css = profile_dir.join("quickCss.css");
         if let Some(data) = read_bounded_file(&quick_css, MAX_BACKUP_FILE_BYTES)? {
             push_entry(
@@ -669,7 +674,7 @@ pub fn collect_backup_entries(
             &mut total_bytes,
         )?;
     }
-    if includes.legcord_extension_plugins {
+    if includes.remcord_extension_plugins {
         // ZIP names are NOT the literal disk directory names: Electron maps
         // disk `extensions/` -> `data/plugins` and disk `plugins/` ->
         // `data/runtime-plugins`. Preserved exactly.
@@ -779,29 +784,16 @@ pub enum SavePickerOutcome {
 }
 
 /// Resolve the host-owned save-dialog configuration: translated title plus the
-/// UTC-date default filename. The renderer influences none of this.
-///
-/// Product identity: the embedded catalogs are Electron's verbatim
-/// translations (e.g. en-US "Save Legcord backup"). Host dialog titles are
-/// Remcord product surfaces, so the looked-up title is rebranded at
-/// presentation (`rebrand_dialog_title`); translation structure and every
-/// other catalog string stay byte-identical for `getLang` parity.
+/// UTC-date default filename. The renderer influences none of this. Titles
+/// come straight from the embedded catalogs.
 pub fn save_dialog_config(profile_dir: &Path) -> (String, String) {
     let found = crate::localization::lookup(profile_dir, DIALOG_TITLE_KEY);
     let title = if found.value.is_empty() {
         FALLBACK_DIALOG_TITLE.to_owned()
     } else {
-        rebrand_dialog_title(&found.value)
+        found.value
     };
     (title, default_backup_filename(&utc_today()))
-}
-
-/// Rebrand one host dialog title at presentation: the Electron catalogs name
-/// the old product, while host dialogs are Remcord surfaces. A literal
-/// product-name substitution preserves every translation's structure without
-/// forking the catalogs or touching `getLang` parity.
-fn rebrand_dialog_title(title: &str) -> String {
-    title.replace("Legcord", "Remcord")
 }
 
 /// Show the host-owned backup save picker and return its outcome.
@@ -1223,7 +1215,7 @@ fn route_entry(
             }
             match components[1].as_str() {
                 "storage" => {
-                    if !includes.legcord_config {
+                    if !includes.remcord_config {
                         return Ok(None);
                     }
                     if components.len() == 3 && components[2] == "settings.json" {
@@ -1235,7 +1227,7 @@ fn route_entry(
                     }
                 }
                 "quickCss.css" => {
-                    if !includes.legcord_themes_and_quick_css {
+                    if !includes.remcord_themes_and_quick_css {
                         return Ok(None);
                     }
                     if components.len() == 2 {
@@ -1245,7 +1237,7 @@ fn route_entry(
                     }
                 }
                 "themes" => {
-                    if !includes.legcord_themes_and_quick_css {
+                    if !includes.remcord_themes_and_quick_css {
                         return Ok(None);
                     }
                     let under = &components[2..];
@@ -1277,7 +1269,7 @@ fn route_entry(
                     }
                 }
                 "plugins" => {
-                    if !includes.legcord_extension_plugins {
+                    if !includes.remcord_extension_plugins {
                         return Ok(None);
                     }
                     let under = &components[2..];
@@ -1289,7 +1281,7 @@ fn route_entry(
                     Ok(Some(RestoreTarget::ExtensionFile { rel }))
                 }
                 "runtime-plugins" => {
-                    if !includes.legcord_extension_plugins {
+                    if !includes.remcord_extension_plugins {
                         return Ok(None);
                     }
                     let under = &components[2..];
@@ -1302,7 +1294,7 @@ fn route_entry(
                     Ok(Some(RestoreTarget::RuntimePluginFile { rel }))
                 }
                 "plugin-storage" => {
-                    if !includes.legcord_extension_plugins {
+                    if !includes.remcord_extension_plugins {
                         return Ok(None);
                     }
                     let under = &components[2..];
@@ -2045,15 +2037,13 @@ pub fn restore_profile_from_picked_file(
 }
 
 /// Resolve the host-owned restore-dialog configuration: translated title
-/// only. The renderer influences none of this. The looked-up title is
-/// rebranded at presentation (see `save_dialog_config`): the catalogs stay
-/// verbatim for `getLang` parity while the host dialog shows Remcord.
+/// only. The renderer influences none of this.
 pub fn restore_dialog_config(profile_dir: &Path) -> String {
     let found = crate::localization::lookup(profile_dir, DIALOG_OPEN_TITLE_KEY);
     if found.value.is_empty() {
         FALLBACK_DIALOG_OPEN_TITLE.to_owned()
     } else {
-        rebrand_dialog_title(&found.value)
+        found.value
     }
 }
 
@@ -2221,9 +2211,9 @@ mod tests {
 
     fn all_true() -> BackupIncludes {
         BackupIncludes {
-            legcord_config: true,
-            legcord_themes_and_quick_css: true,
-            legcord_extension_plugins: true,
+            remcord_config: true,
+            remcord_themes_and_quick_css: true,
+            remcord_extension_plugins: true,
             vencord_mod_data: true,
             equicord_mod_data: true,
             shelter_mod_data: true,
@@ -2233,9 +2223,9 @@ mod tests {
 
     fn all_false() -> BackupIncludes {
         BackupIncludes {
-            legcord_config: false,
-            legcord_themes_and_quick_css: false,
-            legcord_extension_plugins: false,
+            remcord_config: false,
+            remcord_themes_and_quick_css: false,
+            remcord_extension_plugins: false,
             vencord_mod_data: false,
             equicord_mod_data: false,
             shelter_mod_data: false,
@@ -2246,15 +2236,15 @@ mod tests {
     #[test]
     fn includes_rejects_unknown_keys() {
         let parsed: Result<BackupIncludes, _> = serde_json::from_str(
-            r#"{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"evil":true}"#,
+            r#"{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"evil":true}"#,
         );
         assert!(parsed.is_err());
         let parsed: Result<BackupSavePayload, _> = serde_json::from_str(
-            r#"{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"outputPath":"C:\\x.zip"}"#,
+            r#"{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"outputPath":"C:\\x.zip"}"#,
         );
         assert!(parsed.is_err());
         let parsed: Result<BackupSavePayload, _> = serde_json::from_str(
-            r#"{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"vencordLocalStorage":"x","extra":{}}}"#,
+            r#"{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"vencordLocalStorage":"x","extra":{}}}"#,
         );
         assert!(parsed.is_err());
     }
@@ -2262,10 +2252,10 @@ mod tests {
     #[test]
     fn valid_request_filters_client_mods_by_includes() {
         let request = validate_backup_request(
-            r#"{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":false,"legcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":true,"modBundles":false},"clientMods":{"vencordLocalStorage":"{\"a\":1}","equicordLocalStorage":"dropped","shelter":{"plugins":{}}}}"#,
+            r#"{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":false,"remcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":true,"modBundles":false},"clientMods":{"vencordLocalStorage":"{\"a\":1}","equicordLocalStorage":"dropped","shelter":{"plugins":{}}}}"#,
         )
         .expect("valid request must validate");
-        assert!(request.includes.legcord_config);
+        assert!(request.includes.remcord_config);
         assert!(request.includes.vencord_mod_data);
         let map = request.client_mods_manifest.as_object().unwrap();
         assert_eq!(map.len(), 2);
@@ -2277,7 +2267,7 @@ mod tests {
     #[test]
     fn flagged_but_missing_values_become_null_like_electron() {
         let request = validate_backup_request(
-            r#"{"includes":{"legcordConfig":false,"legcordThemesAndQuickCss":false,"legcordExtensionPlugins":false,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":false},"clientMods":{}}"#,
+            r#"{"includes":{"remcordConfig":false,"remcordThemesAndQuickCss":false,"remcordExtensionPlugins":false,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":false},"clientMods":{}}"#,
         )
         .expect("missing values must validate");
         let map = request.client_mods_manifest.as_object().unwrap();
@@ -2290,7 +2280,7 @@ mod tests {
     fn oversized_client_strings_are_rejected() {
         let big = "x".repeat(MAX_CLIENT_MOD_STRING_BYTES + 1);
         let payload = format!(
-            "{{\"includes\":{{\"legcordConfig\":false,\"legcordThemesAndQuickCss\":false,\"legcordExtensionPlugins\":false,\"vencordModData\":true,\"equicordModData\":false,\"shelterModData\":false,\"modBundles\":false}},\"clientMods\":{{\"vencordLocalStorage\":\"{big}\"}}}}"
+            "{{\"includes\":{{\"remcordConfig\":false,\"remcordThemesAndQuickCss\":false,\"remcordExtensionPlugins\":false,\"vencordModData\":true,\"equicordModData\":false,\"shelterModData\":false,\"modBundles\":false}},\"clientMods\":{{\"vencordLocalStorage\":\"{big}\"}}}}"
         );
         let failure = validate_backup_request(&payload).expect_err("oversized string must fail");
         assert_eq!(failure.code, "BACKUP_TOO_LARGE");
@@ -2301,7 +2291,7 @@ mod tests {
     fn oversized_shelter_payload_is_rejected() {
         let big = "x".repeat(MAX_SHELTER_MOD_BYTES);
         let payload = format!(
-            "{{\"includes\":{{\"legcordConfig\":false,\"legcordThemesAndQuickCss\":false,\"legcordExtensionPlugins\":false,\"vencordModData\":false,\"equicordModData\":false,\"shelterModData\":true,\"modBundles\":false}},\"clientMods\":{{\"shelter\":{{\"blob\":\"{big}\"}}}}}}"
+            "{{\"includes\":{{\"remcordConfig\":false,\"remcordThemesAndQuickCss\":false,\"remcordExtensionPlugins\":false,\"vencordModData\":false,\"equicordModData\":false,\"shelterModData\":true,\"modBundles\":false}},\"clientMods\":{{\"shelter\":{{\"blob\":\"{big}\"}}}}}}"
         );
         let failure = validate_backup_request(&payload).expect_err("oversized shelter must fail");
         assert_eq!(failure.code, "BACKUP_TOO_LARGE");
@@ -2354,7 +2344,7 @@ mod tests {
     #[test]
     fn manifest_has_version_one_and_exact_shapes() {
         let request = validate_backup_request(
-            r#"{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"vencordLocalStorage":"v"}}"#,
+            r#"{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"vencordLocalStorage":"v"}}"#,
         )
         .unwrap();
         let manifest = build_backup_manifest(&request, "1.3.0", "2026-10-07T00:00:00.000Z");
@@ -2364,9 +2354,9 @@ mod tests {
         let includes = manifest["includes"].as_object().unwrap();
         assert_eq!(includes.len(), 7);
         for key in [
-            "legcordConfig",
-            "legcordThemesAndQuickCss",
-            "legcordExtensionPlugins",
+            "remcordConfig",
+            "remcordThemesAndQuickCss",
+            "remcordExtensionPlugins",
             "vencordModData",
             "equicordModData",
             "shelterModData",
@@ -2534,7 +2524,7 @@ mod tests {
     #[test]
     fn zip_writes_manifest_first_with_slash_separators() {
         let request = validate_backup_request(
-            r#"{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":false,"equicordModData":false,"shelterModData":false,"modBundles":true},"clientMods":{}}"#,
+            r#"{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":false,"equicordModData":false,"shelterModData":false,"modBundles":true},"clientMods":{}}"#,
         )
         .unwrap();
         let manifest = build_backup_manifest(&request, "1.3.0", "2026-10-07T00:00:00.000Z");
@@ -2598,7 +2588,7 @@ mod tests {
         let profile = temp_profile("codes");
         let oversized = "x".repeat(MAX_CLIENT_MOD_STRING_BYTES + 1);
         let payload = format!(
-            "{{\"includes\":{{\"legcordConfig\":false,\"legcordThemesAndQuickCss\":false,\"legcordExtensionPlugins\":false,\"vencordModData\":true,\"equicordModData\":false,\"shelterModData\":false,\"modBundles\":false}},\"clientMods\":{{\"vencordLocalStorage\":\"{oversized}\"}}}}"
+            "{{\"includes\":{{\"remcordConfig\":false,\"remcordThemesAndQuickCss\":false,\"remcordExtensionPlugins\":false,\"vencordModData\":true,\"equicordModData\":false,\"shelterModData\":false,\"modBundles\":false}},\"clientMods\":{{\"vencordLocalStorage\":\"{oversized}\"}}}}"
         );
         let failure = validate_backup_request(&payload).unwrap_err();
         assert_eq!(failure.code, "BACKUP_TOO_LARGE");
@@ -2778,7 +2768,7 @@ mod restore_tests {
     }
 
     fn full_includes() -> &'static str {
-        r#"{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true}"#
+        r#"{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true}"#
     }
 
     fn manifest_text(includes: &str, client_mods: &str) -> String {
@@ -2855,7 +2845,7 @@ mod restore_tests {
         );
         // Unknown include keys fail (the seven flags are authoritative).
         let bad_inc = manifest_text(
-            r#"{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"evil":true}"#,
+            r#"{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"evil":true}"#,
             "{}",
         );
         assert_eq!(
@@ -3043,7 +3033,7 @@ mod restore_tests {
         std::fs::create_dir_all(source.join("themes").join("t")).unwrap();
         std::fs::write(source.join("themes").join("t").join("src.css"), "t").unwrap();
         let request = validate_backup_request(
-            r#"{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":false,"modBundles":false},"clientMods":{"vencordLocalStorage":"v"}}"#,
+            r#"{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":false,"modBundles":false},"clientMods":{"vencordLocalStorage":"v"}}"#,
         )
         .unwrap();
         let manifest = build_backup_manifest(&request, "1.3.0", "2026-10-07T00:00:00.000Z");
@@ -3211,7 +3201,7 @@ mod restore_tests {
 
     #[test]
     fn include_flags_gate_every_section() {
-        let off = r#"{"legcordConfig":false,"legcordThemesAndQuickCss":false,"legcordExtensionPlugins":false,"vencordModData":false,"equicordModData":false,"shelterModData":false,"modBundles":false}"#;
+        let off = r#"{"remcordConfig":false,"remcordThemesAndQuickCss":false,"remcordExtensionPlugins":false,"vencordModData":false,"equicordModData":false,"shelterModData":false,"modBundles":false}"#;
         let archive = raw_zip(
             &[
                 ("manifest.json", manifest_text(off, "{}").as_bytes()),
@@ -3648,22 +3638,14 @@ mod restore_tests {
     }
 
     #[test]
-    fn dialog_titles_rebrand_the_catalog_product_name_at_presentation() {
-        // The embedded catalogs stay verbatim (getLang parity); host dialogs
-        // rebrand at presentation so no Remcord surface shows the old name.
-        assert_eq!(
-            rebrand_dialog_title("Open Legcord backup"),
-            "Open Remcord backup"
-        );
-        assert_eq!(
-            rebrand_dialog_title("Save Legcord backup"),
-            "Save Remcord backup"
-        );
-        assert_eq!(
-            rebrand_dialog_title("Select a theme you want to import"),
-            "Select a theme you want to import"
-        );
-        assert_eq!(rebrand_dialog_title(""), "");
+    fn dialog_titles_come_from_the_catalogs_unchanged() {
+        // The embedded catalogs carry the product identity, so host dialogs
+        // serve the looked-up titles verbatim (no rewriting layer).
+        let profile = restore_profile("titles");
+        let (save_title, _) = save_dialog_config(&profile);
+        assert_eq!(save_title, "Save Remcord backup");
+        assert_eq!(restore_dialog_config(&profile), "Open Remcord backup");
+        std::fs::remove_dir_all(&profile).ok();
     }
 
     #[test]

@@ -1606,16 +1606,16 @@ mod tests {
     #[test]
     fn managed_css_order_script_reorders_only_host_listed_styles() {
         let order = managed_css_order_script(&[
-            "legcord-quick-css",
+            "remcord-quick-css",
             "remcord-native-theme-alpha",
             "remcord-native-theme-zulu",
         ])
         .unwrap();
-        assert!(order.contains("legcord-quick-css"));
+        assert!(order.contains("remcord-quick-css"));
         assert!(order.contains("remcord-native-theme-alpha"));
         assert!(order.contains("remcord-native-theme-zulu"));
         // Relative order in the script matches the cascade order argument.
-        let quick = order.find("legcord-quick-css").unwrap();
+        let quick = order.find("remcord-quick-css").unwrap();
         let alpha = order.find("remcord-native-theme-alpha").unwrap();
         let zulu = order.find("remcord-native-theme-zulu").unwrap();
         assert!(quick < alpha && alpha < zulu);

@@ -494,7 +494,7 @@ mod tests {
             "Uri(",
             "Source(",
             "Cookie",
-            "legcord://",
+            "remcord://",
             "remcord://",
         ] {
             assert!(

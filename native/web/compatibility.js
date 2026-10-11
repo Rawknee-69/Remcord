@@ -505,9 +505,9 @@
     // The exact seven include flags Electron's backup UI sends. Unknown
     // keys are rejected: the renderer cannot invent an archive section.
     const BACKUP_INCLUDE_KEYS = [
-        "legcordConfig",
-        "legcordThemesAndQuickCss",
-        "legcordExtensionPlugins",
+        "remcordConfig",
+        "remcordThemesAndQuickCss",
+        "remcordExtensionPlugins",
         "vencordModData",
         "equicordModData",
         "shelterModData",
@@ -1071,7 +1071,7 @@
     // Local window state seeded from boot snapshot. The window is created
     // hidden, so both focused and maximized start as false. The typed
     // `window_state` host event converges the authoritative state.
-    let windowFocused = snapshot.window?.focused === true;
+    let _windowFocused = snapshot.window?.focused === true;
     let windowMaximized = snapshot.window?.maximized === true;
 
     window.addEventListener("remcord-native:window-state", (event) => {
@@ -1079,7 +1079,7 @@
         if (!detail || typeof detail !== "object") return;
         if (detail.version !== protocolVersion) return;
         if (typeof detail.focused !== "boolean" || typeof detail.maximized !== "boolean") return;
-        windowFocused = detail.focused;
+        _windowFocused = detail.focused;
         windowMaximized = detail.maximized;
         // Mirror Electron's body-attribute writes (window.ts focus/blur and
         // maximize/unmaximize handlers) in the same event — no polling, no
@@ -1274,17 +1274,17 @@
         getThemes: getThemesSync,
     });
 
-    Object.defineProperty(window, "legcord", {
+    Object.defineProperty(window, "remcord", {
         configurable: false,
         enumerable: true,
         value: Object.freeze({
             boot: snapshot,
             native,
             // Window API at top level for Electron compatibility.
-            // The native path uses `window.legcord.native.window.*` for
-            // capability-gated async operations and `window.legcord.window.*`
+            // The native path uses `window.remcord.native.window.*` for
+            // capability-gated async operations and `window.remcord.window.*`
             // for synchronous local-state reads. Electron's bridge exposes
-            // all under `window.legcord.window` directly; the native facade
+            // all under `window.remcord.window` directly; the native facade
             // mirrors both for exactly-one-path dispatch.
             window: Object.freeze({
                 show: native.window.show,

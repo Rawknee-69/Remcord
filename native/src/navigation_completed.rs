@@ -444,7 +444,7 @@ mod tests {
             "?",
             "cookie",
             "token",
-            "legcord://",
+            "remcord://",
             "remcord://",
             "query",
         ] {
@@ -517,7 +517,7 @@ mod tests {
             "Uri(",
             "Source(",
             "Cookie",
-            "legcord://",
+            "remcord://",
             "remcord://",
         ] {
             assert!(

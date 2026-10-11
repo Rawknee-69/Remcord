@@ -6,8 +6,8 @@
 //! message when the artifact is missing or malformed). This module only
 //! exposes the embedded text plus its content identity; it performs no
 //! execution and offers no renderer-selectable path, URL, or plugin id. Only
-//! the `"Legcord Titlebar Controller"` artifact may be supplied by the native
-//! loader, under the `"legcord-titlebar"` id Electron pins in the Shelter
+//! the `"Remcord Titlebar Controller"` artifact may be supplied by the native
+//! loader, under the `"remcord-titlebar"` id Electron pins in the Shelter
 //! injector map (`src/discord/preload/mods/shelter.mts`).
 //!
 //! Identity is a host-computed SHA-256 over the exact embedded bytes. Any
@@ -31,10 +31,10 @@ pub const MAX_TITLEBAR_PLUGIN_BYTES: usize = 256 * 1024;
 /// identical to the `build.rs` marker set; both are asserted, so a pipeline
 /// change dropping the controls fails loudly instead of shipping buttonless.
 pub const TITLEBAR_PLUGIN_BOOT_MARKERS: &[&str] =
-    &["legcordNavControls", "window-controls-container", "onLoad"];
+    &["remcordNavControls", "window-controls-container", "onLoad"];
 
 /// The exact plugin name pinned by `build.rs` from `plugin.json`.
-pub const TITLEBAR_PLUGIN_EXPECTED_NAME: &str = "Legcord Titlebar Controller";
+pub const TITLEBAR_PLUGIN_EXPECTED_NAME: &str = "Remcord Titlebar Controller";
 
 /// Stylesheet keys embedded by `build.rs`, mirroring the per-OS selection in
 /// `src/discord/preload/newTitlebar.mts` (`base` always, one of
@@ -136,22 +136,22 @@ mod tests {
 
     #[test]
     fn empty_artifact_is_rejected() {
-        assert!(validate_artifact("", "Legcord Titlebar Controller").is_err());
+        assert!(validate_artifact("", "Remcord Titlebar Controller").is_err());
     }
 
     #[test]
     fn oversized_artifact_is_rejected() {
         let oversized = "x".repeat(super::MAX_TITLEBAR_PLUGIN_BYTES + 1);
-        assert!(validate_artifact(&oversized, "Legcord Titlebar Controller").is_err());
+        assert!(validate_artifact(&oversized, "Remcord Titlebar Controller").is_err());
     }
 
     #[test]
     fn artifact_missing_a_boot_marker_is_rejected() {
         for marker in TITLEBAR_PLUGIN_BOOT_MARKERS {
-            let mut candidate = String::from("legcordNavControls window-controls-container onLoad");
+            let mut candidate = String::from("remcordNavControls window-controls-container onLoad");
             candidate = candidate.replace(marker, "renamed");
             assert!(
-                validate_artifact(&candidate, "Legcord Titlebar Controller").is_err(),
+                validate_artifact(&candidate, "Remcord Titlebar Controller").is_err(),
                 "removing `{marker}` must be rejected"
             );
         }
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn foreign_plugin_name_is_rejected() {
         let embedded = artifact();
-        assert!(validate_artifact(embedded.js, "Legcord Settings").is_err());
+        assert!(validate_artifact(embedded.js, "Remcord Settings").is_err());
     }
 
     #[test]

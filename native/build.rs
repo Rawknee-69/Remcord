@@ -7,7 +7,7 @@
 //!
 //! It also extracts the Remcord application version from the repository
 //! `package.json` (the same value Electron serves via `app.getVersion()` for
-//! `window.legcord.version`) into `remcord_app/app_version.rs` as
+//! `window.remcord.version`) into `remcord_app/app_version.rs` as
 //! `pub const REMCORD_APP_VERSION: &str`, so the native `app.get_version`
 //! capability reports the authoritative version without a runtime file read
 //! or a duplicated version constant.
@@ -190,12 +190,12 @@ const SETTINGS_PLUGIN_BOOT_MARKERS: &[&str] = &[
 /// The artifact is authored in `src/shelter/settings/` and compiled by the
 /// existing JS pipeline (`pnpm build:plugins` →
 /// `lune ci --repoSubDir src/shelter --to ts-out/plugins`). Electron serves
-/// the result at runtime as `legcord://plugins/settings/*`, which resolves to
+/// the result at runtime as `remcord://plugins/settings/*`, which resolves to
 /// `<bundle-dir>/plugins/settings/*` (`src/protocol.ts` maps the scheme onto
 /// `import.meta.dirname`, i.e. `ts-out/`), and the Shelter preload pins it as
-/// `"legcord-settings"` (`src/discord/preload/mods/shelter.mts`). The native
+/// `"remcord-settings"` (`src/discord/preload/mods/shelter.mts`). The native
 /// shell serves the same files canonically as `remcord://plugins/settings/*`
-/// (legacy `legcord://` URLs embedded in the artifact rewrite to the same
+/// (legacy `remcord://` URLs embedded in the artifact rewrite to the same
 /// resolver), so the only host-controlled path to that exact artifact is
 /// embedding it at compile time.
 ///
@@ -258,9 +258,9 @@ fn generate_settings_plugin_artifact(out_dir: &str) {
         .get("name")
         .and_then(|value| value.as_str())
         .unwrap_or_else(|| panic!("{} must define a string \"name\"", json_path.display()));
-    if name != "Legcord Settings" {
+    if name != "Remcord Settings" {
         panic!(
-            "{} names {name:?}, expected \"Legcord Settings\"; refusing a foreign artifact",
+            "{} names {name:?}, expected \"Remcord Settings\"; refusing a foreign artifact",
             json_path.display()
         );
     }
@@ -304,14 +304,14 @@ const MAX_TITLEBAR_PLUGIN_BYTES: usize = 256 * 1024;
 /// Shelter lifecycle entry. A pipeline change dropping any of them fails the
 /// build instead of shipping a buttonless artifact.
 const TITLEBAR_PLUGIN_BOOT_MARKERS: &[&str] =
-    &["legcordNavControls", "window-controls-container", "onLoad"];
+    &["remcordNavControls", "window-controls-container", "onLoad"];
 
 /// Validates and embeds the exact Remcord titlebar Shelter plugin artifact.
 ///
 /// Same pipeline contract as the settings artifact above: authored in
 /// `src/shelter/titlebar/`, compiled by `pnpm build:plugins` (`lune ci
 /// --repoSubDir src/shelter --to ts-out/plugins`), pinned by Electron as
-/// `"legcord-titlebar"` in the Shelter injector map
+/// `"remcord-titlebar"` in the Shelter injector map
 /// (`src/discord/preload/mods/shelter.mts`). The native shell has no
 /// injector preload, so the only host-controlled path to that exact artifact
 /// is embedding it at compile time. Never invoked from a build itself and
@@ -363,9 +363,9 @@ fn generate_titlebar_plugin_artifact(out_dir: &str) {
         .get("name")
         .and_then(|value| value.as_str())
         .unwrap_or_else(|| panic!("{} must define a string \"name\"", json_path.display()));
-    if name != "Legcord Titlebar Controller" {
+    if name != "Remcord Titlebar Controller" {
         panic!(
-            "{} names {name:?}, expected \"Legcord Titlebar Controller\"; refusing a foreign artifact",
+            "{} names {name:?}, expected \"Remcord Titlebar Controller\"; refusing a foreign artifact",
             json_path.display()
         );
     }

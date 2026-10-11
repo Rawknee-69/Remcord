@@ -8,7 +8,7 @@
 //!
 //! - **Per-WebView / per-instance** (must be re-applied to every newly
 //!   constructed WebView): the wry builder options and navigation setup,
-//!   download handlers, `remcord://` registration (+ legacy rewrite), CSP request filter,
+//!   download handlers, `remcord://` registration, CSP request filter,
 //!   permission handler, process-failure observer, and
 //!   navigation-completion observer, plus the initial Discord navigation.
 //! - **Process-lifetime / shared** (must never be duplicated by a future
@@ -286,7 +286,7 @@ pub fn main_webview_builder<'a>(
 }
 
 /// Registers the per-WebView content interceptions for one main WebView:
-/// the `remcord://` protocol (+ legacy rewrite), the permission policy, and the CSP request
+/// the `remcord://` protocol, the permission policy, and the CSP request
 /// filter. Must run after `build()` (needs the core WebView) and before
 /// the initial Discord navigation, so the first Discord document is
 /// intercepted like every later one. Returns the namespace roots for the
@@ -532,9 +532,8 @@ fn register_csp_interception(
                 if name_str.to_lowercase() == "content-security-policy" {
                     let mut csp = val_str.to_string();
                     // P0.2: WebView2 custom schemes participate in CSP (no
-                    // bypassCSP parity), so allow remcord: (canonical) plus
-                    // legcord: (legacy rewrite) in exactly the directives
-                    // traced consumers need (default/script/
+                    // bypassCSP parity), so allow remcord: in exactly the
+                    // directives traced consumers need (default/script/
                     // style/img/media/connect). Preservation + badges
                     // patch below stay unchanged in behavior.
                     csp = super::extend_csp_for_remcord(&csp);
@@ -560,9 +559,8 @@ fn register_csp_interception(
                     // (badges and/or local schemes), never removed.
                     csp_modified = true;
                     let remcord_sources = csp.matches("remcord:").count();
-                    let legacy_sources = csp.matches("legcord:").count();
                     println!(
-                        "[CSP] document policy extended badges={} remcord_sources={remcord_sources} legacy_sources={legacy_sources}",
+                        "[CSP] document policy extended badges={} remcord_sources={remcord_sources}",
                         csp.contains("badges.vencord.dev")
                     );
                     headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));

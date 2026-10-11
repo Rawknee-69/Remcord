@@ -8,12 +8,12 @@
 //! startup  -> injectThemesMain on did-finish-load ->
 //!             if getConfig("quickCss") { initQuickCss } ->
 //!             missing quickCss.css is CREATED empty ->
-//!             webContents.send("addTheme", "legcord-quick-css", <utf-8 content,
-//!             even when empty>) -> <style id="legcord-quick-css"> FIRST,
+//!             webContents.send("addTheme", "remcord-quick-css", <utf-8 content,
+//!             even when empty>) -> <style id="remcord-quick-css"> FIRST,
 //!             before every theme style
 //! toggle   -> enableQuickCss: initQuickCss again (re-read + watcher restart)
 //!             disableQuickCss: watcher closed + send("removeTheme",
-//!             "legcord-quick-css")
+//!             "remcord-quick-css")
 //! live     -> fs.watch + 300 ms debounce -> removeTheme + addTheme (DEFERRED
 //!             natively; this milestone is static startup injection + reload)
 //! reload   -> fresh document; did-finish-load re-pushes the file content
@@ -31,7 +31,7 @@
 //! - Empty content IS pushed as an empty managed style (Electron sends
 //!   `addTheme` unconditionally). Enabled-vs-disabled is therefore observable
 //!   as style-present vs style-absent.
-//! - Style identity preserves Electron's `legcord-quick-css` verbatim. It
+//! - Style identity preserves Electron's `remcord-quick-css` verbatim. It
 //!   collides with no native style (`remcord-native-vencord-css`,
 //!   `remcord-native-theme-*`, `remcord-native-prototype-css`), so keeping the
 //!   exact id is safe and maximally compatible.
@@ -61,7 +61,7 @@ use std::time::Instant;
 
 /// Electron's Quick CSS style identity, preserved verbatim. It collides with
 /// no native managed style, so compatibility is safe.
-pub const QUICK_CSS_STYLE_ID: &str = "legcord-quick-css";
+pub const QUICK_CSS_STYLE_ID: &str = "remcord-quick-css";
 /// Fixed Quick CSS filename inside the host profile. The renderer never sees
 /// this name as a path; it only ever observes the style identity above.
 pub const QUICK_CSS_FILE: &str = "quickCss.css";
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn style_identity_preserves_the_electron_id_without_colliding() {
-        assert_eq!(QUICK_CSS_STYLE_ID, "legcord-quick-css");
+        assert_eq!(QUICK_CSS_STYLE_ID, "remcord-quick-css");
         assert_eq!(QUICK_CSS_FILE, "quickCss.css");
         // No native managed style uses this identity.
         assert_ne!(QUICK_CSS_STYLE_ID, "remcord-native-vencord-css");

@@ -1,10 +1,7 @@
 //! WebView2 environment creation with the `remcord` custom scheme registered.
 //!
 //! Registration (exact, via the installed `webview2-com 0.39` API):
-//! - scheme `remcord` (Electron's fixed scheme name was `legcord`; the old
-//!   scheme is deliberately NEVER registered here — legacy `legcord://` URLs
-//!   are rewritten into the canonical resolver at the request layer, see
-//!   `resolver.rs`)
+//! - scheme `remcord`, the one canonical custom scheme
 //! - `HasAuthorityComponent=true`, matching the `remcord://namespace/path`
 //!   syntax the resolver enforces (the namespace is the URI authority)
 //! - `TreatAsSecure=true`, the Electron `secure=true` equivalent
@@ -50,8 +47,7 @@ use windows::{
     },
 };
 
-/// The one canonical runtime scheme name. (Electron used `legcord`; Remcord
-/// registers only `remcord` — see the module docs for the legacy rewrite.)
+/// The one canonical runtime scheme name.
 pub const REMCORD_SCHEME_NAME: &str = "remcord";
 
 /// The only origin allowed to load `remcord://` resources. Extended only

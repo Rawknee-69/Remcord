@@ -363,7 +363,7 @@ mod tests {
             "https://example.com/x",
             "http://example.com/x",
             "mailto:someone@example.com",
-            "https://github.com/Remcord/Remcord",
+            "https://example.com/repo",
             "https://discord.gg/JatCnhKufc",
         ] {
             assert!(is_fast_path_external(url), "{url} must be fast-path");
@@ -404,7 +404,7 @@ mod tests {
         for url in [
             "discord://-/channels/@me",
             "unknown://do-thing",
-            "legcord://plugins/rpc/",
+            "remcord://plugins/rpc/",
             "remcord://plugins/rpc/",
         ] {
             assert_eq!(decide(url), Decision::ConfirmExternal, "{url}");

@@ -4,7 +4,7 @@
 //! Electron backup handlers in `src/common/backup.ts` (`BUNDLE_FILES`,
 //! `buildBackupZipBuffer`, `applyBackupFromMap`) as invoked from
 //! `src/discord/ipc.ts` (`backupSave` / `backupRestore`, exposed as
-//! `window.legcord.backup.save` / `.restore` via
+//! `window.remcord.backup.save` / `.restore` via
 //! `src/discord/preload/bridge.ts`). Only the discovery step is migrated:
 //! which fixed bundle files exist under the profile root and how large they
 //! are. No file contents, no zip handling, no dialogs, no writes.

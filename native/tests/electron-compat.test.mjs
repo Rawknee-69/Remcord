@@ -14,7 +14,7 @@ const settingsPage = readFileSync(
     new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
     "utf8",
 );
-const types = readFileSync(new URL("../../src/@types/legcordWindow.d.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../../src/@types/remcordWindow.d.ts", import.meta.url), "utf8");
 const invite = readFileSync(new URL("../../src/discord/preload/inviteBackButton.mts", import.meta.url), "utf8");
 const heroUpdater = readFileSync(
     new URL("../../src/shelter/settings/components/HeroUpdater.tsx", import.meta.url),
@@ -32,13 +32,13 @@ test("main keeps the synchronous getEntireConfig/getConfig handlers", () => {
     assert.match(ipc, /ipcMain\.on\("getConfig"/);
 });
 
-test("declared window.legcord settings contract stays synchronous", () => {
+test("declared window.remcord settings contract stays synchronous", () => {
     assert.match(types, /getConfig:\s*\(\)\s*=>\s*Readonly<Settings>/);
 });
 
 test("the Shelter power Electron path stays synchronous", () => {
     // The Electron branch must call the sync getter directly in onLoad.
-    assert.match(power, /const settings = window\.legcord\.settings\.getConfig\(\);/);
+    assert.match(power, /const settings = window\.remcord\.settings\.getConfig\(\);/);
     assert.match(power, /if \(!settings\.blockPowerSavingInVoiceChat\) return;/);
 });
 
@@ -60,7 +60,7 @@ test("main keeps the getLang handler returning the catalog string", () => {
     assert.match(ipc, /return getLang\(toGet\)/);
 });
 
-test("declared window.legcord getLang contract stays async", () => {
+test("declared window.remcord getLang contract stays async", () => {
     assert.match(types, /getLang:\s*\(toGet:\s*string\)\s*=>\s*Promise<string>/);
 });
 
@@ -92,13 +92,13 @@ test("main keeps the synchronous setConfig handler returning undefined", () => {
     assert.match(ipc, /event\.returnValue = undefined/);
 });
 
-test("declared window.legcord setConfig contract stays synchronous", () => {
+test("declared window.remcord setConfig contract stays synchronous", () => {
     assert.match(types, /setConfig:\s*<K extends keyof Settings>\(object:\s*K,\s*toSet:\s*Settings\[K\]\)\s*=>\s*void/);
 });
 
 test("the Shelter settings Electron mutation path stays synchronous", () => {
     // The shared helper must still persist via the sync bridge call.
-    assert.match(shelterSettings, /window\.legcord\.settings\.setConfig\(key, value\)/);
+    assert.match(shelterSettings, /window\.remcord\.settings\.setConfig\(key, value\)/);
     // The power-panel switch keeps the original Electron call byte-identical.
     assert.match(settingsPage, /setConfig\("blockPowerSavingInVoiceChat", e, true\)/);
 });
@@ -156,13 +156,13 @@ test("main keeps the get-app-version handler returning the package version", () 
     assert.match(ipc, /event\.returnValue = getVersion\(\)/);
 });
 
-test("declared window.legcord version contract stays a synchronous string", () => {
+test("declared window.remcord version contract stays a synchronous string", () => {
     assert.match(types, /version:\s*string/);
 });
 
 test("the update checker Electron path keeps its synchronous version read", () => {
     // Electron behavior: direct sync read plus the dot-stripped comparison.
-    assert.match(heroUpdater, /return window\.legcord\.version;/);
+    assert.match(heroUpdater, /return window\.remcord\.version;/);
     assert.match(heroUpdater, /await getLocalVersion\(\)/);
 });
 
@@ -192,14 +192,14 @@ test("main keeps the gated pluginWriteFile/pluginReadFile handlers", () => {
     assert.match(ipc, /function resolvePluginFilePath/);
 });
 
-test("declared window.legcord fs contract stays scoped", () => {
+test("declared window.remcord fs contract stays scoped", () => {
     assert.match(types, /fs:\s*\{/);
     assert.match(types, /writeFile:\s*\(/);
     assert.match(types, /readFile:\s*\(/);
 });
 
 test("no src caller is migrated to a native plugin-storage path in this milestone", () => {
-    // There are no in-repository window.legcord.fs callers: the contract is
+    // There are no in-repository window.remcord.fs callers: the contract is
     // a public third-party plugin API. This milestone therefore branches no
     // src/ caller; a DEV-only native smoke probe exercises the contract.
     assert.doesNotMatch(power, /pluginStorage/);
@@ -267,26 +267,26 @@ test("no renderer theme CSS pull exists in Electron or native", () => {
     assert.doesNotMatch(nativeFacade, /getCSS/);
     assert.doesNotMatch(nativeFacade, /addTheme/);
     assert.doesNotMatch(nativeFacade, /removeTheme/);
-    assert.doesNotMatch(nativeFacade, /legcord-native-theme/);
+    assert.doesNotMatch(nativeFacade, /remcord-native-theme/);
 });
 
 test("no src caller is migrated to a native theme path in this milestone", () => {
     // Static startup injection is host-driven: no renderer caller changes.
-    assert.doesNotMatch(power, /legcord-native-theme/);
-    assert.doesNotMatch(shelterSettings, /legcord-native-theme/);
-    assert.doesNotMatch(heroUpdater, /legcord-native-theme/);
-    assert.doesNotMatch(invite, /legcord-native-theme/);
+    assert.doesNotMatch(power, /remcord-native-theme/);
+    assert.doesNotMatch(shelterSettings, /remcord-native-theme/);
+    assert.doesNotMatch(heroUpdater, /remcord-native-theme/);
+    assert.doesNotMatch(invite, /remcord-native-theme/);
 });
 
 test("Electron keeps the Quick CSS host-push lifecycle", () => {
     // Missing file is created empty, content (even empty) is always pushed
-    // as legcord-quick-css BEFORE themes, with a 300 ms-debounced watcher
+    // as remcord-quick-css BEFORE themes, with a 300 ms-debounced watcher
     // for live updates and removeTheme on disable.
     assert.match(themesMain, /const quickCssPath = path\.join\(userDataPath, "\/quickCss\.css"\)/);
     assert.match(themesMain, /if \(!fs\.existsSync\(quickCssPath\)\)/);
     assert.match(themesMain, /fs\.writeFileSync\(quickCssPath, ""\)/);
-    assert.match(themesMain, /webContents\.send\("addTheme", "legcord-quick-css"/);
-    assert.match(themesMain, /webContents\.send\(\s*"removeTheme", "legcord-quick-css"\)/);
+    assert.match(themesMain, /webContents\.send\("addTheme", "remcord-quick-css"/);
+    assert.match(themesMain, /webContents\.send\(\s*"removeTheme", "remcord-quick-css"\)/);
     assert.match(themesMain, /}, 300\)/);
 });
 
@@ -303,8 +303,8 @@ test("Electron keeps the Quick CSS enablement contract", () => {
         new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
         "utf8",
     );
-    assert.match(themesPage, /window\.legcord\.themes\.enableQuickCss\(\)/);
-    assert.match(themesPage, /window\.legcord\.themes\.disableQuickCss\(\)/);
+    assert.match(themesPage, /window\.remcord\.themes\.enableQuickCss\(\)/);
+    assert.match(themesPage, /window\.remcord\.themes\.disableQuickCss\(\)/);
     assert.match(themesPage, /setConfig\("quickCss", e\)/);
 });
 
@@ -317,18 +317,18 @@ test("no renderer Quick CSS pull exists in Electron or native", () => {
     assert.doesNotMatch(types, /getQuickCss|readQuickCss/);
     assert.doesNotMatch(themesMain, /getQuickCss|quickCss\.get|getCSS/);
     // No quickCss.get() shape may be introduced on either side. The backup
-    // include key `legcordThemesAndQuickCss` is Electron's exact save-shape
+    // include key `remcordThemesAndQuickCss` is Electron's exact save-shape
     // member (not a CSS reader), so the native assertion targets pull-side
     // tokens instead of the bare substring.
-    assert.doesNotMatch(nativeFacade, /getQuickCss|quickCss\.get|readQuickCss|legcord-quick-css/);
+    assert.doesNotMatch(nativeFacade, /getQuickCss|quickCss\.get|readQuickCss|remcord-quick-css/);
 });
 
 test("no src caller is migrated to a native Quick CSS path in this milestone", () => {
     // Static startup injection is host-driven: no renderer caller changes.
-    assert.doesNotMatch(power, /legcord-quick-css/);
-    assert.doesNotMatch(shelterSettings, /legcord-quick-css/);
-    assert.doesNotMatch(heroUpdater, /legcord-quick-css/);
-    assert.doesNotMatch(invite, /legcord-quick-css/);
+    assert.doesNotMatch(power, /remcord-quick-css/);
+    assert.doesNotMatch(shelterSettings, /remcord-quick-css/);
+    assert.doesNotMatch(heroUpdater, /remcord-quick-css/);
+    assert.doesNotMatch(invite, /remcord-quick-css/);
 });
 
 test("Electron keeps the four fixed-name bundle handlers byte-identical", () => {
@@ -370,21 +370,21 @@ test("Electron keeps the Shelter preload wrapper and its injector plugin map", (
     // Shelter's Electron path wraps the bundle in a host-built IIFE that
     // declares SHELTER_INJECTOR_PLUGINS and adds a macOS-only Touch Bar entry.
     // The native milestone deliberately does not reproduce this wrapper: the
-    // legcord:// protocol and preload plugin loader are unimplemented natively,
+    // remcord:// protocol and preload plugin loader are unimplemented natively,
     // and Shelter skips the injector entirely when the global is absent. The
     // Electron file must therefore stay byte-identical.
     assert.match(
         shelterPreload,
         /const requiredPlugins: Record<string, \[string, \{ isVisible: boolean; allowedActions: Record<string, true> \}\]> = \{/,
     );
-    assert.match(shelterPreload, /"legcord-arrpc": \["legcord:\/\/plugins\/rpc\/"/);
-    assert.match(shelterPreload, /"legcord-settings": \["legcord:\/\/plugins\/settings\/"/);
-    assert.match(shelterPreload, /"legcord-power": \["legcord:\/\/plugins\/power\/"/);
-    assert.match(shelterPreload, /"legcord-screenshare": \["legcord:\/\/plugins\/screenshare\/"/);
-    assert.match(shelterPreload, /"legcord-titlebar": \["legcord:\/\/plugins\/titlebar\/"/);
+    assert.match(shelterPreload, /"remcord-arrpc": \["remcord:\/\/plugins\/rpc\/"/);
+    assert.match(shelterPreload, /"remcord-settings": \["remcord:\/\/plugins\/settings\/"/);
+    assert.match(shelterPreload, /"remcord-power": \["remcord:\/\/plugins\/power\/"/);
+    assert.match(shelterPreload, /"remcord-screenshare": \["remcord:\/\/plugins\/screenshare\/"/);
+    assert.match(shelterPreload, /"remcord-titlebar": \["remcord:\/\/plugins\/titlebar\/"/);
     // Platform-specific behavior: Touch Bar is Darwin-only.
     assert.match(shelterPreload, /if \(process\.platform === "darwin"\)/);
-    assert.match(shelterPreload, /"legcord-touchbar"/);
+    assert.match(shelterPreload, /"remcord-touchbar"/);
     // The wrapper itself, and the fact that Shelter gets NO CSS.
     assert.match(shelterPreload, /webFrame\.executeJavaScript\(`\(\(\)=>\{/);
     assert.match(shelterPreload, /const SHELTER_INJECTOR_PLUGINS = \$\{JSON\.stringify\(requiredPlugins\)\};/);
@@ -555,7 +555,7 @@ test("no src caller uses the native bundle discovery path", () => {
         assert.doesNotMatch(source, /backup_list_bundles/);
     }
     assert.match(backupSection, /saveBackup\(JSON\.stringify\(payload\)\)/);
-    assert.match(backupSection, /window\.legcord\.backup\.restore\(\)/);
+    assert.match(backupSection, /window\.remcord\.backup\.restore\(\)/);
 });
 
 test("custom bundles stay inventory-only and non-executable natively", () => {
@@ -674,14 +674,14 @@ test("the native backup restore preserves the Electron restore contract", () => 
     assert.match(backupSection, /addRemotePlugin/);
     // No BackupSection UI wiring: the native restore capability is not
     // referenced from src/ (a branch there would be fabrication). The
-    // Electron `window.legcord.backup.restore()` call stays byte-identical,
+    // Electron `window.remcord.backup.restore()` call stays byte-identical,
     // so the check targets the native wire type and native branches only.
     for (const source of [bridge, ipc, types]) {
         assert.doesNotMatch(source, /backup_restore/);
     }
     assert.doesNotMatch(backupSection, /backup_restore/);
     assert.doesNotMatch(backupSection, /isNativeWebView/);
-    assert.match(backupSection, /window\.legcord\.backup\.restore\(\)/);
+    assert.match(backupSection, /window\.remcord\.backup\.restore\(\)/);
 });
 
 test("BackupSection dispatches native vs Electron backup without a generic surface", () => {
@@ -701,14 +701,14 @@ test("BackupSection dispatches native vs Electron backup without a generic surfa
     // Restore: capability-gated branch, exactly one path per click.
     assert.match(backupSection, /isNativeBackupAvailable\(\)/);
     assert.match(backupSection, /normalizeNativeRestoreResult\(await restoreBackupNative\(\)\)/);
-    assert.match(backupSection, /parseElectronRestoreResult\(await window\.legcord\.backup\.restore\(\)\)/);
+    assert.match(backupSection, /parseElectronRestoreResult\(await window\.remcord\.backup\.restore\(\)\)/);
     // The existing renderer clientMods path is preserved verbatim.
     assert.match(backupSection, /applyClientModsFromRestore\(outcome\.clientMods\)/);
     // Async UI state: busy guard on both buttons and every exit path.
     assert.match(backupSection, /disabled=\{busy\(\)\}/);
     assert.match(backupSection, /if \(busy\(\)\) return;/);
     // Helpers: gate on environment + function presence, shared outcome, no
-    // generic surface. legcordWindow.d.ts keeps the Electron string shape.
+    // generic surface. remcordWindow.d.ts keeps the Electron string shape.
     assert.match(settingsHelpers, /export function isNativeBackupAvailable/);
     assert.match(settingsHelpers, /export async function saveBackup/);
     assert.match(settingsHelpers, /export async function restoreBackupNative/);
@@ -769,7 +769,7 @@ test("only the four wired UI actions use the native folder opening path", () => 
     for (const source of [bridge, ipc, types]) {
         assert.doesNotMatch(source, /folders\.open/);
         assert.doesNotMatch(source, /folders_open/);
-        assert.doesNotMatch(source, /legcord\.folders/);
+        assert.doesNotMatch(source, /remcord\.folders/);
     }
     const settingsPage = readFileSync(
         new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
@@ -791,7 +791,7 @@ test("only the four wired UI actions use the native folder opening path", () => 
         assert.match(source, /Native WebView2/);
         assert.match(source, /Electron keeps the original fire-and-forget send/);
     }
-    assert.match(themesCard, /window\.legcord\.themes\.folder\(props\.theme\.id\)/);
+    assert.match(themesCard, /window\.remcord\.themes\.folder\(props\.theme\.id\)/);
 });
 
 test("native folder opening preserves the reveal versus open distinction", () => {
@@ -839,7 +839,7 @@ test("Electron keeps the theme install/edit/picker implementation", () => {
     assert.match(themesMain, /theme: "src\.css",\s*name: "null",\s*enabled: false,/);
     assert.match(themesMain, /if \(key === "import"\) break;/);
     assert.match(themesMain, /manifest\.updateSrc = linkOrPath;/);
-    assert.match(themesMain, /manifest\.supportsLegcordTitlebar = (true|false);/);
+    assert.match(themesMain, /manifest\.supportsRemcordTitlebar = (true|false);/);
     // editTheme reads the manifest with string interpolation and opens the
     // manifest-named file in the system editor or the internal CSS editor.
     assert.match(ipc, /ipcMain\.on\("editTheme", \(_event, id: string\)/);
@@ -873,9 +873,9 @@ test("no src caller uses the native theme install path", () => {
         assert.doesNotMatch(source, /themes\.install_code/);
         assert.doesNotMatch(source, /theme_install_code/);
     }
-    assert.match(themesPage, /window\.legcord\.themes\.install\(downloadUrl\(\)\)/);
-    assert.match(themesCard, /window\.legcord\.themes\.install\(props\.theme\.updateSrc\)/);
-    assert.match(themesCard, /window\.legcord\.themes\.edit\(props\.theme\.id\)/);
+    assert.match(themesPage, /window\.remcord\.themes\.install\(downloadUrl\(\)\)/);
+    assert.match(themesCard, /window\.remcord\.themes\.install\(props\.theme\.updateSrc\)/);
+    assert.match(themesCard, /window\.remcord\.themes\.edit\(props\.theme\.id\)/);
 });
 
 test("native theme install is CSS-text-only with no network or dialog surface", () => {
@@ -931,7 +931,7 @@ test("no src caller uses the native theme write path", () => {
         assert.doesNotMatch(source, /themes\.write_css/);
         assert.doesNotMatch(source, /theme_write_css/);
     }
-    assert.match(themesCard, /window\.legcord\.themes\.edit\(props\.theme\.id\)/);
+    assert.match(themesCard, /window\.remcord\.themes\.edit\(props\.theme\.id\)/);
 });
 
 test("native theme write resolves the manifest file with no editor surface", () => {
@@ -980,7 +980,7 @@ test("Electron keeps the import picker dialog configuration", () => {
         new URL("../../src/shelter/settings/pages/ThemesPage.tsx", import.meta.url),
         "utf8",
     );
-    assert.match(themesPage, /window\.legcord\.themes\.openImportPicker/);
+    assert.match(themesPage, /window\.remcord\.themes\.openImportPicker/);
 });
 
 test("no src caller uses the native theme import path", () => {
@@ -1003,7 +1003,7 @@ test("no src caller uses the native theme import path", () => {
     }
     assert.match(themesPage, /importNativeThemes\(\)/);
     assert.match(themesPage, /isNativeThemeImportAvailable\(\)/);
-    assert.match(themesPage, /window\.legcord\.themes\.openImportPicker/);
+    assert.match(themesPage, /window\.remcord\.themes\.openImportPicker/);
     assert.doesNotMatch(themesPage, /themes\.import_files/);
     assert.doesNotMatch(themesPage, /theme_import_files/);
 });
@@ -1069,7 +1069,7 @@ test("Electron keeps the sync theme-list and fire-and-forget enable contracts", 
     assert.match(themesMain, /manifest\.enabled = enabled;/);
     assert.match(themesMain, /passedWindow\.webContents\.send\("addTheme", id, css\)/);
     assert.match(themesMain, /passedWindow\.webContents\.send\("removeTheme", id\)/);
-    assert.match(themesCard, /window\.legcord\.themes\.set\(props\.theme\.id, state\)/);
+    assert.match(themesCard, /window\.remcord\.themes\.set\(props\.theme\.id, state\)/);
 });
 
 test("no src caller uses the native theme enable path", () => {
@@ -1093,7 +1093,7 @@ test("no src caller uses the native theme enable path", () => {
     }
     assert.match(themesCard, /setNativeThemeEnabled\(props\.theme\.id, state\)/);
     assert.match(themesCard, /isNativeThemeToggleAvailable\(\)/);
-    assert.match(themesCard, /window\.legcord\.themes\.set\(props\.theme\.id, state\)/);
+    assert.match(themesCard, /window\.remcord\.themes\.set\(props\.theme\.id, state\)/);
     assert.doesNotMatch(themesCard, /themes\.set_enabled/);
     assert.doesNotMatch(themesCard, /theme_set_enabled/);
     assert.doesNotMatch(themesPage, /themes\.setEnabled/);
@@ -1161,7 +1161,7 @@ test("no src caller uses the native theme list path yet", () => {
     }
     assert.match(themesPage, /refreshNativeThemes\(\)/);
     assert.match(themesPage, /isNativeThemeListAvailable\(\)/);
-    assert.match(themesPage, /window\.legcord\.themes\.refresh\(\)/);
+    assert.match(themesPage, /window\.remcord\.themes\.refresh\(\)/);
     assert.doesNotMatch(themesPage, /themes\.list\b/);
     assert.doesNotMatch(themesPage, /themes_list/);
 });
@@ -1202,7 +1202,7 @@ test("settings UI reveals the storage folder natively and sends otherwise", () =
     // Native branch calls the typed capability with the exact location;
     // Electron branch keeps the original fire-and-forget send.
     assert.match(settingsPage, /revealFolderNative\("storage"\)/);
-    assert.match(settingsPage, /window\.legcord\.settings\.openStorageFolder\(\)/);
+    assert.match(settingsPage, /window\.remcord\.settings\.openStorageFolder\(\)/);
     // Exactly one dispatch: native success short-circuits the Electron call.
     assert.equal((settingsPage.match(/revealFolderNative\("storage"\)/g) ?? []).length, 1);
 });
@@ -1213,7 +1213,7 @@ test("themes UI reveals the themes folder natively and sends otherwise", () => {
         "utf8",
     );
     assert.match(themesPage, /revealFolderNative\("themes"\)/);
-    assert.match(themesPage, /window\.legcord\.settings\.openThemesFolder\(\)/);
+    assert.match(themesPage, /window\.remcord\.settings\.openThemesFolder\(\)/);
     assert.equal((themesPage.match(/revealFolderNative\("themes"\)/g) ?? []).length, 1);
 });
 
@@ -1223,7 +1223,7 @@ test("plugins UI reveals the plugins folder natively and sends otherwise", () =>
         "utf8",
     );
     assert.match(pluginsPage, /revealFolderNative\("plugins"\)/);
-    assert.match(pluginsPage, /window\.legcord\.plugins\.openFolder\(\)/);
+    assert.match(pluginsPage, /window\.remcord\.plugins\.openFolder\(\)/);
     // Both the toolbar button and the empty-state action dispatch once.
     assert.equal((pluginsPage.match(/revealFolderNative\("plugins"\)/g) ?? []).length, 2);
 });
@@ -1234,7 +1234,7 @@ test("theme cards open the theme folder natively with the verbatim id", () => {
         "utf8",
     );
     assert.match(themesCard, /openThemeFolderNative\(props\.theme\.id\)/);
-    assert.match(themesCard, /window\.legcord\.themes\.folder\(props\.theme\.id\)/);
+    assert.match(themesCard, /window\.remcord\.themes\.folder\(props\.theme\.id\)/);
     // No renderer-side id filtering: validation is owned by the host.
     assert.doesNotMatch(themesCard, /RegExp|new RegExp|\.test\(props\.theme\.id\)|\.match\(props\.theme\.id\)/);
 });
@@ -1287,8 +1287,8 @@ test("Electron keeps the synchronous settings-plugin boot contracts", () => {
     assert.match(settingsIndex, /export function onLoad\(\)/);
     assert.match(settingsIndex, /refreshSettings\(\)/);
     assert.match(settingsIndex, /refreshThemes\(\)/);
-    assert.match(settingsIndex, /store\.i18n = window\.legcord\.translations/);
-    assert.match(settingsIndex, /window\.legcord\.settings\.setLang\(storesFlat\.LocaleStore\.locale\)/);
+    assert.match(settingsIndex, /store\.i18n = window\.remcord\.translations/);
+    assert.match(settingsIndex, /window\.remcord\.settings\.setLang\(storesFlat\.LocaleStore\.locale\)/);
     assert.doesNotMatch(settingsIndex, /await/);
 });
 
@@ -1334,7 +1334,7 @@ test("Electron keeps the optional version read for the about popup", () => {
         new URL("../../src/shelter/settings/components/AboutPopup.tsx", import.meta.url),
         "utf8",
     );
-    assert.match(aboutPopup, /window\.legcord\?\.version/);
+    assert.match(aboutPopup, /window\.remcord\?\.version/);
 });
 
 test("no src caller uses the native shim surface", () => {
@@ -1347,7 +1347,8 @@ test("no src caller uses the native shim surface", () => {
     }
 });
 
-test("native shim is static data plus closed narrow senders", () => {    // platform/osRelease are spliced launch-time strings (process.platform /
+test("native shim is static data plus closed narrow senders", () => {
+    // platform/osRelease are spliced launch-time strings (process.platform /
     // os.release() parity), never capabilities, requests, or reads.
     const platformFacade = nativeFacade.slice(
         nativeFacade.indexOf("const hostPlatform = freezeDeep"),
@@ -1355,7 +1356,7 @@ test("native shim is static data plus closed narrow senders", () => {    // plat
     );
     assert.ok(platformFacade.length > 0);
     // The top-level assignments carry the frozen host strings (asserted on
-    // the whole facade: the slice above ends where window.legcord is built).
+    // the whole facade: the slice above ends where window.remcord is built).
     assert.match(nativeFacade, /platform:\s*hostPlatform\.platform/);
     assert.match(nativeFacade, /osRelease:\s*hostPlatform\.osRelease/);
     assert.doesNotMatch(platformFacade, /requireCapability|request\(|sendSync|fetch\(/);
@@ -1371,17 +1372,17 @@ test("native shim is static data plus closed narrow senders", () => {    // plat
     assert.doesNotMatch(dualGetConfig, /sendSync|new Function|[^a-zA-Z]eval\(/);
 });
 
-test("Electron keeps the legcord:// protocol namespaces and root mapping", () => {
+test("Electron keeps the remcord:// protocol namespaces and root mapping", () => {
     // P0.2 parity pin: the native resolver serves exactly the six Electron
     // namespaces with the same bundle-relative roots. Electron behavior is
     // the reference; native hardening (canonical containment, no `..`
     // substring check) is a deliberate, documented difference, not a drift
-    // in coverage. Product difference: Electron registers `legcord://`;
-    // Remcord registers only `remcord://` and rewrites legacy `legcord://`
+    // in coverage. Product difference: Electron registers `remcord://`;
+    // Remcord registers only `remcord://` and rewrites legacy `remcord://`
     // URLs through the same resolver (no second surface).
     const electronProtocol = readFileSync(new URL("../../src/protocol.ts", import.meta.url), "utf8");
     for (const namespace of ["plugins", "html", "js", "assets", "css", "local"]) {
-        assert.match(electronProtocol, new RegExp(`legcord://${namespace}/`));
+        assert.match(electronProtocol, new RegExp(`remcord://${namespace}/`));
     }
     // Root mapping parity: bundle-relative dirs plus userAssets under userData.
     assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "plugins"/);
@@ -1397,15 +1398,14 @@ test("Electron keeps the legcord:// protocol namespaces and root mapping", () =>
     assert.match(nativeHandler, /assets.*bundle_dir\.join\("assets"\)\.join\("app"\)/s);
     assert.match(nativeHandler, /local.*user_data_dir\.join\("userAssets"\)/s);
     assert.match(nativeScheme, /REMCORD_ALLOWED_ORIGINS.*https:\/\/discord\.com/);
-    // Canonical scheme is remcord; the old scheme is never registered at the
-    // environment level (exactly one CustomSchemeRegistration) and survives
-    // only as a request-layer rewrite into the same resolver.
+    // Canonical scheme is remcord, registered exactly once at the
+    // environment level; no second scheme, alias, or rewrite exists.
     assert.match(nativeScheme, /REMCORD_SCHEME_NAME.*=.*"remcord"/);
     assert.doesNotMatch(nativeScheme, /CoreWebView2CustomSchemeRegistration::new\(LEGACY/);
-    assert.match(nativeHandler, /legcord:\/\/\*/);
+    assert.match(nativeHandler, /remcord:\/\/\*/);
     const nativeCsp = readFileSync(new URL("../src/remcord_protocol/csp.rs", import.meta.url), "utf8");
     assert.match(nativeCsp, /extend_csp_for_remcord/);
-    assert.match(nativeCsp, /LEGACY_CSP_SOURCE/);
+    assert.doesNotMatch(nativeCsp, /LEGACY_CSP_SOURCE/);
     // Hardening markers: canonical containment, symlink refusal, no path
     // leakage, and no Electron-style substring check in executable code
     // (the doc comment names Electron's weak check for contrast — strip
@@ -1422,11 +1422,11 @@ test("Electron keeps the legcord:// protocol namespaces and root mapping", () =>
 });
 
 test("the known-broken disableAutogain caller is left untouched", () => {
-    // legcord://assets/js/disableAutogain.js is referenced by
+    // remcord://assets/js/disableAutogain.js is referenced by
     // src/discord/preload/patches.mts but the file does not exist in the
     // repository. P0.2 must neither fabricate it nor silently rewrite the
     // caller: resolution reports it missing (404) like any absent asset.
     const patches = readFileSync(new URL("../../src/discord/preload/patches.mts", import.meta.url), "utf8");
-    assert.match(patches, /legcord:\/\/assets\/js\/disableAutogain\.js/);
+    assert.match(patches, /remcord:\/\/assets\/js\/disableAutogain\.js/);
     assert.throws(() => readFileSync(new URL("../../ts-out/assets/app/js/disableAutogain.js", import.meta.url)));
 });

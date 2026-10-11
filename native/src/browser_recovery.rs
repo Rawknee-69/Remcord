@@ -456,7 +456,7 @@ mod tests {
             "set_timeout",
             "Uri(",
             "https://",
-            "legcord://",
+            "remcord://",
             "remcord://",
         ] {
             assert!(

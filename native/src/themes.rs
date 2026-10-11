@@ -177,7 +177,7 @@ pub const INSTALLED_THEME_CSS_FILE: &str = "src.css";
 
 /// Parsed BetterDiscord header block. Mirrors exactly the fields Electron's
 /// `parseBDManifest` (`src/common/themes.ts`) reads: `name` plus the known
-/// metadata keys. `theme`, `enabled`, and `supportsLegcordTitlebar` are
+/// metadata keys. `theme`, `enabled`, and `supportsRemcordTitlebar` are
 /// host-fixed/derived, and `updateSrc` is omitted (no URL input exists in
 /// the install capability; a future update flow will validate it then).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -384,7 +384,7 @@ pub fn install_parsed_theme(
         }
     }
     manifest.insert(
-        "supportsLegcordTitlebar".to_owned(),
+        "supportsRemcordTitlebar".to_owned(),
         serde_json::Value::Bool(titlebar),
     );
     let manifest_text = serde_json::to_string(&serde_json::Value::Object(manifest))
@@ -1491,7 +1491,7 @@ mod tests {
         assert_eq!(manifest["author"], "Harbor Line");
         assert_eq!(manifest["version"], "1.2.0");
         assert_eq!(manifest["description"], "A dark harbor theme.");
-        assert_eq!(manifest["supportsLegcordTitlebar"], false);
+        assert_eq!(manifest["supportsRemcordTitlebar"], false);
         assert!(manifest.get("updateSrc").is_none());
         assert!(manifest.get("id").is_none());
 

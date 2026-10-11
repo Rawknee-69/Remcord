@@ -54,13 +54,13 @@
             }
         }
 
-        if (!window.legcord?.native) {
+        if (!window.remcord?.native) {
             reportAdapterError(new Error("Compatibility facade is unavailable"));
             return null;
         }
         if (Object.hasOwn(window, config.adapterFlag)) return null;
 
-        const native = window.legcord.native;
+        const native = window.remcord.native;
         state = { status: "pending", marker: null, executionCount: 0 };
         let requestId = null;
 

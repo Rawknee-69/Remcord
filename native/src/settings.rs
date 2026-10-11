@@ -94,7 +94,7 @@ impl Default for AudioSettings {
 ///
 /// Field names use the exact Electron `settings.json` keys (camelCase) so the
 /// native response is shape-compatible with
-/// `window.legcord.settings.getConfig()` in Electron. Every field has a
+/// `window.remcord.settings.getConfig()` in Electron. Every field has a
 /// default mirroring `src/common/config.ts`; `keybinds` entries are opaque
 /// JSON because this read-only milestone validates the envelope, not the
 /// keybind schema. `customIcon` defaults to empty (no host path is invented).
@@ -627,7 +627,7 @@ mod tests {
             .expect("system time must be available")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "legcord-settings-{tag}-{nanos}-{}",
+            "remcord-settings-{tag}-{nanos}-{}",
             std::process::id()
         ))
     }

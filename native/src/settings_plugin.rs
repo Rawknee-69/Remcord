@@ -6,7 +6,7 @@
 //! message when the artifact is missing or malformed). This module only
 //! exposes the embedded text plus its content identity; it performs no
 //! execution and offers no renderer-selectable path, URL, or plugin id. Only
-//! the `"Legcord Settings"` artifact may be supplied by the native loader.
+//! the `"Remcord Settings"` artifact may be supplied by the native loader.
 //!
 //! Identity is a host-computed SHA-256 over the exact embedded bytes (the
 //! upstream artifact carries no build banner to pin). Any byte change in the
@@ -33,7 +33,7 @@ pub const SETTINGS_PLUGIN_BOOT_MARKERS: &[&str] = &[
 ];
 
 /// The exact plugin name pinned by `build.rs` from `plugin.json`.
-pub const SETTINGS_PLUGIN_EXPECTED_NAME: &str = "Legcord Settings";
+pub const SETTINGS_PLUGIN_EXPECTED_NAME: &str = "Remcord Settings";
 
 /// Host-controlled handle to the embedded artifact. No renderer input can
 /// influence which artifact this resolves to.
@@ -117,13 +117,13 @@ mod tests {
 
     #[test]
     fn empty_artifact_is_rejected() {
-        assert!(validate_artifact("", "Legcord Settings").is_err());
+        assert!(validate_artifact("", "Remcord Settings").is_err());
     }
 
     #[test]
     fn oversized_artifact_is_rejected() {
         let oversized = "x".repeat(super::MAX_SETTINGS_PLUGIN_BYTES + 1);
-        assert!(validate_artifact(&oversized, "Legcord Settings").is_err());
+        assert!(validate_artifact(&oversized, "Remcord Settings").is_err());
     }
 
     #[test]
@@ -133,7 +133,7 @@ mod tests {
             candidate = candidate.replace(marker, "renamed");
             // `setLang` is a substring-sensitive case: removing it must fail.
             assert!(
-                validate_artifact(&candidate, "Legcord Settings").is_err(),
+                validate_artifact(&candidate, "Remcord Settings").is_err(),
                 "removing `{marker}` must be rejected"
             );
         }

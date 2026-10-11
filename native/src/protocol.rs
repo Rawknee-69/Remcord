@@ -968,7 +968,7 @@ pub struct LocalizationStringResponse {
 }
 
 /// Single application version response. `version` is the exact string
-/// Electron serves for `window.legcord.version` (`"0.0.0"` on dev builds,
+/// Electron serves for `window.remcord.version` (`"0.0.0"` on dev builds,
 /// otherwise the package version).
 #[derive(Serialize)]
 pub struct AppVersionResponse {
@@ -2783,7 +2783,7 @@ mod tests {
 
     #[test]
     fn accepts_backup_save_with_exact_shape_and_rejects_paths() {
-        let request = r#"{"version":1,"request_id":"backup-1","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"vencordLocalStorage":"{\"a\":1}","shelter":{"plugins":{}}}}}}"#;
+        let request = r#"{"version":1,"request_id":"backup-1","command":{"type":"backup_save","payload":{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"vencordLocalStorage":"{\"a\":1}","shelter":{"plugins":{}}}}}}"#;
         assert!(matches!(
             parse_bridge_message(request),
             Ok(BridgeMessage::Request(_))
@@ -2791,11 +2791,11 @@ mod tests {
 
         // No path, filename, archive path, source path, dialog option, or
         // arbitrary key may ride along at any level.
-        let with_path = r#"{"version":1,"request_id":"backup-2","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"outputPath":"C:\\x.zip"}}}"#;
-        let with_filename = r#"{"version":1,"request_id":"backup-3","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"filename":"x.zip"}}}"#;
-        let with_include = r#"{"version":1,"request_id":"backup-4","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"everything":true},"clientMods":{}}}}"#;
-        let with_mod = r#"{"version":1,"request_id":"backup-5","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"discordToken":"x"}}}}"#;
-        let missing_mods = r#"{"version":1,"request_id":"backup-6","command":{"type":"backup_save","payload":{"includes":{"legcordConfig":true,"legcordThemesAndQuickCss":true,"legcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true}}}}"#;
+        let with_path = r#"{"version":1,"request_id":"backup-2","command":{"type":"backup_save","payload":{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"outputPath":"C:\\x.zip"}}}"#;
+        let with_filename = r#"{"version":1,"request_id":"backup-3","command":{"type":"backup_save","payload":{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{},"filename":"x.zip"}}}"#;
+        let with_include = r#"{"version":1,"request_id":"backup-4","command":{"type":"backup_save","payload":{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true,"everything":true},"clientMods":{}}}}"#;
+        let with_mod = r#"{"version":1,"request_id":"backup-5","command":{"type":"backup_save","payload":{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true},"clientMods":{"discordToken":"x"}}}}"#;
+        let missing_mods = r#"{"version":1,"request_id":"backup-6","command":{"type":"backup_save","payload":{"includes":{"remcordConfig":true,"remcordThemesAndQuickCss":true,"remcordExtensionPlugins":true,"vencordModData":true,"equicordModData":true,"shelterModData":true,"modBundles":true}}}}"#;
         assert!(parse_bridge_message(with_path).is_err());
         assert!(parse_bridge_message(with_filename).is_err());
         assert!(parse_bridge_message(with_include).is_err());
@@ -2805,7 +2805,7 @@ mod tests {
 
     #[test]
     fn backup_save_enforces_client_envelope_bounds() {
-        let includes = r#""includes":{"legcordConfig":false,"legcordThemesAndQuickCss":false,"legcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":false,"modBundles":false}"#;
+        let includes = r#""includes":{"remcordConfig":false,"remcordThemesAndQuickCss":false,"remcordExtensionPlugins":false,"vencordModData":true,"equicordModData":false,"shelterModData":false,"modBundles":false}"#;
         // A 9 KiB client string fits the legacy 8 KiB transport only through
         // the backup exception, and parses (the 1 MiB per-string bound holds).
         let medium = "x".repeat(9000);

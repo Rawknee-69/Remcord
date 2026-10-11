@@ -186,7 +186,7 @@ function createSyntheticModRuntime(capabilities = ["mod.test.get_bundle"]) {
         TypeError,
         String,
     });
-    window.legcord = {
+    window.remcord = {
         native: {
             requireCapability(name) {
                 if (!capabilities.includes(name)) {
@@ -383,14 +383,14 @@ function createSettingsRuntime(capabilities = ["bridge.ping", "settings.get_conf
 
 test("the facade exposes an asynchronous settings.getConfig capability", () => {
     const { window } = createSettingsRuntime();
-    assert.equal(typeof window.legcord.settings.getConfig, "function");
-    assert.equal(Object.isFrozen(window.legcord.settings), true);
-    assert.equal(window.legcord.native.supports("settings.get_config"), true);
+    assert.equal(typeof window.remcord.settings.getConfig, "function");
+    assert.equal(Object.isFrozen(window.remcord.settings), true);
+    assert.equal(window.remcord.native.supports("settings.get_config"), true);
 });
 
 test("settings.getConfig sends a parameter-free typed request and resolves the snapshot", async () => {
     const { window } = createSettingsRuntime();
-    const pending = window.legcord.settings.getConfig();
+    const pending = window.remcord.settings.getConfig();
     // Dual contract: a synchronous snapshot value that stays awaitable for
     // the live async capability (thenable, not a Promise instance).
     assert.equal(typeof pending?.then, "function");
@@ -407,9 +407,9 @@ test("settings.getConfig sends a parameter-free typed request and resolves the s
 
 test("settings.getConfig throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createSettingsRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("settings.get_config"), false);
+    assert.equal(window.remcord.native.supports("settings.get_config"), false);
     assert.throws(
-        () => window.legcord.settings.getConfig(),
+        () => window.remcord.settings.getConfig(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -420,7 +420,7 @@ test("settings.getConfig throws UNSUPPORTED_CAPABILITY when the snapshot denies 
 
 test("settings.getConfig rejects malformed snapshots", async () => {
     const { window } = createSettingsRuntime();
-    const pending = window.legcord.settings.getConfig();
+    const pending = window.remcord.settings.getConfig();
     const message = window.messages.find((entry) => entry.command?.type === "settings_get_config");
     respondSettings(window, message, { blockPowerSavingInVoiceChat: "yes" });
     await assert.rejects(Promise.resolve(pending), /settings response schema is invalid/);
@@ -428,7 +428,7 @@ test("settings.getConfig rejects malformed snapshots", async () => {
 
 test("settings.getConfig rejects host failures without a snapshot", async () => {
     const { window } = createSettingsRuntime();
-    const pending = window.legcord.settings.getConfig();
+    const pending = window.remcord.settings.getConfig();
     const message = window.messages.find((entry) => entry.command?.type === "settings_get_config");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -446,12 +446,12 @@ test("settings.getConfig rejects host failures without a snapshot", async () => 
 
 test("settings.getConfig rejects after its timeout", async () => {
     const { window } = createSettingsRuntime();
-    await assert.rejects(Promise.resolve(window.legcord.settings.getConfig(50)), /timed out/);
+    await assert.rejects(Promise.resolve(window.remcord.settings.getConfig(50)), /timed out/);
 });
 
 test("settings.getConfig rejects pending requests when the document is disposed", async () => {
     const { window } = createSettingsRuntime();
-    const pending = window.legcord.settings.getConfig();
+    const pending = window.remcord.settings.getConfig();
     const rejection = assert.rejects(Promise.resolve(pending), /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -459,14 +459,14 @@ test("settings.getConfig rejects pending requests when the document is disposed"
 
 test("a reloaded document gets a fresh settings facade with no stale promises", async () => {
     const firstDocument = createSettingsRuntime();
-    const stale = firstDocument.window.legcord.settings.getConfig();
+    const stale = firstDocument.window.remcord.settings.getConfig();
     const staleRejection = assert.rejects(Promise.resolve(stale), /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createSettingsRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.settings.getConfig();
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.settings.getConfig();
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "settings_get_config");
     respondSettings(nextDocument.window, message, { blockPowerSavingInVoiceChat: false });
     assert.equal((await pending).blockPowerSavingInVoiceChat, false);
@@ -502,16 +502,16 @@ function respondMutation(window, request, value = true, extra = {}) {
 
 test("the facade exposes an asynchronous block-power-saving setter and no generic writer", () => {
     const { window } = createMutationRuntime();
-    assert.equal(typeof window.legcord.settings.setBlockPowerSavingInVoiceChat, "function");
-    assert.equal(Object.isFrozen(window.legcord.settings), true);
-    assert.equal(window.legcord.native.supports("settings.set_block_power_saving_in_voice_chat"), true);
+    assert.equal(typeof window.remcord.settings.setBlockPowerSavingInVoiceChat, "function");
+    assert.equal(Object.isFrozen(window.remcord.settings), true);
+    assert.equal(window.remcord.native.supports("settings.set_block_power_saving_in_voice_chat"), true);
     // No generic key/value RPC may exist.
-    assert.equal(window.legcord.settings.setConfig, undefined);
+    assert.equal(window.remcord.settings.setConfig, undefined);
 });
 
 test("the mutation setter sends a bool-only typed request and resolves the applied value", async () => {
     const { window } = createMutationRuntime();
-    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const pending = window.remcord.settings.setBlockPowerSavingInVoiceChat(true);
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
     assert.ok(message);
@@ -523,9 +523,9 @@ test("the mutation setter sends a bool-only typed request and resolves the appli
 
 test("the mutation setter throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createMutationRuntime(["bridge.ping", "settings.get_config"]);
-    assert.equal(window.legcord.native.supports("settings.set_block_power_saving_in_voice_chat"), false);
+    assert.equal(window.remcord.native.supports("settings.set_block_power_saving_in_voice_chat"), false);
     assert.throws(
-        () => window.legcord.settings.setBlockPowerSavingInVoiceChat(true),
+        () => window.remcord.settings.setBlockPowerSavingInVoiceChat(true),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -536,9 +536,9 @@ test("the mutation setter throws UNSUPPORTED_CAPABILITY when the snapshot denies
 
 test("the mutation setter rejects non-boolean values without sending", async () => {
     const { window } = createMutationRuntime();
-    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat("yes"), /must be a boolean/);
-    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat(1), /must be a boolean/);
-    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat(undefined), /must be a boolean/);
+    await assert.rejects(window.remcord.settings.setBlockPowerSavingInVoiceChat("yes"), /must be a boolean/);
+    await assert.rejects(window.remcord.settings.setBlockPowerSavingInVoiceChat(1), /must be a boolean/);
+    await assert.rejects(window.remcord.settings.setBlockPowerSavingInVoiceChat(undefined), /must be a boolean/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "settings_set_block_power_saving"),
         false,
@@ -547,13 +547,13 @@ test("the mutation setter rejects non-boolean values without sending", async () 
 
 test("the mutation setter rejects malformed mutation responses", async () => {
     const { window } = createMutationRuntime();
-    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const pending = window.remcord.settings.setBlockPowerSavingInVoiceChat(true);
     const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
     respondMutation(window, message, "yes");
     await assert.rejects(pending, /mutation response schema is invalid/);
 
     const second = createMutationRuntime();
-    const pending2 = second.window.legcord.settings.setBlockPowerSavingInVoiceChat(false);
+    const pending2 = second.window.remcord.settings.setBlockPowerSavingInVoiceChat(false);
     const message2 = second.window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
     respondMutation(second.window, message2, false, { source: "defaults" });
     await assert.rejects(pending2, /mutation response schema is invalid/);
@@ -561,7 +561,7 @@ test("the mutation setter rejects malformed mutation responses", async () => {
 
 test("the mutation setter rejects host failures without applying state", async () => {
     const { window } = createMutationRuntime();
-    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const pending = window.remcord.settings.setBlockPowerSavingInVoiceChat(true);
     const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -579,12 +579,12 @@ test("the mutation setter rejects host failures without applying state", async (
 
 test("the mutation setter rejects after its timeout", async () => {
     const { window } = createMutationRuntime();
-    await assert.rejects(window.legcord.settings.setBlockPowerSavingInVoiceChat(true, 50), /timed out/);
+    await assert.rejects(window.remcord.settings.setBlockPowerSavingInVoiceChat(true, 50), /timed out/);
 });
 
 test("the mutation setter rejects pending requests when the document is disposed", async () => {
     const { window } = createMutationRuntime();
-    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const pending = window.remcord.settings.setBlockPowerSavingInVoiceChat(true);
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -592,13 +592,13 @@ test("the mutation setter rejects pending requests when the document is disposed
 
 test("a reloaded document gets a fresh mutation facade with no stale promises", async () => {
     const firstDocument = createMutationRuntime();
-    const stale = firstDocument.window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const stale = firstDocument.window.remcord.settings.setBlockPowerSavingInVoiceChat(true);
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createMutationRuntime();
-    const pending = nextDocument.window.legcord.settings.setBlockPowerSavingInVoiceChat(false);
+    const pending = nextDocument.window.remcord.settings.setBlockPowerSavingInVoiceChat(false);
     const message = nextDocument.window.messages.find(
         (entry) => entry.command?.type === "settings_set_block_power_saving",
     );
@@ -611,7 +611,7 @@ test("the migrated caller updates local state only from the host-confirmed value
     // Mirrors src/shelter/settings/settings.ts: local store first holds the
     // old value and is assigned only after the capability resolves.
     const store = { blockPowerSavingInVoiceChat: false };
-    const pending = window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const pending = window.remcord.settings.setBlockPowerSavingInVoiceChat(true);
     const message = window.messages.find((entry) => entry.command?.type === "settings_set_block_power_saving");
     assert.equal(store.blockPowerSavingInVoiceChat, false);
     respondMutation(window, message, true);
@@ -619,7 +619,7 @@ test("the migrated caller updates local state only from the host-confirmed value
     assert.equal(store.blockPowerSavingInVoiceChat, true);
 
     const failing = createMutationRuntime();
-    const rejected = failing.window.legcord.settings.setBlockPowerSavingInVoiceChat(true);
+    const rejected = failing.window.remcord.settings.setBlockPowerSavingInVoiceChat(true);
     const failedMessage = failing.window.messages.find(
         (entry) => entry.command?.type === "settings_set_block_power_saving",
     );
@@ -667,16 +667,16 @@ function respondSettingsSet(window, request, key, value, extra = {}) {
 
 test("the facade exposes a closed settings.set and no generic writer", () => {
     const { window } = createSettingsSetRuntime();
-    assert.equal(typeof window.legcord.settings.set, "function");
-    assert.equal(Object.isFrozen(window.legcord.settings), true);
-    assert.equal(window.legcord.native.supports("settings.set"), true);
+    assert.equal(typeof window.remcord.settings.set, "function");
+    assert.equal(Object.isFrozen(window.remcord.settings), true);
+    assert.equal(window.remcord.native.supports("settings.set"), true);
     // No generic key/value RPC may exist.
-    assert.equal(window.legcord.settings.setConfig, undefined);
+    assert.equal(window.remcord.settings.setConfig, undefined);
 });
 
 test("settings.set sends key plus bounded value and resolves the key echo", async () => {
     const { window } = createSettingsSetRuntime();
-    const pending = window.legcord.settings.set("support_banner_dismissed", true);
+    const pending = window.remcord.settings.set("support_banner_dismissed", true);
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "settings_set");
     assert.ok(message);
@@ -690,7 +690,7 @@ test("settings.set sends key plus bounded value and resolves the key echo", asyn
         value: true,
     });
 
-    const modsPending = window.legcord.settings.set("mods", ["vencord"]);
+    const modsPending = window.remcord.settings.set("mods", ["vencord"]);
     const modsMessage = window.messages.find(
         (entry) => entry.command?.type === "settings_set" && entry.request_id !== message.request_id,
     );
@@ -704,9 +704,9 @@ test("settings.set sends key plus bounded value and resolves the key echo", asyn
 
 test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createSettingsSetRuntime(["bridge.ping", "settings.get_config"]);
-    assert.equal(window.legcord.native.supports("settings.set"), false);
+    assert.equal(window.remcord.native.supports("settings.set"), false);
     assert.throws(
-        () => window.legcord.settings.set("support_banner_dismissed", true),
+        () => window.remcord.settings.set("support_banner_dismissed", true),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -718,16 +718,16 @@ test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", (
 test("settings.set rejects unknown keys and mismatched types without sending", async () => {
     const { window } = createSettingsSetRuntime();
     // Unknown keys: Electron-only or unsafe settings have no wire shape.
-    await assert.rejects(window.legcord.settings.set("tray", true), /allowlisted/);
-    await assert.rejects(window.legcord.settings.set("proxyRules", "http://127.0.0.1:8080"), /allowlisted/);
-    await assert.rejects(window.legcord.settings.set("customIcon", "C:\\secret.png"), /allowlisted/);
+    await assert.rejects(window.remcord.settings.set("tray", true), /allowlisted/);
+    await assert.rejects(window.remcord.settings.set("proxyRules", "http://127.0.0.1:8080"), /allowlisted/);
+    await assert.rejects(window.remcord.settings.set("customIcon", "C:\\secret.png"), /allowlisted/);
     // Key/variant mismatches: bool keys refuse arrays, mods refuses a bool.
-    await assert.rejects(window.legcord.settings.set("support_banner_dismissed", ["vencord"]), /boolean/);
-    await assert.rejects(window.legcord.settings.set("mods", true), /known mod ids/);
+    await assert.rejects(window.remcord.settings.set("support_banner_dismissed", ["vencord"]), /boolean/);
+    await assert.rejects(window.remcord.settings.set("mods", true), /known mod ids/);
     // Strings are never valid values; unknown mod ids are refused.
-    await assert.rejects(window.legcord.settings.set("support_banner_dismissed", "yes"), /boolean/);
-    await assert.rejects(window.legcord.settings.set("mods", ["Vencord"]), /known mod ids/);
-    await assert.rejects(window.legcord.settings.set("mods", ["../escape"]), /known mod ids/);
+    await assert.rejects(window.remcord.settings.set("support_banner_dismissed", "yes"), /boolean/);
+    await assert.rejects(window.remcord.settings.set("mods", ["Vencord"]), /known mod ids/);
+    await assert.rejects(window.remcord.settings.set("mods", ["../escape"]), /known mod ids/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "settings_set"),
         false,
@@ -736,7 +736,7 @@ test("settings.set rejects unknown keys and mismatched types without sending", a
 
 test("settings.set rejects malformed set responses", async () => {
     const { window } = createSettingsSetRuntime();
-    const pending = window.legcord.settings.set("support_banner_dismissed", true);
+    const pending = window.remcord.settings.set("support_banner_dismissed", true);
     const message = window.messages.find((entry) => entry.command?.type === "settings_set");
     // Key echo must equal the request: one key's write can never resolve
     // another key's call.
@@ -744,13 +744,13 @@ test("settings.set rejects malformed set responses", async () => {
     await assert.rejects(pending, /settings set response schema is invalid/);
 
     const second = createSettingsSetRuntime();
-    const pending2 = second.window.legcord.settings.set("mods", ["vencord"]);
+    const pending2 = second.window.remcord.settings.set("mods", ["vencord"]);
     const message2 = second.window.messages.find((entry) => entry.command?.type === "settings_set");
     respondSettingsSet(second.window, message2, "mods", ["vencord"], { source: "defaults" });
     await assert.rejects(pending2, /settings set response schema is invalid/);
 
     const third = createSettingsSetRuntime();
-    const pending3 = third.window.legcord.settings.set("mods", ["vencord"]);
+    const pending3 = third.window.remcord.settings.set("mods", ["vencord"]);
     const message3 = third.window.messages.find((entry) => entry.command?.type === "settings_set");
     respondSettingsSet(third.window, message3, "mods", ["vencord"], { leaked: "path" });
     await assert.rejects(pending3, /settings set response schema is invalid/);
@@ -758,12 +758,12 @@ test("settings.set rejects malformed set responses", async () => {
 
 test("initializes a frozen compatibility facade with the boot snapshot", () => {
     const { window } = createRuntime();
-    assert.ok(window.legcord);
-    assert.equal(window.legcord.boot.runtime, "webview2");
-    assert.equal(window.legcord.boot.platform, "win32");
-    assert.equal(Object.isFrozen(window.legcord), true);
-    assert.equal(Object.isFrozen(window.legcord.boot), true);
-    assert.equal(window.legcord.native.supports("mod.get_bundle"), true);
+    assert.ok(window.remcord);
+    assert.equal(window.remcord.boot.runtime, "webview2");
+    assert.equal(window.remcord.boot.platform, "win32");
+    assert.equal(Object.isFrozen(window.remcord), true);
+    assert.equal(Object.isFrozen(window.remcord.boot), true);
+    assert.equal(window.remcord.native.supports("mod.get_bundle"), true);
     assert.equal(
         window.messages.some((message) => message.event?.type === "bootstrap_metrics"),
         true,
@@ -772,10 +772,10 @@ test("initializes a frozen compatibility facade with the boot snapshot", () => {
 
 test("rejects capabilities that are not in the immutable snapshot", () => {
     const { window } = createRuntime();
-    assert.equal(window.legcord.native.supports("bridge.ping"), true);
-    assert.equal(window.legcord.native.supports("filesystem"), false);
+    assert.equal(window.remcord.native.supports("bridge.ping"), true);
+    assert.equal(window.remcord.native.supports("filesystem"), false);
     assert.throws(
-        () => window.legcord.native.requireCapability("filesystem"),
+        () => window.remcord.native.requireCapability("filesystem"),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
 });
@@ -790,19 +790,19 @@ test("window-state events converge local reads and body attributes without polli
         },
     };
     // Seeded from the boot snapshot: unfocused, unmaximized.
-    assert.equal(window.legcord.native.window.maximized(), false);
-    assert.equal(window.legcord.native.window.isNormal(), true);
-    assert.equal(window.legcord.window.maximized(), false);
-    assert.equal(window.legcord.window.isNormal(), true);
+    assert.equal(window.remcord.native.window.maximized(), false);
+    assert.equal(window.remcord.native.window.isNormal(), true);
+    assert.equal(window.remcord.window.maximized(), false);
+    assert.equal(window.remcord.window.isNormal(), true);
 
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:window-state", {
             detail: { version: 1, focused: true, maximized: true },
         }),
     );
-    assert.equal(window.legcord.native.window.maximized(), true);
-    assert.equal(window.legcord.native.window.isNormal(), false);
-    assert.equal(window.legcord.window.maximized(), true);
+    assert.equal(window.remcord.native.window.maximized(), true);
+    assert.equal(window.remcord.native.window.isNormal(), false);
+    assert.equal(window.remcord.window.maximized(), true);
     assert.equal(attributes.get("isMaximized"), "");
     assert.equal(attributes.has("unFocused"), false);
 
@@ -811,8 +811,8 @@ test("window-state events converge local reads and body attributes without polli
             detail: { version: 1, focused: false, maximized: false },
         }),
     );
-    assert.equal(window.legcord.native.window.maximized(), false);
-    assert.equal(window.legcord.native.window.isNormal(), true);
+    assert.equal(window.remcord.native.window.maximized(), false);
+    assert.equal(window.remcord.native.window.isNormal(), true);
     assert.equal(attributes.has("isMaximized"), false);
     assert.equal(attributes.get("unFocused"), "");
 
@@ -828,15 +828,15 @@ test("window-state events converge local reads and body attributes without polli
             detail: { version: 1, focused: "yes", maximized: true },
         }),
     );
-    assert.equal(window.legcord.native.window.maximized(), false);
+    assert.equal(window.remcord.native.window.maximized(), false);
     assert.equal(attributes.has("isMaximized"), false);
     assert.equal(attributes.get("unFocused"), "");
 });
 
 test("correlates asynchronous responses independently of their arrival order", async () => {
     const { window } = createRuntime();
-    const first = window.legcord.native.ping("first");
-    const second = window.legcord.native.ping("second");
+    const first = window.remcord.native.ping("first");
+    const second = window.remcord.native.ping("second");
     const requests = window.messages.filter((message) => message.command?.type === "ping");
     assert.equal(requests.length, 2);
 
@@ -851,7 +851,7 @@ test("correlates asynchronous responses independently of their arrival order", a
 
 test("enforces UTF-8 byte limits before sending requests", async () => {
     const { window } = createRuntime();
-    await assert.rejects(window.legcord.native.ping("é".repeat(65)), /128 UTF-8 bytes/);
+    await assert.rejects(window.remcord.native.ping("é".repeat(65)), /128 UTF-8 bytes/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "ping"),
         false,
@@ -860,23 +860,23 @@ test("enforces UTF-8 byte limits before sending requests", async () => {
 
 test("disposes pending requests on navigation and initializes fresh document state", async () => {
     const firstDocument = createRuntime();
-    const pending = firstDocument.window.legcord.native.ping("leaving");
+    const pending = firstDocument.window.remcord.native.ping("leaving");
     const rejection = assert.rejects(pending, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
 
     const nextDocument = createRuntime();
-    assert.ok(nextDocument.window.legcord);
-    const request = nextDocument.window.legcord.native.ping("reloaded");
+    assert.ok(nextDocument.window.remcord);
+    const request = nextDocument.window.remcord.native.ping("reloaded");
     const nextPing = nextDocument.window.messages.find((message) => message.command?.type === "ping");
     respondPing(nextDocument.window, nextPing, { nonce: "reloaded", message: "pong" });
     assert.deepEqual(await request, { nonce: "reloaded", message: "pong" });
-    assert.equal(firstDocument.window.legcord === nextDocument.window.legcord, false);
+    assert.equal(firstDocument.window.remcord === nextDocument.window.remcord, false);
 });
 
 test("does not expose the facade outside the exact trusted origin", () => {
     const { window } = createRuntime("https://canary.discord.com");
-    assert.equal(window.legcord, undefined);
+    assert.equal(window.remcord, undefined);
     assert.equal(window.messages.length, 0);
 });
 
@@ -900,7 +900,7 @@ test("reports renderer exception stacks and source locations to the native log",
 
 test("requests only the shared bundle capability with the registered mod id", async () => {
     const { window } = createRuntime();
-    const request = window.legcord.native.getVencordBundle();
+    const request = window.remcord.native.getVencordBundle();
     const message = window.messages.find((entry) => entry.command?.type === "mod_get_bundle");
     assert.ok(message);
     // Exactly one logical id. No path, URL, filename, or source member.
@@ -916,7 +916,7 @@ test("requests only the shared bundle capability with the registered mod id", as
 
 test("the shared bundle request carries a logical id and nothing else", async () => {
     const { window } = createRuntime();
-    const request = window.legcord.native.getModBundle("vencord");
+    const request = window.remcord.native.getModBundle("vencord");
     const message = window.messages.find((entry) => entry.command?.type === "mod_get_bundle");
     assert.deepEqual(message.command.payload, { mod_id: "vencord" });
     for (const forbidden of ["path", "url", "file", "source", "js_url", "channel", "method"]) {
@@ -943,7 +943,7 @@ test("rejects bundle ids that could select a path, URL, or source", async () => 
         { modId: "vencord" },
     ]) {
         await assert.rejects(
-            () => window.legcord.native.getModBundle(hostile),
+            () => window.remcord.native.getModBundle(hostile),
             TypeError,
             `must reject ${JSON.stringify(hostile)}`,
         );
@@ -961,7 +961,7 @@ test("an unregistered but well-formed id is refused by the host registry", async
     // UNKNOWN_MOD failure. Nothing is read, and no source is substituted.
     const { window } = createRuntime();
     for (const unregistered of ["vencord.js", "shelter", "equicord", "custom", "Vencord"]) {
-        const request = window.legcord.native.getModBundle(unregistered);
+        const request = window.remcord.native.getModBundle(unregistered);
         const message = window.messages.filter((entry) => entry.command?.type === "mod_get_bundle").pop();
         assert.deepEqual(message.command.payload, { mod_id: unregistered });
         window.dispatchEvent(
@@ -992,11 +992,11 @@ test("an unregistered but well-formed id is refused by the host registry", async
 test("denies the shared bundle capability when the boot snapshot does not grant it", () => {
     const { window } = createRuntime("https://discord.com", ["bridge.ping"]);
     assert.throws(
-        () => window.legcord.native.getModBundle("vencord"),
+        () => window.remcord.native.getModBundle("vencord"),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.throws(
-        () => window.legcord.native.getVencordBundle(),
+        () => window.remcord.native.getVencordBundle(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -1018,7 +1018,7 @@ test("rejects malformed bundle responses", async () => {
         { request_latency_ms: "fast" },
         { mod_id: undefined },
     ]) {
-        const request = window.legcord.native.getModBundle("vencord");
+        const request = window.remcord.native.getModBundle("vencord");
         const message = window.messages.filter((entry) => entry.command?.type === "mod_get_bundle").pop();
         respondVencord(window, message, malformed);
         await assert.rejects(request, /response schema is invalid/, JSON.stringify(malformed));
@@ -1030,7 +1030,7 @@ test("times out a bundle request that never resolves", async () => {
     // A short explicit timeout keeps the test fast without touching the
     // documented 120 s bundle default.
     await assert.rejects(
-        () => window.legcord.native.getModBundle("vencord", 5),
+        () => window.remcord.native.getModBundle("vencord", 5),
         (error) => {
             assert.equal(error.code, "REQUEST_TIMEOUT");
             return true;
@@ -1140,11 +1140,11 @@ test("a reloaded document re-requests the known bundle through the shared capabi
     vm.runInContext(vencordAdapter, secondDocument.context);
     const secondRequest = secondDocument.window.messages.find((message) => message.command?.type === "mod_get_bundle");
     assert.deepEqual(secondRequest.command.payload, { mod_id: "vencord" });
-    assert.notEqual(firstDocument.window.legcord, secondDocument.window.legcord);
+    assert.notEqual(firstDocument.window.remcord, secondDocument.window.remcord);
 
     // Disposing the previous document clears its pending bundle request, so
     // a late host answer can no longer resolve anything.
-    const lateRequest = firstDocument.window.legcord.native.getModBundle("vencord");
+    const lateRequest = firstDocument.window.remcord.native.getModBundle("vencord");
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await assert.rejects(lateRequest, /document was disposed/);
     assert.equal(secondDocument.window.__remcordNativeVencord.status, "pending");
@@ -1309,13 +1309,13 @@ for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
         vm.runInContext(adapter, second.context);
         const secondRequest = second.window.messages.find((message) => message.command?.type === "mod_get_bundle");
         assert.deepEqual(secondRequest.command.payload, { mod_id: modId });
-        assert.notEqual(first.window.legcord, second.window.legcord);
+        assert.notEqual(first.window.remcord, second.window.remcord);
         assert.equal(second.window[wire.stateName].status, "pending");
         assert.equal(second.window[wire.stateName].executionCount, 0);
 
         // The previous document's pending request is disposed, so a late host
         // answer cannot resolve anything in the new document.
-        const late = first.window.legcord.native.getModBundle(modId);
+        const late = first.window.remcord.native.getModBundle(modId);
         first.window.dispatchEvent(new FakeCustomEvent("pagehide"));
         await assert.rejects(late, /document was disposed/);
 
@@ -1380,7 +1380,7 @@ for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
         ]) {
             const { window, context } = createRuntime(origin);
             vm.runInContext(adapter, context);
-            assert.equal(window.legcord, undefined, origin);
+            assert.equal(window.remcord, undefined, origin);
             assert.deepEqual(window.messages, [], origin);
         }
     });
@@ -1397,7 +1397,7 @@ for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
         assert.doesNotMatch(code, /\.css["'`]/, "an adapter names no cache file");
         assert.doesNotMatch(code, /readFile|writeFile|loadScript|executeSource|executeScript/);
         assert.doesNotMatch(code, /eval\(|new Function/);
-        assert.doesNotMatch(code, /process\.|require\(|webFrame|ipcRenderer|window\.legcord\.fs/);
+        assert.doesNotMatch(code, /process\.|require\(|webFrame|ipcRenderer|window\.remcord\.fs/);
         // The only request it can make is the shared bundle capability.
         assert.match(code, /requireCapability|capability: "mod\.get_bundle"/);
         assert.match(code, new RegExp(`getModBundle\\("${modId}"\\)`));
@@ -1445,7 +1445,7 @@ test("Equicord's descriptor carries a real CSS stage and stylesheet size", async
 test("the mod_bundle response schema distinguishes no-CSS from CSS", async () => {
     // Both CSS fields null (a CSS-less mod) is accepted.
     const noCss = createRuntime();
-    const noCssRequest = noCss.window.legcord.native.getModBundle("shelter");
+    const noCssRequest = noCss.window.remcord.native.getModBundle("shelter");
     respondMod(noCss.window, { request_id: noCssRequest.requestId }, "shelter");
     assert.equal((await noCssRequest).css_bytes, null);
 
@@ -1458,7 +1458,7 @@ test("the mod_bundle response schema distinguishes no-CSS from CSS", async () =>
         { css_bytes: null, css_injection_ms: -1 },
     ]) {
         const runtime = createRuntime();
-        const pending = runtime.window.legcord.native.getModBundle("shelter");
+        const pending = runtime.window.remcord.native.getModBundle("shelter");
         respondMod(runtime.window, { request_id: pending.requestId }, "shelter", payload);
         await assert.rejects(pending, /schema is invalid/, JSON.stringify(payload));
     }
@@ -1547,15 +1547,15 @@ function respondLang(window, request, value = "Go back to the Discord app", lang
     );
 }
 
-test("the facade exposes getLang at the declared window.legcord location", () => {
+test("the facade exposes getLang at the declared window.remcord location", () => {
     const { window } = createLangRuntime();
-    assert.equal(typeof window.legcord.getLang, "function");
-    assert.equal(window.legcord.native.supports("localization.get_lang"), true);
+    assert.equal(typeof window.remcord.getLang, "function");
+    assert.equal(window.remcord.native.supports("localization.get_lang"), true);
 });
 
 test("getLang sends one typed key-only request and resolves the string", async () => {
     const { window } = createLangRuntime();
-    const pending = window.legcord.getLang("invite-goBackToApp");
+    const pending = window.remcord.getLang("invite-goBackToApp");
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
     assert.ok(message);
@@ -1569,7 +1569,7 @@ test("getLang sends one typed key-only request and resolves the string", async (
 
 test("getLang resolves missing keys to an empty string like Electron", async () => {
     const { window } = createLangRuntime();
-    const pending = window.legcord.getLang("remcord-native-no-such-key");
+    const pending = window.remcord.getLang("remcord-native-no-such-key");
     const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
     respondLang(window, message, "");
     assert.equal(await pending, "");
@@ -1578,7 +1578,7 @@ test("getLang resolves missing keys to an empty string like Electron", async () 
 test("getLang throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createLangRuntime(["bridge.ping"]);
     assert.throws(
-        () => window.legcord.getLang("invite-goBackToApp"),
+        () => window.remcord.getLang("invite-goBackToApp"),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -1589,9 +1589,9 @@ test("getLang throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => 
 
 test("getLang rejects empty, non-string, and oversized keys without sending", async () => {
     const { window } = createLangRuntime();
-    await assert.rejects(window.legcord.getLang(""), /non-empty string/);
-    await assert.rejects(window.legcord.getLang(42), /non-empty string/);
-    await assert.rejects(window.legcord.getLang("k".repeat(129)), /128 UTF-8 bytes/);
+    await assert.rejects(window.remcord.getLang(""), /non-empty string/);
+    await assert.rejects(window.remcord.getLang(42), /non-empty string/);
+    await assert.rejects(window.remcord.getLang("k".repeat(129)), /128 UTF-8 bytes/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "localization_get_lang"),
         false,
@@ -1600,7 +1600,7 @@ test("getLang rejects empty, non-string, and oversized keys without sending", as
 
 test("getLang rejects malformed localization responses", async () => {
     const { window } = createLangRuntime();
-    const pending = window.legcord.getLang("invite-goBackToApp");
+    const pending = window.remcord.getLang("invite-goBackToApp");
     const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
     respondLang(window, message, 42);
     await assert.rejects(pending, /localization response schema is invalid/);
@@ -1608,7 +1608,7 @@ test("getLang rejects malformed localization responses", async () => {
 
 test("getLang rejects host failures with the typed error", async () => {
     const { window } = createLangRuntime();
-    const pending = window.legcord.getLang("invite-goBackToApp");
+    const pending = window.remcord.getLang("invite-goBackToApp");
     const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -1626,12 +1626,12 @@ test("getLang rejects host failures with the typed error", async () => {
 
 test("getLang rejects after its timeout", async () => {
     const { window } = createLangRuntime();
-    await assert.rejects(window.legcord.getLang("invite-goBackToApp", 50), /timed out/);
+    await assert.rejects(window.remcord.getLang("invite-goBackToApp", 50), /timed out/);
 });
 
 test("getLang rejects pending requests when the document is disposed", async () => {
     const { window } = createLangRuntime();
-    const pending = window.legcord.getLang("invite-goBackToApp");
+    const pending = window.remcord.getLang("invite-goBackToApp");
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -1639,14 +1639,14 @@ test("getLang rejects pending requests when the document is disposed", async () 
 
 test("a reloaded document gets a fresh getLang facade with no stale promises", async () => {
     const firstDocument = createLangRuntime();
-    const stale = firstDocument.window.legcord.getLang("invite-goBackToApp");
+    const stale = firstDocument.window.remcord.getLang("invite-goBackToApp");
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createLangRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.getLang("invite-goBackToApp");
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.getLang("invite-goBackToApp");
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "localization_get_lang");
     respondLang(nextDocument.window, message);
     assert.equal(await pending, "Go back to the Discord app");
@@ -1672,16 +1672,16 @@ function respondAppVersion(window, request, version = "1.3.0") {
 
 test("the facade exposes an asynchronous app.get_version capability", () => {
     const { window } = createAppRuntime();
-    assert.equal(typeof window.legcord.native.getVersion, "function");
-    assert.equal(Object.isFrozen(window.legcord.native), true);
-    assert.equal(window.legcord.native.supports("app.get_version"), true);
+    assert.equal(typeof window.remcord.native.getVersion, "function");
+    assert.equal(Object.isFrozen(window.remcord.native), true);
+    assert.equal(window.remcord.native.supports("app.get_version"), true);
     // No synchronous version field or generic RPC may exist.
-    assert.equal(window.legcord.version, undefined);
+    assert.equal(window.remcord.version, undefined);
 });
 
 test("app.get_version sends a parameter-free typed request and resolves the version", async () => {
     const { window } = createAppRuntime();
-    const pending = window.legcord.native.getVersion();
+    const pending = window.remcord.native.getVersion();
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
     assert.ok(message);
@@ -1693,7 +1693,7 @@ test("app.get_version sends a parameter-free typed request and resolves the vers
 
 test("app.get_version resolves the dev version exactly like Electron isDev", async () => {
     const { window } = createAppRuntime();
-    const pending = window.legcord.native.getVersion();
+    const pending = window.remcord.native.getVersion();
     const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
     respondAppVersion(window, message, "0.0.0");
     assert.equal(await pending, "0.0.0");
@@ -1701,9 +1701,9 @@ test("app.get_version resolves the dev version exactly like Electron isDev", asy
 
 test("app.get_version throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createAppRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("app.get_version"), false);
+    assert.equal(window.remcord.native.supports("app.get_version"), false);
     assert.throws(
-        () => window.legcord.native.getVersion(),
+        () => window.remcord.native.getVersion(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -1714,13 +1714,13 @@ test("app.get_version throws UNSUPPORTED_CAPABILITY when the snapshot denies it"
 
 test("app.get_version rejects malformed version responses", async () => {
     const { window } = createAppRuntime();
-    const pending = window.legcord.native.getVersion();
+    const pending = window.remcord.native.getVersion();
     const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
     respondAppVersion(window, message, 42);
     await assert.rejects(pending, /app version response schema is invalid/);
 
     const second = createAppRuntime();
-    const pendingEmpty = second.window.legcord.native.getVersion();
+    const pendingEmpty = second.window.remcord.native.getVersion();
     const messageEmpty = second.window.messages.find((entry) => entry.command?.type === "app_get_version");
     respondAppVersion(second.window, messageEmpty, "");
     await assert.rejects(pendingEmpty, /app version response schema is invalid/);
@@ -1728,7 +1728,7 @@ test("app.get_version rejects malformed version responses", async () => {
 
 test("app.get_version rejects host failures with the typed error", async () => {
     const { window } = createAppRuntime();
-    const pending = window.legcord.native.getVersion();
+    const pending = window.remcord.native.getVersion();
     const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -1746,12 +1746,12 @@ test("app.get_version rejects host failures with the typed error", async () => {
 
 test("app.get_version rejects after its timeout", async () => {
     const { window } = createAppRuntime();
-    await assert.rejects(window.legcord.native.getVersion(50), /timed out/);
+    await assert.rejects(window.remcord.native.getVersion(50), /timed out/);
 });
 
 test("app.get_version rejects pending requests when the document is disposed", async () => {
     const { window } = createAppRuntime();
-    const pending = window.legcord.native.getVersion();
+    const pending = window.remcord.native.getVersion();
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -1759,14 +1759,14 @@ test("app.get_version rejects pending requests when the document is disposed", a
 
 test("a reloaded document gets a fresh app version facade with no stale promises", async () => {
     const firstDocument = createAppRuntime();
-    const stale = firstDocument.window.legcord.native.getVersion();
+    const stale = firstDocument.window.remcord.native.getVersion();
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createAppRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.native.getVersion();
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.native.getVersion();
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "app_get_version");
     respondAppVersion(nextDocument.window, message);
     assert.equal(await pending, "1.3.0");
@@ -1777,7 +1777,7 @@ test("the migrated update checker compares the host-confirmed version", async ()
     // Mirrors src/shelter/settings/components/HeroUpdater.tsx: the remote
     // dotted version is compared against the capability-resolved local
     // version with dots stripped, never against a sync field.
-    const pending = window.legcord.native.getVersion();
+    const pending = window.remcord.native.getVersion();
     const message = window.messages.find((entry) => entry.command?.type === "app_get_version");
     respondAppVersion(window, message, "1.3.0");
     const localVersion = (await pending).replace(/\./g, "");
@@ -1864,13 +1864,13 @@ function respondBundlesList(window, request, bundles = BUNDLE_FIXTURE) {
 
 test("the facade exposes backup save, restore, plus discovery", () => {
     const { window } = createBundlesRuntime(["bridge.ping", "backup.list_bundles", "backup.save", "backup.restore"]);
-    assert.equal(typeof window.legcord.backup.listBundles, "function");
-    assert.equal(typeof window.legcord.backup.save, "function");
-    assert.equal(typeof window.legcord.backup.restore, "function");
-    assert.equal(Object.isFrozen(window.legcord.backup), true);
-    assert.equal(window.legcord.native.supports("backup.list_bundles"), true);
-    assert.equal(window.legcord.native.supports("backup.save"), true);
-    assert.equal(window.legcord.native.supports("backup.restore"), true);
+    assert.equal(typeof window.remcord.backup.listBundles, "function");
+    assert.equal(typeof window.remcord.backup.save, "function");
+    assert.equal(typeof window.remcord.backup.restore, "function");
+    assert.equal(Object.isFrozen(window.remcord.backup), true);
+    assert.equal(window.remcord.native.supports("backup.list_bundles"), true);
+    assert.equal(window.remcord.native.supports("backup.save"), true);
+    assert.equal(window.remcord.native.supports("backup.restore"), true);
     // No generic restore/filesystem surface may ride along: the Electron
     // channel names and dialog sends stay out of the native facade.
     assert.doesNotMatch(bootstrapTemplate, /backupRestore/);
@@ -1880,7 +1880,7 @@ test("the facade exposes backup save, restore, plus discovery", () => {
 
 test("backup.list_bundles sends a parameter-free typed request and resolves the inventory", async () => {
     const { window } = createBundlesRuntime();
-    const pending = window.legcord.backup.listBundles();
+    const pending = window.remcord.backup.listBundles();
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "bundles_list");
     assert.ok(message);
@@ -1892,9 +1892,9 @@ test("backup.list_bundles sends a parameter-free typed request and resolves the 
 
 test("backup.list_bundles throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createBundlesRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("backup.list_bundles"), false);
+    assert.equal(window.remcord.native.supports("backup.list_bundles"), false);
     assert.throws(
-        () => window.legcord.backup.listBundles(),
+        () => window.remcord.backup.listBundles(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -1906,14 +1906,14 @@ test("backup.list_bundles throws UNSUPPORTED_CAPABILITY when the snapshot denies
 test("backup.list_bundles rejects malformed inventories", async () => {
     // Wrong entry count.
     const short = createBundlesRuntime();
-    const pendingShort = short.window.legcord.backup.listBundles();
+    const pendingShort = short.window.remcord.backup.listBundles();
     const messageShort = short.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(short.window, messageShort, BUNDLE_FIXTURE.slice(0, 6));
     await assert.rejects(pendingShort, /bundle inventory response schema is invalid/);
 
     // Wrong name or order.
     const renamed = createBundlesRuntime();
-    const pendingRenamed = renamed.window.legcord.backup.listBundles();
+    const pendingRenamed = renamed.window.remcord.backup.listBundles();
     const messageRenamed = renamed.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(renamed.window, messageRenamed, [
         ...BUNDLE_FIXTURE.slice(0, 5),
@@ -1924,7 +1924,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
 
     // Absent entry carrying bytes.
     const absentBytes = createBundlesRuntime();
-    const pendingAbsent = absentBytes.window.legcord.backup.listBundles();
+    const pendingAbsent = absentBytes.window.remcord.backup.listBundles();
     const messageAbsent = absentBytes.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(absentBytes.window, messageAbsent, [
         ...BUNDLE_FIXTURE.slice(0, 6),
@@ -1934,7 +1934,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
 
     // Metadata-only: a path riding along is rejected.
     const withPath = createBundlesRuntime();
-    const pendingPath = withPath.window.legcord.backup.listBundles();
+    const pendingPath = withPath.window.remcord.backup.listBundles();
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(withPath.window, messagePath, [
         ...BUNDLE_FIXTURE.slice(0, 6),
@@ -1945,7 +1945,7 @@ test("backup.list_bundles rejects malformed inventories", async () => {
 
 test("backup.list_bundles rejects host failures with the typed error", async () => {
     const { window } = createBundlesRuntime();
-    const pending = window.legcord.backup.listBundles();
+    const pending = window.remcord.backup.listBundles();
     const message = window.messages.find((entry) => entry.command?.type === "bundles_list");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -1963,12 +1963,12 @@ test("backup.list_bundles rejects host failures with the typed error", async () 
 
 test("backup.list_bundles rejects after its timeout", async () => {
     const { window } = createBundlesRuntime();
-    await assert.rejects(window.legcord.backup.listBundles(50), /timed out/);
+    await assert.rejects(window.remcord.backup.listBundles(50), /timed out/);
 });
 
 test("backup.list_bundles rejects pending requests when the document is disposed", async () => {
     const { window } = createBundlesRuntime();
-    const pending = window.legcord.backup.listBundles();
+    const pending = window.remcord.backup.listBundles();
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -1976,14 +1976,14 @@ test("backup.list_bundles rejects pending requests when the document is disposed
 
 test("a reloaded document gets a fresh bundle inventory facade with no stale promises", async () => {
     const firstDocument = createBundlesRuntime();
-    const stale = firstDocument.window.legcord.backup.listBundles();
+    const stale = firstDocument.window.remcord.backup.listBundles();
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createBundlesRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.backup.listBundles();
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.backup.listBundles();
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "bundles_list");
     respondBundlesList(nextDocument.window, message);
     assert.deepEqual(await pending, BUNDLE_FIXTURE);
@@ -1995,9 +1995,9 @@ function createBackupSaveRuntime(capabilities = ["bridge.ping", "backup.list_bun
 
 const BACKUP_SAVE_PAYLOAD = JSON.stringify({
     includes: {
-        legcordConfig: true,
-        legcordThemesAndQuickCss: true,
-        legcordExtensionPlugins: true,
+        remcordConfig: true,
+        remcordThemesAndQuickCss: true,
+        remcordExtensionPlugins: true,
         vencordModData: true,
         equicordModData: true,
         shelterModData: true,
@@ -2026,7 +2026,7 @@ function respondBackupSaved(window, request, payload = { canceled: false, bytes:
 
 test("backup.save sends the exact includes/clientMods shape with the long timeout", async () => {
     const { window } = createBackupSaveRuntime();
-    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const pending = window.remcord.backup.save(BACKUP_SAVE_PAYLOAD);
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "backup_save");
     assert.ok(message);
@@ -2042,7 +2042,7 @@ test("backup.save sends the exact includes/clientMods shape with the long timeou
 
 test("backup.save resolves cancellation as the silent Electron shape", async () => {
     const { window } = createBackupSaveRuntime();
-    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const pending = window.remcord.backup.save(BACKUP_SAVE_PAYLOAD);
     const message = window.messages.find((entry) => entry.command?.type === "backup_save");
     respondBackupSaved(window, message, { canceled: true, bytes: 0 });
     const canceled = await pending;
@@ -2052,7 +2052,7 @@ test("backup.save resolves cancellation as the silent Electron shape", async () 
 
 test("backup.save maps typed host failures to the Electron error shape", async () => {
     const { window } = createBackupSaveRuntime();
-    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const pending = window.remcord.backup.save(BACKUP_SAVE_PAYLOAD);
     const message = window.messages.find((entry) => entry.command?.type === "backup_save");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2077,28 +2077,28 @@ test("backup.save rejects paths, filenames, unknown keys, and oversized envelope
     // Renderer-supplied output path / filename / dialog option.
     for (const extra of [{ outputPath: "C:\\x.zip" }, { filename: "x.zip" }, { defaultPath: "C:\\x" }]) {
         await assert.rejects(
-            window.legcord.backup.save(JSON.stringify({ ...parsed, ...extra })),
+            window.remcord.backup.save(JSON.stringify({ ...parsed, ...extra })),
             /exactly includes and clientMods/,
         );
     }
     // Unknown include key.
     await assert.rejects(
-        window.legcord.backup.save(JSON.stringify({ ...parsed, includes: { ...parsed.includes, everything: true } })),
+        window.remcord.backup.save(JSON.stringify({ ...parsed, includes: { ...parsed.includes, everything: true } })),
         /seven known booleans/,
     );
     // Non-boolean include.
     await assert.rejects(
-        window.legcord.backup.save(JSON.stringify({ ...parsed, includes: { ...parsed.includes, modBundles: "yes" } })),
+        window.remcord.backup.save(JSON.stringify({ ...parsed, includes: { ...parsed.includes, modBundles: "yes" } })),
         /seven known booleans/,
     );
     // Unknown clientMods field.
     await assert.rejects(
-        window.legcord.backup.save(JSON.stringify({ ...parsed, clientMods: { discordToken: "x" } })),
+        window.remcord.backup.save(JSON.stringify({ ...parsed, clientMods: { discordToken: "x" } })),
         /unknown field/,
     );
     // Oversized client string.
     await assert.rejects(
-        window.legcord.backup.save(
+        window.remcord.backup.save(
             JSON.stringify({
                 ...parsed,
                 clientMods: { vencordLocalStorage: "x".repeat(1048577) },
@@ -2107,8 +2107,8 @@ test("backup.save rejects paths, filenames, unknown keys, and oversized envelope
         /at most 1048576/,
     );
     // Non-string payload / invalid JSON.
-    await assert.rejects(window.legcord.backup.save(42), /JSON string/);
-    await assert.rejects(window.legcord.backup.save("{not json"), /valid JSON/);
+    await assert.rejects(window.remcord.backup.save(42), /JSON string/);
+    await assert.rejects(window.remcord.backup.save("{not json"), /valid JSON/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "backup_save"),
         false,
@@ -2117,9 +2117,9 @@ test("backup.save rejects paths, filenames, unknown keys, and oversized envelope
 
 test("backup.save throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createBackupSaveRuntime(["bridge.ping", "backup.list_bundles"]);
-    assert.equal(window.legcord.native.supports("backup.save"), false);
+    assert.equal(window.remcord.native.supports("backup.save"), false);
     assert.throws(
-        () => window.legcord.backup.save(BACKUP_SAVE_PAYLOAD),
+        () => window.remcord.backup.save(BACKUP_SAVE_PAYLOAD),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -2131,7 +2131,7 @@ test("backup.save throws UNSUPPORTED_CAPABILITY when the snapshot denies it", ()
 test("backup.save surfaces malformed save outcomes as the Electron error shape", async () => {
     // A path riding along with the outcome.
     const withPath = createBackupSaveRuntime();
-    const pendingPath = withPath.window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const pendingPath = withPath.window.remcord.backup.save(BACKUP_SAVE_PAYLOAD);
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_save");
     respondBackupSaved(withPath.window, messagePath, { canceled: false, bytes: 12, path: "C:\\x.zip" });
     const malformedPath = await pendingPath;
@@ -2140,7 +2140,7 @@ test("backup.save surfaces malformed save outcomes as the Electron error shape",
 
     // Negative bytes.
     const negative = createBackupSaveRuntime();
-    const pendingNegative = negative.window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const pendingNegative = negative.window.remcord.backup.save(BACKUP_SAVE_PAYLOAD);
     const messageNegative = negative.window.messages.find((entry) => entry.command?.type === "backup_save");
     respondBackupSaved(negative.window, messageNegative, { canceled: false, bytes: -1 });
     const malformedNegative = await pendingNegative;
@@ -2150,7 +2150,7 @@ test("backup.save surfaces malformed save outcomes as the Electron error shape",
 
 test("backup.save rejects pending requests when the document is disposed", async () => {
     const { window } = createBackupSaveRuntime();
-    const pending = window.legcord.backup.save(BACKUP_SAVE_PAYLOAD);
+    const pending = window.remcord.backup.save(BACKUP_SAVE_PAYLOAD);
     // Cancellation-by-disposal maps through the Electron error shape, never
     // an unhandled rejection: the pending promise settles as ok:false.
     const rejection = pending.then((result) => {
@@ -2186,7 +2186,7 @@ function respondBackupRestored(window, request, payload = { canceled: false, cli
 
 test("backup.restore sends a parameter-free typed request and resolves the envelope", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.legcord.backup.restore();
+    const pending = window.remcord.backup.restore();
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
     assert.ok(message);
@@ -2201,7 +2201,7 @@ test("backup.restore sends a parameter-free typed request and resolves the envel
 
 test("backup.restore resolves cancellation as the silent Electron shape", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.legcord.backup.restore();
+    const pending = window.remcord.backup.restore();
     const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
     respondBackupRestored(window, message, { canceled: true, client_mods: null });
     const canceled = await pending;
@@ -2211,7 +2211,7 @@ test("backup.restore resolves cancellation as the silent Electron shape", async 
 
 test("backup.restore maps typed host failures to the Electron error shape", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.legcord.backup.restore();
+    const pending = window.remcord.backup.restore();
     const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2232,9 +2232,9 @@ test("backup.restore maps typed host failures to the Electron error shape", asyn
 
 test("backup.restore throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createBackupRestoreRuntime(["bridge.ping", "backup.save"]);
-    assert.equal(window.legcord.native.supports("backup.restore"), false);
+    assert.equal(window.remcord.native.supports("backup.restore"), false);
     assert.throws(
-        () => window.legcord.backup.restore(),
+        () => window.remcord.backup.restore(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -2246,7 +2246,7 @@ test("backup.restore throws UNSUPPORTED_CAPABILITY when the snapshot denies it",
 test("backup.restore surfaces malformed restore outcomes without paths", async () => {
     // A path riding along with the outcome.
     const withPath = createBackupRestoreRuntime();
-    const pendingPath = withPath.window.legcord.backup.restore();
+    const pendingPath = withPath.window.remcord.backup.restore();
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_restore");
     respondBackupRestored(withPath.window, messagePath, {
         canceled: false,
@@ -2260,7 +2260,7 @@ test("backup.restore surfaces malformed restore outcomes without paths", async (
     // An unknown clientMods key: the dispatcher rejects the schema before
     // the facade ever sees it.
     const unknownKey = createBackupRestoreRuntime();
-    const pendingUnknown = unknownKey.window.legcord.backup.restore();
+    const pendingUnknown = unknownKey.window.remcord.backup.restore();
     const messageUnknown = unknownKey.window.messages.find((entry) => entry.command?.type === "backup_restore");
     respondBackupRestored(unknownKey.window, messageUnknown, {
         canceled: false,
@@ -2272,7 +2272,7 @@ test("backup.restore surfaces malformed restore outcomes without paths", async (
 
     // A non-object envelope is not valid clientMods.
     const arrayEnvelope = createBackupRestoreRuntime();
-    const pendingArray = arrayEnvelope.window.legcord.backup.restore();
+    const pendingArray = arrayEnvelope.window.remcord.backup.restore();
     const messageArray = arrayEnvelope.window.messages.find((entry) => entry.command?.type === "backup_restore");
     respondBackupRestored(arrayEnvelope.window, messageArray, {
         canceled: false,
@@ -2284,7 +2284,7 @@ test("backup.restore surfaces malformed restore outcomes without paths", async (
 
     // Cancellation must carry a null envelope.
     const canceledEnvelope = createBackupRestoreRuntime();
-    const pendingCanceled = canceledEnvelope.window.legcord.backup.restore();
+    const pendingCanceled = canceledEnvelope.window.remcord.backup.restore();
     const messageCanceled = canceledEnvelope.window.messages.find((entry) => entry.command?.type === "backup_restore");
     respondBackupRestored(canceledEnvelope.window, messageCanceled, {
         canceled: true,
@@ -2301,14 +2301,14 @@ test("backup.restore maps its timeout through the Electron error shape", async (
     // { ok: false, error } shape (transport misuse still throws
     // synchronously before dispatch).
     const { window } = createBackupRestoreRuntime();
-    const result = await window.legcord.backup.restore(50);
+    const result = await window.remcord.backup.restore(50);
     assert.equal(result.ok, false);
     assert.equal(result.error, "REQUEST_TIMEOUT");
 });
 
 test("backup.restore rejects pending requests when the document is disposed", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.legcord.backup.restore();
+    const pending = window.remcord.backup.restore();
     // Cancellation-by-disposal maps through the Electron error shape, never
     // an unhandled rejection: the pending promise settles as ok:false.
     const rejection = pending.then((result) => {
@@ -2352,21 +2352,21 @@ function respondThemeFolderOpened(window, request, id = "my-theme") {
 
 test("the facade exposes scoped folder reveal and theme open capabilities", () => {
     const { window } = createFoldersRuntime();
-    assert.equal(typeof window.legcord.folders.open, "function");
-    assert.equal(typeof window.legcord.folders.openTheme, "function");
-    assert.equal(Object.isFrozen(window.legcord.folders), true);
-    assert.equal(window.legcord.native.supports("folders.open"), true);
-    assert.equal(window.legcord.native.supports("folders.open_theme"), true);
+    assert.equal(typeof window.remcord.folders.open, "function");
+    assert.equal(typeof window.remcord.folders.openTheme, "function");
+    assert.equal(Object.isFrozen(window.remcord.folders), true);
+    assert.equal(window.remcord.native.supports("folders.open"), true);
+    assert.equal(window.remcord.native.supports("folders.open_theme"), true);
     // No generic path opener, dialog, picker, or shell surface may exist.
-    assert.equal(window.legcord.folders.openPath, undefined);
-    assert.equal(window.legcord.folders.openDialog, undefined);
-    assert.equal(window.legcord.folders.shell, undefined);
+    assert.equal(window.remcord.folders.openPath, undefined);
+    assert.equal(window.remcord.folders.openDialog, undefined);
+    assert.equal(window.remcord.folders.shell, undefined);
 });
 
 test("folders.open sends a closed-enum reveal request and resolves the location", async () => {
     const { window } = createFoldersRuntime();
     for (const location of ["storage", "themes", "plugins"]) {
-        const pending = window.legcord.folders.open(location);
+        const pending = window.remcord.folders.open(location);
         assert.ok(pending instanceof Promise);
         const message = window.messages.find((entry) => entry.command?.type === "folders_open");
         assert.ok(message);
@@ -2380,7 +2380,7 @@ test("folders.open sends a closed-enum reveal request and resolves the location"
 
 test("folders.openTheme sends an id-only open request and resolves the id", async () => {
     const { window } = createFoldersRuntime();
-    const pending = window.legcord.folders.openTheme("my-theme");
+    const pending = window.remcord.folders.openTheme("my-theme");
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "folders_open_theme");
     assert.ok(message);
@@ -2392,14 +2392,14 @@ test("folders.openTheme sends an id-only open request and resolves the id", asyn
 
 test("folder capabilities throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
     const { window } = createFoldersRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("folders.open"), false);
-    assert.equal(window.legcord.native.supports("folders.open_theme"), false);
+    assert.equal(window.remcord.native.supports("folders.open"), false);
+    assert.equal(window.remcord.native.supports("folders.open_theme"), false);
     assert.throws(
-        () => window.legcord.folders.open("themes"),
+        () => window.remcord.folders.open("themes"),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.throws(
-        () => window.legcord.folders.openTheme("my-theme"),
+        () => window.remcord.folders.openTheme("my-theme"),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -2415,13 +2415,13 @@ test("folder capabilities throw UNSUPPORTED_CAPABILITY when the snapshot denies 
 test("folder requests reject non-enum locations and hostile ids without sending", async () => {
     const { window } = createFoldersRuntime();
     for (const location of ["extensions", "Themes", "", "C:\\themes", "../themes", 42, null]) {
-        await assert.rejects(window.legcord.folders.open(location), /location must be one of/);
+        await assert.rejects(window.remcord.folders.open(location), /location must be one of/);
     }
     for (const id of ["", ".", "..", "../escape", "..\\escape", "a/b", "a\\b", "C:\\x", "has space", 42, null]) {
-        await assert.rejects(window.legcord.folders.openTheme(id), /id must match/);
+        await assert.rejects(window.remcord.folders.openTheme(id), /id must match/);
     }
     const oversized = `t${"t".repeat(64)}`;
-    await assert.rejects(window.legcord.folders.openTheme(oversized), /id must match/);
+    await assert.rejects(window.remcord.folders.openTheme(oversized), /id must match/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "folders_open"),
         false,
@@ -2435,21 +2435,21 @@ test("folder requests reject non-enum locations and hostile ids without sending"
 test("folder responses reject mismatched echoes and path-bearing members", async () => {
     // Host echoes a different location than requested.
     const mismatched = createFoldersRuntime();
-    const pendingMismatch = mismatched.window.legcord.folders.open("themes");
+    const pendingMismatch = mismatched.window.remcord.folders.open("themes");
     const messageMismatch = mismatched.window.messages.find((entry) => entry.command?.type === "folders_open");
     respondFoldersOpened(mismatched.window, messageMismatch, "storage");
     await assert.rejects(pendingMismatch, /folder response schema is invalid/);
 
     // Unknown location in a well-formed envelope.
     const unknown = createFoldersRuntime();
-    const pendingUnknown = unknown.window.legcord.folders.open("themes");
+    const pendingUnknown = unknown.window.remcord.folders.open("themes");
     const messageUnknown = unknown.window.messages.find((entry) => entry.command?.type === "folders_open");
     respondFoldersOpened(unknown.window, messageUnknown, "extensions");
     await assert.rejects(pendingUnknown, /folder response schema is invalid/);
 
     // Path riding along with a theme open response.
     const withPath = createFoldersRuntime();
-    const pendingPath = withPath.window.legcord.folders.openTheme("my-theme");
+    const pendingPath = withPath.window.remcord.folders.openTheme("my-theme");
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "folders_open_theme");
     withPath.window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2466,7 +2466,7 @@ test("folder responses reject mismatched echoes and path-bearing members", async
 
     // Host echoes a different id than requested.
     const wrongId = createFoldersRuntime();
-    const pendingId = wrongId.window.legcord.folders.openTheme("my-theme");
+    const pendingId = wrongId.window.remcord.folders.openTheme("my-theme");
     const messageId = wrongId.window.messages.find((entry) => entry.command?.type === "folders_open_theme");
     respondThemeFolderOpened(wrongId.window, messageId, "other-theme");
     await assert.rejects(pendingId, /theme folder response schema is invalid/);
@@ -2474,7 +2474,7 @@ test("folder responses reject mismatched echoes and path-bearing members", async
 
 test("folder requests reject host failures with the typed error", async () => {
     const { window } = createFoldersRuntime();
-    const pendingReveal = window.legcord.folders.open("themes");
+    const pendingReveal = window.remcord.folders.open("themes");
     const messageReveal = window.messages.find((entry) => entry.command?.type === "folders_open");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2489,7 +2489,7 @@ test("folder requests reject host failures with the typed error", async () => {
     );
     await assert.rejects(pendingReveal, /folder reveal failed/);
 
-    const pendingOpen = window.legcord.folders.openTheme("my-theme");
+    const pendingOpen = window.remcord.folders.openTheme("my-theme");
     const messageOpen = window.messages.find((entry) => entry.command?.type === "folders_open_theme");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2507,14 +2507,14 @@ test("folder requests reject host failures with the typed error", async () => {
 
 test("folder requests reject after their timeout", async () => {
     const { window } = createFoldersRuntime();
-    await assert.rejects(window.legcord.folders.open("themes", 50), /timed out/);
-    await assert.rejects(window.legcord.folders.openTheme("my-theme", 50), /timed out/);
+    await assert.rejects(window.remcord.folders.open("themes", 50), /timed out/);
+    await assert.rejects(window.remcord.folders.openTheme("my-theme", 50), /timed out/);
 });
 
 test("folder requests reject pending requests when the document is disposed", async () => {
     const { window } = createFoldersRuntime();
-    const pendingReveal = window.legcord.folders.open("themes");
-    const pendingOpen = window.legcord.folders.openTheme("my-theme");
+    const pendingReveal = window.remcord.folders.open("themes");
+    const pendingOpen = window.remcord.folders.openTheme("my-theme");
     const rejections = Promise.all([
         assert.rejects(pendingReveal, /document was disposed/),
         assert.rejects(pendingOpen, /document was disposed/),
@@ -2525,14 +2525,14 @@ test("folder requests reject pending requests when the document is disposed", as
 
 test("a reloaded document gets a fresh folders facade with no stale promises", async () => {
     const firstDocument = createFoldersRuntime();
-    const stale = firstDocument.window.legcord.folders.open("themes");
+    const stale = firstDocument.window.remcord.folders.open("themes");
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createFoldersRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.folders.openTheme("my-theme");
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.folders.openTheme("my-theme");
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "folders_open_theme");
     respondThemeFolderOpened(nextDocument.window, message, "my-theme");
     assert.equal(await pending, "my-theme");
@@ -2563,25 +2563,25 @@ function respondThemeInstalled(window, request, payload = { id: "Midnight-Harbor
 
 test("the facade exposes a CSS-text-only themes.install_code capability", () => {
     const { window } = createThemesRuntime();
-    assert.equal(typeof window.legcord.themes.installFromCode, "function");
-    assert.equal(typeof window.legcord.themes.writeCss, "function");
-    assert.equal(Object.isFrozen(window.legcord.themes), true);
-    assert.equal(window.legcord.native.supports("themes.install_code"), true);
-    assert.equal(window.legcord.native.supports("themes.write_css"), true);
+    assert.equal(typeof window.remcord.themes.installFromCode, "function");
+    assert.equal(typeof window.remcord.themes.writeCss, "function");
+    assert.equal(Object.isFrozen(window.remcord.themes), true);
+    assert.equal(window.remcord.native.supports("themes.install_code"), true);
+    assert.equal(window.remcord.native.supports("themes.write_css"), true);
     // No URL install, Electron sync setters, dialog, or picker surface may
     // exist. getThemes is the one closed synchronous exception (settings
     // shim): it returns only the frozen snapshot projection, never a host
     // operation.
-    assert.equal(window.legcord.themes.install, undefined);
-    assert.equal(typeof window.legcord.themes.getThemes, "function");
-    assert.equal(window.legcord.themes.set, undefined);
-    assert.equal(window.legcord.themes.edit, undefined);
-    assert.equal(window.legcord.themes.openImportPicker, undefined);
+    assert.equal(window.remcord.themes.install, undefined);
+    assert.equal(typeof window.remcord.themes.getThemes, "function");
+    assert.equal(window.remcord.themes.set, undefined);
+    assert.equal(window.remcord.themes.edit, undefined);
+    assert.equal(window.remcord.themes.openImportPicker, undefined);
 });
 
 test("themes.install_code sends CSS text only and resolves bounded metadata", async () => {
     const { window } = createThemesRuntime();
-    const pending = window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const pending = window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "theme_install_code");
     assert.ok(message);
@@ -2597,9 +2597,9 @@ test("themes.install_code sends CSS text only and resolves bounded metadata", as
 
 test("themes.install_code throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createThemesRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("themes.install_code"), false);
+    assert.equal(window.remcord.native.supports("themes.install_code"), false);
     assert.throws(
-        () => window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS),
+        () => window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -2610,9 +2610,9 @@ test("themes.install_code throws UNSUPPORTED_CAPABILITY when the snapshot denies
 
 test("themes.install_code rejects non-string, empty, and oversized CSS without sending", async () => {
     const { window } = createThemesRuntime();
-    await assert.rejects(window.legcord.themes.installFromCode(42), /css must be a non-empty string/);
-    await assert.rejects(window.legcord.themes.installFromCode(""), /css must be a non-empty string/);
-    await assert.rejects(window.legcord.themes.installFromCode("x".repeat(1048577)), /css must be a non-empty string/);
+    await assert.rejects(window.remcord.themes.installFromCode(42), /css must be a non-empty string/);
+    await assert.rejects(window.remcord.themes.installFromCode(""), /css must be a non-empty string/);
+    await assert.rejects(window.remcord.themes.installFromCode("x".repeat(1048577)), /css must be a non-empty string/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "theme_install_code"),
         false,
@@ -2622,21 +2622,21 @@ test("themes.install_code rejects non-string, empty, and oversized CSS without s
 test("themes.install_code rejects malformed install responses", async () => {
     // Enabled must stay false by Electron parity.
     const enabled = createThemesRuntime();
-    const pendingEnabled = enabled.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const pendingEnabled = enabled.window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const messageEnabled = enabled.window.messages.find((entry) => entry.command?.type === "theme_install_code");
     respondThemeInstalled(enabled.window, messageEnabled, { id: "Midnight-Harbor-BD", enabled: true });
     await assert.rejects(pendingEnabled, /theme install response schema is invalid/);
 
     // The id must be host-derived (<name>-BD): a foreign id is rejected.
     const foreign = createThemesRuntime();
-    const pendingForeign = foreign.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const pendingForeign = foreign.window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const messageForeign = foreign.window.messages.find((entry) => entry.command?.type === "theme_install_code");
     respondThemeInstalled(foreign.window, messageForeign, { id: "other", enabled: false });
     await assert.rejects(pendingForeign, /theme install response schema is invalid/);
 
     // No path, URL, source, or extra member may ride along.
     const withPath = createThemesRuntime();
-    const pendingPath = withPath.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const pendingPath = withPath.window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_install_code");
     withPath.window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2662,7 +2662,7 @@ test("themes.install_code rejects malformed install responses", async () => {
 
 test("themes.install_code rejects host failures with the typed error", async () => {
     const { window } = createThemesRuntime();
-    const pending = window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const pending = window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const message = window.messages.find((entry) => entry.command?.type === "theme_install_code");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2680,12 +2680,12 @@ test("themes.install_code rejects host failures with the typed error", async () 
 
 test("themes.install_code rejects after its timeout", async () => {
     const { window } = createThemesRuntime();
-    await assert.rejects(window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS, 50), /timed out/);
+    await assert.rejects(window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS, 50), /timed out/);
 });
 
 test("themes.install_code rejects pending requests when the document is disposed", async () => {
     const { window } = createThemesRuntime();
-    const pending = window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const pending = window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -2693,14 +2693,14 @@ test("themes.install_code rejects pending requests when the document is disposed
 
 test("a reloaded document gets a fresh theme install facade with no stale promises", async () => {
     const firstDocument = createThemesRuntime();
-    const stale = firstDocument.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    const stale = firstDocument.window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createThemesRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.themes.installFromCode(INSTALL_FIXTURE_CSS);
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_install_code");
     respondThemeInstalled(nextDocument.window, message);
     assert.deepEqual(await pending, {
@@ -2731,7 +2731,7 @@ function respondThemeWritten(window, request, payload = { id: "my-theme", enable
 
 test("themes.write_css sends id plus CSS text and resolves bounded metadata", async () => {
     const { window } = createThemesRuntime();
-    const pending = window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const pending = window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "theme_write_css");
     assert.ok(message);
@@ -2747,9 +2747,9 @@ test("themes.write_css sends id plus CSS text and resolves bounded metadata", as
 
 test("themes.write_css throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createThemesRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("themes.write_css"), false);
+    assert.equal(window.remcord.native.supports("themes.write_css"), false);
     assert.throws(
-        () => window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS),
+        () => window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -2761,12 +2761,12 @@ test("themes.write_css throws UNSUPPORTED_CAPABILITY when the snapshot denies it
 test("themes.write_css rejects hostile ids and oversized CSS without sending", async () => {
     const { window } = createThemesRuntime();
     for (const id of ["", ".", "..", "../escape", "..\\escape", "a/b", "C:\\x", 42, null]) {
-        await assert.rejects(window.legcord.themes.writeCss(id, WRITE_FIXTURE_CSS), /id must match/);
+        await assert.rejects(window.remcord.themes.writeCss(id, WRITE_FIXTURE_CSS), /id must match/);
     }
     const oversized = `t${"t".repeat(64)}`;
-    await assert.rejects(window.legcord.themes.writeCss(oversized, WRITE_FIXTURE_CSS), /id must match/);
-    await assert.rejects(window.legcord.themes.writeCss("my-theme", 42), /css must be a string/);
-    await assert.rejects(window.legcord.themes.writeCss("my-theme", "x".repeat(1048577)), /css must be a string/);
+    await assert.rejects(window.remcord.themes.writeCss(oversized, WRITE_FIXTURE_CSS), /id must match/);
+    await assert.rejects(window.remcord.themes.writeCss("my-theme", 42), /css must be a string/);
+    await assert.rejects(window.remcord.themes.writeCss("my-theme", "x".repeat(1048577)), /css must be a string/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "theme_write_css"),
         false,
@@ -2776,14 +2776,14 @@ test("themes.write_css rejects hostile ids and oversized CSS without sending", a
 test("themes.write_css rejects mismatched echoes and foreign members", async () => {
     // Host echoes a different id than requested.
     const mismatched = createThemesRuntime();
-    const pendingMismatch = mismatched.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const pendingMismatch = mismatched.window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const messageMismatch = mismatched.window.messages.find((entry) => entry.command?.type === "theme_write_css");
     respondThemeWritten(mismatched.window, messageMismatch, { id: "other-theme", enabled: true });
     await assert.rejects(pendingMismatch, /theme write response schema is invalid/);
 
     // A path riding along is rejected.
     const withPath = createThemesRuntime();
-    const pendingPath = withPath.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const pendingPath = withPath.window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_write_css");
     withPath.window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2808,7 +2808,7 @@ test("themes.write_css rejects mismatched echoes and foreign members", async () 
 
     // Enabled must be a real boolean.
     const noBool = createThemesRuntime();
-    const pendingBool = noBool.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const pendingBool = noBool.window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const messageBool = noBool.window.messages.find((entry) => entry.command?.type === "theme_write_css");
     noBool.window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2829,7 +2829,7 @@ test("themes.write_css rejects mismatched echoes and foreign members", async () 
 
 test("themes.write_css rejects host failures with the typed error", async () => {
     const { window } = createThemesRuntime();
-    const pending = window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const pending = window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const message = window.messages.find((entry) => entry.command?.type === "theme_write_css");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2847,12 +2847,12 @@ test("themes.write_css rejects host failures with the typed error", async () => 
 
 test("themes.write_css rejects after its timeout", async () => {
     const { window } = createThemesRuntime();
-    await assert.rejects(window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS, 50), /timed out/);
+    await assert.rejects(window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS, 50), /timed out/);
 });
 
 test("themes.write_css rejects pending requests when the document is disposed", async () => {
     const { window } = createThemesRuntime();
-    const pending = window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const pending = window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -2860,14 +2860,14 @@ test("themes.write_css rejects pending requests when the document is disposed", 
 
 test("a reloaded document gets a fresh theme write facade with no stale promises", async () => {
     const firstDocument = createThemesRuntime();
-    const stale = firstDocument.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    const stale = firstDocument.window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createThemesRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.themes.writeCss("my-theme", WRITE_FIXTURE_CSS);
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_write_css");
     respondThemeWritten(nextDocument.window, message);
     assert.deepEqual(await pending, {
@@ -2883,7 +2883,7 @@ test("theme requests stay inert off the trusted origin", async () => {
         "themes.install_code",
         "themes.write_css",
     ]);
-    assert.equal(window.legcord, undefined);
+    assert.equal(window.remcord, undefined);
 });
 
 function createImportRuntime(capabilities = ["bridge.ping", "themes.import_files"]) {
@@ -2906,20 +2906,20 @@ function respondThemeImported(window, request, payload = { canceled: false, impo
 
 test("the facade exposes a parameter-free themes.import_files capability", () => {
     const { window } = createImportRuntime();
-    assert.equal(typeof window.legcord.themes.importFiles, "function");
-    assert.equal(Object.isFrozen(window.legcord.themes), true);
-    assert.equal(window.legcord.native.supports("themes.import_files"), true);
+    assert.equal(typeof window.remcord.themes.importFiles, "function");
+    assert.equal(Object.isFrozen(window.remcord.themes), true);
+    assert.equal(window.remcord.native.supports("themes.import_files"), true);
     // No generic dialog, filesystem, path, or URL surface may exist.
-    assert.equal(window.legcord.themes.openImportPicker, undefined);
-    assert.equal(window.legcord.dialog, undefined);
-    assert.equal(window.legcord.fs, undefined);
-    assert.equal(window.legcord.themes.openFile, undefined);
-    assert.equal(window.legcord.themes.readFile, undefined);
+    assert.equal(window.remcord.themes.openImportPicker, undefined);
+    assert.equal(window.remcord.dialog, undefined);
+    assert.equal(window.remcord.fs, undefined);
+    assert.equal(window.remcord.themes.openFile, undefined);
+    assert.equal(window.remcord.themes.readFile, undefined);
 });
 
 test("themes.import_files sends an exact empty payload and resolves the bounded summary", async () => {
     const { window } = createImportRuntime();
-    const pending = window.legcord.themes.importFiles();
+    const pending = window.remcord.themes.importFiles();
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "theme_import_files");
     assert.ok(message);
@@ -2931,7 +2931,7 @@ test("themes.import_files sends an exact empty payload and resolves the bounded 
 
 test("themes.import_files resolves cancellation as control flow, never a rejection", async () => {
     const { window } = createImportRuntime();
-    const pending = window.legcord.themes.importFiles();
+    const pending = window.remcord.themes.importFiles();
     const message = window.messages.find((entry) => entry.command?.type === "theme_import_files");
     // A dismissed picker resolves { canceled: true }: no rejection, so no
     // unhandled rejection, error toast, or console error can follow.
@@ -2941,9 +2941,9 @@ test("themes.import_files resolves cancellation as control flow, never a rejecti
 
 test("themes.import_files throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createImportRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("themes.import_files"), false);
+    assert.equal(window.remcord.native.supports("themes.import_files"), false);
     assert.throws(
-        () => window.legcord.themes.importFiles(),
+        () => window.remcord.themes.importFiles(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -2955,7 +2955,7 @@ test("themes.import_files throws UNSUPPORTED_CAPABILITY when the snapshot denies
 test("themes.import_files rejects malformed summaries without path leakage", async () => {
     // Non-boolean cancellation flag.
     const noBool = createImportRuntime();
-    const pendingBool = noBool.window.legcord.themes.importFiles();
+    const pendingBool = noBool.window.remcord.themes.importFiles();
     const messageBool = noBool.window.messages.find((entry) => entry.command?.type === "theme_import_files");
     respondThemeImported(noBool.window, messageBool, { canceled: 0, imported: 1, failed: 0 });
     await assert.rejects(pendingBool, /theme import response schema is invalid/);
@@ -2967,7 +2967,7 @@ test("themes.import_files rejects malformed summaries without path leakage", asy
         { canceled: false, imported: 0, failed: -2 },
     ]) {
         const runtime = createImportRuntime();
-        const pending = runtime.window.legcord.themes.importFiles();
+        const pending = runtime.window.remcord.themes.importFiles();
         const message = runtime.window.messages.find((entry) => entry.command?.type === "theme_import_files");
         respondThemeImported(runtime.window, message, payload);
         await assert.rejects(pending, /theme import response schema is invalid/);
@@ -2975,7 +2975,7 @@ test("themes.import_files rejects malformed summaries without path leakage", asy
 
     // No path, URL, id, or extra member may ride along with the summary.
     const withPath = createImportRuntime();
-    const pendingPath = withPath.window.legcord.themes.importFiles();
+    const pendingPath = withPath.window.remcord.themes.importFiles();
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_import_files");
     withPath.window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -2996,7 +2996,7 @@ test("themes.import_files rejects malformed summaries without path leakage", asy
 
 test("themes.import_files maps host failures to typed errors", async () => {
     const { window } = createImportRuntime();
-    const pending = window.legcord.themes.importFiles();
+    const pending = window.remcord.themes.importFiles();
     const message = window.messages.find((entry) => entry.command?.type === "theme_import_files");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -3018,12 +3018,12 @@ test("themes.import_files waits with the long-operation picker timeout", async (
     // never the ordinary 5-second command timeout.
     assert.match(bootstrapTemplate, /function importFiles\(timeoutMs = 120_000\)/);
     const { window } = createImportRuntime();
-    await assert.rejects(window.legcord.themes.importFiles(50), /timed out/);
+    await assert.rejects(window.remcord.themes.importFiles(50), /timed out/);
 });
 
 test("themes.import_files rejects pending requests when the document is disposed", async () => {
     const { window } = createImportRuntime();
-    const pending = window.legcord.themes.importFiles();
+    const pending = window.remcord.themes.importFiles();
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -3031,14 +3031,14 @@ test("themes.import_files rejects pending requests when the document is disposed
 
 test("a reloaded document gets a fresh theme import facade with no stale promises", async () => {
     const firstDocument = createImportRuntime();
-    const stale = firstDocument.window.legcord.themes.importFiles();
+    const stale = firstDocument.window.remcord.themes.importFiles();
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createImportRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.themes.importFiles();
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.themes.importFiles();
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_import_files");
     respondThemeImported(nextDocument.window, message, { canceled: true, imported: 0, failed: 0 });
     assert.deepEqual(await pending, { canceled: true, imported: 0, failed: 0 });
@@ -3046,7 +3046,7 @@ test("a reloaded document gets a fresh theme import facade with no stale promise
 
 test("theme import requests stay inert off the trusted origin", async () => {
     const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.import_files"]);
-    assert.equal(window.legcord, undefined);
+    assert.equal(window.remcord, undefined);
 });
 
 function createEnableRuntime(capabilities = ["bridge.ping", "themes.set_enabled"]) {
@@ -3069,17 +3069,17 @@ function respondThemeEnabled(window, request, payload = { id: "my-theme", enable
 
 test("the facade exposes a typed themes.set_enabled flip and no generic set", () => {
     const { window } = createEnableRuntime();
-    assert.equal(typeof window.legcord.themes.setEnabled, "function");
-    assert.equal(window.legcord.native.supports("themes.set_enabled"), true);
+    assert.equal(typeof window.remcord.themes.setEnabled, "function");
+    assert.equal(window.remcord.native.supports("themes.set_enabled"), true);
     // No untyped set surface may exist. (The read-only `listThemes`
     // inventory is a separate slice with its own capability and tests.)
-    assert.equal(window.legcord.themes.set, undefined);
-    assert.equal(window.legcord.fs, undefined);
+    assert.equal(window.remcord.themes.set, undefined);
+    assert.equal(window.remcord.fs, undefined);
 });
 
 test("themes.set_enabled sends id plus boolean and resolves the echo", async () => {
     const { window } = createEnableRuntime();
-    const pending = window.legcord.themes.setEnabled("my-theme", true);
+    const pending = window.remcord.themes.setEnabled("my-theme", true);
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     assert.ok(message);
@@ -3091,9 +3091,9 @@ test("themes.set_enabled sends id plus boolean and resolves the echo", async () 
 
 test("themes.set_enabled throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createEnableRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("themes.set_enabled"), false);
+    assert.equal(window.remcord.native.supports("themes.set_enabled"), false);
     assert.throws(
-        () => window.legcord.themes.setEnabled("my-theme", true),
+        () => window.remcord.themes.setEnabled("my-theme", true),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -3105,14 +3105,14 @@ test("themes.set_enabled throws UNSUPPORTED_CAPABILITY when the snapshot denies 
 test("themes.set_enabled rejects hostile ids and non-boolean flags without sending", async () => {
     const { window } = createEnableRuntime();
     for (const id of ["", ".", "..", "../escape", "..\\escape", "a/b", "C:\\x", "has space"]) {
-        await assert.rejects(window.legcord.themes.setEnabled(id, true), /id must match/);
+        await assert.rejects(window.remcord.themes.setEnabled(id, true), /id must match/);
     }
     const oversized = "t".repeat(65);
-    await assert.rejects(window.legcord.themes.setEnabled(oversized, true), /id must match/);
-    await assert.rejects(window.legcord.themes.setEnabled("my-theme", 42), /enabled must be a boolean/);
-    await assert.rejects(window.legcord.themes.setEnabled("my-theme", "yes"), /enabled must be a boolean/);
-    await assert.rejects(window.legcord.themes.setEnabled("my-theme", null), /enabled must be a boolean/);
-    await assert.rejects(window.legcord.themes.setEnabled(42, true), /id must match/);
+    await assert.rejects(window.remcord.themes.setEnabled(oversized, true), /id must match/);
+    await assert.rejects(window.remcord.themes.setEnabled("my-theme", 42), /enabled must be a boolean/);
+    await assert.rejects(window.remcord.themes.setEnabled("my-theme", "yes"), /enabled must be a boolean/);
+    await assert.rejects(window.remcord.themes.setEnabled("my-theme", null), /enabled must be a boolean/);
+    await assert.rejects(window.remcord.themes.setEnabled(42, true), /id must match/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "theme_set_enabled"),
         false,
@@ -3123,21 +3123,21 @@ test("themes.set_enabled rejects echo mismatches and path ridealongs", async () 
     // Id echo must equal the request: another theme's flip can never
     // resolve this call.
     const mismatched = createEnableRuntime();
-    const pendingMismatch = mismatched.window.legcord.themes.setEnabled("my-theme", true);
+    const pendingMismatch = mismatched.window.remcord.themes.setEnabled("my-theme", true);
     const messageMismatch = mismatched.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     respondThemeEnabled(mismatched.window, messageMismatch, { id: "other-theme", enabled: true });
     await assert.rejects(pendingMismatch, /theme enable response schema is invalid/);
 
     // Enabled echo must equal the request.
     const flipped = createEnableRuntime();
-    const pendingFlipped = flipped.window.legcord.themes.setEnabled("my-theme", true);
+    const pendingFlipped = flipped.window.remcord.themes.setEnabled("my-theme", true);
     const messageFlipped = flipped.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     respondThemeEnabled(flipped.window, messageFlipped, { id: "my-theme", enabled: false });
     await assert.rejects(pendingFlipped, /theme enable response schema is invalid/);
 
     // No path, CSS, manifest, or extra member may ride along.
     const withPath = createEnableRuntime();
-    const pendingPath = withPath.window.legcord.themes.setEnabled("my-theme", true);
+    const pendingPath = withPath.window.remcord.themes.setEnabled("my-theme", true);
     const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     withPath.window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -3158,7 +3158,7 @@ test("themes.set_enabled rejects echo mismatches and path ridealongs", async () 
 
 test("themes.set_enabled maps host failures to typed errors", async () => {
     const { window } = createEnableRuntime();
-    const pending = window.legcord.themes.setEnabled("my-theme", true);
+    const pending = window.remcord.themes.setEnabled("my-theme", true);
     const message = window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -3176,12 +3176,12 @@ test("themes.set_enabled maps host failures to typed errors", async () => {
 
 test("themes.set_enabled rejects after its timeout", async () => {
     const { window } = createEnableRuntime();
-    await assert.rejects(window.legcord.themes.setEnabled("my-theme", true, 50), /timed out/);
+    await assert.rejects(window.remcord.themes.setEnabled("my-theme", true, 50), /timed out/);
 });
 
 test("themes.set_enabled rejects pending requests when the document is disposed", async () => {
     const { window } = createEnableRuntime();
-    const pending = window.legcord.themes.setEnabled("my-theme", true);
+    const pending = window.remcord.themes.setEnabled("my-theme", true);
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -3189,14 +3189,14 @@ test("themes.set_enabled rejects pending requests when the document is disposed"
 
 test("a reloaded document gets a fresh theme enable facade with no stale promises", async () => {
     const firstDocument = createEnableRuntime();
-    const stale = firstDocument.window.legcord.themes.setEnabled("my-theme", true);
+    const stale = firstDocument.window.remcord.themes.setEnabled("my-theme", true);
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createEnableRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.themes.setEnabled("my-theme", false);
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.themes.setEnabled("my-theme", false);
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "theme_set_enabled");
     respondThemeEnabled(nextDocument.window, message, { id: "my-theme", enabled: false });
     assert.deepEqual(await pending, { id: "my-theme", enabled: false });
@@ -3204,7 +3204,7 @@ test("a reloaded document gets a fresh theme enable facade with no stale promise
 
 test("theme enable requests stay inert off the trusted origin", async () => {
     const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.set_enabled"]);
-    assert.equal(window.legcord, undefined);
+    assert.equal(window.remcord, undefined);
 });
 
 function createListRuntime(capabilities = ["bridge.ping", "themes.list"]) {
@@ -3232,19 +3232,19 @@ function respondThemesList(window, request, themes = LIST_FIXTURE) {
 
 test("the facade exposes a parameter-free themes.list inventory", () => {
     const { window } = createListRuntime();
-    assert.equal(typeof window.legcord.themes.listThemes, "function");
-    assert.equal(window.legcord.native.supports("themes.list"), true);
+    assert.equal(typeof window.remcord.themes.listThemes, "function");
+    assert.equal(window.remcord.native.supports("themes.list"), true);
     // No CSS pull, filesystem, path, or URL surface may exist. getThemes is
     // the one closed synchronous exception (settings shim snapshot
     // projection, not a host operation).
-    assert.equal(typeof window.legcord.themes.getThemes, "function");
-    assert.equal(window.legcord.themes.getCSS, undefined);
-    assert.equal(window.legcord.fs, undefined);
+    assert.equal(typeof window.remcord.themes.getThemes, "function");
+    assert.equal(window.remcord.themes.getCSS, undefined);
+    assert.equal(window.remcord.fs, undefined);
 });
 
 test("themes.list sends an exact empty payload and resolves the display array", async () => {
     const { window } = createListRuntime();
-    const pending = window.legcord.themes.listThemes();
+    const pending = window.remcord.themes.listThemes();
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "themes_list");
     assert.ok(message);
@@ -3256,9 +3256,9 @@ test("themes.list sends an exact empty payload and resolves the display array", 
 
 test("themes.list throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createListRuntime(["bridge.ping"]);
-    assert.equal(window.legcord.native.supports("themes.list"), false);
+    assert.equal(window.remcord.native.supports("themes.list"), false);
     assert.throws(
-        () => window.legcord.themes.listThemes(),
+        () => window.remcord.themes.listThemes(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -3270,7 +3270,7 @@ test("themes.list throws UNSUPPORTED_CAPABILITY when the snapshot denies it", ()
 test("themes.list rejects malformed inventories without path leakage", async () => {
     // Non-array inventory.
     const nonArray = createListRuntime();
-    const pendingArray = nonArray.window.legcord.themes.listThemes();
+    const pendingArray = nonArray.window.remcord.themes.listThemes();
     const messageArray = nonArray.window.messages.find((entry) => entry.command?.type === "themes_list");
     respondThemesList(nonArray.window, messageArray, { themes: "nope" });
     await assert.rejects(pendingArray, /theme list response schema is invalid/);
@@ -3284,7 +3284,7 @@ test("themes.list rejects malformed inventories without path leakage", async () 
         "not-an-array",
     ]) {
         const runtime = createListRuntime();
-        const pending = runtime.window.legcord.themes.listThemes();
+        const pending = runtime.window.remcord.themes.listThemes();
         const message = runtime.window.messages.find((entry) => entry.command?.type === "themes_list");
         respondThemesList(runtime.window, message, themes);
         await assert.rejects(pending, /theme list response schema is invalid/);
@@ -3292,14 +3292,14 @@ test("themes.list rejects malformed inventories without path leakage", async () 
 
     // Over-long display string.
     const long = createListRuntime();
-    const pendingLong = long.window.legcord.themes.listThemes();
+    const pendingLong = long.window.remcord.themes.listThemes();
     const messageLong = long.window.messages.find((entry) => entry.command?.type === "themes_list");
     respondThemesList(long.window, messageLong, [{ ...LIST_FIXTURE[0], description: "x".repeat(4097) }]);
     await assert.rejects(pendingLong, /theme list response schema is invalid/);
 
     // Excessive entry count.
     const many = createListRuntime();
-    const pendingMany = many.window.legcord.themes.listThemes();
+    const pendingMany = many.window.remcord.themes.listThemes();
     const messageMany = many.window.messages.find((entry) => entry.command?.type === "themes_list");
     respondThemesList(
         many.window,
@@ -3311,12 +3311,12 @@ test("themes.list rejects malformed inventories without path leakage", async () 
 
 test("themes.list rejects after its timeout", async () => {
     const { window } = createListRuntime();
-    await assert.rejects(window.legcord.themes.listThemes(50), /timed out/);
+    await assert.rejects(window.remcord.themes.listThemes(50), /timed out/);
 });
 
 test("themes.list rejects pending requests when the document is disposed", async () => {
     const { window } = createListRuntime();
-    const pending = window.legcord.themes.listThemes();
+    const pending = window.remcord.themes.listThemes();
     const rejection = assert.rejects(pending, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await rejection;
@@ -3324,14 +3324,14 @@ test("themes.list rejects pending requests when the document is disposed", async
 
 test("a reloaded document gets a fresh theme list facade with no stale promises", async () => {
     const firstDocument = createListRuntime();
-    const stale = firstDocument.window.legcord.themes.listThemes();
+    const stale = firstDocument.window.remcord.themes.listThemes();
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createListRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.themes.listThemes();
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.themes.listThemes();
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "themes_list");
     respondThemesList(nextDocument.window, message, []);
     assert.deepEqual(await pending, []);
@@ -3339,14 +3339,14 @@ test("a reloaded document gets a fresh theme list facade with no stale promises"
 
 test("theme list requests stay inert off the trusted origin", async () => {
     const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.list"]);
-    assert.equal(window.legcord, undefined);
+    assert.equal(window.remcord, undefined);
 });
 
 function createPluginStorageRuntime(capabilities = ["bridge.ping", "plugin_storage.read", "plugin_storage.write"]) {
     return createRuntime("https://discord.com", capabilities);
 }
 
-function respondPluginRead(window, request, data = "hello legcord") {
+function respondPluginRead(window, request, data = "hello remcord") {
     const bytes = new TextEncoder().encode(data).length;
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
@@ -3377,18 +3377,18 @@ function respondPluginWrite(window, request, payloadBytes = 5) {
 
 test("the facade exposes a namespaced pluginStorage capability and no generic fs", () => {
     const { window } = createPluginStorageRuntime();
-    assert.equal(typeof window.legcord.pluginStorage.readFile, "function");
-    assert.equal(typeof window.legcord.pluginStorage.writeFile, "function");
-    assert.equal(Object.isFrozen(window.legcord.pluginStorage), true);
-    assert.equal(window.legcord.native.supports("plugin_storage.read"), true);
-    assert.equal(window.legcord.native.supports("plugin_storage.write"), true);
+    assert.equal(typeof window.remcord.pluginStorage.readFile, "function");
+    assert.equal(typeof window.remcord.pluginStorage.writeFile, "function");
+    assert.equal(Object.isFrozen(window.remcord.pluginStorage), true);
+    assert.equal(window.remcord.native.supports("plugin_storage.read"), true);
+    assert.equal(window.remcord.native.supports("plugin_storage.write"), true);
     // A generic filesystem abstraction must never exist.
-    assert.equal(window.legcord.fs, undefined);
+    assert.equal(window.remcord.fs, undefined);
 });
 
 test("pluginStorage.writeFile sends a scoped typed request and resolves bytes", async () => {
     const { window } = createPluginStorageRuntime();
-    const pending = window.legcord.pluginStorage.writeFile("my-plugin", "cache/note.txt", "hello");
+    const pending = window.remcord.pluginStorage.writeFile("my-plugin", "cache/note.txt", "hello");
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_write");
     assert.ok(message);
@@ -3402,7 +3402,7 @@ test("pluginStorage.writeFile sends a scoped typed request and resolves bytes", 
 
 test("pluginStorage.readFile sends a scoped typed request and resolves text", async () => {
     const { window } = createPluginStorageRuntime();
-    const pending = window.legcord.pluginStorage.readFile("my-plugin", "cache/note.txt");
+    const pending = window.remcord.pluginStorage.readFile("my-plugin", "cache/note.txt");
     assert.ok(pending instanceof Promise);
     const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
     assert.ok(message);
@@ -3410,20 +3410,20 @@ test("pluginStorage.readFile sends a scoped typed request and resolves text", as
         type: "plugin_storage_read",
         payload: { plugin_id: "my-plugin", relative_path: "cache/note.txt" },
     });
-    respondPluginRead(window, message, "hello legcord");
-    assert.equal(await pending, "hello legcord");
+    respondPluginRead(window, message, "hello remcord");
+    assert.equal(await pending, "hello remcord");
 });
 
 test("pluginStorage throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const denied = createPluginStorageRuntime(["bridge.ping"]);
-    assert.equal(denied.window.legcord.native.supports("plugin_storage.read"), false);
-    assert.equal(denied.window.legcord.native.supports("plugin_storage.write"), false);
+    assert.equal(denied.window.remcord.native.supports("plugin_storage.read"), false);
+    assert.equal(denied.window.remcord.native.supports("plugin_storage.write"), false);
     assert.throws(
-        () => denied.window.legcord.pluginStorage.readFile("p", "a.txt"),
+        () => denied.window.remcord.pluginStorage.readFile("p", "a.txt"),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.throws(
-        () => denied.window.legcord.pluginStorage.writeFile("p", "a.txt", "x"),
+        () => denied.window.remcord.pluginStorage.writeFile("p", "a.txt", "x"),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
@@ -3438,11 +3438,11 @@ test("pluginStorage throws UNSUPPORTED_CAPABILITY when the snapshot denies it", 
 
 test("pluginStorage rejects malformed requests without sending", async () => {
     const { window } = createPluginStorageRuntime();
-    await assert.rejects(window.legcord.pluginStorage.readFile("", "a.txt"), /pluginId/);
-    await assert.rejects(window.legcord.pluginStorage.readFile("a/b", "a.txt"), /pluginId/);
-    await assert.rejects(window.legcord.pluginStorage.readFile("p", ""), /relativePath/);
-    await assert.rejects(window.legcord.pluginStorage.writeFile("p", "a.txt", 42), /data must be a string/);
-    await assert.rejects(window.legcord.pluginStorage.writeFile(42, "a.txt", "x"), /pluginId/);
+    await assert.rejects(window.remcord.pluginStorage.readFile("", "a.txt"), /pluginId/);
+    await assert.rejects(window.remcord.pluginStorage.readFile("a/b", "a.txt"), /pluginId/);
+    await assert.rejects(window.remcord.pluginStorage.readFile("p", ""), /relativePath/);
+    await assert.rejects(window.remcord.pluginStorage.writeFile("p", "a.txt", 42), /data must be a string/);
+    await assert.rejects(window.remcord.pluginStorage.writeFile(42, "a.txt", "x"), /pluginId/);
     assert.equal(
         window.messages.some((message) => message.command?.type?.startsWith("plugin_storage")),
         false,
@@ -3451,13 +3451,13 @@ test("pluginStorage rejects malformed requests without sending", async () => {
 
 test("pluginStorage rejects malformed responses", async () => {
     const { window } = createPluginStorageRuntime();
-    const pending = window.legcord.pluginStorage.readFile("p", "a.txt");
+    const pending = window.remcord.pluginStorage.readFile("p", "a.txt");
     const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
     respondPluginRead(window, message, 42);
     await assert.rejects(pending, /plugin storage response schema is invalid/);
 
     const second = createPluginStorageRuntime();
-    const pending2 = second.window.legcord.pluginStorage.writeFile("p", "a.txt", "x");
+    const pending2 = second.window.remcord.pluginStorage.writeFile("p", "a.txt", "x");
     const message2 = second.window.messages.find((entry) => entry.command?.type === "plugin_storage_write");
     respondPluginWrite(second.window, message2, -1);
     await assert.rejects(pending2, /plugin storage response schema is invalid/);
@@ -3466,7 +3466,7 @@ test("pluginStorage rejects malformed responses", async () => {
 test("pluginStorage propagates typed host failures", async () => {
     for (const code of ["NOT_FOUND", "INVALID_PATH", "EXTENSION_DISABLED", "TOO_LARGE"]) {
         const { window } = createPluginStorageRuntime();
-        const pending = window.legcord.pluginStorage.readFile("p", "a.txt");
+        const pending = window.remcord.pluginStorage.readFile("p", "a.txt");
         const message = window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
         window.dispatchEvent(
             new FakeCustomEvent("remcord-native:response", {
@@ -3485,14 +3485,14 @@ test("pluginStorage propagates typed host failures", async () => {
 
 test("pluginStorage rejects after its timeout", async () => {
     const { window } = createPluginStorageRuntime();
-    await assert.rejects(window.legcord.pluginStorage.readFile("p", "a.txt", 50), /timed out/);
-    await assert.rejects(window.legcord.pluginStorage.writeFile("p", "a.txt", "x", 50), /timed out/);
+    await assert.rejects(window.remcord.pluginStorage.readFile("p", "a.txt", 50), /timed out/);
+    await assert.rejects(window.remcord.pluginStorage.writeFile("p", "a.txt", "x", 50), /timed out/);
 });
 
 test("pluginStorage rejects pending requests when the document is disposed", async () => {
     const { window } = createPluginStorageRuntime();
-    const read = window.legcord.pluginStorage.readFile("p", "a.txt");
-    const write = window.legcord.pluginStorage.writeFile("p", "a.txt", "x");
+    const read = window.remcord.pluginStorage.readFile("p", "a.txt");
+    const write = window.remcord.pluginStorage.writeFile("p", "a.txt", "x");
     const readRejection = assert.rejects(read, /document was disposed/);
     const writeRejection = assert.rejects(write, /document was disposed/);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
@@ -3502,14 +3502,14 @@ test("pluginStorage rejects pending requests when the document is disposed", asy
 
 test("a reloaded document gets a fresh pluginStorage facade with no stale promises", async () => {
     const firstDocument = createPluginStorageRuntime();
-    const stale = firstDocument.window.legcord.pluginStorage.readFile("p", "a.txt");
+    const stale = firstDocument.window.remcord.pluginStorage.readFile("p", "a.txt");
     const staleRejection = assert.rejects(stale, /document was disposed/);
     firstDocument.window.dispatchEvent(new FakeCustomEvent("pagehide"));
     await staleRejection;
 
     const nextDocument = createPluginStorageRuntime();
-    assert.notEqual(firstDocument.window.legcord, nextDocument.window.legcord);
-    const pending = nextDocument.window.legcord.pluginStorage.readFile("p", "a.txt");
+    assert.notEqual(firstDocument.window.remcord, nextDocument.window.remcord);
+    const pending = nextDocument.window.remcord.pluginStorage.readFile("p", "a.txt");
     const message = nextDocument.window.messages.find((entry) => entry.command?.type === "plugin_storage_read");
     respondPluginRead(nextDocument.window, message, "persisted");
     assert.equal(await pending, "persisted");
@@ -3712,43 +3712,43 @@ test("the theme smoke observation sees exactly the managed theme styles", () => 
 // The host push reuses the same managed-CSS builders as themes
 // (`managed_css_script`/`managed_css_remove_script`, structurally asserted in
 // Rust), so these tests pin the Quick CSS specifics on the shared contract:
-// Electron's verbatim `legcord-quick-css` identity, injection BEFORE themes
+// Electron's verbatim `remcord-quick-css` identity, injection BEFORE themes
 // (Electron's `initQuickCss`-before-theme-loop order), empty-CSS push parity,
 // and clean disabled/reload/reset behavior. Cascade note: for equal
 // specificity, later stylesheets win, so append order IS the cascade order.
 test("Quick CSS injects under Electron's verbatim style identity", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
     assert.equal(headChildren.length, 1);
-    assert.equal(headChildren[0].id, "legcord-quick-css");
+    assert.equal(headChildren[0].id, "remcord-quick-css");
     assert.equal(headChildren[0].textContent, ":root{--q:1;}");
 });
 
 test("Quick CSS injection reuses its style instead of duplicating", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:2;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:2;}");
     assert.equal(headChildren.length, 1);
-    assert.equal(document.getElementById("legcord-quick-css").textContent, ":root{--q:2;}");
+    assert.equal(document.getElementById("remcord-quick-css").textContent, ":root{--q:2;}");
 });
 
 test("empty Quick CSS is pushed as an empty managed style like Electron", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", "");
+    managedThemeInject(document, "remcord-quick-css", "");
     assert.equal(headChildren.length, 1);
-    assert.equal(document.getElementById("legcord-quick-css").textContent, "");
+    assert.equal(document.getElementById("remcord-quick-css").textContent, "");
 });
 
 test("Quick CSS injects before themes in the document head", () => {
     const { document, headChildren } = createFakeThemeDocument();
     // The host emits Quick CSS before the sorted theme set, matching
     // Electron's initQuickCss-before-theme-loop order.
-    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--probe:quickcss;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--probe:theme;}");
     managedThemeInject(document, "remcord-native-theme-zulu", ":root{--probe:theme;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
+        ["remcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
@@ -3756,14 +3756,14 @@ test("disabled Quick CSS leaves no style while themes still inject", () => {
     const { document, headChildren } = createFakeThemeDocument();
     // Disabled means the host never pushes: no node is created at all.
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
-    assert.equal(document.getElementById("legcord-quick-css"), null);
+    assert.equal(document.getElementById("remcord-quick-css"), null);
     assert.deepEqual(
         headChildren.map((node) => node.id),
         ["remcord-native-theme-alpha"],
     );
     // Disabling after an injection removes exactly the Quick CSS style.
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeRemove(document, "legcord-quick-css");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
+    managedThemeRemove(document, "remcord-quick-css");
     assert.deepEqual(
         headChildren.map((node) => node.id),
         ["remcord-native-theme-alpha"],
@@ -3772,39 +3772,39 @@ test("disabled Quick CSS leaves no style while themes still inject", () => {
 
 test("a reloaded document resets Quick CSS alongside themes", () => {
     const first = createFakeThemeDocument();
-    managedThemeInject(first.document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(first.document, "remcord-quick-css", ":root{--q:1;}");
     managedThemeInject(first.document, "remcord-native-theme-alpha", ":root{--a:1;}");
     assert.equal(first.headChildren.length, 2);
 
     const next = createFakeThemeDocument();
     assert.equal(next.headChildren.length, 0);
-    managedThemeRemove(next.document, "legcord-quick-css");
-    managedThemeInject(next.document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeRemove(next.document, "remcord-quick-css");
+    managedThemeInject(next.document, "remcord-quick-css", ":root{--q:1;}");
     managedThemeInject(next.document, "remcord-native-theme-alpha", ":root{--a:1;}");
     assert.deepEqual(
         next.headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha"],
+        ["remcord-quick-css", "remcord-native-theme-alpha"],
     );
 });
 
 test("Quick CSS coexists with Vencord and themes in cascade order", () => {
     const { document, headChildren } = createFakeThemeDocument();
     managedThemeInject(document, "remcord-native-vencord-css", "/*vencord*/");
-    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--probe:quickcss;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--probe:theme;}");
     // Re-injecting everything (as a reload would) duplicates nothing.
-    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--probe:quickcss;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--probe:theme;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["remcord-native-vencord-css", "legcord-quick-css", "remcord-native-theme-alpha"],
+        ["remcord-native-vencord-css", "remcord-quick-css", "remcord-native-theme-alpha"],
     );
 });
 
 test("the smoke observation reports Quick CSS presence and bytes", () => {
     const { document } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
-    const quickCssNode = document.getElementById("legcord-quick-css");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
+    const quickCssNode = document.getElementById("remcord-quick-css");
     const observed = {
         quickcss_present: Boolean(quickCssNode),
         quickcss_bytes: quickCssNode ? (quickCssNode.textContent || "").length : 0,
@@ -3812,7 +3812,7 @@ test("the smoke observation reports Quick CSS presence and bytes", () => {
     assert.deepEqual(observed, { quickcss_present: true, quickcss_bytes: ":root{--q:1;}".length });
 
     const empty = createFakeThemeDocument();
-    const missing = empty.document.getElementById("legcord-quick-css");
+    const missing = empty.document.getElementById("remcord-quick-css");
     assert.deepEqual(
         { quickcss_present: Boolean(missing), quickcss_bytes: missing ? missing.textContent.length : 0 },
         { quickcss_present: false, quickcss_bytes: 0 },
@@ -3832,66 +3832,66 @@ test("the smoke observation reports Quick CSS presence and bytes", () => {
 // accumulation (watcher ownership itself is asserted in Rust).
 test("a live content update never moves the style in the cascade", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--probe:quickcss;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
     // Live: alpha CSS changes on disk -> in-place update, no order repair.
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:2;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
+        ["remcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
     assert.equal(document.getElementById("remcord-native-theme-alpha").textContent, ":root{--a:2;}");
     // Live: Quick CSS changes -> still first, themes untouched.
-    managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss2;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--probe:quickcss2;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
+        ["remcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
 test("a recreated Quick CSS style is repaired back before themes", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     // Live: file deleted then recreated -> remove + fresh append lands last.
-    managedThemeRemove(document, "legcord-quick-css");
-    assert.equal(document.getElementById("legcord-quick-css"), null);
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:2;}");
+    managedThemeRemove(document, "remcord-quick-css");
+    assert.equal(document.getElementById("remcord-quick-css"), null);
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:2;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["remcord-native-theme-alpha", "legcord-quick-css"],
+        ["remcord-native-theme-alpha", "remcord-quick-css"],
     );
     // Host structural repair: Quick CSS first, then sorted themes.
-    managedCssOrder(document, ["legcord-quick-css", "remcord-native-theme-alpha"]);
+    managedCssOrder(document, ["remcord-quick-css", "remcord-native-theme-alpha"]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha"],
+        ["remcord-quick-css", "remcord-native-theme-alpha"],
     );
-    assert.equal(document.getElementById("legcord-quick-css").textContent, ":root{--q:2;}");
+    assert.equal(document.getElementById("remcord-quick-css").textContent, ":root{--q:2;}");
 });
 
 test("a newly added theme is repaired into sorted cascade position", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
     // Live: theme "mike" created -> appended at the end, out of position.
     managedThemeInject(document, "remcord-native-theme-mike", ":root{--m:1;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu", "remcord-native-theme-mike"],
+        ["remcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu", "remcord-native-theme-mike"],
     );
     // Host structural repair restores sorted order without touching bytes.
     managedCssOrder(document, [
-        "legcord-quick-css",
+        "remcord-quick-css",
         "remcord-native-theme-alpha",
         "remcord-native-theme-mike",
         "remcord-native-theme-zulu",
     ]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-mike", "remcord-native-theme-zulu"],
+        ["remcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-mike", "remcord-native-theme-zulu"],
     );
 });
 
@@ -3899,81 +3899,81 @@ test("rapid live edits collapse to one node with the final bytes", () => {
     const { document, headChildren } = createFakeThemeDocument();
     // Burst A -> B -> C within one debounce window: the host re-reads once
     // and pushes only the latest bytes.
-    managedThemeInject(document, "legcord-quick-css", ":root{--v:a;}");
-    managedThemeInject(document, "legcord-quick-css", ":root{--v:b;}");
-    managedThemeInject(document, "legcord-quick-css", ":root{--v:c;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--v:a;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--v:b;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--v:c;}");
     assert.equal(headChildren.length, 1);
-    assert.equal(document.getElementById("legcord-quick-css").textContent, ":root{--v:c;}");
+    assert.equal(document.getElementById("remcord-quick-css").textContent, ":root{--v:c;}");
 });
 
 test("disable removes the style and re-enable injects current bytes once", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     // Live: disabled while the file keeps changing -> style removed, file
     // writes issue no renderer work (nothing injected here).
-    managedThemeRemove(document, "legcord-quick-css");
+    managedThemeRemove(document, "remcord-quick-css");
     assert.deepEqual(
         headChildren.map((node) => node.id),
         ["remcord-native-theme-alpha"],
     );
     // Live: re-enabled -> current bytes appear exactly once, before themes.
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:99;}");
-    managedCssOrder(document, ["legcord-quick-css", "remcord-native-theme-alpha"]);
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:99;}");
+    managedCssOrder(document, ["remcord-quick-css", "remcord-native-theme-alpha"]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha"],
+        ["remcord-quick-css", "remcord-native-theme-alpha"],
     );
-    assert.equal(headChildren.filter((node) => node.id === "legcord-quick-css").length, 1);
+    assert.equal(headChildren.filter((node) => node.id === "remcord-quick-css").length, 1);
 });
 
 test("deleted themes remove exactly their stale style", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(document, "remcord-quick-css", ":root{--q:1;}");
     managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
     // Live: zulu directory deleted -> stale style removed, rest untouched.
     managedThemeRemove(document, "remcord-native-theme-zulu");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha"],
+        ["remcord-quick-css", "remcord-native-theme-alpha"],
     );
     // Live: zulu recreated -> injected, then repaired into sorted position.
     managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:2;}");
-    managedCssOrder(document, ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"]);
+    managedCssOrder(document, ["remcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
+        ["remcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
 test("live updates keep Vencord first across reloads without duplication", () => {
     const first = createFakeThemeDocument();
     managedThemeInject(first.document, "remcord-native-vencord-css", "/*vencord*/");
-    managedThemeInject(first.document, "legcord-quick-css", ":root{--q:1;}");
+    managedThemeInject(first.document, "remcord-quick-css", ":root{--q:1;}");
     managedThemeInject(first.document, "remcord-native-theme-alpha", ":root{--a:1;}");
     // Live content update: Vencord stays first, no duplicates.
     managedThemeInject(first.document, "remcord-native-theme-alpha", ":root{--a:2;}");
-    managedThemeInject(first.document, "legcord-quick-css", ":root{--q:2;}");
+    managedThemeInject(first.document, "remcord-quick-css", ":root{--q:2;}");
     assert.deepEqual(
         first.headChildren.map((node) => node.id),
-        ["remcord-native-vencord-css", "legcord-quick-css", "remcord-native-theme-alpha"],
+        ["remcord-native-vencord-css", "remcord-quick-css", "remcord-native-theme-alpha"],
     );
     // Reload: fresh document re-pushes the same order, still no duplicates.
     const next = createFakeThemeDocument();
     managedThemeInject(next.document, "remcord-native-vencord-css", "/*vencord*/");
-    managedThemeInject(next.document, "legcord-quick-css", ":root{--q:2;}");
+    managedThemeInject(next.document, "remcord-quick-css", ":root{--q:2;}");
     managedThemeInject(next.document, "remcord-native-theme-alpha", ":root{--a:2;}");
     assert.deepEqual(
         next.headChildren.map((node) => node.id),
-        ["remcord-native-vencord-css", "legcord-quick-css", "remcord-native-theme-alpha"],
+        ["remcord-native-vencord-css", "remcord-quick-css", "remcord-native-theme-alpha"],
     );
     assert.equal(first.headChildren.length, 3);
 });
 
 test("the facade exposes a frozen settingsBoot surface with exactly the approved members", () => {
     const { window } = createRuntime();
-    const boot = window.legcord.settingsBoot;
+    const boot = window.remcord.settingsBoot;
     assert.ok(boot);
     assert.deepEqual(Object.keys(boot).sort(), [
         "i18n",
@@ -3984,7 +3984,7 @@ test("the facade exposes a frozen settingsBoot surface with exactly the approved
         "settingsSource",
         "themes",
     ]);
-    assert.equal(Object.isFrozen(window.legcord), true);
+    assert.equal(Object.isFrozen(window.remcord), true);
     assert.equal(Object.isFrozen(boot), true);
     assert.equal(Object.isFrozen(boot.settings), true);
     assert.equal(Object.isFrozen(boot.themes), true);
@@ -3998,20 +3998,20 @@ test("the facade exposes a frozen settingsBoot surface with exactly the approved
 
 test("settingsBoot carries no path, URL, source, or renderer-supplied members", () => {
     const { window } = createRuntime();
-    const boot = window.legcord.settingsBoot;
+    const boot = window.remcord.settingsBoot;
     for (const key of ["path", "url", "source", "file", "pluginId", "plugin_id", "eval"]) {
         assert.equal(key in boot, false, `settingsBoot must not carry ${key}`);
         assert.equal(key in (boot.settings ?? {}), false);
     }
     const serialized = JSON.stringify({ settings: boot.settings, themes: boot.themes });
-    for (const forbidden of ["legcord://", "ts-out", "userData", "AppData"]) {
+    for (const forbidden of ["remcord://", "ts-out", "userData", "AppData"]) {
         assert.equal(serialized.includes(forbidden), false);
     }
 });
 
 test("settingsBoot.setLang sends one narrow fire-and-forget locale event", () => {
     const { window } = createRuntime();
-    const result = window.legcord.settingsBoot.setLang("en-US");
+    const result = window.remcord.settingsBoot.setLang("en-US");
     assert.equal(result, undefined);
     const events = window.messages.filter((message) => message.event?.type === "settings_boot_set_lang");
     assert.equal(events.length, 1);
@@ -4021,7 +4021,7 @@ test("settingsBoot.setLang sends one narrow fire-and-forget locale event", () =>
 test("settingsBoot.setLang rejects empty, oversized, and hostile locales without sending", () => {
     const { window } = createRuntime();
     for (const locale of ["", "en US", "en;US", "../escape", "a".repeat(33), 42, null, undefined, {}]) {
-        assert.throws(() => window.legcord.settingsBoot.setLang(locale), TypeError);
+        assert.throws(() => window.remcord.settingsBoot.setLang(locale), TypeError);
     }
     assert.equal(
         window.messages.some((message) => message.event?.type === "settings_boot_set_lang"),
@@ -4031,7 +4031,7 @@ test("settingsBoot.setLang rejects empty, oversized, and hostile locales without
 
 test("settingsBoot.restart sends an empty fire-and-forget event", () => {
     const { window } = createRuntime();
-    const result = window.legcord.settingsBoot.restart();
+    const result = window.remcord.settingsBoot.restart();
     assert.equal(result, undefined);
     const events = window.messages.filter((message) => message.event?.type === "settings_boot_restart");
     assert.equal(events.length, 1);
@@ -4046,12 +4046,12 @@ test("an unavailable settings source carries a null config with working narrow f
         lang: "en-US",
         i18n: {},
     });
-    const boot = window.legcord.settingsBoot;
+    const boot = window.remcord.settingsBoot;
     assert.equal(boot.settingsSource, "unavailable");
     assert.equal(boot.settings, null);
     assert.equal(Object.isFrozen(boot), true);
-    window.legcord.settingsBoot.setLang("de");
-    window.legcord.settingsBoot.restart();
+    window.remcord.settingsBoot.setLang("de");
+    window.remcord.settingsBoot.restart();
     assert.equal(window.messages.filter((message) => message.event?.type === "settings_boot_set_lang").length, 1);
     assert.equal(window.messages.filter((message) => message.event?.type === "settings_boot_restart").length, 1);
 });
@@ -4059,11 +4059,11 @@ test("an unavailable settings source carries a null config with working narrow f
 test("a reloaded document gets a fresh frozen settingsBoot with no shared identity", () => {
     const first = createRuntime();
     const next = createRuntime();
-    assert.ok(first.window.legcord.settingsBoot);
-    assert.ok(next.window.legcord.settingsBoot);
-    assert.equal(first.window.legcord.settingsBoot === next.window.legcord.settingsBoot, false);
-    assert.equal(first.window.legcord.settingsBoot.settings === next.window.legcord.settingsBoot.settings, false);
-    assert.equal(Object.isFrozen(next.window.legcord.settingsBoot), true);
+    assert.ok(first.window.remcord.settingsBoot);
+    assert.ok(next.window.remcord.settingsBoot);
+    assert.equal(first.window.remcord.settingsBoot === next.window.remcord.settingsBoot, false);
+    assert.equal(first.window.remcord.settingsBoot.settings === next.window.remcord.settingsBoot.settings, false);
+    assert.equal(Object.isFrozen(next.window.remcord.settingsBoot), true);
 });
 
 test("the settingsBoot surface adds no generic sync bridge, eval, or invocation", () => {
@@ -4083,42 +4083,42 @@ function createShimRuntime(origin = "https://discord.com", settingsBoot) {
 
 test("the closed shim exposes exactly the seven sync members plus two platform strings", () => {
     const { window } = createShimRuntime();
-    const legcord = window.legcord;
-    assert.equal(typeof legcord.settings.getConfig, "function");
-    assert.equal(typeof legcord.settings.setLang, "function");
-    assert.equal(typeof legcord.themes.getThemes, "function");
-    assert.equal(typeof legcord.translations, "object");
-    assert.equal(typeof legcord.restart, "function");
-    assert.equal(legcord.platform, "win32");
-    assert.equal(legcord.osRelease, "10.0.22631");
-    assert.equal(Object.isFrozen(legcord), true);
-    assert.equal(Object.isFrozen(legcord.settings), true);
-    assert.equal(Object.isFrozen(legcord.themes), true);
+    const remcord = window.remcord;
+    assert.equal(typeof remcord.settings.getConfig, "function");
+    assert.equal(typeof remcord.settings.setLang, "function");
+    assert.equal(typeof remcord.themes.getThemes, "function");
+    assert.equal(typeof remcord.translations, "object");
+    assert.equal(typeof remcord.restart, "function");
+    assert.equal(remcord.platform, "win32");
+    assert.equal(remcord.osRelease, "10.0.22631");
+    assert.equal(Object.isFrozen(remcord), true);
+    assert.equal(Object.isFrozen(remcord.settings), true);
+    assert.equal(Object.isFrozen(remcord.themes), true);
 });
 
 test("the shim exposes no generic sync API beyond the closed members", () => {
     const { window } = createRuntime();
-    const legcord = window.legcord;
-    assert.equal(legcord.settings.setConfig, undefined);
-    assert.equal(legcord.themes.install, undefined);
-    assert.equal(legcord.themes.set, undefined);
-    assert.equal(legcord.themes.edit, undefined);
-    assert.equal(legcord.themes.refresh, undefined);
-    assert.equal(legcord.themes.folder, undefined);
-    assert.equal(legcord.version, undefined);
-    assert.equal(legcord.fs, undefined);
-    assert.equal(legcord.plugins, undefined);
+    const remcord = window.remcord;
+    assert.equal(remcord.settings.setConfig, undefined);
+    assert.equal(remcord.themes.install, undefined);
+    assert.equal(remcord.themes.set, undefined);
+    assert.equal(remcord.themes.edit, undefined);
+    assert.equal(remcord.themes.refresh, undefined);
+    assert.equal(remcord.themes.folder, undefined);
+    assert.equal(remcord.version, undefined);
+    assert.equal(remcord.fs, undefined);
+    assert.equal(remcord.plugins, undefined);
     // backup.save and backup.restore are closed members (D4-1/D4-2): the
     // typed JSON-string save and the parameter-free restore, both with the
     // long-operation timeout. Neither takes a path.
-    assert.equal(typeof legcord.backup.save, "function");
-    assert.equal(typeof legcord.backup.restore, "function");
-    assert.equal(typeof legcord.translations, "object");
+    assert.equal(typeof remcord.backup.save, "function");
+    assert.equal(typeof remcord.backup.restore, "function");
+    assert.equal(typeof remcord.translations, "object");
 });
 
 test("shim getConfig returns the mutable snapshot synchronously with no throw", () => {
     const { window } = createShimRuntime();
-    const first = window.legcord.settings.getConfig();
+    const first = window.remcord.settings.getConfig();
     assert.equal(first.blockPowerSavingInVoiceChat, false);
     assert.equal(JSON.stringify(first.mods), JSON.stringify([]));
     // The plugin mutates the working copy (setConfig writes, keybind push):
@@ -4128,20 +4128,20 @@ test("shim getConfig returns the mutable snapshot synchronously with no throw", 
     first.mods.push("shelter");
     assert.equal(JSON.stringify(first.mods), JSON.stringify(["shelter"]));
     // ...while the host snapshot stays frozen and unchanged.
-    assert.equal(window.legcord.settingsBoot.settings.blockPowerSavingInVoiceChat, false);
-    assert.equal(Object.isFrozen(window.legcord.settingsBoot.settings), true);
+    assert.equal(window.remcord.settingsBoot.settings.blockPowerSavingInVoiceChat, false);
+    assert.equal(Object.isFrozen(window.remcord.settingsBoot.settings), true);
 });
 
 test("shim getConfig preserves identity within a document and isolates across documents", () => {
     const first = createShimRuntime();
-    const again = first.window.legcord.settings.getConfig();
-    assert.equal(first.window.legcord.settings.getConfig() === again, true);
+    const again = first.window.remcord.settings.getConfig();
+    assert.equal(first.window.remcord.settings.getConfig() === again, true);
     again.blockPowerSavingInVoiceChat = true;
-    assert.equal(first.window.legcord.settings.getConfig().blockPowerSavingInVoiceChat, true);
+    assert.equal(first.window.remcord.settings.getConfig().blockPowerSavingInVoiceChat, true);
 
     const next = createShimRuntime();
-    assert.equal(next.window.legcord.settings.getConfig() === again, false);
-    assert.equal(next.window.legcord.settings.getConfig().blockPowerSavingInVoiceChat, false);
+    assert.equal(next.window.remcord.settings.getConfig() === again, false);
+    assert.equal(next.window.remcord.settings.getConfig().blockPowerSavingInVoiceChat, false);
 });
 
 test("shim getThemes returns the closed six-field projection", () => {
@@ -4166,7 +4166,7 @@ test("shim getThemes returns the closed six-field projection", () => {
         i18n: {},
     };
     const { window } = createRuntime("https://discord.com", ["bridge.ping"], snapshot);
-    const themes = window.legcord.themes.getThemes();
+    const themes = window.remcord.themes.getThemes();
     assert.equal(themes.length, 2);
     // JSON-compared: the projection lives in the document realm, so its
     // prototype differs from test-realm literals.
@@ -4192,20 +4192,20 @@ test("shim getThemes returns the closed six-field projection", () => {
             enabled: false,
         }),
     );
-    assert.equal(window.legcord.themes.getThemes() === themes, true);
+    assert.equal(window.remcord.themes.getThemes() === themes, true);
 });
 
 test("shim translations exposes the frozen snapshot object as-is", () => {
     const { window } = createRuntime();
-    assert.equal(window.legcord.translations === window.legcord.settingsBoot.i18n, true);
-    assert.equal(Object.isFrozen(window.legcord.translations), true);
-    assert.equal(window.legcord.translations["invite-goBackToApp"], "Go back to the Discord app");
+    assert.equal(window.remcord.translations === window.remcord.settingsBoot.i18n, true);
+    assert.equal(Object.isFrozen(window.remcord.translations), true);
+    assert.equal(window.remcord.translations["invite-goBackToApp"], "Go back to the Discord app");
 });
 
 test("shim setLang posts the narrow locale event and restart posts the empty event", () => {
     const { window } = createRuntime();
-    assert.equal(window.legcord.settings.setLang("de"), undefined);
-    assert.equal(window.legcord.restart(), undefined);
+    assert.equal(window.remcord.settings.setLang("de"), undefined);
+    assert.equal(window.remcord.restart(), undefined);
     assert.deepEqual(
         window.messages
             .filter((message) => message.event?.type === "settings_boot_set_lang")
@@ -4224,8 +4224,8 @@ test("shim setLang posts the narrow locale event and restart posts the empty eve
         window.messages.some((message) => message.command),
         false,
     );
-    assert.throws(() => window.legcord.settings.setLang("../escape"), TypeError);
-    assert.throws(() => window.legcord.settings.setLang(""), TypeError);
+    assert.throws(() => window.remcord.settings.setLang("../escape"), TypeError);
+    assert.throws(() => window.remcord.settings.setLang(""), TypeError);
 });
 
 test("the shim replays the real plugin onLoad reads without sync-member failures", () => {
@@ -4234,13 +4234,13 @@ test("the shim replays the real plugin onLoad reads without sync-member failures
     // registerSections flag - twice-called getConfig included.
     const { window } = createShimRuntime();
     const store = {};
-    store.settings = window.legcord.settings.getConfig();
-    store.themes = window.legcord.themes.getThemes();
-    store.i18n = window.legcord.translations;
-    window.legcord.settings.setLang("en-US");
-    const sections = ["legcord-settings", "legcord-themes"];
-    if (window.legcord.settings.getConfig().showExperimentalPluginMenu) sections.push("legcord-plugins");
-    assert.deepEqual(sections, ["legcord-settings", "legcord-themes"]);
+    store.settings = window.remcord.settings.getConfig();
+    store.themes = window.remcord.themes.getThemes();
+    store.i18n = window.remcord.translations;
+    window.remcord.settings.setLang("en-US");
+    const sections = ["remcord-settings", "remcord-themes"];
+    if (window.remcord.settings.getConfig().showExperimentalPluginMenu) sections.push("remcord-plugins");
+    assert.deepEqual(sections, ["remcord-settings", "remcord-themes"]);
     assert.equal(store.settings.blockPowerSavingInVoiceChat, false);
     assert.equal(store.themes.length, 0);
     assert.equal(store.i18n["invite-goBackToApp"], "Go back to the Discord app");
@@ -4249,13 +4249,13 @@ test("the shim replays the real plugin onLoad reads without sync-member failures
 test("the renderer cannot replace the host snapshot or shim before plugin execution", () => {
     const { window } = createRuntime();
     assert.throws(() => {
-        window.legcord.settingsBoot = {};
+        window.remcord.settingsBoot = {};
     }, TypeError);
     assert.throws(() => {
-        window.legcord.translations = {};
+        window.remcord.translations = {};
     }, TypeError);
     assert.throws(() => {
-        window.legcord.platform = "darwin";
+        window.remcord.platform = "darwin";
     }, TypeError);
-    assert.equal(window.legcord.platform, "win32");
+    assert.equal(window.remcord.platform, "win32");
 });

@@ -58,7 +58,7 @@ pub const MAX_OS_RELEASE_BYTES: usize = 64;
 /// (`src/discord/ipc.ts:374-376` serves `os.release()`, i.e.
 /// `"major.minor.build"` on Windows).
 ///
-/// Used ONLY for the closed settings shim's `window.legcord.osRelease`, which
+/// Used ONLY for the closed settings shim's `window.remcord.osRelease`, which
 /// the Settings UI reads during render (`isMinWindowsVersion()` in
 /// `src/shelter/settings/settings.ts:397-402`, called from
 /// `SettingsPage.tsx:348`). There is no capability, no request, and no

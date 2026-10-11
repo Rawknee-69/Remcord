@@ -422,7 +422,7 @@ mod tests {
                 "?",
                 "cookie",
                 "token",
-                "legcord://",
+                "remcord://",
                 "remcord://",
                 "query",
             ] {
@@ -456,7 +456,7 @@ mod tests {
             "set_timeout",
             "Uri(",
             "https://",
-            "legcord://",
+            "remcord://",
             "remcord://",
         ] {
             assert!(

@@ -2,7 +2,7 @@
 //!
 //! This module is the native counterpart of the Electron plugin-storage
 //! handlers in `src/discord/ipc.ts` (`pluginWriteFile` / `pluginReadFile`,
-//! exposed to third-party plugins as `window.legcord.fs.writeFile/readFile`
+//! exposed to third-party plugins as `window.remcord.fs.writeFile/readFile`
 //! via `src/discord/preload/bridge.ts`). The Electron contract, traced from
 //! the actual implementation rather than declarations:
 //!

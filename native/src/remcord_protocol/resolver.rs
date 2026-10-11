@@ -116,26 +116,10 @@ pub enum ResolveError {
 /// Result type for resolution operations.
 pub type ResolveResult<T> = Result<T, ResolveError>;
 
-/// The legacy Electron scheme. Never registered with WebView2 and never
-/// emitted by Remcord content; accepted only as a rewrite input so existing
-/// user customizations (themes, plugins, Quick CSS) and the embedded upstream
-/// artifact keep resolving. The rewrite happens before every security check,
-/// so legacy URLs face the identical policy as canonical ones.
-pub const LEGACY_SCHEME_PREFIX: &str = "legcord://";
-/// The one canonical runtime scheme.
-pub const CANONICAL_SCHEME_PREFIX: &str = "remcord://";
-
-/// True when `uri` uses the legacy Electron scheme and will be rewritten into
-/// the canonical resolver. Host-side logging only; no renderer surface.
-pub fn is_legacy_uri(uri: &str) -> bool {
-    uri.starts_with(LEGACY_SCHEME_PREFIX)
-}
-
 /// Resolves a remcord:// URI to a filesystem path.
 ///
-/// Legacy `legcord://` URLs are rewritten to `remcord://` before any other
-/// check and face the identical policy below — one canonical resolver, no
-/// second security surface.
+/// Only the canonical scheme is accepted. Any other scheme — including the
+/// previous product generation's — is rejected before any other check.
 ///
 /// Performs the following security checks:
 /// 1. Validates the namespace is one of the fixed set
@@ -157,17 +141,6 @@ pub fn is_legacy_uri(uri: &str) -> bool {
 /// 17. Does not accept renderer-provided absolute roots
 /// 18. Does not expose filesystem paths in errors
 pub fn resolve_uri(uri: &str, roots: &NamespaceRoots) -> ResolveResult<PathBuf> {
-    // Narrow legacy compatibility: rewrite the old Electron scheme into the
-    // canonical one before any security decision. Everything below — raw-text
-    // traversal checks, decoding policy, containment — runs on the rewritten
-    // URI exactly as if the caller had used the canonical scheme.
-    let rewritten;
-    let uri = if let Some(rest) = uri.strip_prefix(LEGACY_SCHEME_PREFIX) {
-        rewritten = format!("{CANONICAL_SCHEME_PREFIX}{rest}");
-        rewritten.as_str()
-    } else {
-        uri
-    };
     // Security-critical: check the RAW uri string BEFORE url::Url normalizes it.
     // url::Url resolves dot segments and decodes %2e, so traversal would be
     // invisible after parsing. All traversal/encoding checks run on raw text.
@@ -739,37 +712,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_scheme_rewrites_to_the_same_file() {
-        // Existing user customizations and the embedded upstream artifact
-        // reference the old Electron scheme. The rewrite must land on the
-        // identical file the canonical URL resolves to.
+    fn non_canonical_schemes_are_rejected() {
+        // One canonical scheme: anything else fails before any other check,
+        // with no rewrite, alias, or fallback path.
         let (_temp, roots) = setup_test_roots();
-        assert!(is_legacy_uri("legcord://plugins/test.js"));
-        assert!(!is_legacy_uri("remcord://plugins/test.js"));
-        let canonical = resolve_uri("remcord://plugins/test.js", &roots).unwrap();
-        let legacy = resolve_uri("legcord://plugins/test.js", &roots).unwrap();
-        assert_eq!(canonical, legacy);
-        assert!(resolve_uri("legcord://html/splash.html", &roots).is_ok());
-        assert!(resolve_uri("legcord://assets/image.png", &roots).is_ok());
-    }
-
-    #[test]
-    fn legacy_scheme_faces_the_identical_security_policy() {
-        // The rewrite happens before every check: traversal, UNC, drive
-        // paths, queries, and unknown namespaces fail for legacy URLs exactly
-        // as they do for canonical ones. No second surface is exposed.
-        let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/../html/splash.html", &roots);
-        assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
-        let result = resolve_uri("legcord://plugins/C:/Windows/System32/cmd.exe", &roots);
-        assert!(matches!(result, Err(ResolveError::AbsoluteWindowsPath(_))));
-        let result = resolve_uri("legcord://plugins//server/share/file.txt", &roots);
-        assert!(matches!(result, Err(ResolveError::UncPath(_))));
-        let result = resolve_uri("legcord://plugins/test.js?query=1", &roots);
-        assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
-        let result = resolve_uri("legcord://invalid/test.js", &roots);
-        assert!(matches!(result, Err(ResolveError::InvalidNamespace(_))));
-        let result = resolve_uri("legcord://plugins/nonexistent.js", &roots);
-        assert!(matches!(result, Err(ResolveError::NotFound)));
+        for uri in [
+            "other://plugins/test.js",
+            "http://plugins/test.js",
+            "remcord:/plugins/test.js",
+            "://plugins/test.js",
+            "",
+        ] {
+            let result = resolve_uri(uri, &roots);
+            assert!(
+                matches!(result, Err(ResolveError::InvalidNamespace(_))),
+                "{uri} must be rejected"
+            );
+        }
     }
 }

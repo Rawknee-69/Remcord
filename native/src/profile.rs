@@ -8,8 +8,8 @@
 //! - Release: `%LOCALAPPDATA%\Remcord` — a stable, writable,
 //!   per-user, machine-local directory. Machine-local (not roaming) fits
 //!   the WebView2 user-data caches living beneath it, and the leaf
-//!   (`Remcord`) can never alias Electron's `%APPDATA%\legcord`
-//!   profile (roaming, different leaf and different root).
+//!   (`Remcord`) can never alias the production Electron profile
+//!   (roaming, different leaf and different root).
 //! - Explicit override (`REMCORD_NATIVE_PROFILE_DIR`, absolute path only):
 //!   honored in both builds for safe isolated testing (e.g. a temp
 //!   directory). The renderer never supplies this: it is read once from
@@ -33,7 +33,7 @@ pub const DEV_PROFILE_DIR: &str = r"E:\Remcord.webview-dev-user-data";
 /// Explicit host-side profile override (absolute path). Both builds.
 pub const PROFILE_OVERRIDE_ENV: &str = "REMCORD_NATIVE_PROFILE_DIR";
 /// Leaf of the release profile under `%LOCALAPPDATA%`. Distinct from
-/// Electron's `%APPDATA%\legcord` by root and by leaf.
+/// the production Electron profile by root and by leaf.
 pub const RELEASE_PROFILE_LEAF: &str = "Remcord";
 
 /// Which configuration a resolved profile came from.

@@ -218,7 +218,7 @@ mod tests {
         .unwrap();
         for forbidden in [
             "ts-out",
-            "legcord://",
+            "remcord://",
             "E:\\",
             "C:\\",
             "userData",

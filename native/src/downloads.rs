@@ -1,7 +1,7 @@
 //! Native download filename/destination policy (P0.5).
 //!
 //! Electron contract: active source has NO `will-download` /
-//! `download-item` / `downloadURL` handler, so production Legcord uses the
+//! `download-item` / `downloadURL` handler, so production Remcord uses the
 //! Chromium/Electron default — a per-download Save dialog with the
 //! server-suggested filename and a user-chosen destination.
 //!
@@ -468,7 +468,7 @@ mod tests {
             "evaluate_script",
             "postMessage",
             "window.ipc",
-            "legcord",
+            "remcord",
             "Command::new",
             "std::process",
         ] {

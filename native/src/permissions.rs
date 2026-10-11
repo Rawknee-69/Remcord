@@ -337,7 +337,7 @@ mod tests {
             "https://discord.com.",
             "https://user@discord.com",
             "about:blank",
-            "legcord://html/x",
+            "remcord://html/x",
             "remcord://html/x",
             "",
             "not a uri",

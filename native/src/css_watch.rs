@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! Quick CSS: initQuickCss -> webContents.send("addTheme",
-//!            "legcord-quick-css", <utf-8, even when empty>)
+//!            "remcord-quick-css", <utf-8, even when empty>)
 //!            -> fs.watch(quickCssPath) + 300 ms debounce on "change" events
 //!            -> removeTheme + addTheme (re-read on fire)
 //!            -> disableQuickCss closes the watcher + removeTheme
@@ -38,7 +38,7 @@
 //!   [`crate::mod_substrate::managed_css_script`] (in-place, never
 //!   re-appended), structural changes finish with
 //!   [`crate::mod_substrate::managed_css_order_script`] over
-//!   `[legcord-quick-css + sorted theme ids]`.
+//!   `[remcord-quick-css + sorted theme ids]`.
 //!
 //! Logical resources owned here: the fixed `<profile>/quickCss.css` file
 //! (filtered out of the profile-directory watch) and the `<profile>/themes/`
