@@ -72,6 +72,44 @@ Source: "stage\license.txt"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{autoprograms}\Legcord Native"; Filename: "{app}\legcord.exe"
 
 [Code]
+{ WebView2 Runtime prerequisite (release blocker 4): warn-and-continue.
+  The Evergreen Runtime registration is read from the documented EdgeUpdate
+  ClientState locations (per-machine 64/32-bit views plus per-user) with no
+  plugins and no elevation. If nothing is registered, setup shows where to
+  get the official Runtime and CONTINUES: registry heuristics can miss valid
+  systems, and the application itself gates authoritatively at launch with
+  the loader check (webview_runtime.rs) plus an actionable dialog. No
+  download is invoked, no payload is bundled, no privilege is requested. }
+
+const
+  WebView2ClientState = 'SOFTWARE\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  WebView2InfoPage = 'https://developer.microsoft.com/microsoft-edge/webview2/';
+
+function WebView2RuntimePresent(): Boolean;
+var
+  Version: String;
+begin
+  Result :=
+    (RegQueryStringValue(HKLM64, WebView2ClientState, 'pv', Version) and (Version <> '')) or
+    (RegQueryStringValue(HKLM32, WebView2ClientState, 'pv', Version) and (Version <> '')) or
+    (RegQueryStringValue(HKCU, WebView2ClientState, 'pv', Version) and (Version <> ''));
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if not WebView2RuntimePresent() then
+  begin
+    MsgBox('Legcord Native needs the Microsoft Edge WebView2 Evergreen Runtime, '
+      + 'and none was detected on this PC.' + #13#10 + #13#10
+      + 'Get it free from Microsoft at:' + #13#10
+      + WebView2InfoPage + #13#10 + #13#10
+      + 'Setup will continue, but Legcord Native cannot start until the Runtime is installed. '
+      + 'Your data is safe: installing never touches your profiles.',
+      mbInformation, MB_OK);
+  end;
+end;
+
 { Directory guards: the install target must stay dedicated to native
   Legcord. Refuse the Electron installation, the Electron profile, the
   native profile, and the DEV profile, even if typed by hand. }

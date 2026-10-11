@@ -69,6 +69,14 @@ Check ($code -match 'Name: "\{autoprograms\}\\Legcord Native"') "distinct Start 
 Check (-not ($code -match "signtool")) "no signing claims in installer"
 Check (-not ($code -match "autoupdate|update channel")) "no updater claims in installer"
 
+# 8. WebView2 Runtime prerequisite: detect, warn, never block or download.
+Check ($code -match "function WebView2RuntimePresent\(\)") "runtime presence function present"
+Check ($code -match "F3017226-FE2A-4295-8BDF-00C3A9A7E4C5") "EdgeUpdate ClientState ID present"
+Check (($code -match "HKLM64") -and ($code -match "HKLM32") -and ($code -match "HKCU")) "per-machine and per-user views covered"
+Check ($code -match "function InitializeSetup\(\).*Result := True" -or ($code -match "function InitializeSetup" -and $code -match "Result := True")) "setup warns and continues (no hard block)"
+Check ($code -match "https://developer\.microsoft\.com/microsoft-edge/webview2/") "verified official page referenced"
+Check (-not ($code -match "DownloadPage|IDPDownload|InternetReadFile|URLDownloadToFile|bitsadmin|Invoke-WebRequest|curl\.exe|Start-Process.*http")) "no silent download machinery"
+
 # 8. Cross-check live product metadata when a release exe exists.
 $exe = Join-Path $native "target/release/legcord.exe"
 if (Test-Path -LiteralPath $exe -PathType Leaf) {

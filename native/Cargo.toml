@@ -29,6 +29,10 @@ http = "1.5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Windows WebView2 COM interop for response header interception (CSP modification)
 webview2-com = "0.39"
+# Direct loader API for Evergreen Runtime presence detection
+# (GetAvailableCoreWebView2BrowserVersionString; the safe wrapper above
+# does not expose it). Pinned to the same 0.39 line.
+webview2-com-sys = "0.39"
 # URL parsing for legcord:// protocol
 url = "2.5"
 # Percent encoding/decoding for legcord:// protocol

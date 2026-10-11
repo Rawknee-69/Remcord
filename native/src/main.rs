@@ -28,6 +28,7 @@ mod settings_plugin;
 mod theme_import;
 mod themes;
 mod titlebar_plugin;
+mod webview_runtime;
 
 use std::{
     collections::HashMap,
@@ -2842,6 +2843,38 @@ where
     }
 }
 
+/// User-facing missing-Runtime diagnostic (release blocker 4). stderr for
+/// console launches plus a message box for shortcut launches with no
+/// console. Names the exact component and the remedy; no profile, browser,
+/// or configuration is touched, and nothing is retried.
+#[cfg(target_os = "windows")]
+fn report_missing_runtime() {
+    const MESSAGE: &str = "Legcord needs the Microsoft Edge WebView2 Evergreen Runtime to run, and none was found on this PC.\n\nInstall the Evergreen Runtime from Microsoft's official WebView2 page, then start Legcord again. Your Legcord data was not changed.";
+    eprintln!("[Runtime] {MESSAGE}");
+    use windows::{
+        core::{HSTRING, PCWSTR},
+        Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK},
+    };
+    let text = HSTRING::from(MESSAGE);
+    let caption = HSTRING::from("Legcord");
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR::from_raw(text.as_ptr()),
+            PCWSTR::from_raw(caption.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+/// Non-Windows fallback: stderr only (no WebView2 shell exists here).
+#[cfg(not(target_os = "windows"))]
+fn report_missing_runtime() {
+    eprintln!(
+        "[Runtime] WebView2 Evergreen Runtime is required on Windows; this platform is unsupported"
+    );
+}
+
 /// Attaches the P0.5 download policy to one WebView builder (main and P0.4
 /// child share this helper — no policy fork).
 ///
@@ -4289,17 +4322,49 @@ fn main() -> Result<(), Box<dyn Error>> {
         seen_ids.push(descriptor.id);
     }
     let mut web_context = WebContext::new(Some(profile_path.clone()));
+    // Release blocker 4: Evergreen WebView2 Runtime prerequisite check,
+    // before any WebView initialization. Supported loader lookup (default
+    // per-machine + per-user registrations, no admin, no profile); the
+    // result is logged and reused below to classify an environment failure
+    // as a missing Runtime vs an unrelated error. Never a recovery input.
+    let runtime_check = webview_runtime::check();
+    match &runtime_check {
+        webview_runtime::RuntimeCheck::Present { version } => {
+            println!("[Runtime] WebView2 Evergreen Runtime version={version}");
+        }
+        webview_runtime::RuntimeCheck::Absent => {
+            eprintln!(
+                "[Runtime] WebView2 Evergreen Runtime not detected; environment creation will fail without it"
+            );
+        }
+    }
     // WebView2 environment with the legcord custom scheme registered (P0.2).
     // Created here — before the environment exists and before navigation —
     // and adopted by wry below. Fail-fast: without registration, legcord://
     // subresources fail as an unknown scheme and no handler ever fires.
     #[cfg(target_os = "windows")]
     let webview_env = {
-        let env = create_legcord_webview_environment(&profile_path)?;
-        println!(
-            "[LegcordProtocol] scheme registered: legcord (authority, secure, https://discord.com)"
-        );
-        env
+        match create_legcord_webview_environment(&profile_path) {
+            Ok(env) => {
+                println!(
+                    "[LegcordProtocol] scheme registered: legcord (authority, secure, https://discord.com)"
+                );
+                env
+            }
+            Err(error) => {
+                // Absent Runtime: stop cleanly with an actionable
+                // diagnostic (stderr for consoles, a message box for
+                // shortcut launches with no console). Nothing falls back
+                // anywhere — no other profile, browser, or configuration.
+                // A present Runtime means an unrelated init error: propagate
+                // it unchanged for the existing fail-fast behavior.
+                if runtime_check == webview_runtime::RuntimeCheck::Absent {
+                    report_missing_runtime();
+                    return Err("WebView2 Evergreen Runtime is not installed; install it from Microsoft and start Legcord again".into());
+                }
+                return Err(error);
+            }
+        }
     };
     // Phase 2G: register the environment-level browser-process exit observer
     // exactly once for the shared environment. This provides the authoritative

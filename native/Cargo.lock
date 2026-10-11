@@ -1176,6 +1176,7 @@ dependencies = [
  "ureq",
  "url",
  "webview2-com",
+ "webview2-com-sys",
  "windows",
  "winres",
  "wry",
