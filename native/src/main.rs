@@ -18,6 +18,7 @@ mod new_window;
 mod permissions;
 mod plugin_storage;
 mod process_failure;
+mod profile;
 mod protocol;
 mod quick_css;
 mod recovery;
@@ -102,7 +103,6 @@ use wry::{
 use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
 
 const DISCORD_URL: &str = "https://discord.com/app";
-const WEBVIEW_PROFILE: &str = r"E:\Legcord.webview-dev-user-data";
 /// Vencord as the first consumer of the shared mod substrate. Every bundle
 /// identity value lives in this descriptor; the substrate mechanics in
 /// `mod_substrate.rs` never name Vencord. Registering Shelter or Equicord
@@ -4241,8 +4241,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let window = Arc::new(window);
     let window_for_webview = Arc::clone(&window);
 
-    let profile_path = PathBuf::from(WEBVIEW_PROFILE);
-    std::fs::create_dir_all(&profile_path)?;
+    // Release blocker 2: the profile root is resolved per build, never
+    // hardcoded. Debug takes the isolated DEV profile; release takes
+    // `%LOCALAPPDATA%\LegcordNative`; an explicit absolute
+    // `LEGCORD_NATIVE_PROFILE_DIR` wins in both. Any failure fails startup
+    // — never a silent fallback to another product's data.
+    let resolved_profile = profile::resolve_for_build(
+        cfg!(debug_assertions),
+        std::env::var(profile::PROFILE_OVERRIDE_ENV).ok().as_deref(),
+        std::env::var("LOCALAPPDATA").ok().as_deref(),
+    )
+    .map_err(|error| format!("profile resolution failed: {error}"))?;
+    let profile_path = resolved_profile.path;
+    profile::ensure_profile_dir(&profile_path)
+        .map_err(|error| format!("profile resolution failed: {error}"))?;
     // P0.5 host-owned downloads directory. Fail fast: every download
     // decision needs this root, and a broken profile dir is fatal anyway.
     let downloads_dir = downloads::ensure_downloads_dir(&profile_path)?;
@@ -4833,7 +4845,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         builder.build(&window_for_webview)?
     };
     println!("[Native] WebView2 prototype started");
-    println!("[Native] Persistent DEV profile: {WEBVIEW_PROFILE}");
+    println!(
+        "[Native] profile kind={} dir={}",
+        resolved_profile.kind.as_str(),
+        profile_path.display()
+    );
 
     // Per-WebView content interceptions (Phase 2F helper): the
     // `legcord://` registration, the permission policy, and the CSP
@@ -4843,7 +4859,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // (registration is per-WebView, not per-environment).
     #[cfg(target_os = "windows")]
     let popup_roots =
-        main_webview::attach_main_content_filters(&webview, &profile_path, WEBVIEW_PROFILE);
+        main_webview::attach_main_content_filters(&webview, &profile_path, &profile_path);
     // Second boot phase (P0.2): navigate to Discord only after both
     // WebResourceRequested filters exist, so the first Discord document is
     // intercepted like every later one. `about:blank` has no CSP of its own
@@ -5400,7 +5416,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // 9. Re-attach per-WebView content filters (legcord://, permissions, CSP).
                     #[cfg(target_os = "windows")]
                     {
-                        let _ = main_webview::attach_main_content_filters(&webview, &profile_path, WEBVIEW_PROFILE);
+                        let _ = main_webview::attach_main_content_filters(&webview, &profile_path, &profile_path);
                     }
 
                     // 10. Re-attach per-WebView observers.

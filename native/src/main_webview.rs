@@ -295,7 +295,7 @@ pub fn main_webview_builder<'a>(
 pub fn attach_main_content_filters(
     webview: &WebView,
     profile_path: &Path,
-    webview_profile: &str,
+    user_data_dir: &Path,
 ) -> crate::legcord_protocol::NamespaceRoots {
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
     use wry::WebViewExtWindows;
@@ -304,7 +304,7 @@ pub fn attach_main_content_filters(
     let bundle_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("ts-out");
-    let user_data_dir = PathBuf::from(webview_profile);
+    let user_data_dir = user_data_dir.to_path_buf();
     let _ = profile_path;
     let roots = super::build_namespace_roots(&bundle_dir, &user_data_dir);
     if let Err(e) = super::register_legcord_protocol(&core_webview2, roots.clone()) {

@@ -104,11 +104,68 @@ fn generate_app_version(out_dir: &str) {
 
 fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR must be set");
+    check_product_identity();
     generate_lang_catalogs(&out_dir);
     generate_app_version(&out_dir);
     generate_settings_plugin_artifact(&out_dir);
     generate_titlebar_plugin_artifact(&out_dir);
     generate_titlebar_css(&out_dir);
+    embed_windows_resources();
+}
+
+/// Release blocker 2: the native binary identity must stay coherent.
+/// `Cargo.toml` (`name`, `version`) is the single source the Windows
+/// executable name and version resources derive from; `../package.json`
+/// is the product source of truth. A mismatch fails the build instead of
+/// shipping an exe whose identity disagrees with the product version.
+fn check_product_identity() {
+    let cargo_name = std::env::var("CARGO_PKG_NAME").expect("CARGO_PKG_NAME must be set");
+    if cargo_name != "legcord" {
+        panic!("native package name must be \"legcord\", found {cargo_name:?}");
+    }
+    let cargo_version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION must be set");
+    let raw = fs::read_to_string("../package.json").unwrap_or_else(|error| {
+        panic!("native product identity requires ../package.json: {error}")
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|error| panic!("../package.json is not valid JSON: {error}"));
+    let product_version = parsed
+        .get("version")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("../package.json must define a string \"version\""));
+    if cargo_version != product_version {
+        panic!(
+            "native Cargo version ({cargo_version}) must match ../package.json version ({product_version}); bump them together"
+        );
+    }
+    println!("cargo:rerun-if-changed=../package.json");
+}
+
+/// Release blocker 2: Windows executable metadata. `winres` derives the
+/// numeric/file/product versions and description from the Cargo identity
+/// checked above; only the product icon (the repository's own
+/// `build/icon.ico`, also used by the Electron packaging) is attached
+/// here. Windows-only: other targets skip resource embedding entirely.
+fn embed_windows_resources() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS must be set");
+    if target_os != "windows" {
+        return;
+    }
+    let icon = Path::new("../build/icon.ico");
+    if !icon.is_file() {
+        panic!(
+            "native Windows resources require {}; refusing an iconless release executable",
+            icon.display()
+        );
+    }
+    winres::WindowsResource::new()
+        .set_icon(
+            icon.to_str()
+                .unwrap_or_else(|| panic!("icon path must be UTF-8")),
+        )
+        .compile()
+        .unwrap_or_else(|error| panic!("native Windows resource embedding failed: {error}"));
+    println!("cargo:rerun-if-changed=../build/icon.ico");
 }
 
 /// Maximum accepted settings `plugin.js` size in bytes. The real artifact is

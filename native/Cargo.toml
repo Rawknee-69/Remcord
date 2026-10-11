@@ -1,9 +1,17 @@
 [package]
-name = "legcord-native-prototype"
-version = "0.1.0"
+name = "legcord"
+version = "1.3.0"
 edition = "2021"
 rust-version = "1.85"
 publish = false
+description = "Legcord is a custom client designed to enhance your Discord experience while keeping everything lightweight."
+
+[package.metadata.winres]
+# Display name differs in case from the package/exe name (`legcord`).
+ProductName = "Legcord"
+OriginalFilename = "legcord.exe"
+# Set explicitly: must match the package description verbatim.
+FileDescription = "Legcord is a custom client designed to enhance your Discord experience while keeping everything lightweight."
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
@@ -50,3 +58,6 @@ serde_json = "1.0.151"
 # Content identity for the embedded settings plugin artifact (same version
 # as the main dependency; build scripts cannot use regular dependencies).
 sha2 = "0.10.9"
+# Windows executable metadata (product name, version, icon) for release
+# identity. Only invoked on Windows targets (see build.rs).
+winres = "0.1"
