@@ -10,7 +10,7 @@ This document records the existing Electron renderer/preload contract and the in
 | `webContents` | `window.ts` owns navigation, reload, title/focus/maximize; `ipc.ts` sends native updates | `CoreWebView2` events and controller | High: event coverage differs and needs one owner | Yes: navigation/view | Most parity behaviors can defer |
 | `executeJavaScript` | `window.ts` focus/maximize state (replaced by typed `window_state` event P0.1); `common/dom.ts`; `common/keybindActions.ts`; `rpcProcess.ts`; preload mod files | `CoreWebView2.ExecuteScriptAsync` | Medium: async errors and document/frame targeting | Not for bare Discord | Yes; bootstrap and prototype probes are present |
 | Preload / early script | `window.ts` configures `discord/preload.mjs`; `discord/preload/preload.mts` imports `mods/{shelter,vencord,equicord,custom}.mts` | `AddScriptToExecuteOnDocumentCreatedAsync` | High: registration must precede navigation; main-frame vs iframe scope must be explicit | No for bare Discord; yes for mod startup | Mod adapters are main-frame/document-start; other preload modules defer |
-| `contextBridge` | [`src/discord/preload/bridge.ts`](../src/discord/preload/bridge.ts) exposes `window.legcord` | No direct equivalent; a document-start facade over `WebMessageReceived` | High: current facade is broad and synchronous APIs must be redesigned | No for bare Discord | Broad Remcord bridge can defer; this prototype exposes the snapshot, ping, and the typed registry-scoped bundle operation |
+| `contextBridge` | [`src/discord/preload/bridge.ts`](../src/discord/preload/bridge.ts) exposes `window.remcord` | No direct equivalent; a document-start facade over `WebMessageReceived` | High: current facade is broad and synchronous APIs must be redesigned | No for bare Discord | Broad Remcord bridge can defer; this prototype exposes the snapshot, ping, and the typed registry-scoped bundle operation |
 | `webFrame` | `window.ts` frame-created YouTube injection; `preload/plugins.mts`; `preload/mods/{custom,equicord,shelter,vencord}.mts` | Frame-aware WebView2 scripting / `CoreWebView2Frame` | High: frame lifetime and cross-origin behavior differ | No | Yes, except where an enabled mod specifically needs frame injection |
 | `insertCSS` | `preload/mods/vencord.mts` and `preload/mods/equicord.mts` inject their `browser.css` after bundle execution (`preload/mods/shelter.mts` injects none); `preload/themes.ts` and [`src/common/themes.ts`](../src/common/themes.ts) manage unrelated themes | Native host runs a fixed style-element insertion script with stable identity, in the same document and after the mod JS — only for descriptors that declare a stylesheet | Medium: CSP, style order, removal/reapplication must be qualified | No | Vencord + Equicord CSS are implemented, Shelter has none; other mod CSS defers |
 | `ipcMain` | [`src/discord/ipc.ts`](../src/discord/ipc.ts) registers `getShelterBundle`, `getVencordBundle`, `getEquicordBundle`, `getCustomBundle` plus bundle/config/theme/plugin/RPC/backup handlers; `screenshare.ts`, Venmic and other main modules register IPC | `WebMessageReceived` with a versioned, explicitly dispatched Rust command enum | Very high: hundreds of exposed calls and sync IPC need contract-by-contract migration | No for bare Discord; yes for existing mod feature parity | Native supports `ping`, the registry-scoped `mod_get_bundle` operation, window chrome commands (`window_show`/`hide`/`minimize`/`maximize`/`unmaximize`/`quit`), typed lifecycle/error events, and `window_state` host→renderer event; other handlers defer |
@@ -25,7 +25,7 @@ This document records the existing Electron renderer/preload contract and the in
 | Native menus | [`src/discord/menu.ts`](../src/discord/menu.ts); `window.ts` context menu | Win32 menus / WebView2 context-menu event | Medium-high: application, page and accessibility behavior | No | Yes |
 | Window state | `window.ts` saves/restores bounds and maximize/minimize/focus state; [`src/common/windowState.ts`](../src/common/windowState.ts) persists it | Tao/Win32 window events plus an isolated native config store | Medium | No | Yes |
 | Navigation / reload events | `window.ts` loads stable/canary/PTB Discord, handles `window.open`, reloads unresponsive pages; `main.ts` handles renderer-process loss | `NavigationStarting`, `NavigationCompleted`, process-failure events, `CoreWebView2.Reload` | Medium-high: origin policy and process recovery differ | Yes: initial navigation; reload events are prototype-validated only on target | Feature-complete loss/recovery policy can defer |
-| Protocol handling | [`src/protocol.ts`](../src/protocol.ts) registers `legcord://`; mods and theme assets use local resources | WebView2 `remcord://` scheme registration + `WebResourceRequested` (P0.2: all six namespaces served canonically, legacy `legcord://` URLs rewritten into the same resolver, CSP extended narrowly with both sources) | High: local path authorization, MIME and CSP behavior | No for bare Discord; yes for current local assets/mods | Splash/setup/editor windows can defer; the protocol itself is implemented |
+| Protocol handling | [`src/protocol.ts`](../src/protocol.ts) registers `remcord://`; mods and theme assets use local resources | WebView2 `remcord://` scheme registration + `WebResourceRequested` (P0.2: all six namespaces served canonically, legacy `remcord://` URLs rewritten into the same resolver, CSP extended narrowly with both sources) | High: local path authorization, MIME and CSP behavior | No for bare Discord; yes for current local assets/mods | Splash/setup/editor windows can defer; the protocol itself is implemented |
 | Updater | [`src/updater.ts`](../src/updater.ts), enabled by config; `main.ts` restart/relaunch | A Rust updater/signature/rollback service | High: release channels, signing and install layout | No | Yes |
 | arRPC | [`src/rpc.ts`](../src/rpc.ts) starts arRPC; [`src/discord/rpcProcess.ts`](../src/discord/rpcProcess.ts) scans processes and forwards activity | Rust WebSocket service plus Windows process enumeration; typed page event | High: behavior and detection parity | No | Yes |
 | Client mods / renderer injection | `discord/extensions/modloader.ts`; `discord/preload/mods/*.mts`; `discord/preload/plugins.mts`; `common/themes.ts` | Document-start script registry, post-load execution and managed styles | High: preserve ordering, update/failure behavior, CSP and reload lifecycle | No for bare Discord; yes for existing modified-client behavior | The general registry can defer beyond prototype; early-script and CSS mechanics are demonstrated |
@@ -40,7 +40,7 @@ The transport is Wry's `window.ipc.postMessage` / WebView2 web-message callback.
 
 | Direction | Exact message |
 | --- | --- |
-| Renderer request | `{"version":1,"request_id":"legcord-<document-time>-<sequence>","command":{"type":"ping","payload":{"nonce":"..."}}}` |
+| Renderer request | `{"version":1,"request_id":"remcord-<document-time>-<sequence>","command":{"type":"ping","payload":{"nonce":"..."}}}` |
 | Renderer request (mod bundle capability) | `{"version":1,"request_id":"...","command":{"type":"mod_get_bundle","payload":{"mod_id":"vencord"}}}` |
 | Renderer request (settings capability) | `{"version":1,"request_id":"...","command":{"type":"settings_get_config","payload":{}}}` |
 | Renderer request (settings mutation capability) | `{"version":1,"request_id":"...","command":{"type":"settings_set_block_power_saving","payload":{"value":true}}}` |
@@ -140,7 +140,7 @@ Every descriptor value lives in the Rust `ModDescriptor` registry (`KNOWN_MODS` 
 | CSS | yes (`insertCSS`) | **none** — `getShelterBundle` returns only `js`, no stylesheet exists upstream, no `insertCSS` in its preload | **yes**, explicitly (`//NOTE - Equicord requires CSS.`) |
 | Page-world global | `Vencord` (sync) | `shelter` (**async** — assigned after Discord's `#app-mount` has children) + requires a `plugins` member | `Vencord` (sync; Equicord is a Vencord fork and publishes that global) |
 | Settings key | `VencordSettings` | **none** — Shelter uses IndexedDB (`dbstore`), never `localStorage`; the snapshot reports `not_applicable` rather than inventing a key | `EquicordSettings` |
-| Host wrapper | none | Electron's `SHELTER_INJECTOR_PLUGINS` IIFE is **deliberately not reproduced**: it depends on the `legcord://` protocol and the preload plugin loader � the protocol now exists natively as `remcord://` with a legacy rewrite, but the preload plugin loader surface is still absent � and Shelter skips the injector when the global is absent | none |
+| Host wrapper | none | Electron's `SHELTER_INJECTOR_PLUGINS` IIFE is **deliberately not reproduced**: it depends on the `remcord://` protocol and the preload plugin loader � the protocol now exists natively as `remcord://` with a legacy rewrite, but the preload plugin loader surface is still absent � and Shelter skips the injector when the global is absent | none |
 | Enablement | `settings.mods` | unconditional (Electron hardcodes `enabled: true`) | `settings.mods` |
 
 "Ships no CSS" is a first-class state: `ModDescriptor.css` is `Option<ModCssSource>`, validation refuses a stylesheet a descriptor did not declare and refuses a missing one it did, and the host runs no CSS stage at all (no empty `<style>`, no CSS result event, `css_bytes`/`css_injection_ms` both `null` in the response).
@@ -196,7 +196,7 @@ All three adapters are thin identity declarations over the same factory: capabil
 ### Remaining mod work
 
 1. Custom mods stay blocked until a host-controlled authoritative source exists; there is deliberately no renderer-supplied path/URL for it.
-2. Shelter's Legcord plugin surface (`SHELTER_INJECTOR_PLUGINS`, the preload plugin loader, `new Function`) is a separate logical resource and remains deferred (the local-asset protocol it loads from now exists natively as `remcord://` with a legacy `legcord://` rewrite) — which is why its Electron injector wrapper is deliberately not reproduced.
+2. Shelter's Remcord plugin surface (`SHELTER_INJECTOR_PLUGINS`, the preload plugin loader, `new Function`) is a separate logical resource and remains deferred (the local-asset protocol it loads from now exists natively as `remcord://` with a legacy `remcord://` rewrite) — which is why its Electron injector wrapper is deliberately not reproduced.
 3. Runtime plugin loading (`plugins.mts`, `new Function`, per-plugin manifests) is also deferred and unrelated to bundle registration.
 4. Running Vencord and Equicord together is a configuration conflict (both publish the `Vencord` page-world global), not a host defect; enablement follows `settings.mods` exactly as Electron does.
 
@@ -208,7 +208,7 @@ Failure logs distinguish `bundle_retrieval`, `adapter_initialization`, `script_e
 
 ## Bundle discovery capability (Phase D Step 1)
 
-The first backups slice migrates ONLY bundle-file discovery — the `BUNDLE_FILES` half of `src/common/backup.ts` — to a read-only typed capability `backup.list_bundles` (wire `bundles_list`, facade `window.legcord.backup.listBundles()`). No save/restore, no zip handling, no dialogs, no writes, no folder opening, no theme install/edit. There is no migrated `src/` caller (the Electron backup UI keeps calling `save`/`restore`; a native branch would be fabrication), so this slice establishes the allowlist + root-scoping contract that a future export slice will build on.
+The first backups slice migrates ONLY bundle-file discovery — the `BUNDLE_FILES` half of `src/common/backup.ts` — to a read-only typed capability `backup.list_bundles` (wire `bundles_list`, facade `window.remcord.backup.listBundles()`). No save/restore, no zip handling, no dialogs, no writes, no folder opening, no theme install/edit. There is no migrated `src/` caller (the Electron backup UI keeps calling `save`/`restore`; a native branch would be fabrication), so this slice establishes the allowlist + root-scoping contract that a future export slice will build on.
 
 ### Electron chain (unchanged)
 
@@ -217,7 +217,7 @@ The first backups slice migrates ONLY bundle-file discovery — the `BUNDLE_FILE
 ### Native chain
 
 ```text
-renderer await window.legcord.backup.listBundles()
+renderer await window.remcord.backup.listBundles()
   → requireCapability("backup.list_bundles") or sync UNSUPPORTED_CAPABILITY throw
   → parameter-free {"type":"bundles_list","payload":{}} request
      (path/url/include_*/name/method members host-rejected by deny_unknown_fields)
@@ -234,16 +234,16 @@ Deliberate Electron differences (hardening, not regressions): metadata only (`{n
 
 ## Backup save capability (Phase D4-1)
 
-The second backups slice migrates ONLY the save half — `buildBackupZipBuffer` plus the `showSaveDialog` + write path of `backupSave` — to a typed capability `backup.save` (wire `backup_save`, facade `window.legcord.backup.save(payloadString)` preserving the existing Electron JSON-string signature, so `BackupSection.tsx` is untouched). Restore (`applyBackupFromMap` / `backupRestore`) is out of scope for that slice (see the restore section below) and BackupSection UI wiring stays deferred to D4-3. There is no new `src/` caller in either slice: a native branch in the Electron backup UI would be fabrication, so DEV-only probes (`REMCORD_NATIVE_BACKUP_SAVE_SMOKE=1`, `REMCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`) exercise the real capabilities instead.
+The second backups slice migrates ONLY the save half — `buildBackupZipBuffer` plus the `showSaveDialog` + write path of `backupSave` — to a typed capability `backup.save` (wire `backup_save`, facade `window.remcord.backup.save(payloadString)` preserving the existing Electron JSON-string signature, so `BackupSection.tsx` is untouched). Restore (`applyBackupFromMap` / `backupRestore`) is out of scope for that slice (see the restore section below) and BackupSection UI wiring stays deferred to D4-3. There is no new `src/` caller in either slice: a native branch in the Electron backup UI would be fabrication, so DEV-only probes (`REMCORD_NATIVE_BACKUP_SAVE_SMOKE=1`, `REMCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`) exercise the real capabilities instead.
 
 ### Electron chain (unchanged)
 
-`src/common/backup.ts::buildBackupZipBuffer(payload, paths)` builds `{ version: 1, createdAt: new Date().toISOString(), appVersion: app.getVersion(), includes, clientMods }` (only flagged clientMods keys carried; unflagged stay absent; flagged-but-missing values become `null`), then collects `data/storage/settings.json`, `data/quickCss.css` + `data/themes/**`, `data/plugins/**` (disk `extensions/`) + `data/runtime-plugins/**` (disk `plugins/`) + `data/plugin-storage/**`, and `bundles/<name>` for the 7 fixed names — manifest first, whole-file unbounded reads, filesystem order, missing files/dirs silently skipped. `src/discord/ipc.ts::backupSave` parses one JSON string, builds the buffer, shows `dialog.showSaveDialog` (translated title `backup-dialogSave-title`, `defaultPath: Documents/legcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter), returns `{ ok: false, error: "CANCELLED" }` on dismissal, appends `.zip` when missing, and writes with `writeFileSync`. `native/tests/electron-compat.test.mjs` asserts every handler, bridge mapping, and declared contract above is byte-identical.
+`src/common/backup.ts::buildBackupZipBuffer(payload, paths)` builds `{ version: 1, createdAt: new Date().toISOString(), appVersion: app.getVersion(), includes, clientMods }` (only flagged clientMods keys carried; unflagged stay absent; flagged-but-missing values become `null`), then collects `data/storage/settings.json`, `data/quickCss.css` + `data/themes/**`, `data/plugins/**` (disk `extensions/`) + `data/runtime-plugins/**` (disk `plugins/`) + `data/plugin-storage/**`, and `bundles/<name>` for the 7 fixed names — manifest first, whole-file unbounded reads, filesystem order, missing files/dirs silently skipped. `src/discord/ipc.ts::backupSave` parses one JSON string, builds the buffer, shows `dialog.showSaveDialog` (translated title `backup-dialogSave-title`, `defaultPath: Documents/remcord-backup-YYYY-MM-DD.zip`, one `ZIP/.zip` filter), returns `{ ok: false, error: "CANCELLED" }` on dismissal, appends `.zip` when missing, and writes with `writeFileSync`. `native/tests/electron-compat.test.mjs` asserts every handler, bridge mapping, and declared contract above is byte-identical.
 
 ### Native chain
 
 ```text
-renderer await window.legcord.backup.save(jsonString)
+renderer await window.remcord.backup.save(jsonString)
   → requireCapability("backup.save") or sync UNSUPPORTED_CAPABILITY throw
   → client exact-shape check ({includes, clientMods} only; 7 booleans;
      3 known clientMods keys; per-string ≤ 1 MiB; TypeError before dispatch)
@@ -270,7 +270,7 @@ Known issue (fixed in P0.4): `compatibility.js` discovery sent `backup_list_bund
 
 ## Backup restore capability (Phase D4-2)
 
-The third backups slice migrates ONLY the restore half — `applyBackupFromMap` plus the `showOpenDialog` + read path of `backupRestore` — to a typed capability `backup.restore` (wire `backup_restore`, facade `window.legcord.backup.restore()` with no arguments, so `BackupSection.tsx` is untouched). The native restore consumes the SAME Electron-compatible ZIP format the save path produces (and valid Electron-produced archives that avoid unsafe/unbounded behavior), while intentionally hardening every unsafe filesystem/archive behavior. BackupSection UI wiring (D4-3) stays deferred: there is no new `src/` caller, so a DEV-only probe (`REMCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`) exercises the real capability instead.
+The third backups slice migrates ONLY the restore half — `applyBackupFromMap` plus the `showOpenDialog` + read path of `backupRestore` — to a typed capability `backup.restore` (wire `backup_restore`, facade `window.remcord.backup.restore()` with no arguments, so `BackupSection.tsx` is untouched). The native restore consumes the SAME Electron-compatible ZIP format the save path produces (and valid Electron-produced archives that avoid unsafe/unbounded behavior), while intentionally hardening every unsafe filesystem/archive behavior. BackupSection UI wiring (D4-3) stays deferred: there is no new `src/` caller, so a DEV-only probe (`REMCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`) exercises the real capability instead.
 
 ### Electron chain (unchanged)
 
@@ -279,7 +279,7 @@ The third backups slice migrates ONLY the restore half — `applyBackupFromMap` 
 ### Native chain
 
 ```text
-renderer await window.legcord.backup.restore()
+renderer await window.remcord.backup.restore()
   → requireCapability("backup.restore") or sync UNSUPPORTED_CAPABILITY throw
   → parameter-free {"type":"backup_restore","payload":{}} request
      (any archive path/filename/url/filter/dialog member host-rejected)
@@ -322,7 +322,7 @@ The host NEVER applies clientMods: no `localStorage` manipulation, no `addRemote
 
 ### UI wiring (D4-3)
 
-`BackupSection.tsx` branches restore on `isNativeBackupAvailable()` (existing `isNativeWebView` environment check AND `backup.save`/`backup.restore` function presence — an Electron `window.legcord.backup` also carries those names, so the environment check selects the shape): native takes the OBJECT result through `normalizeNativeRestoreResult`, Electron takes the existing JSON-string path through `parseElectronRestoreResult`, and both converge on one shared outcome (`{ok:true, clientMods}` | `{ok:false, error}`) with the pre-existing toasts — success + restart-required message, silent `CANCELLED`, `INVALID` → invalid-file toast, `UNKNOWN`/typed code → failed toast. The existing `applyClientModsFromRestore` (localStorage writes + `addRemotePlugin`) is untouched and stays the renderer's job; the new helpers add no storage/plugin/fetch surface of their own (asserted). One degenerate-input difference from the old inline parse: `{}` (or another truthy-shaped non-`ok:true` document, which neither host ever sends) now reports invalid-file instead of an erroneous success toast. The confirmation modal and restart message are unchanged; no reload is forced (the existing UI never reloaded).
+`BackupSection.tsx` branches restore on `isNativeBackupAvailable()` (existing `isNativeWebView` environment check AND `backup.save`/`backup.restore` function presence — an Electron `window.remcord.backup` also carries those names, so the environment check selects the shape): native takes the OBJECT result through `normalizeNativeRestoreResult`, Electron takes the existing JSON-string path through `parseElectronRestoreResult`, and both converge on one shared outcome (`{ok:true, clientMods}` | `{ok:false, error}`) with the pre-existing toasts — success + restart-required message, silent `CANCELLED`, `INVALID` → invalid-file toast, `UNKNOWN`/typed code → failed toast. The existing `applyClientModsFromRestore` (localStorage writes + `addRemotePlugin`) is untouched and stays the renderer's job; the new helpers add no storage/plugin/fetch surface of their own (asserted). One degenerate-input difference from the old inline parse: `{}` (or another truthy-shaped non-`ok:true` document, which neither host ever sends) now reports invalid-file instead of an erroneous success toast. The confirmation modal and restart message are unchanged; no reload is forced (the existing UI never reloaded).
 
 ### Intentional Electron/native differences (hardening, not regressions)
 
@@ -363,11 +363,11 @@ Parsed classification instead of `startsWith` (`https:evil`, `https:///x` never 
 
 ### Bundles list fix (rides with P0.4)
 
-`native/web/compatibility.js::listBundles` sent `backup_list_bundles`; the protocol (`protocol.rs::BridgeCommand::BundlesList`, `rename_all="snake_case"`) only ever accepted `bundles_list`, and the response validator already expected `bundles_list`. One-line facade correction; the old string stays a host-side deserialization error (new `protocol.rs` test pins the rejection). No backup format/inventory/save/restore/Electron change. `window.legcord.backup.listBundles()` now round-trips to the 7-entry `{name, present, bytes}` inventory.
+`native/web/compatibility.js::listBundles` sent `backup_list_bundles`; the protocol (`protocol.rs::BridgeCommand::BundlesList`, `rename_all="snake_case"`) only ever accepted `bundles_list`, and the response validator already expected `bundles_list`. One-line facade correction; the old string stays a host-side deserialization error (new `protocol.rs` test pins the rejection). No backup format/inventory/save/restore/Electron change. `window.remcord.backup.listBundles()` now round-trips to the 7-entry `{name, present, bytes}` inventory.
 
 ## Download handling (P0.5)
 
-P0.5 migrates the *absence* of an Electron download policy — active source has no `will-download`/`download-item`/`downloadURL` handler, so production Legcord uses the Chromium default of a per-download Save dialog with the server filename — to a narrow native policy in `native/src/downloads.rs` (pure logic, no COM) wired by one shared `apply_download_handlers` helper onto the main and P0.4 child WebViews. No save dialog (wry's `DownloadStarting` closure is synchronous), no manager/progress/pause/history, no renderer API, no `DefaultDownloadFolderPath` mutation.
+P0.5 migrates the *absence* of an Electron download policy — active source has no `will-download`/`download-item`/`downloadURL` handler, so production Remcord uses the Chromium default of a per-download Save dialog with the server filename — to a narrow native policy in `native/src/downloads.rs` (pure logic, no COM) wired by one shared `apply_download_handlers` helper onto the main and P0.4 child WebViews. No save dialog (wry's `DownloadStarting` closure is synchronous), no manager/progress/pause/history, no renderer API, no `DefaultDownloadFolderPath` mutation.
 
 ### Electron chain (unchanged)
 
@@ -394,7 +394,7 @@ Deliberate Electron difference (hardening, not parity): silent host-owned save i
 
 ## Titlebar controls (window chrome completion)
 
-P0.1 implemented the typed host window operations but nothing loaded the titlebar UI natively (Electron pins `legcord-titlebar` via the Shelter injector map, which the native shell deliberately does not reproduce), so the frameless window had no min/max/close buttons. This slice loads the exact `src/shelter/titlebar` artifact through the proven Shelter loader surface — no new RPC, no new capability, no renderer API.
+P0.1 implemented the typed host window operations but nothing loaded the titlebar UI natively (Electron pins `remcord-titlebar` via the Shelter injector map, which the native shell deliberately does not reproduce), so the frameless window had no min/max/close buttons. This slice loads the exact `src/shelter/titlebar` artifact through the proven Shelter loader surface — no new RPC, no new capability, no renderer API.
 
 ### Native chain
 
@@ -404,8 +404,8 @@ Shelter bootstrap marker (same trigger as the settings plugin)
   → remove stale controls (Shelter auto-starts persisted plugins on its own;
      the plugin's unload path never removes DOM, so marker-time-only starts
      stack duplicate button sets without this)
-  → addLocalPlugin("legcord-titlebar") + startPlugin (idempotent per document)
-  → onLoad injects minimize/maximize/quit wired to window.legcord.window.*
+  → addLocalPlugin("remcord-titlebar") + startPlugin (idempotent per document)
+  → onLoad injects minimize/maximize/quit wired to window.remcord.window.*
 PageLoadFinished (trusted Discord docs, once per generation)
   → settle re-run of the same idempotent script (heals injections discarded
      by a later mount; covers marker-after-finish ordering either way)
@@ -413,13 +413,13 @@ window-state host event → facade mirrors body[isMaximized]/[unFocused]
   (same listener, no polling) so the restore icon swaps like Electron
 ```
 
-Titlebar styling is build-embedded (`base` + per-OS sheet, `newTitlebar.mts` parity: `legcord-platform` attribute, `platform-win` class) and injected as inline `<style>` nodes — deliberately NOT `<link legcord://>` subresources: those stop reaching the host after a reload (two 200s on first load, zero afterwards; consistent with service-worker takeover of subresource fetches), which silently unstyles link-based controls post-reload. Managed-CSS precedent (themes/Quick CSS) proves inline `<style>` works under the extended CSP.
+Titlebar styling is build-embedded (`base` + per-OS sheet, `newTitlebar.mts` parity: `remcord-platform` attribute, `platform-win` class) and injected as inline `<style>` nodes — deliberately NOT `<link remcord://>` subresources: those stop reaching the host after a reload (two 200s on first load, zero afterwards; consistent with service-worker takeover of subresource fetches), which silently unstyles link-based controls post-reload. Managed-CSS precedent (themes/Quick CSS) proves inline `<style>` works under the extended CSP.
 
 Deliberate Electron differences: no injector preload (host-pushed closed loader instead); close follows existing P0.1 host lifecycle (`hide()` when `minimizeToTray`, else quit — no tray icon yet, so hide leaves no visible affordance); no `skipTaskbar` toggle.
 
 ## Folder opening capability (Phase D Step 2)
 
-Four caller-backed folder behaviors migrate to two typed capabilities under `window.legcord.folders`: `folders.open` (wire `folders_open`, facade `folders.open(location)`) reveals exactly one of three fixed roots, and `folders.open_theme` (wire `folders_open_theme`, facade `folders.openTheme(id)`) opens exactly one validated theme directory. No generic open(path), no dialogs, no pickers, no file-in-editor paths, no theme install/edit.
+Four caller-backed folder behaviors migrate to two typed capabilities under `window.remcord.folders`: `folders.open` (wire `folders_open`, facade `folders.open(location)`) reveals exactly one of three fixed roots, and `folders.open_theme` (wire `folders_open_theme`, facade `folders.openTheme(id)`) opens exactly one validated theme directory. No generic open(path), no dialogs, no pickers, no file-in-editor paths, no theme install/edit.
 
 ### Electron chain (unchanged)
 
@@ -435,7 +435,7 @@ Four caller-backed folder behaviors migrate to two typed capabilities under `win
 ### Native chain
 
 ```text
-renderer await window.legcord.folders.open("themes")
+renderer await window.remcord.folders.open("themes")
   → requireCapability("folders.open") or sync UNSUPPORTED_CAPABILITY throw
   → client enum check (storage|themes|plugins, TypeError before dispatch)
   → {"type":"folders_open","payload":{"location":"themes"}}
@@ -445,7 +445,7 @@ renderer await window.legcord.folders.open("themes")
      with the root selected (showItemInFolder-equivalent, direct shell API)
   → validated folders_opened { location } (echo must equal the request)
 
-renderer await window.legcord.folders.openTheme("my-theme")
+renderer await window.remcord.folders.openTheme("my-theme")
   → requireCapability("folders.open_theme") or sync UNSUPPORTED_CAPABILITY throw
   → client id check ([A-Za-z0-9._-]{1,64}, never ./.., TypeError before dispatch)
   → {"type":"folders_open_theme","payload":{"id":"my-theme"}}
@@ -462,20 +462,20 @@ Deliberate Electron differences (hardening, not regressions): closed enum instea
 
 ### Settings UI wiring (Phase D Step 2 follow-up)
 
-The four settings-UI actions dispatch to the native capabilities when the WebView2 shell grants them, keeping the Electron `send` path otherwise. Shared helpers in `src/shelter/settings/settings.ts` (`revealFolderNative("storage" | "themes" | "plugins")`, `openThemeFolderNative(id)`) reuse the existing `isNativeWebView()` check plus a namespace function-presence gate — no second detection mechanism — and return `true` when native handled the action, so each call site executes exactly one path. The theme id passes through verbatim; validation stays host-owned. Rejections are swallowed after a path-free `console.warn` (fire-and-forget parity with Electron's silent `send`, but never an unhandled rejection and never a path in the UI). Native-only surface stays in local minimal interfaces per the `setBlockPowerSavingInVoiceChat`/`getVersion` precedent, so `legcordWindow.d.ts` is unchanged. Wired callers: `SettingsPage.tsx` (storage), `ThemesPage.tsx` (themes), `PluginsPage.tsx` toolbar + empty-state (plugins), `ThemesCard.tsx` per-theme folder (id). The main IPC handlers, bridge mappings, and declared `void` contracts are untouched.
+The four settings-UI actions dispatch to the native capabilities when the WebView2 shell grants them, keeping the Electron `send` path otherwise. Shared helpers in `src/shelter/settings/settings.ts` (`revealFolderNative("storage" | "themes" | "plugins")`, `openThemeFolderNative(id)`) reuse the existing `isNativeWebView()` check plus a namespace function-presence gate — no second detection mechanism — and return `true` when native handled the action, so each call site executes exactly one path. The theme id passes through verbatim; validation stays host-owned. Rejections are swallowed after a path-free `console.warn` (fire-and-forget parity with Electron's silent `send`, but never an unhandled rejection and never a path in the UI). Native-only surface stays in local minimal interfaces per the `setBlockPowerSavingInVoiceChat`/`getVersion` precedent, so `remcordWindow.d.ts` is unchanged. Wired callers: `SettingsPage.tsx` (storage), `ThemesPage.tsx` (themes), `PluginsPage.tsx` toolbar + empty-state (plugins), `ThemesCard.tsx` per-theme folder (id). The main IPC handlers, bridge mappings, and declared `void` contracts are untouched.
 
 ## Theme install capability (Phase D Step 3a)
 
-`themes.install_code` (wire `theme_install_code`, facade `window.legcord.themes.installFromCode(css)`) installs one BetterDiscord theme from CSS text under the host-controlled themes root. No URL, no path, no filename, no id, no dialog, no fetch: the host derives the id from `@name`, fixes `src.css`, and keeps the theme disabled. No `src/` caller is branched — the Electron theme UI keeps calling `install`/`edit`/`openImportPicker`.
+`themes.install_code` (wire `theme_install_code`, facade `window.remcord.themes.installFromCode(css)`) installs one BetterDiscord theme from CSS text under the host-controlled themes root. No URL, no path, no filename, no id, no dialog, no fetch: the host derives the id from `@name`, fixes `src.css`, and keeps the theme disabled. No `src/` caller is branched — the Electron theme UI keeps calling `install`/`edit`/`openImportPicker`.
 
 ### Electron chain (unchanged)
 
-`src/common/themes.ts::installTheme(linkOrPath)` fetches `http(s)` URLs with global `fetch` (arbitrary hosts, no allowlist) or reads local files, then `installThemeFromCode` parses with `parseBDManifest` (`/**` required; `name` defaults to `"null"`; `enabled: false`; `import` stops the scan), derives `` `${name.replace(" ", "-")}-BD` `` (first space only), and silently overwrites `<themes>/<id>/manifest.json` + `src.css` (also storing `updateSrc` and `supportsLegcordTitlebar`). `editTheme(id)` reads the manifest with raw string interpolation and opens the manifest-named file in the system editor or the internal Monaco editor; `openImportPicker` feeds a filtered file dialog into the same installer. `native/tests/electron-compat.test.mjs` asserts all of this is byte-identical.
+`src/common/themes.ts::installTheme(linkOrPath)` fetches `http(s)` URLs with global `fetch` (arbitrary hosts, no allowlist) or reads local files, then `installThemeFromCode` parses with `parseBDManifest` (`/**` required; `name` defaults to `"null"`; `enabled: false`; `import` stops the scan), derives `` `${name.replace(" ", "-")}-BD` `` (first space only), and silently overwrites `<themes>/<id>/manifest.json` + `src.css` (also storing `updateSrc` and `supportsRemcordTitlebar`). `editTheme(id)` reads the manifest with raw string interpolation and opens the manifest-named file in the system editor or the internal Monaco editor; `openImportPicker` feeds a filtered file dialog into the same installer. `native/tests/electron-compat.test.mjs` asserts all of this is byte-identical.
 
 ### Native chain
 
 ```text
-renderer await window.legcord.themes.installFromCode(css)
+renderer await window.remcord.themes.installFromCode(css)
   → requireCapability("themes.install_code") or sync UNSUPPORTED_CAPABILITY throw
   → client non-empty/≤1 MiB check (TypeError before dispatch)
   → {"type":"theme_install_code","payload":{"css":"..."}}
@@ -490,7 +490,7 @@ Deliberate Electron differences: validated/rejected names instead of `null-BD`; 
 
 ## Theme CSS write capability (Phase D Step 3b)
 
-`themes.write_css` (wire `theme_write_css`, facade `window.legcord.themes.writeCss(id, css)`) replaces one theme's CSS text. The renderer supplies only the id and the new CSS: the destination is the manifest-declared file resolved through the filename allowlist, and `manifest.json` is never modified (enablement and metadata preserved byte-for-byte, mirroring Electron's editor save path). No URL, no path, no filename, no destination, no enablement flag, no editor/process launch, no dialog. No `src/` caller is branched.
+`themes.write_css` (wire `theme_write_css`, facade `window.remcord.themes.writeCss(id, css)`) replaces one theme's CSS text. The renderer supplies only the id and the new CSS: the destination is the manifest-declared file resolved through the filename allowlist, and `manifest.json` is never modified (enablement and metadata preserved byte-for-byte, mirroring Electron's editor save path). No URL, no path, no filename, no destination, no enablement flag, no editor/process launch, no dialog. No `src/` caller is branched.
 
 ### Electron edit chain (unchanged)
 
@@ -499,7 +499,7 @@ Deliberate Electron differences: validated/rejected names instead of `null-BD`; 
 ### Native chain
 
 ```text
-renderer await window.legcord.themes.writeCss("my-theme", css)
+renderer await window.remcord.themes.writeCss("my-theme", css)
   → requireCapability("themes.write_css") or sync UNSUPPORTED_CAPABILITY throw
   → client id/css checks (TypeError before dispatch)
   → {"type":"theme_write_css","payload":{"id":"my-theme","css":"..."}}
@@ -516,7 +516,7 @@ Deliberate Electron differences (hardening, not regressions): validated ids inst
 
 ## Theme import picker capability (Phase D Step 3c)
 
-`themes.import_files` (wire `theme_import_files`, facade `window.legcord.themes.importFiles()`) opens the host-owned native file picker and installs every selected file through the SAME shared installer as `themes.install_code` (`themes::install_parsed_theme` — exactly one installation implementation underneath both; no parser/manifest/validation/bound/write logic duplicated). No `src/` caller is branched.
+`themes.import_files` (wire `theme_import_files`, facade `window.remcord.themes.importFiles()`) opens the host-owned native file picker and installs every selected file through the SAME shared installer as `themes.install_code` (`themes::install_parsed_theme` — exactly one installation implementation underneath both; no parser/manifest/validation/bound/write logic duplicated). No `src/` caller is branched.
 
 ### Electron picker chain (unchanged)
 
@@ -525,7 +525,7 @@ Deliberate Electron differences (hardening, not regressions): validated ids inst
 ### Native chain
 
 ```text
-renderer await window.legcord.themes.importFiles()
+renderer await window.remcord.themes.importFiles()
   → requireCapability("themes.import_files") or sync UNSUPPORTED_CAPABILITY throw
   → no client checks possible (no input); 120 s long-operation timeout
   → {"type":"theme_import_files","payload":{}}
@@ -544,7 +544,7 @@ Deliberate Electron differences: sequential in-order processing instead of un-aw
 
 ## Theme enable flip capability (Phase D Step 3d-1)
 
-`themes.set_enabled` (wire `theme_set_enabled`, facade `window.legcord.themes.setEnabled(id, enabled)`) flips one theme's `manifest.enabled` flag. The renderer supplies only the id and the boolean: the manifest path is derived from the validated id under the host-controlled themes root, and ONLY `enabled` changes — every other field, known or unknown, is preserved by editing the parsed JSON document in place. No `src/` caller is branched.
+`themes.set_enabled` (wire `theme_set_enabled`, facade `window.remcord.themes.setEnabled(id, enabled)`) flips one theme's `manifest.enabled` flag. The renderer supplies only the id and the boolean: the manifest path is derived from the validated id under the host-controlled themes root, and ONLY `enabled` changes — every other field, known or unknown, is preserved by editing the parsed JSON document in place. No `src/` caller is branched.
 
 ### Electron toggle chain (unchanged)
 
@@ -553,7 +553,7 @@ Deliberate Electron differences: sequential in-order processing instead of un-aw
 ### Native chain
 
 ```text
-renderer await window.legcord.themes.setEnabled("my-theme", true)
+renderer await window.remcord.themes.setEnabled("my-theme", true)
   → requireCapability("themes.set_enabled") or sync UNSUPPORTED_CAPABILITY throw
   → client id/boolean checks (TypeError before dispatch)
   → {"type":"theme_set_enabled","payload":{"id":"my-theme","enabled":true}}
@@ -578,11 +578,11 @@ The `ThemesPage`/`ThemesCard` renderer UI dispatches to the already-proven nativ
 | Action | Native (capability present) | Electron (capability absent) |
 | --- | --- | --- |
 | Page inventory | `loadNativeThemes()` over `themes.listThemes()`, scroll-preserving `store.themes` replace | `refreshThemes()` over sync `getThemes()` |
-| Manual refresh | same native reload | `window.legcord.themes.refresh()` |
-| Toggle | `setNativeThemeEnabled(id, state)` over `themes.setEnabled(id, state)` + reconcile reload | `window.legcord.themes.set(id, state)` + sync `refreshThemes()` |
-| Import | `importNativeThemes()` over `themes.importFiles()` + reload when `imported > 0` | `window.legcord.themes.openImportPicker()` |
-| Theme folder | `openThemeFolderNative(id)` (unchanged) | `window.legcord.themes.folder(id)` (unchanged) |
-| URL install | hidden in native mode | `window.legcord.themes.install(url)` |
+| Manual refresh | same native reload | `window.remcord.themes.refresh()` |
+| Toggle | `setNativeThemeEnabled(id, state)` over `themes.setEnabled(id, state)` + reconcile reload | `window.remcord.themes.set(id, state)` + sync `refreshThemes()` |
+| Import | `importNativeThemes()` over `themes.importFiles()` + reload when `imported > 0` | `window.remcord.themes.openImportPicker()` |
+| Theme folder | `openThemeFolderNative(id)` (unchanged) | `window.remcord.themes.folder(id)` (unchanged) |
+| URL install | hidden in native mode | `window.remcord.themes.install(url)` |
 | Edit / uninstall | hidden in native mode (no placeholder RPC) | unchanged Electron calls |
 | Update from URL | hidden (native inventory never carries `updateSrc`) | unchanged |
 | Quick CSS switch / open | disabled in native mode | unchanged |
@@ -622,7 +622,7 @@ The substrate additionally owns `ModCache` (in-memory validated bundles keyed by
 
 ## Settings capability (Phase C)
 
-The first real mod-facing `window.legcord` capability migrates `settings.getConfig()` from synchronous Electron IPC to typed async WebView2 IPC. Exactly one real caller is migrated: the Shelter power plugin's `blockPowerSavingInVoiceChat` read (`src/shelter/power/index.ts`). All other `settings.getConfig()` callers (Shelter settings, titlebar) keep the unchanged synchronous Electron implementation.
+The first real mod-facing `window.remcord` capability migrates `settings.getConfig()` from synchronous Electron IPC to typed async WebView2 IPC. Exactly one real caller is migrated: the Shelter power plugin's `blockPowerSavingInVoiceChat` read (`src/shelter/power/index.ts`). All other `settings.getConfig()` callers (Shelter settings, titlebar) keep the unchanged synchronous Electron implementation.
 
 ### Electron chain (unchanged)
 
@@ -630,9 +630,9 @@ The first real mod-facing `window.legcord` capability migrates `settings.getConf
 
 ### Native chain
 
-Renderer `window.legcord.settings.getConfig()` → parameter-free `settings_get_config` request → Rust `settings::load_settings` reads the host-built `<DEV profile>/storage/settings.json` into the typed `SettingsSnapshot` (`native/src/settings.rs`, Electron-compatible camelCase keys, defaults mirroring `src/common/config.ts`) → validated `settings_config` response → renderer schema check → resolved snapshot object. Missing file returns compiled-in defaults (`source: "defaults"`, nothing is written); corrupt file returns typed `SETTINGS_UNAVAILABLE`; unknown future keys are ignored; wrong field types are rejected. There is no `settings.setConfig`, no key argument, no path argument, and no generic invocation.
+Renderer `window.remcord.settings.getConfig()` → parameter-free `settings_get_config` request → Rust `settings::load_settings` reads the host-built `<DEV profile>/storage/settings.json` into the typed `SettingsSnapshot` (`native/src/settings.rs`, Electron-compatible camelCase keys, defaults mirroring `src/common/config.ts`) → validated `settings_config` response → renderer schema check → resolved snapshot object. Missing file returns compiled-in defaults (`source: "defaults"`, nothing is written); corrupt file returns typed `SETTINGS_UNAVAILABLE`; unknown future keys are ignored; wrong field types are rejected. There is no `settings.setConfig`, no key argument, no path argument, and no generic invocation.
 
-The facade resolves the snapshot object directly (same shape as Electron's return), never blocks document startup, and uses the shared pending map: correlation by request ID, timeout rejection, and `pagehide` disposal. The Shelter power plugin branches on `window.legcord.boot.runtime === "webview2"`: native uses `await getConfig()` (subscription installed after resolve), Electron keeps the direct synchronous call.
+The facade resolves the snapshot object directly (same shape as Electron's return), never blocks document startup, and uses the shared pending map: correlation by request ID, timeout rejection, and `pagehide` disposal. The Shelter power plugin branches on `window.remcord.boot.runtime === "webview2"`: native uses `await getConfig()` (subscription installed after resolve), Electron keeps the direct synchronous call.
 
 ## Settings mutation capability (Phase C-3)
 
@@ -651,7 +651,7 @@ The write half of the settings capability migrates ONE real mutation — `blockP
 
 ### Native chain
 
-Renderer `await window.legcord.settings.setBlockPowerSavingInVoiceChat(value)` → `requireCapability("settings.set_block_power_saving_in_voice_chat")` → bool-only `settings_set_block_power_saving` request (non-boolean values rejected client-side; key/path/object members rejected host-side by `deny_unknown_fields`) → Rust `settings::apply_block_power_saving` loads the authoritative settings (missing file → defaults; corrupt file → typed `SETTINGS_UNAVAILABLE`, never overwritten), applies ONLY the allowlisted field (unknown future keys preserved via JSON-document merge), persists atomically (sibling temp file + same-directory rename), and returns the validated `settings_mutation { block_power_saving_in_voice_chat, source: "file", payload_bytes }` response → renderer schema check → resolved boolean. The migrated Shelter caller assigns the host-confirmed value into `store.settings` (scroll-preserving, in place); a rejected mutation leaves local state untouched. Host dispatches bridge requests on one event-loop thread, so mutations serialize with no locks; rapid sequential writes were tested to leave deterministic valid state with last-write-wins.
+Renderer `await window.remcord.settings.setBlockPowerSavingInVoiceChat(value)` → `requireCapability("settings.set_block_power_saving_in_voice_chat")` → bool-only `settings_set_block_power_saving` request (non-boolean values rejected client-side; key/path/object members rejected host-side by `deny_unknown_fields`) → Rust `settings::apply_block_power_saving` loads the authoritative settings (missing file → defaults; corrupt file → typed `SETTINGS_UNAVAILABLE`, never overwritten), applies ONLY the allowlisted field (unknown future keys preserved via JSON-document merge), persists atomically (sibling temp file + same-directory rename), and returns the validated `settings_mutation { block_power_saving_in_voice_chat, source: "file", payload_bytes }` response → renderer schema check → resolved boolean. The migrated Shelter caller assigns the host-confirmed value into `store.settings` (scroll-preserving, in place); a rejected mutation leaves local state untouched. Host dispatches bridge requests on one event-loop thread, so mutations serialize with no locks; rapid sequential writes were tested to leave deterministic valid state with last-write-wins.
 
 ## Settings set capability (POST-D4 settings milestone)
 
@@ -668,11 +668,11 @@ Every other `Settings` field stays out: window chrome/tray/startup keys are ELEC
 
 ### Native chain
 
-Renderer `await window.legcord.settings.set(key, value)` → `requireCapability("settings.set")` → client allowlist check (unknown keys, key↔variant mismatches, unknown mod ids rejected before dispatch) → `settings_set` request → host re-validates via `settings::validate_settings_set` (parse-time and dispatch-time) → Rust `settings::apply_settings_set` loads the authoritative settings (missing file → defaults; corrupt file → typed `SETTINGS_UNAVAILABLE`, never overwritten), merges ONLY the allowlisted field into the JSON document (unknown future keys preserved), persists atomically (sibling temp file + same-directory rename), and returns the validated `settings_set { key, value, source: "file", payload_bytes }` response (key echo must equal the request) → renderer schema check → resolved `{ key, value }`. Migrated callers (`toggleMod`, banner dismiss, the two switches) assign the host-confirmed value into `store.settings` in place with scroll preservation; a rejected mutation leaves local state untouched. Live `setLang` and `restart` need no new code: they already exist as narrow one-way events (`settings_boot_set_lang` → `localization::apply_lang` with charset/length validation and atomic write; `settings_boot_restart` → document reload, explicitly NOT Electron relaunch).
+Renderer `await window.remcord.settings.set(key, value)` → `requireCapability("settings.set")` → client allowlist check (unknown keys, key↔variant mismatches, unknown mod ids rejected before dispatch) → `settings_set` request → host re-validates via `settings::validate_settings_set` (parse-time and dispatch-time) → Rust `settings::apply_settings_set` loads the authoritative settings (missing file → defaults; corrupt file → typed `SETTINGS_UNAVAILABLE`, never overwritten), merges ONLY the allowlisted field into the JSON document (unknown future keys preserved), persists atomically (sibling temp file + same-directory rename), and returns the validated `settings_set { key, value, source: "file", payload_bytes }` response (key echo must equal the request) → renderer schema check → resolved `{ key, value }`. Migrated callers (`toggleMod`, banner dismiss, the two switches) assign the host-confirmed value into `store.settings` in place with scroll preservation; a rejected mutation leaves local state untouched. Live `setLang` and `restart` need no new code: they already exist as narrow one-way events (`settings_boot_set_lang` → `localization::apply_lang` with charset/length validation and atomic write; `settings_boot_restart` → document reload, explicitly NOT Electron relaunch).
 
 ## Localization capability (Phase C-2)
 
-The second mod-facing `window.legcord` capability migrates the already-async `getLang(key)` contract to the typed bridge. Exactly one caller is migrated: the invite back-button preload's `invite-goBackToApp` label lookup (`src/discord/preload/inviteBackButton.mts`). No language mutation, no new format, no duplicated database.
+The second mod-facing `window.remcord` capability migrates the already-async `getLang(key)` contract to the typed bridge. Exactly one caller is migrated: the invite back-button preload's `invite-goBackToApp` label lookup (`src/discord/preload/inviteBackButton.mts`). No language mutation, no new format, no duplicated database.
 
 ### Electron chain (unchanged)
 
@@ -680,12 +680,12 @@ The second mod-facing `window.legcord` capability migrates the already-async `ge
 
 ### Native chain
 
-Renderer `window.legcord.getLang(key)` → `requireCapability("localization.get_lang")` → key-only `localization_get_lang` request (empty/oversized/non-string keys rejected client-side and host-side) → Rust `localization::lookup` over the compile-time-embedded `assets/lang/*.json` catalogs (via `native/build.rs`) with the identical selection/fallback/empty-string rules, selection re-read per request from `<DEV profile>/storage/lang.json` → validated `localization_string { value, lang }` → resolved string. The invite caller branches on `boot.runtime === "webview2"`; Electron keeps the raw invoke byte-for-byte.
+Renderer `window.remcord.getLang(key)` → `requireCapability("localization.get_lang")` → key-only `localization_get_lang` request (empty/oversized/non-string keys rejected client-side and host-side) → Rust `localization::lookup` over the compile-time-embedded `assets/lang/*.json` catalogs (via `native/build.rs`) with the identical selection/fallback/empty-string rules, selection re-read per request from `<DEV profile>/storage/lang.json` → validated `localization_string { value, lang }` → resolved string. The invite caller branches on `boot.runtime === "webview2"`; Electron keeps the raw invoke byte-for-byte.
 
 ### Required dependency categories
 
 - **Needed to execute Vencord:** one standalone Vencord browser JS bundle, the matching browser CSS bundle, the page-world execution mechanism, and fixed CSS insertion after the JS. The native bridge transports only a typed request/result, not bundle data. (Shelter needs only its JS bundle; Equicord needs JS plus CSS.)
-- **Optional Remcord features:** existing `userData` location, cache/ref update policy, broad `window.legcord` API, the runtime-plugin loader, themes, RPC, and all other `ipcRenderer` channels. (Mod enable/disable is honored natively, but only to decide adapter injection — see "Adapter enablement".)
+- **Optional Remcord features:** existing `userData` location, cache/ref update policy, broad `window.remcord` API, the runtime-plugin loader, themes, RPC, and all other `ipcRenderer` channels. (Mod enable/disable is honored natively, but only to decide adapter injection — see "Adapter enablement".)
 - **Electron-only replacements in this slice:** `app.getPath` plus exact local bundle reads are replaced by the isolated DEV cache and fixed URL retrieval; `ipcRenderer.invoke` by the one typed operation; `webFrame.executeJavaScript` by fixed-source Wry main-world execution; `webFrame.insertCSS` by the one identified style element.
 - **Deferred:** ambient `require("electron")`, `window.require`, arbitrary `native.invoke`, arbitrary `eval`/host source execution, `contextBridge` parity, `process` parity, arbitrary file reads, config migration, generic plugin scripts, custom bundles, and each mod's full settings/update UX.
 
@@ -693,11 +693,11 @@ Limits: a bridge message is at most 8 KiB; a ping nonce is non-empty and at most
 
 ## App version capability (Phase C-4)
 
-The fourth and final Phase C mod-facing `window.legcord` capability migrates the synchronous `window.legcord.version` read to the typed async bridge. Exactly one caller is migrated: the Shelter update checker's local-version comparison (`src/shelter/settings/components/HeroUpdater.tsx`). AboutPopup's render-time version label keeps the unchanged synchronous Electron read.
+The fourth and final Phase C mod-facing `window.remcord` capability migrates the synchronous `window.remcord.version` read to the typed async bridge. Exactly one caller is migrated: the Shelter update checker's local-version comparison (`src/shelter/settings/components/HeroUpdater.tsx`). AboutPopup's render-time version label keeps the unchanged synchronous Electron read.
 
 ### Why this contract
 
-Every remaining `window.legcord` read was traced before choosing. `rpc.getBlacklist` sits on the hot RPC `listen()` path and inside synchronous Solid memos, carries an unbounded array plus mutation/event pairing, and is filesystem-backed. `translations` is a whole-catalog payload. `platform`/`osRelease` callers are synchronous render conditions. `isPowerSavingEnabled` has no renderer caller and needs an OS power API. `dumpFlags` has no caller. `getDetectables`/`getProcessList` are unbounded OS-scanned arrays. The version read is the smallest safe migration: one short string, a compile-time source, an already-async caller, no parameters, no filesystem, no native UI dependency.
+Every remaining `window.remcord` read was traced before choosing. `rpc.getBlacklist` sits on the hot RPC `listen()` path and inside synchronous Solid memos, carries an unbounded array plus mutation/event pairing, and is filesystem-backed. `translations` is a whole-catalog payload. `platform`/`osRelease` callers are synchronous render conditions. `isPowerSavingEnabled` has no renderer caller and needs an OS power API. `dumpFlags` has no caller. `getDetectables`/`getProcessList` are unbounded OS-scanned arrays. The version read is the smallest safe migration: one short string, a compile-time source, an already-async caller, no parameters, no filesystem, no native UI dependency.
 
 ### Electron chain (unchanged)
 
@@ -705,39 +705,39 @@ Every remaining `window.legcord` read was traced before choosing. `rpc.getBlackl
 
 ### Native chain
 
-Renderer `await window.legcord.native.getVersion()` → `requireCapability("app.get_version")` → parameter-free `app_get_version` request (any channel/key/path member rejected by `deny_unknown_fields`) → Rust `app::current_app_version()` (the `package.json` version embedded at compile time by `native/build.rs`; debug builds report `"0.0.0"` exactly like Electron `isDev`) → validated `app_version { version }` response (non-empty, at most 64 UTF-8 bytes, both sides) → resolved string. There is no runtime source to be missing or corrupt: a missing or malformed `package.json` version fails the build, and the host validates the embedded constant at startup. The HeroUpdater caller branches on `boot.runtime === "webview2"`; Electron keeps the direct `window.legcord.version` read. No `version` field, `sendSync`, generic invoke, or filesystem capability exists on the native facade.
+Renderer `await window.remcord.native.getVersion()` → `requireCapability("app.get_version")` → parameter-free `app_get_version` request (any channel/key/path member rejected by `deny_unknown_fields`) → Rust `app::current_app_version()` (the `package.json` version embedded at compile time by `native/build.rs`; debug builds report `"0.0.0"` exactly like Electron `isDev`) → validated `app_version { version }` response (non-empty, at most 64 UTF-8 bytes, both sides) → resolved string. There is no runtime source to be missing or corrupt: a missing or malformed `package.json` version fails the build, and the host validates the embedded constant at startup. The HeroUpdater caller branches on `boot.runtime === "webview2"`; Electron keeps the direct `window.remcord.version` read. No `version` field, `sendSync`, generic invoke, or filesystem capability exists on the native facade.
 
-### Implemented `window.legcord`
+### Implemented `window.remcord`
 
-The exact facade is `window.legcord = Object.freeze({ boot, native, settings, getLang, pluginStorage })`, installed in the document-start script only when `location.origin === "https://discord.com"`.
+The exact facade is `window.remcord = Object.freeze({ boot, native, settings, getLang, pluginStorage })`, installed in the document-start script only when `location.origin === "https://discord.com"`.
 
 | Property | Kind | Behavior |
 | --- | --- | --- |
-| `window.legcord.boot.runtime` | immutable boot snapshot | `"webview2"` |
-| `window.legcord.boot.platform` | immutable boot snapshot | `"win32"`; the native prototype is Windows-only |
-| `window.legcord.boot.protocol_version` | immutable boot snapshot | `1` |
-| `window.legcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.get_bundle", "settings.get_config", "settings.set_block_power_saving_in_voice_chat", "settings.set", "localization.get_lang", "app.get_version", "plugin_storage.read", "plugin_storage.write"]` |
-| `window.legcord.native.ping(nonce)` | async native request | Returns `{ nonce, message: "pong" }`; rejects malformed input, transport errors, native errors, timeout, or document disposal |
-| `window.legcord.native.getModBundle(modId)` | registry-scoped async request (one logical id) | Resolves the registered mod's bundle operation for `vencord`, `shelter`, or `equicord`; typed size/version/timing/marker metadata only after the host executes the bundle and, for the mods that declare one, applies CSS. Rejects unregistered ids with `UNKNOWN_MOD`, malformed ids before dispatch, timeout, or document disposal |
-| `window.legcord.native.getVencordBundle()` | thin Vencord convenience wrapper over `getModBundle("vencord")` | Same response, fixed id |
-| `window.legcord.native.supports(name)` | renderer-local | Boolean membership test against the frozen boot capability list |
-| `window.legcord.native.requireCapability(name)` | renderer-local | Returns `true` when present; otherwise throws with `code === "UNSUPPORTED_CAPABILITY"` |
-| `window.legcord.native.reportCss(value)` | typed one-way diagnostic event | Sends the native prototype's CSS injection probe result; not a general CSS API |
-| `window.legcord.settings.getConfig()` | explicit settings-only async request (Phase C) | Requires the `settings.get_config` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the parameter-free `settings_get_config` command and resolves the validated `Settings` snapshot object (Electron-compatible keys). Rejects malformed snapshots, `SETTINGS_UNAVAILABLE` host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
-| `window.legcord.settings.setBlockPowerSavingInVoiceChat(value)` | explicit allowlisted settings-mutation async request (Phase C-3) | Requires the `settings.set_block_power_saving_in_voice_chat` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one boolean (`settings_set_block_power_saving`, non-boolean client-rejected) and resolves the host-confirmed applied value from the validated `settings_mutation` response (`source` must be `"file"`). Rejects malformed responses, `SETTINGS_UNAVAILABLE` host failures (missing/unreadable/corrupt file, write failure), timeout (default 5 s), or document disposal. No generic `setConfig` exists on the native facade |
-| `window.legcord.settings.set(key, value)` | explicit closed-allowlist settings-set async request (POST-D4) | Requires the `settings.set` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one allowlisted key (`mods`, `support_banner_dismissed`, `show_experimental_plugin_menu`, `extended_plugin_abilities`; unknown keys client-rejected) plus its bounded value (`ValidMods`-only array ≤8, or boolean matching the key; mismatches client-rejected) as `settings_set` and resolves `{ key, value }` from the validated `settings_set` response (key echo must equal the request, `source` must be `"file"`). Rejects malformed responses, `SETTINGS_UNAVAILABLE`/`INVALID_SETTINGS_SET` host failures, timeout (default 5 s), or document disposal. No generic `setConfig`, no paths, no URLs, no objects |
-| `window.legcord.getLang(key)` | explicit localization-only async request (Phase C-2) | Requires the `localization.get_lang` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one bounded key (`localization_get_lang`, non-empty, at most 128 UTF-8 bytes; client- and host-validated) and resolves the localized string — `""` for a missing key, exactly like Electron. Rejects malformed responses, host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
-| `window.legcord.native.getVersion()` | explicit app-version async request (Phase C-4) | Requires the `app.get_version` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the parameter-free `app_get_version` command and resolves the application version string (`"0.0.0"` on dev builds, otherwise the `package.json` version, exactly like Electron `getVersion()`). Rejects empty/oversized versions (at most 64 UTF-8 bytes), host failures, timeout (default 5 s), or document disposal. No synchronous `version` field exists on the native facade |
-| `window.legcord.pluginStorage.readFile(pluginId, relativePath)` | explicit scoped plugin-storage read (Phase D) | Requires the `plugin_storage.read` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly a logical plugin id (`[A-Za-z0-9_-]{1,64}`, client- and host-validated) plus a logical relative path (non-empty, at most 256 UTF-8 bytes client-side; full traversal/drive/UNC/device/quirks policy host-side) as `plugin_storage_read` and resolves the file text. Rejects malformed responses (data must be a string within 1 MiB with matching byte count), typed host failures (`NOT_FOUND` for missing files like Electron, `INVALID_PATH`/`INVALID_PLUGIN_ID`, `EXTENSION_DISABLED`, `SETTINGS_UNAVAILABLE`, `TOO_LARGE`, `READ_FAILED`), timeout (default 5 s), or document disposal. No paths, roots, or metadata cross the boundary |
-| `window.legcord.pluginStorage.writeFile(pluginId, relativePath, data)` | explicit scoped plugin-storage write (Phase D) | Requires the `plugin_storage.write` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the same logical addressing plus UTF-8 text `data` (at most 1 MiB, client- and host-validated) as `plugin_storage_write` and resolves the persisted byte count. Same rejection taxonomy as the read (`WRITE_FAILED` instead of `READ_FAILED`). No generic `window.legcord.fs` object exists anywhere on the native facade |
+| `window.remcord.boot.runtime` | immutable boot snapshot | `"webview2"` |
+| `window.remcord.boot.platform` | immutable boot snapshot | `"win32"`; the native prototype is Windows-only |
+| `window.remcord.boot.protocol_version` | immutable boot snapshot | `1` |
+| `window.remcord.boot.capabilities` | immutable boot snapshot | `["bridge.ping", "mod.get_bundle", "settings.get_config", "settings.set_block_power_saving_in_voice_chat", "settings.set", "localization.get_lang", "app.get_version", "plugin_storage.read", "plugin_storage.write"]` |
+| `window.remcord.native.ping(nonce)` | async native request | Returns `{ nonce, message: "pong" }`; rejects malformed input, transport errors, native errors, timeout, or document disposal |
+| `window.remcord.native.getModBundle(modId)` | registry-scoped async request (one logical id) | Resolves the registered mod's bundle operation for `vencord`, `shelter`, or `equicord`; typed size/version/timing/marker metadata only after the host executes the bundle and, for the mods that declare one, applies CSS. Rejects unregistered ids with `UNKNOWN_MOD`, malformed ids before dispatch, timeout, or document disposal |
+| `window.remcord.native.getVencordBundle()` | thin Vencord convenience wrapper over `getModBundle("vencord")` | Same response, fixed id |
+| `window.remcord.native.supports(name)` | renderer-local | Boolean membership test against the frozen boot capability list |
+| `window.remcord.native.requireCapability(name)` | renderer-local | Returns `true` when present; otherwise throws with `code === "UNSUPPORTED_CAPABILITY"` |
+| `window.remcord.native.reportCss(value)` | typed one-way diagnostic event | Sends the native prototype's CSS injection probe result; not a general CSS API |
+| `window.remcord.settings.getConfig()` | explicit settings-only async request (Phase C) | Requires the `settings.get_config` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the parameter-free `settings_get_config` command and resolves the validated `Settings` snapshot object (Electron-compatible keys). Rejects malformed snapshots, `SETTINGS_UNAVAILABLE` host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
+| `window.remcord.settings.setBlockPowerSavingInVoiceChat(value)` | explicit allowlisted settings-mutation async request (Phase C-3) | Requires the `settings.set_block_power_saving_in_voice_chat` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one boolean (`settings_set_block_power_saving`, non-boolean client-rejected) and resolves the host-confirmed applied value from the validated `settings_mutation` response (`source` must be `"file"`). Rejects malformed responses, `SETTINGS_UNAVAILABLE` host failures (missing/unreadable/corrupt file, write failure), timeout (default 5 s), or document disposal. No generic `setConfig` exists on the native facade |
+| `window.remcord.settings.set(key, value)` | explicit closed-allowlist settings-set async request (POST-D4) | Requires the `settings.set` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one allowlisted key (`mods`, `support_banner_dismissed`, `show_experimental_plugin_menu`, `extended_plugin_abilities`; unknown keys client-rejected) plus its bounded value (`ValidMods`-only array ≤8, or boolean matching the key; mismatches client-rejected) as `settings_set` and resolves `{ key, value }` from the validated `settings_set` response (key echo must equal the request, `source` must be `"file"`). Rejects malformed responses, `SETTINGS_UNAVAILABLE`/`INVALID_SETTINGS_SET` host failures, timeout (default 5 s), or document disposal. No generic `setConfig`, no paths, no URLs, no objects |
+| `window.remcord.getLang(key)` | explicit localization-only async request (Phase C-2) | Requires the `localization.get_lang` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly one bounded key (`localization_get_lang`, non-empty, at most 128 UTF-8 bytes; client- and host-validated) and resolves the localized string — `""` for a missing key, exactly like Electron. Rejects malformed responses, host failures, timeout (default 5 s), or document disposal. No synchronous facade exists |
+| `window.remcord.native.getVersion()` | explicit app-version async request (Phase C-4) | Requires the `app.get_version` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the parameter-free `app_get_version` command and resolves the application version string (`"0.0.0"` on dev builds, otherwise the `package.json` version, exactly like Electron `getVersion()`). Rejects empty/oversized versions (at most 64 UTF-8 bytes), host failures, timeout (default 5 s), or document disposal. No synchronous `version` field exists on the native facade |
+| `window.remcord.pluginStorage.readFile(pluginId, relativePath)` | explicit scoped plugin-storage read (Phase D) | Requires the `plugin_storage.read` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends exactly a logical plugin id (`[A-Za-z0-9_-]{1,64}`, client- and host-validated) plus a logical relative path (non-empty, at most 256 UTF-8 bytes client-side; full traversal/drive/UNC/device/quirks policy host-side) as `plugin_storage_read` and resolves the file text. Rejects malformed responses (data must be a string within 1 MiB with matching byte count), typed host failures (`NOT_FOUND` for missing files like Electron, `INVALID_PATH`/`INVALID_PLUGIN_ID`, `EXTENSION_DISABLED`, `SETTINGS_UNAVAILABLE`, `TOO_LARGE`, `READ_FAILED`), timeout (default 5 s), or document disposal. No paths, roots, or metadata cross the boundary |
+| `window.remcord.pluginStorage.writeFile(pluginId, relativePath, data)` | explicit scoped plugin-storage write (Phase D) | Requires the `plugin_storage.write` capability (`UNSUPPORTED_CAPABILITY` otherwise). Sends the same logical addressing plus UTF-8 text `data` (at most 1 MiB, client- and host-validated) as `plugin_storage_write` and resolves the persisted byte count. Same rejection taxonomy as the read (`WRITE_FAILED` instead of `READ_FAILED`). No generic `window.remcord.fs` object exists anywhere on the native facade |
 
-No other existing Electron-facing `window.legcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Remcord config, OS release, translations, or Electron version. The one exception is the app version itself, which is the authoritative `package.json` value (or `"0.0.0"` on dev builds), not an invented substitute.
+No other existing Electron-facing `window.remcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Remcord config, OS release, translations, or Electron version. The one exception is the app version itself, which is the authoritative `package.json` value (or `"0.0.0"` on dev builds), not an invented substitute.
 
-No other existing Electron-facing `window.legcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Remcord config, Remcord version, OS release, translations, or Electron version.
+No other existing Electron-facing `window.remcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Remcord config, Remcord version, OS release, translations, or Electron version.
 
 ### Classification of the existing renderer contract
 
-The table lists the exposed `RemcordWindow` groups from `src/@types/legcordWindow.d.ts` and the behavior actually wired by `src/discord/preload/bridge.ts`. Existing API calls must not be redirected to an untyped generic bridge.
+The table lists the exposed `RemcordWindow` groups from `src/@types/remcordWindow.d.ts` and the behavior actually wired by `src/discord/preload/bridge.ts`. Existing API calls must not be redirected to an untyped generic bridge.
 
 | API / caller | Sync or async; arguments / return | Side effects and boot-critical status | Migration decision |
 | --- | --- | --- | --- |
@@ -758,13 +758,13 @@ The table lists the exposed `RemcordWindow` groups from `src/@types/legcordWindo
 | `rpc.refreshProcessList()`, `getProcessList()`, `addDetectable(game)`, `removeDetectable(id)`, `getDetectables()`, `getBlacklist()`, `blacklistGame(name,id)`, `unblacklistGame(id)` — Shelter registered games/RPC | Mixed fire-and-forget, synchronous process/list/cache reads, synchronous blacklist mutation | Reads process list, edits detectable/blacklist state, emits `rpcBlacklistUpdated`; not boot-critical | Process/detectable reads become async or locally cached; blacklist state uses typed events and async mutations |
 | `backup.save(data)`, `restore()` — settings | Async; serialized backup string / no args; promise result | Opens save/open dialogs and reads/writes archive contents | Native `backup.save` + `backup.restore` (host-mediated pickers, bounded validate/stage/commit); BackupSection UI wiring deferred |
 | `plugins.list()`, `setEnabled(id,enabled)`, `reload(id)`, `openFolder()` — plugins page | Async list/toggle/reload; fire-and-forget folder open | Enumerates and changes runtime plugins | Deferred; no plugin loader is part of the prototype |
-| `fs.writeFile(pluginId,relativePath,data)`, `readFile(pluginId,relativePath)` — plugin storage | Async; plugin ID, relative path, text; structured success/error result | Reads/writes scoped plugin storage, gated by user setting and path containment | Phase D ports exactly this pair as typed `plugin_storage.read`/`plugin_storage.write` capabilities under `window.legcord.pluginStorage` (strict id/path validation, canonical containment, 1 MiB bounds, atomic writes, no `window.legcord.fs`). There are no in-repo callers, so no `src/` caller is branched; a DEV-only smoke probe exercises the exact public contract |
-| `window.legcordRPC` — `src/discord/rpcProcess.ts` / Shelter RPC | Renderer-side API; receives activity and notifies consumers | Page-world RPC data delivery; not a `RemcordWindow` member | Deferred arRPC integration |
-| `window.legcord.channel` — `src/splash/redirect.html` | Synchronous string property | Selects redirect channel on splash page | Not part of the Discord document contract; splash is deferred |
+| `fs.writeFile(pluginId,relativePath,data)`, `readFile(pluginId,relativePath)` — plugin storage | Async; plugin ID, relative path, text; structured success/error result | Reads/writes scoped plugin storage, gated by user setting and path containment | Phase D ports exactly this pair as typed `plugin_storage.read`/`plugin_storage.write` capabilities under `window.remcord.pluginStorage` (strict id/path validation, canonical containment, 1 MiB bounds, atomic writes, no `window.remcord.fs`). There are no in-repo callers, so no `src/` caller is branched; a DEV-only smoke probe exercises the exact public contract |
+| `window.remcordRPC` — `src/discord/rpcProcess.ts` / Shelter RPC | Renderer-side API; receives activity and notifies consumers | Page-world RPC data delivery; not a `RemcordWindow` member | Deferred arRPC integration |
+| `window.remcord.channel` — `src/splash/redirect.html` | Synchronous string property | Selects redirect channel on splash page | Not part of the Discord document contract; splash is deferred |
 
 ### Direct Electron dependencies in Discord preload
 
-These are separate from `window.legcord`. Only the exact integration operations in `preload/mods/{vencord,shelter,equicord}.mts` have a native replacement; other current preload modules remain unimplemented and are not loaded.
+These are separate from `window.remcord`. Only the exact integration operations in `preload/mods/{vencord,shelter,equicord}.mts` have a native replacement; other current preload modules remain unimplemented and are not loaded.
 
 | Caller | Electron dependency and contract | Migration |
 | --- | --- | --- |
@@ -823,7 +823,7 @@ There are 35 call sites in the current repository search, grouped below by the c
 
 ## Plugin storage capability (Phase D)
 
-The first filesystem-scoped native capability migrates the public third-party plugin-storage pair (`window.legcord.fs.writeFile`/`readFile` over `pluginWriteFile`/`pluginReadFile`) to typed async WebView2 capabilities under `window.legcord.pluginStorage`. No generic filesystem RPC exists: the renderer supplies only a logical plugin id plus a logical relative path, and the host builds the single root `<profile>/plugin-storage/<plugin_id>/` itself. Themes, Quick CSS, bundles, backups, folder opening, pickers, directory listing, and arbitrary paths remain deferred.
+The first filesystem-scoped native capability migrates the public third-party plugin-storage pair (`window.remcord.fs.writeFile`/`readFile` over `pluginWriteFile`/`pluginReadFile`) to typed async WebView2 capabilities under `window.remcord.pluginStorage`. No generic filesystem RPC exists: the renderer supplies only a logical plugin id plus a logical relative path, and the host builds the single root `<profile>/plugin-storage/<plugin_id>/` itself. Themes, Quick CSS, bundles, backups, folder opening, pickers, directory listing, and arbitrary paths remain deferred.
 
 ### Electron chain (unchanged)
 
@@ -835,7 +835,7 @@ Static enabled-theme injection at document startup: the native host discovers `<
 
 ### Electron chain (unchanged)
 
-`src/common/themes.ts::buildThemeCssCache` iterates the themes folder, reads each `manifest.json` (`getThemeManifest`, mtime-cached), defaults a missing `enabled` via a legacy `disabled.txt` check, and caches `readFileSync(`${themePath}/${manifest.theme}`)` — a raw string join with no filename validation, so `../` and absolute values escape the theme directory. `injectThemesMain` rebuilds the cache at startup and, on `did-finish-load`, pushes Quick CSS first when enabled (`initQuickCss` → `addTheme "legcord-quick-css"` with a 300 ms-debounced file watcher) then one `addTheme (id, css)` per cached theme in discovery order. The renderer (`src/discord/preload/themes.ts` over `src/common/dom.ts::addTheme`) creates one `<style id=name>` per push (duplicate-guarded by id) and `removeTheme` deletes by id. `setThemeEnabled` re-reads/pushes or removes per window and persists `manifest.enabled`. The theme-list watcher (`startThemeWatcher`, 500 ms debounce) refreshes only the manifest list cache, not CSS. Vencord CSS travels separately via `webFrame.insertCSS` at preload time (before `did-finish-load`), so Electron cascade order is Vencord CSS → Quick CSS → themes. `native/tests/electron-compat.test.mjs` asserts this pipeline is byte-identical and that no `themes.getCSS()` pull exists on either side.
+`src/common/themes.ts::buildThemeCssCache` iterates the themes folder, reads each `manifest.json` (`getThemeManifest`, mtime-cached), defaults a missing `enabled` via a legacy `disabled.txt` check, and caches `readFileSync(`${themePath}/${manifest.theme}`)` — a raw string join with no filename validation, so `../` and absolute values escape the theme directory. `injectThemesMain` rebuilds the cache at startup and, on `did-finish-load`, pushes Quick CSS first when enabled (`initQuickCss` → `addTheme "remcord-quick-css"` with a 300 ms-debounced file watcher) then one `addTheme (id, css)` per cached theme in discovery order. The renderer (`src/discord/preload/themes.ts` over `src/common/dom.ts::addTheme`) creates one `<style id=name>` per push (duplicate-guarded by id) and `removeTheme` deletes by id. `setThemeEnabled` re-reads/pushes or removes per window and persists `manifest.enabled`. The theme-list watcher (`startThemeWatcher`, 500 ms debounce) refreshes only the manifest list cache, not CSS. Vencord CSS travels separately via `webFrame.insertCSS` at preload time (before `did-finish-load`), so Electron cascade order is Vencord CSS → Quick CSS → themes. `native/tests/electron-compat.test.mjs` asserts this pipeline is byte-identical and that no `themes.getCSS()` pull exists on either side.
 
 ### Native chain
 
@@ -849,11 +849,11 @@ Static Quick CSS startup injection: when the authoritative settings flag is enab
 
 ### Electron chain (unchanged)
 
-`src/common/themes.ts::initQuickCss` resolves `<userData>/quickCss.css`, CREATES it empty when missing (`writeFileSync(path, "")`), and unconditionally sends `addTheme ("legcord-quick-css", <utf-8 content>)` — even when empty — so enabled-vs-disabled is style-present vs style-absent. `injectThemesMain` calls it on `did-finish-load` before the theme loop exactly when `getConfig("quickCss")` is truthy (`settings.quickCss`, default `true`, safe-mode `false`); the Themes page toggles via `enableQuickCss`/`disableQuickCss` IPC (re-read + watcher restart, or watcher close + `removeTheme`) plus `setConfig("quickCss", e)`. The live path (`fs.watch` + 300 ms debounce → `removeTheme` + `addTheme`) is deferred natively. `native/tests/electron-compat.test.mjs` asserts this lifecycle and enablement contract are byte-identical and that no Quick CSS pull exists on either side.
+`src/common/themes.ts::initQuickCss` resolves `<userData>/quickCss.css`, CREATES it empty when missing (`writeFileSync(path, "")`), and unconditionally sends `addTheme ("remcord-quick-css", <utf-8 content>)` — even when empty — so enabled-vs-disabled is style-present vs style-absent. `injectThemesMain` calls it on `did-finish-load` before the theme loop exactly when `getConfig("quickCss")` is truthy (`settings.quickCss`, default `true`, safe-mode `false`); the Themes page toggles via `enableQuickCss`/`disableQuickCss` IPC (re-read + watcher restart, or watcher close + `removeTheme`) plus `setConfig("quickCss", e)`. The live path (`fs.watch` + 300 ms debounce → `removeTheme` + `addTheme`) is deferred natively. `native/tests/electron-compat.test.mjs` asserts this lifecycle and enablement contract are byte-identical and that no Quick CSS pull exists on either side.
 
 ### Native chain
 
-On every trusted `PageLoadFinished`, BEFORE the theme block, the host runs `quick_css::load_quick_css`: authoritative `load_settings` → `quick_css` flag (corrupt settings fail closed to disabled, matching Electron's falsy fallback) → missing file is created empty (Electron parity) → 1 MiB bound → UTF-8 → content (possibly empty) or a typed state. When content is present the host evaluates one `managed_css_script("legcord-quick-css", css)`; when disabled/unreadable after a previous injection it evaluates the idempotent `managed_css_remove_script` so no stale style survives a reset. Style identity preserves Electron's `legcord-quick-css` verbatim (it collides with no native style). No renderer request, response, capability, or path crosses the boundary; a DEV-only `REMCORD_NATIVE_QUICKCSS_SMOKE=1` observation shares the managed-styles script and additionally reports `quickcss_present`, `quickcss_bytes`, and the computed `--remcord-native-order-probe` value through the evaluate callback (never the bridge).
+On every trusted `PageLoadFinished`, BEFORE the theme block, the host runs `quick_css::load_quick_css`: authoritative `load_settings` → `quick_css` flag (corrupt settings fail closed to disabled, matching Electron's falsy fallback) → missing file is created empty (Electron parity) → 1 MiB bound → UTF-8 → content (possibly empty) or a typed state. When content is present the host evaluates one `managed_css_script("remcord-quick-css", css)`; when disabled/unreadable after a previous injection it evaluates the idempotent `managed_css_remove_script` so no stale style survives a reset. Style identity preserves Electron's `remcord-quick-css` verbatim (it collides with no native style). No renderer request, response, capability, or path crosses the boundary; a DEV-only `REMCORD_NATIVE_QUICKCSS_SMOKE=1` observation shares the managed-styles script and additionally reports `quickcss_present`, `quickcss_bytes`, and the computed `--remcord-native-order-probe` value through the evaluate callback (never the bridge).
 
 Deliberate Electron differences: 1 MiB bound and explicit UTF-8/invalid states (Electron is unbounded and would throw); corrupt settings are a named `settings_unavailable` state instead of an unlogged falsy read. Everything else is parity: fixed host path, create-when-missing, empty push, verbatim identity, Quick CSS-before-themes emission, disabled-means-absent.
 
@@ -867,13 +867,13 @@ Quick CSS: `initQuickCss` sends `addTheme` unconditionally, then `fs.watch(quick
 
 ### Native chain
 
-A watcher signal only bumps a per-resource epoch and arms exactly one 300 ms timer per burst (`ResourceDebouncer`: first event spawns, later events only bump). The timer fires once with the latest epoch; the event-loop handler discards it unless both the epoch and the document generation still match (a superseded burst or a mid-debounce reload dies before any filesystem or renderer work). A fresh fire re-reads authoritative state — `quick_css::load_quick_css` (settings flag + fixed file, missing file recreated empty, error states never presented as CSS) or `themes::load_enabled_themes` — diffs against the last-pushed snapshot (`quick_css_transition` / `diff_theme_snapshots`), and issues minimal managed-CSS work: content updates evaluate `managed_css_script` (in place, never re-appended), removals evaluate `managed_css_remove_script`, and ONLY structural changes (Quick CSS recreated, theme added/removed) finish with `managed_css_order_script` over `[legcord-quick-css + sorted theme ids]`. Identical rescans issue zero renderer work. Every fire logs `[QuickCss][Live]` / `[Themes][Live]` (transition, bytes, read/injection latency) plus cumulative `[LiveCss][Metrics]` (`watchers`, `raw_fs_events`, `debounced_reloads`, `css_updates`, `css_removes`, `stale_discarded`, `order_repairs`), so rapid-edit bursts report raw events → coalesced updates. Watcher creation failure only disables live watching (startup injection still runs); the host never crashes on watcher, read, UTF-8, oversize, manifest, or shutdown paths.
+A watcher signal only bumps a per-resource epoch and arms exactly one 300 ms timer per burst (`ResourceDebouncer`: first event spawns, later events only bump). The timer fires once with the latest epoch; the event-loop handler discards it unless both the epoch and the document generation still match (a superseded burst or a mid-debounce reload dies before any filesystem or renderer work). A fresh fire re-reads authoritative state — `quick_css::load_quick_css` (settings flag + fixed file, missing file recreated empty, error states never presented as CSS) or `themes::load_enabled_themes` — diffs against the last-pushed snapshot (`quick_css_transition` / `diff_theme_snapshots`), and issues minimal managed-CSS work: content updates evaluate `managed_css_script` (in place, never re-appended), removals evaluate `managed_css_remove_script`, and ONLY structural changes (Quick CSS recreated, theme added/removed) finish with `managed_css_order_script` over `[remcord-quick-css + sorted theme ids]`. Identical rescans issue zero renderer work. Every fire logs `[QuickCss][Live]` / `[Themes][Live]` (transition, bytes, read/injection latency) plus cumulative `[LiveCss][Metrics]` (`watchers`, `raw_fs_events`, `debounced_reloads`, `css_updates`, `css_removes`, `stale_discarded`, `order_repairs`), so rapid-edit bursts report raw events → coalesced updates. Watcher creation failure only disables live watching (startup injection still runs); the host never crashes on watcher, read, UTF-8, oversize, manifest, or shutdown paths.
 
 Deliberate Electron differences (correctness, not regressions): one persistent watcher set instead of per-window create/close (reconfiguration replaces the handle; document reload never touches it); the themes root is watched for CSS/manifest/dir changes rather than manifest names only (diffing keeps renderer work minimal); rename/delete events are actionable (delete → empty-file recreation like startup; malicious manifest values remove the theme instead of escaping); and content updates never move nodes while structural inserts are repaired back into cascade position (Electron's live re-add drifts to the end of `<head>`).
 
 ### Native chain (plugin storage, unchanged)
 
-Renderer `await window.legcord.pluginStorage.writeFile(id, rel, text)` → `requireCapability("plugin_storage.write")` (client id-shape/byte checks) → `plugin_storage_write` request (parser checks presence + byte caps: id ≤ 64, path ≤ 256, data ≤ 1 MiB; unknown members rejected by `deny_unknown_fields`) → Rust `plugin_storage::write_plugin_file` (strict id validation, component-wise path validation rejecting traversal/absolute/drive/UNC/device/quirks, `extendedPluginAbilities` gate from the authoritative settings load, namespace-only directory creation, canonical parent containment resolving symlinks/junctions, atomic sibling-temp + rename persist) → validated `plugin_storage_write { payload_bytes }` → resolved byte count. Reads mirror this through `read_plugin_file` (missing file → typed `NOT_FOUND` like Electron; oversized stored files rejected before buffering; canonical file containment; UTF-8 text only) → validated `plugin_storage_read { data, payload_bytes }` → resolved file text. The facade resolves unwrapped values (string/bytes, matching the `getLang`/mutation precedent) and uses the shared pending map (correlation, 5 s timeout, `pagehide` disposal).
+Renderer `await window.remcord.pluginStorage.writeFile(id, rel, text)` → `requireCapability("plugin_storage.write")` (client id-shape/byte checks) → `plugin_storage_write` request (parser checks presence + byte caps: id ≤ 64, path ≤ 256, data ≤ 1 MiB; unknown members rejected by `deny_unknown_fields`) → Rust `plugin_storage::write_plugin_file` (strict id validation, component-wise path validation rejecting traversal/absolute/drive/UNC/device/quirks, `extendedPluginAbilities` gate from the authoritative settings load, namespace-only directory creation, canonical parent containment resolving symlinks/junctions, atomic sibling-temp + rename persist) → validated `plugin_storage_write { payload_bytes }` → resolved byte count. Reads mirror this through `read_plugin_file` (missing file → typed `NOT_FOUND` like Electron; oversized stored files rejected before buffering; canonical file containment; UTF-8 text only) → validated `plugin_storage_read { data, payload_bytes }` → resolved file text. The facade resolves unwrapped values (string/bytes, matching the `getLang`/mutation precedent) and uses the shared pending map (correlation, 5 s timeout, `pagehide` disposal).
 
 Deliberate Electron differences (hardening, not regressions): ids are validated instead of sanitized (Electron maps `"a/b"` to `"ab"`; native rejects `INVALID_PLUGIN_ID`); paths face the full Windows quirks policy (Electron accepts several); both directions are capped at 1 MiB (Electron is unbounded); writes are atomic (Electron writes in place); a corrupt settings file surfaces `SETTINGS_UNAVAILABLE` (Electron falls back to a near-empty cache and reports disabled). No `%`-decoding is performed anywhere, so encoded traversal is an inert literal filename.
 
@@ -883,7 +883,7 @@ The document-start compatibility script owns facade creation, local response cor
 
 ### Deferred and not tested
 
-Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`legcord://`); arRPC; popup windows; general mod loader; custom bundle execution; runtime plugins; theme install/edit (folder reveal/open now implemented natively); backup UI wiring (save + restore capabilities done, BackupSection unwired); existing broad `window.legcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's Legcord plugin surface is not implemented. This narrow mod path does not establish full Remcord compatibility.
+Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`remcord://`); arRPC; popup windows; general mod loader; custom bundle execution; runtime plugins; theme install/edit (folder reveal/open now implemented natively); backup UI wiring (save + restore capabilities done, BackupSection unwired); existing broad `window.remcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's Remcord plugin surface is not implemented. This narrow mod path does not establish full Remcord compatibility.
 
 ### Validation status
 
@@ -925,13 +925,13 @@ No error was hidden: renderer `uncaught`, `unhandled_rejection`, and `console.er
 
 ## Settings plugin artifact (3d-2 prerequisite A)
 
-The exact Legcord settings Shelter plugin artifact (`ts-out/plugins/settings/plugin.js`, 252,541 bytes, SHA-256 `dcbfc8d9d75535209c40bc9a5817f4eb351ca66f947288ffc94681887f320491`) is now embedded at compile time by `native/build.rs` and exposed read-only through `native/src/settings_plugin.rs`. No execution is wired: the artifact is available to the host, not to the renderer.
+The exact Remcord settings Shelter plugin artifact (`ts-out/plugins/settings/plugin.js`, 252,541 bytes, SHA-256 `dcbfc8d9d75535209c40bc9a5817f4eb351ca66f947288ffc94681887f320491`) is now embedded at compile time by `native/build.rs` and exposed read-only through `native/src/settings_plugin.rs`. No execution is wired: the artifact is available to the host, not to the renderer.
 
 ### Provenance (traced, not assumed)
 
-- Authored in `src/shelter/settings/` (`index.ts` entrypoint, `plugin.json` name `"Legcord Settings"`, lune per-directory convention).
+- Authored in `src/shelter/settings/` (`index.ts` entrypoint, `plugin.json` name `"Remcord Settings"`, lune per-directory convention).
 - Compiled by the existing JS pipeline: `pnpm build:plugins` ? `lune ci --repoSubDir src/shelter --to ts-out/plugins` (`package.json:11`, chained by `package.json:12` `build`, ordered before packaging in `.github/workflows/package.yml`, packaged via `electron-builder.ts` `files: [..., "ts-out", ...]`).
-- Electron serves it as `legcord://plugins/settings/*`, which resolves to `<bundle-dir>/plugins/settings/*` (`src/protocol.ts:22-31` maps the scheme onto `import.meta.dirname`, i.e. `ts-out/` at runtime). The Shelter preload pins it as `"legcord-settings"` (`src/discord/preload/mods/shelter.mts:8`).
+- Electron serves it as `remcord://plugins/settings/*`, which resolves to `<bundle-dir>/plugins/settings/*` (`src/protocol.ts:22-31` maps the scheme onto `import.meta.dirname`, i.e. `ts-out/` at runtime). The Shelter preload pins it as `"remcord-settings"` (`src/discord/preload/mods/shelter.mts:8`).
 - `ts-out/` is gitignored (`.gitignore:4`); nothing is committed and no binary blob was added. Rebuild determinism could NOT be re-verified in this environment (the `node_modules/@uwu/lune` entry points are broken symlinks under the bun-shimmed `pnpm`); the recorded identity is from the existing pipeline output and CI rebuilds it via `pnpm build`. NOTE (shim milestone): the artifact was rebuilt here by invoking the lune bundle directly (`node node_modules/@uwu/lune/dist/clibundle.cjs ci --repoSubDir src/shelter --to ts-out/plugins`, pnpm itself being broken) because the previous output predated all native WebView2 branches (`isNativeWebView`, `refreshNativeThemes`, `setNativeThemeEnabled`, `importNativeThemes`, folder helpers). New identity 252,541 bytes / SHA-256 `dcbfc8d9d75535209c40bc9a5817f4eb351ca66f947288ffc94681887f320491`; the five boot markers still validate and the bundle now carries the native theme/folder/version branches the runtime validation depends on.
 
 ### Build-pipeline decision
@@ -940,7 +940,7 @@ Candidate A: the existing JS build produces `ts-out` before cargo. `build.rs` de
 
 ### Validation and boundary
 
-- `build.rs` rejects a missing file (actionable panic), empty output, output over 2 MiB, non-UTF-8 output, output missing any of the five synchronous boot members (`getConfig`, `getThemes`, `translations`, `setLang`, `restart` � the exact surface `src/shelter/settings/index.ts:90-99` + `settings.ts:14-20` reads during `onLoad()`, confirmed present in the compiled bundle: `getConfig` x2, `getThemes`/`translations`/`setLang` x1 each, `window.legcord.restart` x3), and a `plugin.json` whose `name` is not `"Legcord Settings"`.
+- `build.rs` rejects a missing file (actionable panic), empty output, output over 2 MiB, non-UTF-8 output, output missing any of the five synchronous boot members (`getConfig`, `getThemes`, `translations`, `setLang`, `restart` � the exact surface `src/shelter/settings/index.ts:90-99` + `settings.ts:14-20` reads during `onLoad()`, confirmed present in the compiled bundle: `getConfig` x2, `getThemes`/`translations`/`setLang` x1 each, `window.remcord.restart` x3), and a `plugin.json` whose `name` is not `"Remcord Settings"`.
 - Identity is a host-computed SHA-256 over the exact embedded bytes (the upstream artifact carries no build banner to pin). Any pipeline byte change yields a different identity and the same bytes always yield the same one.
 - The renderer cannot choose a plugin path, source file, URL, or plugin id through this module: `settings_plugin::artifact()` takes no input and resolves only the pinned artifact. Startup logs one identity line (`[SettingsPlugin] artifact name=... bytes=... sha256=...`).
 - The compiled bundle was verified to reference exactly the five traced boot members above, matching the source trace file-for-file. Full settings-plugin execution remains intentionally unwired (3d-2 prerequisite B, the synchronous boot snapshot, is still pending).
@@ -949,7 +949,7 @@ Candidate A: the existing JS build produces `ts-out` before cargo. `build.rs` de
 
 The native shell now provides the exact synchronous boot data the real
 settings plugin reads during onLoad(), as one host-created frozen surface:
-window.legcord.settingsBoot. Full settings-plugin execution stays
+window.remcord.settingsBoot. Full settings-plugin execution stays
 intentionally unwired - this is the prerequisite, not the integration.
 
 ### Traced boot contract (verified in source AND the compiled bundle)
@@ -964,11 +964,11 @@ src/shelter/settings/index.ts:90-99 runs synchronously, no await:
 | setLang | index.ts:96 with storesFlat.LocaleStore.locale | bridge.ts:64 fire-and-forget send(setLang, lang) to ipc.ts:224 to lang.ts:55-66 writes storage/lang.json, clears caches | void | INVOKED at every boot (not mere existence) |
 | restart | index.ts:83, SettingsPage.tsx:59, AddDetectableModal.tsx:81 - modal/button callbacks only | bridge.ts:116 fire-and-forget send(restart) to ipc.ts:284 to main.ts:124-133 app.relaunch() + app.exit() | void | existence only at boot; never invoked during init |
 
-The compiled ts-out/plugins/settings/plugin.js (252,541 bytes after the rebuild below) references exactly this surface (getConfig x2, getThemes/translations/setLang x1 each, window.legcord.restart x3).
+The compiled ts-out/plugins/settings/plugin.js (252,541 bytes after the rebuild below) references exactly this surface (getConfig x2, getThemes/translations/setLang x1 each, window.remcord.restart x3).
 
 ### Snapshot shape (exact, frozen, host-created)
 
-window.legcord.settingsBoot carries exactly seven members: settingsSource (file | defaults | unavailable), settings (the Settings object, or null only when unavailable), themes (Array of raw manifest-plus-id documents, the Electron getThemes() shape), lang (resolved selection), i18n (merged catalog record), setLang(locale) and restart() as narrow fire-and-forget senders.
+window.remcord.settingsBoot carries exactly seven members: settingsSource (file | defaults | unavailable), settings (the Settings object, or null only when unavailable), themes (Array of raw manifest-plus-id documents, the Electron getThemes() shape), lang (resolved selection), i18n (merged catalog record), setLang(locale) and restart() as narrow fire-and-forget senders.
 
 Sourced from the actual owners, never duplicated or invented: settings.rs load_settings (missing file maps to compiled-in defaults; corrupt maps to unavailable with null config, never fabricated defaults), themes.rs raw_theme_manifests (raw manifest-plus-id passthrough sorted by id, capped at 256, invalid manifests skipped; NO loose-file auto-import - a boot read must have no write side effects), localization.rs load_raw_lang (selected catalog over en-US fallback fill, the exact loadLanguage() rules). setLang persists via localization.rs apply_lang (4-space lang.json layout identical to Electron, atomic temp-plus-rename; no cache exists natively to invalidate). Caps: snapshot at most 1 MiB, catalog at most 8192 keys / 512 KiB, locale [A-Za-z0-9_-] at most 32 bytes.
 
@@ -993,11 +993,11 @@ Native theme install, enable/disable, and managed style-node injection are funct
 
 ## Closed settings compatibility shim (3d-2)
 
-The native shell now executes the real Legcord settings plugin. A closed host-controlled shim maps the frozen boot snapshot onto the exact synchronous names the plugin reads, and the host registers the embedded artifact through the proven add/start loader lifecycle once Shelter itself is up.
+The native shell now executes the real Remcord settings plugin. A closed host-controlled shim maps the frozen boot snapshot onto the exact synchronous names the plugin reads, and the host registers the embedded artifact through the proven add/start loader lifecycle once Shelter itself is up.
 
 ### Why a shim (no generic sync IPC)
 
-The plugin reads five synchronous members during onLoad() (verified in source and in the compiled bundle: getConfig x2, getThemes/translations/setLang x1 each, restart x3 in later callbacks only, all direct window.legcord reads, never destructured). The native bridge is Promise-only by architecture. The shim backfills exactly those five names from the launch-frozen snapshot - plus two static platform strings (below) - and nothing else.
+The plugin reads five synchronous members during onLoad() (verified in source and in the compiled bundle: getConfig x2, getThemes/translations/setLang x1 each, restart x3 in later callbacks only, all direct window.remcord reads, never destructured). The native bridge is Promise-only by architecture. The shim backfills exactly those five names from the launch-frozen snapshot - plus two static platform strings (below) - and nothing else.
 
 ### Shim members (exact)
 
@@ -1014,7 +1014,7 @@ The frozen snapshot is never unfrozen. Deep per-document clones give the plugin 
 
 ### Host loader (closed add/start)
 
-After Shelter's own bootstrap marker proves window.shelter.plugins exists, the host evaluates one fixed script per document: remove-first (idempotent), addLocalPlugin with the host-fixed id legcord-settings + embedded artifact bytes (JSON-encoded splice) + fixed name-only manifest, then startPlugin. Plain status strings (settings-plugin-started / settings-plugin-failed) come back for host observability. Guarded once per document generation (reloads start fresh, replays log a loud duplicate and are refused). No renderer input at any step: id, source, and manifest are host literals.
+After Shelter's own bootstrap marker proves window.shelter.plugins exists, the host evaluates one fixed script per document: remove-first (idempotent), addLocalPlugin with the host-fixed id remcord-settings + embedded artifact bytes (JSON-encoded splice) + fixed name-only manifest, then startPlugin. Plain status strings (settings-plugin-started / settings-plugin-failed) come back for host observability. Guarded once per document generation (reloads start fresh, replays log a loud duplicate and are refused). No renderer input at any step: id, source, and manifest are host literals.
 
 ### Ordering
 
@@ -1022,30 +1022,30 @@ document-start init script (facade + settingsBoot + shim clones, all before adap
 
 ### What the shim does NOT do
 
-No sendSync, generic invoke, eval RPC, arbitrary source/plugin/filesystem/URL access, renderer-controlled ids, or snapshot construction input. The async capabilities are untouched. Theme operations reached by the executing UI are the already-implemented native capabilities (list/setEnabled/importFiles/folders), never duplicated. Deferred editor/URL/uninstall paths stay hidden via the existing isNativeThemesMode gates. legcord:// asset images (Trash/Edit/Folder/UpgradeArrow icons, screenshots) now resolve through the native remcord protocol legacy rewrite (P0.2); before it they rendered broken.
+No sendSync, generic invoke, eval RPC, arbitrary source/plugin/filesystem/URL access, renderer-controlled ids, or snapshot construction input. The async capabilities are untouched. Theme operations reached by the executing UI are the already-implemented native capabilities (list/setEnabled/importFiles/folders), never duplicated. Deferred editor/URL/uninstall paths stay hidden via the existing isNativeThemesMode gates. remcord:// asset images (Trash/Edit/Folder/UpgradeArrow icons, screenshots) now resolve through the native remcord protocol legacy rewrite (P0.2); before it they rendered broken.
 
 ### Runtime acceptance (DEV profile only, 11 items)
 
 1. Discord loads (health hasAppMount, no login redirect). 2. Shelter loads (bootstrap marker per document). 3. Real artifact loads (start ok=true, 252,541 bytes, once per generation). 4. Plugin does not unload (Remcord section found on both documents). 5. Settings UI appears (modal via plain click). 6. ThemesPage exists (Installed Themes header). 7. Themes list renders (both cards). 8. ClearVision appears (card found, persisted disabled baseline shown). 9. No getThemes failure (sync shim + native list path; zero such errors anywhere). 10. No new unhandled rejections (stderr holds only previously attributed diagnostics). 11. No duplicate execution (start count tracks generations 1:1, no duplicate logs, execution_count=1).
 Beyond the eleven: enable/disable drive real managed-node add/remove (host css_updates/css_removes), two themes simultaneously (2 nodes), import click keeps the page alive (file selection itself is inherently manual - host modal), folder action proven twice by host Metrics lines, reload persistence verified (2 nodes without opening UI), DEV profile restored (0 nodes, both manifests disabled). CSS proof uses a self-contained fixture theme, never ClearVision visuals (Phase F gap above). setLang proven live (locale persisted per document).
 
-## remcord:// protocol (P0.2; rebranded from `legcord://`)
+## remcord:// protocol (P0.2; rebranded from `remcord://`)
 
-Native serves all six Electron namespaces canonically as `remcord://` with the same bundle-relative roots: plugins/html/js/css under the bundle dir, assets under `<bundle>/assets/app/`, local under `<userData>/userAssets/`. The `remcord://plugins/settings/*` files resolve from the same `ts-out/plugins/settings/` tree the embedded settings artifact is built from (filesystem serve, no embedded dump). Legacy `legcord://` URLs (existing user customizations, the embedded upstream artifact) rewrite into the same resolver at the request layer — the old scheme is never registered, no second surface.
+Native serves all six Electron namespaces canonically as `remcord://` with the same bundle-relative roots: plugins/html/js/css under the bundle dir, assets under `<bundle>/assets/app/`, local under `<userData>/userAssets/`. The `remcord://plugins/settings/*` files resolve from the same `ts-out/plugins/settings/` tree the embedded settings artifact is built from (filesystem serve, no embedded dump). Legacy `remcord://` URLs (existing user customizations, the embedded upstream artifact) rewrite into the same resolver at the request layer — the old scheme is never registered, no second surface.
 
 ### Registration (exact mechanism)
 
 wry 0.57 creates the WebView2 environment internally with no scheme hook, so the host creates the environment itself with `webview2-com 0.39` (`CoreWebView2EnvironmentOptions` + `CoreWebView2CustomSchemeRegistration`, verified against the installed sources, not guessed) and hands it to wry via `WebViewBuilderExtWindows::with_environment` (which adopts a caller-provided environment verbatim). Every other option mirrors wry's own `create_environment` (same additional-args string, system language, default scroll style, same user-data directory), so the only delta is the registration:
 
-- scheme `remcord` (rebranded; the `legcord` scheme is never registered — legacy URLs rewrite at the request layer), `HasAuthorityComponent=true` (the `remcord://namespace/path` syntax), `TreatAsSecure=true`
-- `AllowedOrigins=["https://discord.com"]` only — the one origin proven to load local-scheme subresources; origin restriction (the AllowedOrigins equivalent) is additionally enforced by navigation policy (HTTPS Discord hosts + `about:blank` boot document only, popups denied), the `remcord://*` + legacy `legcord://*` filters, and CSP
+- scheme `remcord` (rebranded; the `remcord` scheme is never registered — legacy URLs rewrite at the request layer), `HasAuthorityComponent=true` (the `remcord://namespace/path` syntax), `TreatAsSecure=true`
+- `AllowedOrigins=["https://discord.com"]` only — the one origin proven to load local-scheme subresources; origin restriction (the AllowedOrigins equivalent) is additionally enforced by navigation policy (HTTPS Discord hosts + `about:blank` boot document only, popups denied), the `remcord://*` + legacy `remcord://*` filters, and CSP
 - registration happens at environment creation, before navigation. A generic Rust-side scheme registry was not invented.
 
 No `TreatAsSecure`/bypass parity beyond this is claimed. `supportFetchAPI`/`corsEnabled`/`stream` have no registration switch: fetch/XHR reach the same handler, and no `Access-Control-Allow-Origin` is sent (cors-mode fetch of a cross-origin local-scheme URL is rejected renderer-side while the handler still serves 200; observed, not worked around).
 
 ### Request handling
 
-One `WebResourceRequested` handler with one filter per resource context actually served (`remcord://*` plus the legacy `legcord://*` rewrite scope × DOCUMENT/STYLESHEET/SCRIPT/IMAGE/MEDIA/FETCH/XML_HTTP_REQUEST), via `ICoreWebView2_22::AddWebResourceRequestedFilterWithRequestSourceKinds` when the runtime supports it (same overload wry itself uses) and the two-argument overload otherwise. The existing Discord HTTPS filter, the Vencord badges interception, and every other filter are untouched. Success is 200 + extension MIME + bytes; traversal is 400 + minimal body; missing is 404. Rejections and successes log namespace + status + bytes + MIME + legacy flag only — never URIs or filesystem paths.
+One `WebResourceRequested` handler with one filter per resource context actually served (`remcord://*` plus the legacy `remcord://*` rewrite scope × DOCUMENT/STYLESHEET/SCRIPT/IMAGE/MEDIA/FETCH/XML_HTTP_REQUEST), via `ICoreWebView2_22::AddWebResourceRequestedFilterWithRequestSourceKinds` when the runtime supports it (same overload wry itself uses) and the two-argument overload otherwise. The existing Discord HTTPS filter, the Vencord badges interception, and every other filter are untouched. Success is 200 + extension MIME + bytes; traversal is 400 + minimal body; missing is 404. Rejections and successes log namespace + status + bytes + MIME + legacy flag only — never URIs or filesystem paths.
 
 ### Path security (stronger than Electron by design)
 
@@ -1057,7 +1057,7 @@ html/htm, js/mjs, css, json/map, txt/md, wasm, png, svg, jpg/jpeg, webp, ico, gi
 
 ### CSP (narrow extension, never removed)
 
-Electron's `bypassCSP=true` has no WebView2 equivalent — registered custom schemes adhere to CSP. The existing Discord main-document interception now also appends `remcord:` plus the legacy `legcord:` source to exactly the directives traced consumers need (`default-src` when present as fallback, `script-src`, `style-src`, `img-src`, `media-src`, `connect-src`; `font-src`/`object-src` untouched — no consumer). All existing sources preserved, badges patch preserved. Concrete modification, not "bypass parity".
+Electron's `bypassCSP=true` has no WebView2 equivalent — registered custom schemes adhere to CSP. The existing Discord main-document interception now also appends `remcord:` plus the legacy `remcord:` source to exactly the directives traced consumers need (`default-src` when present as fallback, `script-src`, `style-src`, `img-src`, `media-src`, `connect-src`; `font-src`/`object-src` untouched — no consumer). All existing sources preserved, badges patch preserved. Concrete modification, not "bypass parity".
 
 ### Two-phase boot (filter-registration race)
 
@@ -1070,9 +1070,9 @@ wry starts the initial navigation inside `build()`, before any `WebResourceReque
 - 2 electron-compat tests (namespace/root parity pin vs `src/protocol.ts`, hardening markers; known-broken `disableAutogain.js` caller left untouched — resolves 404, never fabricated)
 - Full suite: 397 Rust + 217 compatibility + 84 electron-compat, clippy `-D warnings` clean, fmt clean
 
-### Runtime evidence (DEV only, `REMCORD_NATIVE_PROTOCOL_SMOKE=1`; at record time `LEGCORD_NATIVE_LEGCORD_PROTOCOL_SMOKE=1`)
+### Runtime evidence (DEV only, `REMCORD_NATIVE_PROTOCOL_SMOKE=1`; at record time `REMCORD_NATIVE_REMCORD_PROTOCOL_SMOKE=1`)
 
-Cold start: scheme registered → `about:blank` gen 1 → Discord gen 2 with `[CSP] document policy extended badges=true legcord_sources=6` (now `remcord_sources=6 legacy_sources=6`) before its navigation → real WebView2 `status=200` for `assets/css/discord.css` (790 B, text/css), `assets/desktop.png` (29697 B, image/png), `plugins/settings/plugin.js` ×2 (256903 B, javascript) → probe `css=loaded img=loaded csp=none` (zero CSP violations) with `nocors=resolved` (cors-mode fetch stays rejected: no ACAO sent, by design). Reload run: same on generation 2, no duplicate handlers, HTTPS Discord networking intact, health `hasAppMount=true`, settings plugin starts per generation. Earlier transient runs additionally proved top-level `legcord://html/splash.html` navigation serves 200 (7850 B, text/html) with its `Loading.webm` subresource (160381 B, video/webm). Splash/setup/editor WINDOWS are not exercised by the native shell (deferred multi-window) — marked unverified as windows, validated as protocol resources. No traversal reached outside authorized roots; production Legcord/profile untouched.
+Cold start: scheme registered → `about:blank` gen 1 → Discord gen 2 with `[CSP] document policy extended badges=true remcord_sources=6` (now `remcord_sources=6 legacy_sources=6`) before its navigation → real WebView2 `status=200` for `assets/css/discord.css` (790 B, text/css), `assets/desktop.png` (29697 B, image/png), `plugins/settings/plugin.js` ×2 (256903 B, javascript) → probe `css=loaded img=loaded csp=none` (zero CSP violations) with `nocors=resolved` (cors-mode fetch stays rejected: no ACAO sent, by design). Reload run: same on generation 2, no duplicate handlers, HTTPS Discord networking intact, health `hasAppMount=true`, settings plugin starts per generation. Earlier transient runs additionally proved top-level `remcord://html/splash.html` navigation serves 200 (7850 B, text/html) with its `Loading.webm` subresource (160381 B, video/webm). Splash/setup/editor WINDOWS are not exercised by the native shell (deferred multi-window) — marked unverified as windows, validated as protocol resources. No traversal reached outside authorized roots; production Remcord/profile untouched.
 
 ### Known limitations
 
@@ -1104,7 +1104,7 @@ One `PermissionRequested` handler on the main WebView (never wry's `with_permiss
 
 ### Runtime evidence (DEV only)
 
-`REMCORD_NATIVE_PERMISSIONS_SMOKE=1`: notifications ALLOW → renderer `granted`, no browser prompt; microphone ALLOW → live stream obtained and stopped (`live-stopped`); geolocation DENY → renderer `PERMISSION_DENIED` (code 1); camera UNVERIFIED — no camera device in this environment, `getUserMedia({video:true})` rejects with `NotFoundError` before any PermissionRequested fires (policy arm unit-tested, code path shared with microphone). Reload re-issues identical decisions on the new document (no persisted grants, no duplicate handlers); same DEV profile across all runs reaches the handler every time. P0.2 intact in the same runs (CSP extended with badges + 6 `remcord:` + 6 `legcord:`, remcord 200s, subresources loaded). Renderer errors: only pre-existing diagnostics. Production untouched.
+`REMCORD_NATIVE_PERMISSIONS_SMOKE=1`: notifications ALLOW → renderer `granted`, no browser prompt; microphone ALLOW → live stream obtained and stopped (`live-stopped`); geolocation DENY → renderer `PERMISSION_DENIED` (code 1); camera UNVERIFIED — no camera device in this environment, `getUserMedia({video:true})` rejects with `NotFoundError` before any PermissionRequested fires (policy arm unit-tested, code path shared with microphone). Reload re-issues identical decisions on the new document (no persisted grants, no duplicate handlers); same DEV profile across all runs reaches the handler every time. P0.2 intact in the same runs (CSP extended with badges + 6 `remcord:` + 6 `remcord:`, remcord 200s, subresources loaded). Renderer errors: only pre-existing diagnostics. Production untouched.
 
 ### Known limitations
 

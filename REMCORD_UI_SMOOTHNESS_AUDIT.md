@@ -1,6 +1,6 @@
-# LEGcord UI Smoothness Audit
+# REMCORD UI Smoothness Audit
 
-**Repository assessed:** `E:\Legcord` on 3 October 2026.  
+**Repository assessed:** `E:\Remcord` on 3 October 2026.  
 **Scope:** repository-controlled Electron/native-shell, preload, Shelter, CSS, and injected JavaScript. Discord's downloaded renderer, third-party mod bundles, user themes, and user runtime plugins were not available for source review. Findings marked **Confirmed** are direct source evidence; **Likely** needs a trace to quantify; **Unknown** cannot be attributed without runtime profiling.
 
 ## Outcome
@@ -61,7 +61,7 @@ Use one document-scoped registry rather than independent insertions:
 
 ```text
 Document -> { id, owner, version, enabled, createdAt, node/sheet, dispose }
-  core | legcord | theme:<id> | quick-css | plugin:<id>
+  core | remcord | theme:<id> | quick-css | plugin:<id>
 ```
 
 `install(id, css)` must update an existing resource rather than duplicate it; `remove(id)` must be idempotent; navigation/unload must dispose the entire document registry. Batch changes in one animation frame only for user-visible stylesheet changes, never during text input/scroll. Track CSS bytes, update time, and active resource count in diagnostics.

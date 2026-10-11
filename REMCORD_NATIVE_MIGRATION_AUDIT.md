@@ -1,11 +1,11 @@
-# LEGcord Native Migration & Performance Audit
+# REMCORD Native Migration & Performance Audit
 
-**Repository assessed:** `E:\Legcord` at `b750f1e` (`fix: add .gitattributes...`), 3 October 2026.  
+**Repository assessed:** `E:\Remcord` at `b750f1e` (`fix: add .gitattributes...`), 3 October 2026.  
 **Method:** static source and checked-in asset audit; no production runtime, heap snapshot, trace, or package build was available. Statements tagged **Confirmed** follow directly from source. **Likely** means the control flow is clear but the size/rate is supplied by Discord or a dependency. **Possible** requires measurement.
 
 ## 1. Executive Summary
 
-Legcord is an Electron 44 shell around `https://discord.com/app`, with a privileged preload/injection layer, native media/window integrations, and a Shelter-based settings UI. It does **not** contain Discord's React application, gateway processing, media pipeline, or most plugin code in this repository. Consequently, this audit cannot attribute a measured amount of RAM/CPU to Discord itself, and it must not label Discord's renderer a leak from static source alone.
+Remcord is an Electron 44 shell around `https://discord.com/app`, with a privileged preload/injection layer, native media/window integrations, and a Shelter-based settings UI. It does **not** contain Discord's React application, gateway processing, media pipeline, or most plugin code in this repository. Consequently, this audit cannot attribute a measured amount of RAM/CPU to Discord itself, and it must not label Discord's renderer a leak from static source alone.
 
 The Electron shell is a real fixed cost: Electron's bundled Chromium, V8/Node main process, preload environment, Crashpad, and Chromium child processes are packaged with every installation. Moving the shell to Rust plus the installed Windows WebView2 runtime should remove the Electron/Node application process and packaged Chromium distribution cost. It will **not** make Discord a native app: WebView2 still runs browser, renderer, GPU, network/media, and crash-handling processes as required by the web application.
 
@@ -69,23 +69,23 @@ Electron executable (Electron 44.2.0, Node >=26)
      -> optional splash/setup BrowserWindow
      -> main Discord BrowserWindow
         -> isolated Electron preload (`discord/preload.mjs`)
-           -> contextBridge `window.legcord`
+           -> contextBridge `window.remcord`
            -> early page scripts, Vencord/Equicord/Shelter/custom injection
            -> runtime preload/page plugins
         -> remote Discord app
-        -> Shelter settings and built-in Legcord plugins
+        -> Shelter settings and built-in Remcord plugins
   -> optional Node worker thread running arRPC process scanning
 ```
 
 There is one production browser surface for Discord. Setup, splash, Monaco Quick CSS editor, Chrome internals pages, Discord popouts, and `window.open` windows add more `BrowserWindow`/renderer instances on demand. User-installed Chromium extensions are loaded after startup.
 
-The app stores config, themes, plugins, bundle downloads, and plugin storage under Electron `userData`; portable mode redirects it to `<exe-dir>/legcord-data`.
+The app stores config, themes, plugins, bundle downloads, and plugin storage under Electron `userData`; portable mode redirects it to `<exe-dir>/remcord-data`.
 
 ## 4. Process Architecture
 
 Static source cannot prove an exact OS process count because Chromium/WebView process allocation varies with OS, site isolation, GPU driver, extensions, OOPIFs, and active media. The following is the defensible map.
 
-| Scenario | Processes/threads directly created by Legcord | Chromium/Electron processes expected or possible | Why / migration result |
+| Scenario | Processes/threads directly created by Remcord | Chromium/Electron processes expected or possible | Why / migration result |
 |---|---|---|---|
 | Cold normal start | Electron main; splash renderer; Discord renderer; Node **worker thread** for arRPC if `inviteWebsocket` | GPU, network/service utility, Crashpad, audio/video/media, extension/OOPIF processes as Chromium decides | Rust removes Electron main and Node worker only if arRPC becomes native; WebView2 still needs its browser-renderer-GPU/media process model. |
 | Setup first run | Electron main; setup renderer; setup tray on non-macOS | GPU/Crashpad possible; Discord window is not created until restart | Native setup can be a local webview or Rust UI. |
@@ -140,7 +140,7 @@ This ordering is compatibility-sensitive. Preserve it as an explicit bootstrap m
 
 ## 7. Preload / IPC Architecture
 
-`src/discord/preload/bridge.ts` exposes a large `window.legcord` object via `contextBridge`. It includes window controls, settings, native dialogs/folders, debug clipboard, screen-share source selection, power blocker, themes, arRPC data, backup, runtime plugin administration, and conditionally-gated plugin file storage.
+`src/discord/preload/bridge.ts` exposes a large `window.remcord` object via `contextBridge`. It includes window controls, settings, native dialogs/folders, debug clipboard, screen-share source selection, power blocker, themes, arRPC data, backup, runtime plugin administration, and conditionally-gated plugin file storage.
 
 `src/discord/ipc.ts:registerIpc()` is registered once, guarded by `ipcRegistered`. It captures the first `passedWindow`; a later primary window can therefore send commands that manipulate the original captured window. Every sync IPC call blocks the renderer/main boundary, including full config/theme/translation data. None of the handlers validates `event.senderFrame.url`, window identity, or origin.
 
@@ -151,7 +151,7 @@ Migration rule: replace channels with typed async messages, attach each message 
 | Layer | Location | Execution model | Portability |
 |---|---|---|---|
 | Downloaded Vencord/Equicord/Shelter/custom bundles | `src/discord/extensions/modloader.ts`, `preload/mods/*` | Fetches JS/CSS into user data; injects as page scripts/styles | Renderer-only technique is portable to WebView2; trust/update policy must be redesigned. |
-| Built-in Shelter plugins | `src/shelter/**` -> Lune output | Shelter module system, Discord Flux/module internals, `window.legcord` bridge | Keep JavaScript/TS mostly unchanged; replace bridge calls and verify WebView engine behavior. |
+| Built-in Shelter plugins | `src/shelter/**` -> Lune output | Shelter module system, Discord Flux/module internals, `window.remcord` bridge | Keep JavaScript/TS mostly unchanged; replace bridge calls and verify WebView engine behavior. |
 | Runtime filesystem plugins | `src/discord/plugins/manager.ts`, `preload/plugins.mts` | `main`, preload, and page scripts dynamically imported/evaluated | Renderer portions portable; Electron-main plugin API must be replaced and permission-scoped. |
 | Chromium extensions | `src/discord/extensions/plugin.ts` | Loads user-data extension directories into Electron default session | Electron/Chromium specific; no guaranteed Wry/Tauri/WebView2 parity. Redesign/retire or provide a separate vetted extension model. |
 | BetterDiscord themes / Quick CSS | `src/common/themes.ts`, renderer IPC | Local files, watcher, injected `<style>` | Portable, with host file watcher and one CSS lifecycle manager. |
@@ -267,7 +267,7 @@ The common principle is to keep the JavaScript modification plane. Replacing it 
 
 ## 18. Media / WebRTC Audit
 
-Discord owns normal voice, camera, video, WebRTC, device enumeration, and most codecs. Legcord modifies:
+Discord owns normal voice, camera, video, WebRTC, device enumeration, and most codecs. Remcord modifies:
 
 * Electron display-media handler and custom source picker (`discord/screenshare.ts`), including 320x180 thumbnails and optional loopback audio.
 * Screen quality/codec/constraints via Shelter (`shelter/screenshare/**`), including H.264 profile handling and RTP limits.
@@ -314,7 +314,7 @@ Windows WebView2 supports script execution, early document scripts, host/web mes
 | `webContents.executeJavaScript`, `webFrame.executeJavaScript`, `insertCSS` | preloads, keybinds, injection | Critical | document-created script manifest + evaluate JS + DOM CSS manager. |
 | `contextBridge`, `ipcMain`, `ipcRenderer` | bridge, IPC, all preloads | Critical | custom typed postMessage bridge. |
 | `session`, `webRequest`, permission handler | CSP, proxy, filters, media | Critical | WebView2 adapter; partial/nonuniform other backends. |
-| `protocol`, `net` | `legcord://` local content | Critical | custom scheme/virtual-host adapter. |
+| `protocol`, `net` | `remcord://` local content | Critical | custom scheme/virtual-host adapter. |
 | `desktopCapturer`, display-media handler | screen share | Critical | platform capture adapter; high-risk parity. |
 | `Tray`, `Menu`, badges/TouchBar | tray/menu/touchbar | High | Tauri tray/native menu; platform modules. |
 | `shell`, `dialog`, `clipboard`, `nativeImage` | folders, URL, backup, context image copy | High | narrow native commands/dialog/clipboard/image decode. |
@@ -335,7 +335,7 @@ Windows WebView2 supports script execution, early document scripts, host/web mes
 | Permissions | session handler | PermissionRequested | Tauri backend-dependent | Origin/type policy | Medium |
 | Request block/replace | webRequest | WebResourceRequested filters/response | Not common Wry API | Windows adapter; proxy/JS elsewhere | High |
 | Header/CSP mutations | webRequest | Intercept/replace response where feasible | No portable abstraction | Local proxy or redesigned CSP on Apple/Linux | High |
-| `legcord://` assets | protocol.handle | virtual host mapping / resource response | Custom protocol | Yes for path validation | Medium |
+| `remcord://` assets | protocol.handle | virtual host mapping / resource response | Custom protocol | Yes for path validation | Medium |
 | Popouts / `window.open` | setWindowOpenHandler | NewWindowRequested | Window events only | popup registry and policy | Medium |
 | Tray/menu/notifications | Tray/Menu/Notification | native APIs | Tauri plugin support | Badge behavior | Low-medium |
 | File dialogs/folders | dialog/shell | native Rust dialog/shell | Tauri plugins | Per-command allowlist | Low |
@@ -355,9 +355,9 @@ WebView2 document-created scripts run after the global object but before documen
 
 `WebResourceRequested` needs URL/resource filters and can block the request while the host handles it. It can provide a response, making the existing telemetry block and local asset protocol practical. Frame interception needs the newer source-kind filter behavior; test Discord embeds explicitly. [WebView2 request management](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webresourcerequested) and [frame interception notes](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/frames) are the implementation references.
 
-Do not claim runtime-wide process reuse as a guaranteed RAM win. The Evergreen WebView2 runtime removes Legcord's bundled Chromium distribution, but each app/profile/instance can still cause Edge runtime processes. Measure the same profile/scenario against Electron.
+Do not claim runtime-wide process reuse as a guaranteed RAM win. The Evergreen WebView2 runtime removes Remcord's bundled Chromium distribution, but each app/profile/instance can still cause Edge runtime processes. Measure the same profile/scenario against Electron.
 
-Use one explicitly located WebView2 user-data folder per Legcord profile. Start with persistent storage; document that Electron cookies/local-storage cannot safely be copied wholesale into WebView2's different profile format, so initial login migration may be required.
+Use one explicitly located WebView2 user-data folder per Remcord profile. Start with persistent storage; document that Electron cookies/local-storage cannot safely be copied wholesale into WebView2's different profile format, so initial login migration may be required.
 
 ## 24. Linux WebKitGTK Feasibility
 
@@ -442,7 +442,7 @@ Adapters:
 
 | ID | Severity | Files | Evidence | Recommendation |
 |---|---|---|---|---|
-| SEC-01 | P0 | `preload/bridge.ts`, `ipc.ts` | Remote renderer receives powerful `window.legcord` APIs; main handlers do not verify sender origin/frame. A Discord XSS, malicious injected bundle, or inherited preload in a popup could reach config, dialogs/folders, restart/quit, clipboard/debug data, and optionally plugin storage. | Replace with origin/frame-checked, typed, least-capability message bridge. |
+| SEC-01 | P0 | `preload/bridge.ts`, `ipc.ts` | Remote renderer receives powerful `window.remcord` APIs; main handlers do not verify sender origin/frame. A Discord XSS, malicious injected bundle, or inherited preload in a popup could reach config, dialogs/folders, restart/quit, clipboard/debug data, and optionally plugin storage. | Replace with origin/frame-checked, typed, least-capability message bridge. |
 | SEC-02 | P0 (trust boundary) | `plugins/manager.ts:176-181` | Enabled filesystem **main** plugins receive `app`, `BrowserWindow`, `ipcMain`, `dialog`, `shell`, and patcher; module code is imported dynamically. | Declare as full-trust native extensions, require explicit install/permission consent, separate from renderer plugins, and avoid supplying raw host handles. |
 | SEC-03 | P1 | `extensions/modloader.ts`, `common/consts.ts` | Startup downloads executable mod JavaScript from mutable GitHub release/raw URLs and executes it; ref check/download does not verify artifact hash/signature. | Signed/versioned manifest, SHA-256 verified content, cached rollback, explicit update UI. |
 | SEC-04 | P1 | `extensions/csp.ts`, default `csp:"none"` | Default policy removes Discord main-frame CSP to facilitate injections. | New architecture must keep CSP/isolated worlds and allow only required bridge/bootstrap paths. |
@@ -486,11 +486,11 @@ CPU-01, CPU-02, CPU-03, and the default non-throttled hidden renderer behavior a
 | Item | Evidence | Disposition |
 |---|---|---|
 | `src/discord/preload/optimizer.ts` | No import from preload entry or another source; not a rolldown input | **Safe to remove after clean build confirms no external inclusion.** |
-| `src/splash/redirect.html` | No source path loads it; it expects `window.legcord.channel`, which bridge does not expose | **Needs verification; likely dead.** |
+| `src/splash/redirect.html` | No source path loads it; it expects `window.remcord.channel`, which bridge does not expose | **Needs verification; likely dead.** |
 | `inviteWindow` export in `discord/window.ts` | No repository reference found | **Safe to remove after TypeScript/build verification.** |
 | `customJsBundle` / `customCssBundle` config keys | Present in types/defaults, no consumer found | **Needs migration/compatibility decision.** |
 | `getLangSync` IPC handler | No sender found | **Safe after IPC integration test.** |
-| `disableAutogain` feature | `patches.mts:262` requests `legcord://assets/js/disableAutogain.js`; no such checked-in asset exists | **Confirmed broken P2 feature; fix or remove setting before migration.** |
+| `disableAutogain` feature | `patches.mts:262` requests `remcord://assets/js/disableAutogain.js`; no such checked-in asset exists | **Confirmed broken P2 feature; fix or remove setting before migration.** |
 | Splash `installState` UI | `splash.html` reads fields absent from exposed `internal` bridge | **Likely obsolete/dead branch.** |
 | Direct `ms`, `ws`, `tslib` dependencies | No direct source import | **Needs clean package/build test before manifest removal.** |
 
@@ -696,7 +696,7 @@ The table groups files only where identical static role makes individual rows no
 |---|---|---|---|
 | Root metadata | `package.json`, `pnpm-lock.yaml`, `bun.lock`, `pnpm-workspace.yaml`, `tsconfig.json`, `biome.jsonc`, `lune.config.js`, `rolldown.config.ts`, `electron-builder.ts`, `license.txt` | dependencies, bundling, package targets, lint/license | Build/startup metadata; Electron/package migration-critical. |
 | Main bootstrap | `src/main.ts`, `src/updater.ts`, `src/protocol.ts`, `src/power.ts`, `src/dbus.ts`, `src/rpc.ts` (TS) | application lifecycle, updater, local protocol, power, DBus, worker entry | `main.ts` startup-critical; worker/scanner/background services. |
-| Shared paths/types | `src/shared/consts/paths.ts`; `src/@types/{consts,cssModules,i18nStrings,keybind,legcordWindow,ModBundle,settings,themeManifest,windowState}.d.ts` | type-only API/settings contracts | No runtime except shared paths; bridge/migration contract source. |
+| Shared paths/types | `src/shared/consts/paths.ts`; `src/@types/{consts,cssModules,i18nStrings,keybind,remcordWindow,ModBundle,settings,themeManifest,windowState}.d.ts` | type-only API/settings contracts | No runtime except shared paths; bridge/migration contract source. |
 | Common storage/utility | `src/common/{backup,blacklistGame,commandDefinitions,config,consts,detectables,dom,flags,forceQuit,handleCommands,keybindActions,lang,proxy,sanitization,sleep,themes,version,windowBounds,windowState,windowVisibility}.ts` | config/state, backup, themes, proxy, sanitization, window state/actions | Config/flags/proxy startup; theme watchers and caches continuous; migration-critical. |
 | Discord shell | `src/discord/{window,ipc,tray,screenshare,screenshareSources,rpcProcess,venmic,globalKeybinds,menu,touchbar}.ts` | window, IPC, tray, capture, RPC, audio, menus | Main-process native integrations; primary performance/lifecycle scope. |
 | Extensions/plugins | `src/discord/extensions/{csp,modloader,plugin}.ts`; `src/discord/plugins/manager.ts` | CSP/header changes, bundle fetch, Chrome extensions, filesystem plugin host | CSP at ready; bundle/plugin init startup; extension/plugin code can continue. |
@@ -712,7 +712,7 @@ The table groups files only where identical static role makes individual rows no
 | Docs/examples | `README.md`, `CONTRIBUTING.md`, `docs/plugin-system.md`, `docs/examples/hello-plugin/{main,preload,renderer}.js`, `docs/examples/hello-plugin/manifest.json`, `docs/examples/clipboard-fallback-plugin/{README.md,custom-bundle.js,renderer.js,manifest.json}` | documentation and plugin examples | Not packaged runtime unless manually copied. |
 | Tests | `tests/register-ts.mjs`, `tests/screenshare-previews.test.ts` | source resolver and source-thumbnail tests | Build/test-only; test execution blocked by corrupt local Bun shim. |
 | Build scripts | `scripts/{copyVenmic,spdxLicenceDebianFormat}.ts`, `scripts/utils/updateMeta.ts`, `scripts/build/sandboxFix.mjs` | native addon copy, Debian metadata, release metadata, AppImage wrapper | Build/release only. |
-| Packaging/containers | `build/{.DS_Store,entitlements.mac.plist,icon.icns,icon.ico,icon.png,appx/Square150x150Logo.png,appx/Square44x44Logo.png,appx/StoreLogo.png,appx/Wide310x150Logo.png}`; `meta/app.legcord.Legcord.metainfo.xml`; `docker-compose.yml`; `docker/{start.sh,Dockerfile.bookworm,Dockerfile.pacman,Dockerfile.trixie,Dockerfile.ubuntu}` | platform icons, entitlement, AppStream, packaging test images | Build/release-only; Electron-specific replacement scope. |
+| Packaging/containers | `build/{.DS_Store,entitlements.mac.plist,icon.icns,icon.ico,icon.png,appx/Square150x150Logo.png,appx/Square44x44Logo.png,appx/StoreLogo.png,appx/Wide310x150Logo.png}`; `meta/app.remcord.Remcord.metainfo.xml`; `docker-compose.yml`; `docker/{start.sh,Dockerfile.bookworm,Dockerfile.pacman,Dockerfile.trixie,Dockerfile.ubuntu}` | platform icons, entitlement, AppStream, packaging test images | Build/release-only; Electron-specific replacement scope. |
 
 ## Appendix B — Electron API Inventory
 
