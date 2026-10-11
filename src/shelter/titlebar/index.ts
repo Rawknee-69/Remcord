@@ -67,7 +67,7 @@ function injectButtonControls() {
 
     minimize!.addEventListener("click", (event) => {
         // Buttons must never start a titlebar drag: stop the event at the
-        // control so the container drag handle below ignores it.
+        // control so drag handles below ignore it.
         event.stopPropagation();
         event.preventDefault();
         (ops.minimize ?? window.remcord.window.minimize)();
@@ -111,9 +111,60 @@ function injectButtonControls() {
     }
 }
 
+/**
+ * Native-shell full titlebar: the frameless window has no OS caption, so
+ * Remcord draws its own slim strip across the whole top edge (wordmark on
+ * the left, window controls top-right). The strip is a drag handle
+ * everywhere except on the buttons; Discord's own content is pushed below
+ * it so nothing is covered and no Discord click is stolen.
+ */
+function injectNativeTitlebar() {
+    if (!document.getElementById("remcordTitlebar")) {
+        const nav = document.createElement("div");
+        nav.innerHTML = titlebarOverlayHTML;
+        nav.id = "remcordTitlebar";
+        document.body.prepend(nav);
+    }
+    injectButtonControls();
+    const strip = document.querySelector("#remcordTitlebar .titlebar") as HTMLElement | null;
+    const appMount = document.getElementById("app-mount");
+    if (strip && appMount) {
+        const height = strip.offsetHeight > 0 ? strip.offsetHeight : 30;
+        appMount.style.marginTop = `${height}px`;
+        // Never clobber an inline height Discord itself set.
+        if (!appMount.style.height) {
+            appMount.style.height = `calc(100vh - ${height}px)`;
+        }
+    }
+    const ops = nativeWindowOps();
+    if (typeof ops.drag === "function" && strip && !strip.dataset.remcordDragBound) {
+        strip.dataset.remcordDragBound = "1";
+        strip.addEventListener("mousedown", (event) => {
+            const target = event.target as HTMLElement | null;
+            if (target?.closest("#minimize,#maximize,#quit")) return;
+            if (event.button !== 0) return;
+            event.preventDefault();
+            ops.drag!();
+        });
+    }
+}
+
+function resetNativeTitlebarPush() {
+    const appMount = document.getElementById("app-mount");
+    appMount?.style.removeProperty("margin-top");
+    // Only remove the compensation we added; leave Discord's own inline
+    // height (if any) untouched.
+    if (appMount?.style.height.startsWith("calc(100vh -")) {
+        appMount.style.removeProperty("height");
+    }
+}
+
 function layerPush(payload: { type: string; component: string }) {
     console.log(payload.component);
     if (payload.component === "USER_SETTINGS") {
+        // The native shell already draws its own persistent strip: never
+        // stack a second one when the settings layer opens.
+        if (document.getElementById("remcordTitlebar")) return;
         const elem = document.createElement("div");
         elem.innerHTML = titlebarOverlayHTML;
         elem.id = "remcordTitlebar";
@@ -129,13 +180,14 @@ function layerPop() {
 export function onLoad() {
     log("Remcord Titlebar Controller");
     // The native shell is always frameless, independent of the
-    // Electron-consumed `windowStyle` value: inject working controls (and the
-    // drag handle) for every style. The overlay subscriptions below still
-    // apply so settings-layer chrome keeps working.
+    // Electron-consumed `windowStyle` value: draw the full titlebar strip
+    // (drag handle + working controls, Discord content pushed below) for
+    // every style. The overlay subscriptions below still apply so
+    // settings-layer chrome keeps working.
     const native = isNativeShell();
     if (native) {
         document.body.setAttribute("customTitlebar", "");
-        injectButtonControls();
+        injectNativeTitlebar();
     }
     if (!native && settings.windowStyle === "default") {
         document.body.setAttribute("customTitlebar", "");
@@ -164,7 +216,9 @@ export function onUnload() {
     dispatcher.unsubscribe("LAYER_PUSH", layerPush);
     dispatcher.unsubscribe("LAYER_POP", layerPop);
     // The host stale-sweep also covers these, but an unload must not leave
-    // dead controls (or their listeners) behind in either shell.
+    // dead controls (or their listeners) behind in either shell. The native
+    // content push is removed too so no gap is left behind.
     document.getElementById("remcordNavControls")?.remove();
     document.getElementById("remcordTitlebar")?.remove();
+    resetNativeTitlebarPush();
 }
