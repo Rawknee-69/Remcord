@@ -1,19 +1,22 @@
-//! WebView2 environment creation with the `legcord` custom scheme registered.
+//! WebView2 environment creation with the `remcord` custom scheme registered.
 //!
 //! Registration (exact, via the installed `webview2-com 0.39` API):
-//! - scheme `legcord`, the fixed Electron scheme name
-//! - `HasAuthorityComponent=true`, matching the `legcord://namespace/path`
+//! - scheme `remcord` (Electron's fixed scheme name was `legcord`; the old
+//!   scheme is deliberately NEVER registered here — legacy `legcord://` URLs
+//!   are rewritten into the canonical resolver at the request layer, see
+//!   `resolver.rs`)
+//! - `HasAuthorityComponent=true`, matching the `remcord://namespace/path`
 //!   syntax the resolver enforces (the namespace is the URI authority)
 //! - `TreatAsSecure=true`, the Electron `secure=true` equivalent
 //! - `AllowedOrigins=["https://discord.com"]` only: the one origin proven
-//!   to load legcord:// subresources. No additional origin is added without
+//!   to load remcord:// subresources. No additional origin is added without
 //!   a traced consumer behind it.
 //!
 //! `supportFetchAPI`/`corsEnabled`/`stream` have no WebView2 registration
 //! switch: fetch/XHR reach the same `WebResourceRequested` handler, and no
 //! `Access-Control-Allow-Origin` is sent unless a consumer proves the need.
 //! `bypassCSP` has NO WebView2 equivalent for custom schemes (registered
-//! schemes adhere to CSP), so the Discord document CSP gains `legcord:` in
+//! schemes adhere to CSP), so the Discord document CSP gains `remcord:` in
 //! exactly the traced directives (`csp.rs`) instead of being disabled.
 //!
 //! Every other environment option mirrors wry 0.57's own
@@ -47,21 +50,22 @@ use windows::{
     },
 };
 
-/// The fixed custom scheme name (Electron parity).
-pub const LEGCORD_SCHEME_NAME: &str = "legcord";
+/// The one canonical runtime scheme name. (Electron used `legcord`; Remcord
+/// registers only `remcord` — see the module docs for the legacy rewrite.)
+pub const REMCORD_SCHEME_NAME: &str = "remcord";
 
-/// The only origin allowed to load `legcord://` resources. Extended only
+/// The only origin allowed to load `remcord://` resources. Extended only
 /// with a traced consumer behind the addition.
-pub const LEGCORD_ALLOWED_ORIGINS: &[&str] = &["https://discord.com"];
+pub const REMCORD_ALLOWED_ORIGINS: &[&str] = &["https://discord.com"];
 
-/// Builds the `legcord` scheme registration with the fixed options above.
+/// Builds the `remcord` scheme registration with the fixed options above.
 pub fn build_scheme_registration() -> CoreWebView2CustomSchemeRegistration {
-    let registration = CoreWebView2CustomSchemeRegistration::new(LEGCORD_SCHEME_NAME.to_owned());
+    let registration = CoreWebView2CustomSchemeRegistration::new(REMCORD_SCHEME_NAME.to_owned());
     unsafe {
         registration.set_treat_as_secure(true);
         registration.set_has_authority_component(true);
         registration.set_allowed_origins(
-            LEGCORD_ALLOWED_ORIGINS
+            REMCORD_ALLOWED_ORIGINS
                 .iter()
                 .map(|origin| origin.to_string())
                 .collect(),
@@ -71,7 +75,7 @@ pub fn build_scheme_registration() -> CoreWebView2CustomSchemeRegistration {
 }
 
 /// Builds environment options mirroring wry 0.57's defaults, plus the
-/// `legcord` scheme registration (the only delta).
+/// `remcord` scheme registration (the only delta).
 pub fn build_environment_options() -> CoreWebView2EnvironmentOptions {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
@@ -90,7 +94,7 @@ pub fn build_environment_options() -> CoreWebView2EnvironmentOptions {
     options
 }
 
-/// Creates the WebView2 environment with the `legcord` scheme registered.
+/// Creates the WebView2 environment with the `remcord` scheme registered.
 /// The caller hands the result to wry via `with_environment`.
 pub fn create_environment(
     profile_dir: &std::path::Path,
@@ -130,8 +134,8 @@ mod tests {
 
     #[test]
     fn scheme_name_and_allowed_origin_are_fixed() {
-        assert_eq!(LEGCORD_SCHEME_NAME, "legcord");
-        assert_eq!(LEGCORD_ALLOWED_ORIGINS, &["https://discord.com"]);
+        assert_eq!(REMCORD_SCHEME_NAME, "remcord");
+        assert_eq!(REMCORD_ALLOWED_ORIGINS, &["https://discord.com"]);
     }
 
     #[test]
@@ -145,7 +149,7 @@ mod tests {
         unsafe {
             let mut name = windows::core::PWSTR::null();
             iface.SchemeName(&mut name).unwrap();
-            assert_eq!(name.to_string().unwrap(), "legcord");
+            assert_eq!(name.to_string().unwrap(), "remcord");
             let mut secure = windows::core::BOOL::default();
             iface.TreatAsSecure(&mut secure).unwrap();
             assert!(secure.as_bool());
@@ -171,7 +175,7 @@ mod tests {
         unsafe {
             let mut name = windows::core::PWSTR::null();
             iface.SchemeName(&mut name).unwrap();
-            assert_eq!(name.to_string().unwrap(), "legcord");
+            assert_eq!(name.to_string().unwrap(), "remcord");
             let mut secure = windows::core::BOOL::default();
             iface.TreatAsSecure(&mut secure).unwrap();
             assert!(secure.as_bool());

@@ -1,13 +1,13 @@
-//! MIME type mapping for the legcord protocol.
+//! MIME type mapping for the remcord protocol.
 //!
-//! Extension-based MIME mapping for all known legcord:// resources.
+//! Extension-based MIME mapping for all known remcord:// resources.
 //! No MIME sniffing — content-type is determined exclusively by file extension.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 /// Extension to MIME type mapping.
-/// All extensions used by current legcord:// consumers are included.
+/// All extensions used by current remcord:// consumers are included.
 static MIME_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut map = HashMap::new();
     // Text

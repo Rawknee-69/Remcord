@@ -1376,7 +1376,9 @@ test("Electron keeps the legcord:// protocol namespaces and root mapping", () =>
     // namespaces with the same bundle-relative roots. Electron behavior is
     // the reference; native hardening (canonical containment, no `..`
     // substring check) is a deliberate, documented difference, not a drift
-    // in coverage.
+    // in coverage. Product difference: Electron registers `legcord://`;
+    // Remcord registers only `remcord://` and rewrites legacy `legcord://`
+    // URLs through the same resolver (no second surface).
     const electronProtocol = readFileSync(new URL("../../src/protocol.ts", import.meta.url), "utf8");
     for (const namespace of ["plugins", "html", "js", "assets", "css", "local"]) {
         assert.match(electronProtocol, new RegExp(`legcord://${namespace}/`));
@@ -1388,18 +1390,27 @@ test("Electron keeps the legcord:// protocol namespaces and root mapping", () =>
     assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "assets", "app"/);
     assert.match(electronProtocol, /path\.join\(import\.meta\.dirname, "css"/);
     assert.match(electronProtocol, /path\.join\(app\.getPath\("userData"\), "userAssets"\)/);
-    const nativeScheme = readFileSync(new URL("../src/legcord_protocol/scheme.rs", import.meta.url), "utf8");
-    const nativeHandler = readFileSync(new URL("../src/legcord_protocol/handler.rs", import.meta.url), "utf8");
+    const nativeScheme = readFileSync(new URL("../src/remcord_protocol/scheme.rs", import.meta.url), "utf8");
+    const nativeHandler = readFileSync(new URL("../src/remcord_protocol/handler.rs", import.meta.url), "utf8");
     assert.match(nativeHandler, /plugins.*bundle_dir\.join\("plugins"\)/s);
     assert.match(nativeHandler, /html.*bundle_dir\.join\("html"\)/s);
     assert.match(nativeHandler, /assets.*bundle_dir\.join\("assets"\)\.join\("app"\)/s);
     assert.match(nativeHandler, /local.*user_data_dir\.join\("userAssets"\)/s);
-    assert.match(nativeScheme, /LEGCORD_ALLOWED_ORIGINS.*https:\/\/discord\.com/);
+    assert.match(nativeScheme, /REMCORD_ALLOWED_ORIGINS.*https:\/\/discord\.com/);
+    // Canonical scheme is remcord; the old scheme is never registered at the
+    // environment level (exactly one CustomSchemeRegistration) and survives
+    // only as a request-layer rewrite into the same resolver.
+    assert.match(nativeScheme, /REMCORD_SCHEME_NAME.*=.*"remcord"/);
+    assert.doesNotMatch(nativeScheme, /CoreWebView2CustomSchemeRegistration::new\(LEGACY/);
+    assert.match(nativeHandler, /legcord:\/\/\*/);
+    const nativeCsp = readFileSync(new URL("../src/remcord_protocol/csp.rs", import.meta.url), "utf8");
+    assert.match(nativeCsp, /extend_csp_for_remcord/);
+    assert.match(nativeCsp, /LEGACY_CSP_SOURCE/);
     // Hardening markers: canonical containment, symlink refusal, no path
     // leakage, and no Electron-style substring check in executable code
     // (the doc comment names Electron's weak check for contrast — strip
     // comment lines before asserting).
-    const nativeResolver = readFileSync(new URL("../src/legcord_protocol/resolver.rs", import.meta.url), "utf8");
+    const nativeResolver = readFileSync(new URL("../src/remcord_protocol/resolver.rs", import.meta.url), "utf8");
     assert.match(nativeResolver, /canonicalize/);
     assert.match(nativeResolver, /SymlinkEscape/);
     const shippedResolver = nativeResolver

@@ -53,7 +53,7 @@ pub const PER_INSTANCE_INTEGRATIONS: &[&str] = &[
     "new_window_handler",
     "page_load_handler",
     "ipc_handler",
-    "legcord_protocol_registration",
+    "remcord_protocol_registration",
     "permission_handler",
     "csp_request_filter",
     "process_failed_observer",
@@ -296,7 +296,7 @@ pub fn attach_main_content_filters(
     webview: &WebView,
     profile_path: &Path,
     user_data_dir: &Path,
-) -> crate::legcord_protocol::NamespaceRoots {
+) -> crate::remcord_protocol::NamespaceRoots {
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
     use wry::WebViewExtWindows;
 
@@ -307,7 +307,7 @@ pub fn attach_main_content_filters(
     let user_data_dir = user_data_dir.to_path_buf();
     let _ = profile_path;
     let roots = super::build_namespace_roots(&bundle_dir, &user_data_dir);
-    if let Err(e) = super::register_legcord_protocol(&core_webview2, roots.clone()) {
+    if let Err(e) = super::register_remcord_protocol(&core_webview2, roots.clone()) {
         eprintln!("[RemcordProtocol] Failed to register protocol handler: {e}");
     } else {
         println!("[RemcordProtocol] Custom scheme handler registered");
@@ -536,7 +536,7 @@ fn register_csp_interception(
                     // directives traced consumers need (default/script/
                     // style/img/media/connect). Preservation + badges
                     // patch below stay unchanged in behavior.
-                    csp = super::extend_csp_for_legcord(&csp);
+                    csp = super::extend_csp_for_remcord(&csp);
                     if !csp.contains("badges.vencord.dev") {
                         csp = if let Some(pos) = csp.to_lowercase().find("connect-src") {
                             let after = &csp[pos..];
@@ -830,7 +830,7 @@ mod tests {
             "ipc_handler",
             "page_load_handler",
             "new_window_handler",
-            "legcord_protocol_registration",
+            "remcord_protocol_registration",
             "permission_handler",
             "csp_request_filter",
             "process_failed_observer",
@@ -903,7 +903,7 @@ mod tests {
             "with_new_window_req_handler",
             "with_on_page_load_handler",
             "with_ipc_handler",
-            "register_legcord_protocol",
+            "register_remcord_protocol",
             "permissions::register",
             "AddWebResourceRequestedFilter",
             "process_failure::register",

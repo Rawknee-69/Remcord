@@ -1,4 +1,4 @@
-//! Path resolver for the legcord:// custom protocol.
+//! Path resolver for the remcord:// custom protocol.
 //!
 //! Implements strict path resolution with security hardening beyond Electron's
 //! weak `filePath.includes("..")` validation. All paths are canonicalized and
@@ -116,12 +116,31 @@ pub enum ResolveError {
 /// Result type for resolution operations.
 pub type ResolveResult<T> = Result<T, ResolveError>;
 
-/// Resolves a legcord:// URI to a filesystem path.
+/// The legacy Electron scheme. Never registered with WebView2 and never
+/// emitted by Remcord content; accepted only as a rewrite input so existing
+/// user customizations (themes, plugins, Quick CSS) and the embedded upstream
+/// artifact keep resolving. The rewrite happens before every security check,
+/// so legacy URLs face the identical policy as canonical ones.
+pub const LEGACY_SCHEME_PREFIX: &str = "legcord://";
+/// The one canonical runtime scheme.
+pub const CANONICAL_SCHEME_PREFIX: &str = "remcord://";
+
+/// True when `uri` uses the legacy Electron scheme and will be rewritten into
+/// the canonical resolver. Host-side logging only; no renderer surface.
+pub fn is_legacy_uri(uri: &str) -> bool {
+    uri.starts_with(LEGACY_SCHEME_PREFIX)
+}
+
+/// Resolves a remcord:// URI to a filesystem path.
+///
+/// Legacy `legcord://` URLs are rewritten to `remcord://` before any other
+/// check and face the identical policy below — one canonical resolver, no
+/// second security surface.
 ///
 /// Performs the following security checks:
 /// 1. Validates the namespace is one of the fixed set
 /// 2. Parses the URI properly (scheme, authority, path, query, fragment)
-/// 3. Validates authority/host form matches `legcord://namespace/path` syntax
+/// 3. Validates authority/host form matches `remcord://namespace/path` syntax
 /// 4. Decodes path exactly once per repository URL semantics
 /// 5. Rejects malformed percent encoding
 /// 6. Rejects absolute Windows paths (C:\, C:/, \\server\share, \\?\, etc.)
@@ -138,15 +157,26 @@ pub type ResolveResult<T> = Result<T, ResolveError>;
 /// 17. Does not accept renderer-provided absolute roots
 /// 18. Does not expose filesystem paths in errors
 pub fn resolve_uri(uri: &str, roots: &NamespaceRoots) -> ResolveResult<PathBuf> {
+    // Narrow legacy compatibility: rewrite the old Electron scheme into the
+    // canonical one before any security decision. Everything below — raw-text
+    // traversal checks, decoding policy, containment — runs on the rewritten
+    // URI exactly as if the caller had used the canonical scheme.
+    let rewritten;
+    let uri = if let Some(rest) = uri.strip_prefix(LEGACY_SCHEME_PREFIX) {
+        rewritten = format!("{CANONICAL_SCHEME_PREFIX}{rest}");
+        rewritten.as_str()
+    } else {
+        uri
+    };
     // Security-critical: check the RAW uri string BEFORE url::Url normalizes it.
     // url::Url resolves dot segments and decodes %2e, so traversal would be
     // invisible after parsing. All traversal/encoding checks run on raw text.
-    if !uri.starts_with("legcord://") {
+    if !uri.starts_with("remcord://") {
         return Err(ResolveError::InvalidNamespace(
-            "scheme must be 'legcord'".to_string(),
+            "scheme must be 'remcord'".to_string(),
         ));
     }
-    let rest = &uri["legcord://".len()..];
+    let rest = &uri["remcord://".len()..];
 
     // Manual host/path split so dot segments survive until we inspect them.
     let (host, raw_path) = match rest.find('/') {
@@ -205,9 +235,9 @@ pub fn resolve_uri(uri: &str, roots: &NamespaceRoots) -> ResolveResult<PathBuf> 
     // Its normalized path is NOT used for security decisions.
     let parsed =
         url::Url::parse(uri).map_err(|e| ResolveError::MalformedPercentEncoding(e.to_string()))?;
-    if parsed.scheme() != "legcord" {
+    if parsed.scheme() != "remcord" {
         return Err(ResolveError::InvalidNamespace(
-            "scheme must be 'legcord'".to_string(),
+            "scheme must be 'remcord'".to_string(),
         ));
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
@@ -268,7 +298,7 @@ pub fn resolve_uri(uri: &str, roots: &NamespaceRoots) -> ResolveResult<PathBuf> 
             ));
         }
         // A colon inside any component is drive/ADS/prefix-confusion syntax
-        // (C:, file:../, alternate data streams). No valid legcord asset
+        // (C:, file:../, alternate data streams). No valid remcord asset
         // name contains one.
         if component.contains(':') {
             return Err(check_colon_component(component));
@@ -460,7 +490,7 @@ mod tests {
     #[test]
     fn valid_namespace_and_path() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/test.js", &roots).unwrap();
+        let result = resolve_uri("remcord://plugins/test.js", &roots).unwrap();
         assert!(result.ends_with("plugins/test.js"));
         assert!(result.exists());
     }
@@ -468,7 +498,7 @@ mod tests {
     #[test]
     fn nested_path() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/rpc/index.js", &roots).unwrap();
+        let result = resolve_uri("remcord://plugins/rpc/index.js", &roots).unwrap();
         assert!(result.ends_with("plugins/rpc/index.js"));
         assert!(result.exists());
     }
@@ -476,77 +506,77 @@ mod tests {
     #[test]
     fn dot_segment_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/../html/splash.html", &roots);
+        let result = resolve_uri("remcord://plugins/../html/splash.html", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
     }
 
     #[test]
     fn backslash_dot_segment_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/..\\html/splash.html", &roots);
+        let result = resolve_uri("remcord://plugins/..\\html/splash.html", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
     }
 
     #[test]
     fn mixed_separators() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/rpc\\index.js", &roots).unwrap();
+        let result = resolve_uri("remcord://plugins/rpc\\index.js", &roots).unwrap();
         assert!(result.ends_with("plugins/rpc/index.js"));
     }
 
     #[test]
     fn encoded_traversal_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/%2e%2e/html/splash.html", &roots);
+        let result = resolve_uri("remcord://plugins/%2e%2e/html/splash.html", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
     }
 
     #[test]
     fn double_encoded_traversal_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/%252e%252e/html/splash.html", &roots);
+        let result = resolve_uri("remcord://plugins/%252e%252e/html/splash.html", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
     }
 
     #[test]
     fn absolute_windows_path_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/C:/Windows/System32/cmd.exe", &roots);
+        let result = resolve_uri("remcord://plugins/C:/Windows/System32/cmd.exe", &roots);
         assert!(matches!(result, Err(ResolveError::AbsoluteWindowsPath(_))));
     }
 
     #[test]
     fn absolute_windows_path_backslash_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/C:\\Windows\\System32\\cmd.exe", &roots);
+        let result = resolve_uri("remcord://plugins/C:\\Windows\\System32\\cmd.exe", &roots);
         assert!(matches!(result, Err(ResolveError::AbsoluteWindowsPath(_))));
     }
 
     #[test]
     fn drive_relative_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/C:foo", &roots);
+        let result = resolve_uri("remcord://plugins/C:foo", &roots);
         assert!(matches!(result, Err(ResolveError::DriveRelativePath(_))));
     }
 
     #[test]
     fn unc_path_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/\\\\server\\share\\file.txt", &roots);
+        let result = resolve_uri("remcord://plugins/\\\\server\\share\\file.txt", &roots);
         assert!(matches!(result, Err(ResolveError::UncPath(_))));
     }
 
     #[test]
     fn unc_path_forward_slash_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins//server/share/file.txt", &roots);
+        let result = resolve_uri("remcord://plugins//server/share/file.txt", &roots);
         assert!(matches!(result, Err(ResolveError::UncPath(_))));
     }
 
     #[test]
     fn extended_length_path_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/\\\\?\\C:\\Windows\\file.txt", &roots);
+        let result = resolve_uri("remcord://plugins/\\\\?\\C:\\Windows\\file.txt", &roots);
         assert!(matches!(result, Err(ResolveError::AbsoluteWindowsPath(_))));
     }
 
@@ -554,7 +584,7 @@ mod tests {
     fn prefix_confusion_rejected() {
         let (_temp, roots) = setup_test_roots();
         // Try to confuse the parser with scheme-like prefixes
-        let result = resolve_uri("legcord://plugins/file:../etc/passwd", &roots);
+        let result = resolve_uri("remcord://plugins/file:../etc/passwd", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
     }
 
@@ -596,7 +626,7 @@ mod tests {
             return;
         }
 
-        let result = resolve_uri("legcord://plugins/escape.txt", &roots);
+        let result = resolve_uri("remcord://plugins/escape.txt", &roots);
         assert!(matches!(result, Err(ResolveError::SymlinkEscape)));
     }
 
@@ -604,14 +634,14 @@ mod tests {
     fn namespace_crossing_rejected() {
         let (_temp, roots) = setup_test_roots();
         // Try to access html from plugins namespace
-        let result = resolve_uri("legcord://plugins/../html/splash.html", &roots);
+        let result = resolve_uri("remcord://plugins/../html/splash.html", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
     }
 
     #[test]
     fn empty_path_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/", &roots);
+        let result = resolve_uri("remcord://plugins/", &roots);
         assert!(matches!(result, Err(ResolveError::EmptyPath)));
     }
 
@@ -620,21 +650,21 @@ mod tests {
         let (_temp, roots) = setup_test_roots();
         // Create a directory
         fs::create_dir_all(roots.plugins.join("subdir")).unwrap();
-        let result = resolve_uri("legcord://plugins/subdir", &roots);
+        let result = resolve_uri("remcord://plugins/subdir", &roots);
         assert!(matches!(result, Err(ResolveError::IsDirectory)));
     }
 
     #[test]
     fn missing_target_returns_not_found() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/nonexistent.js", &roots);
+        let result = resolve_uri("remcord://plugins/nonexistent.js", &roots);
         assert!(matches!(result, Err(ResolveError::NotFound)));
     }
 
     #[test]
     fn malformed_percent_encoding_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/%ZZ", &roots);
+        let result = resolve_uri("remcord://plugins/%ZZ", &roots);
         assert!(matches!(
             result,
             Err(ResolveError::MalformedPercentEncoding(_))
@@ -646,9 +676,9 @@ mod tests {
         let (_temp, roots) = setup_test_roots();
         // Interior repeats normalize; a LEADING double slash is UNC-like and
         // rejected (see unc_path_forward_slash_rejected).
-        let result = resolve_uri("legcord://plugins/rpc//index.js", &roots).unwrap();
+        let result = resolve_uri("remcord://plugins/rpc//index.js", &roots).unwrap();
         assert!(result.ends_with("plugins/rpc/index.js"));
-        let result = resolve_uri("legcord://plugins/rpc///index.js", &roots).unwrap();
+        let result = resolve_uri("remcord://plugins/rpc///index.js", &roots).unwrap();
         assert!(result.ends_with("plugins/rpc/index.js"));
     }
 
@@ -675,7 +705,7 @@ mod tests {
             percent_encoding::NON_ALPHANUMERIC,
         )
         .to_string();
-        let uri = format!("legcord://assets/{}", encoded);
+        let uri = format!("remcord://assets/{}", encoded);
         let result = resolve_uri(&uri, &roots).unwrap();
         assert!(result.ends_with(unicode_name));
     }
@@ -683,28 +713,63 @@ mod tests {
     #[test]
     fn query_and_fragment_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://plugins/test.js?query=1", &roots);
+        let result = resolve_uri("remcord://plugins/test.js?query=1", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
 
-        let result = resolve_uri("legcord://plugins/test.js#fragment", &roots);
+        let result = resolve_uri("remcord://plugins/test.js#fragment", &roots);
         assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
     }
 
     #[test]
     fn invalid_namespace_rejected() {
         let (_temp, roots) = setup_test_roots();
-        let result = resolve_uri("legcord://invalid/test.js", &roots);
+        let result = resolve_uri("remcord://invalid/test.js", &roots);
         assert!(matches!(result, Err(ResolveError::InvalidNamespace(_))));
     }
 
     #[test]
     fn all_valid_namespaces_resolve() {
         let (_temp, roots) = setup_test_roots();
-        assert!(resolve_uri("legcord://plugins/test.js", &roots).is_ok());
+        assert!(resolve_uri("remcord://plugins/test.js", &roots).is_ok());
+        assert!(resolve_uri("remcord://html/splash.html", &roots).is_ok());
+        assert!(resolve_uri("remcord://js/main.js", &roots).is_ok());
+        assert!(resolve_uri("remcord://assets/image.png", &roots).is_ok());
+        assert!(resolve_uri("remcord://css/style.css", &roots).is_ok());
+        assert!(resolve_uri("remcord://local/user.txt", &roots).is_ok());
+    }
+
+    #[test]
+    fn legacy_scheme_rewrites_to_the_same_file() {
+        // Existing user customizations and the embedded upstream artifact
+        // reference the old Electron scheme. The rewrite must land on the
+        // identical file the canonical URL resolves to.
+        let (_temp, roots) = setup_test_roots();
+        assert!(is_legacy_uri("legcord://plugins/test.js"));
+        assert!(!is_legacy_uri("remcord://plugins/test.js"));
+        let canonical = resolve_uri("remcord://plugins/test.js", &roots).unwrap();
+        let legacy = resolve_uri("legcord://plugins/test.js", &roots).unwrap();
+        assert_eq!(canonical, legacy);
         assert!(resolve_uri("legcord://html/splash.html", &roots).is_ok());
-        assert!(resolve_uri("legcord://js/main.js", &roots).is_ok());
         assert!(resolve_uri("legcord://assets/image.png", &roots).is_ok());
-        assert!(resolve_uri("legcord://css/style.css", &roots).is_ok());
-        assert!(resolve_uri("legcord://local/user.txt", &roots).is_ok());
+    }
+
+    #[test]
+    fn legacy_scheme_faces_the_identical_security_policy() {
+        // The rewrite happens before every check: traversal, UNC, drive
+        // paths, queries, and unknown namespaces fail for legacy URLs exactly
+        // as they do for canonical ones. No second surface is exposed.
+        let (_temp, roots) = setup_test_roots();
+        let result = resolve_uri("legcord://plugins/../html/splash.html", &roots);
+        assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
+        let result = resolve_uri("legcord://plugins/C:/Windows/System32/cmd.exe", &roots);
+        assert!(matches!(result, Err(ResolveError::AbsoluteWindowsPath(_))));
+        let result = resolve_uri("legcord://plugins//server/share/file.txt", &roots);
+        assert!(matches!(result, Err(ResolveError::UncPath(_))));
+        let result = resolve_uri("legcord://plugins/test.js?query=1", &roots);
+        assert!(matches!(result, Err(ResolveError::TraversalAttempt(_))));
+        let result = resolve_uri("legcord://invalid/test.js", &roots);
+        assert!(matches!(result, Err(ResolveError::InvalidNamespace(_))));
+        let result = resolve_uri("legcord://plugins/nonexistent.js", &roots);
+        assert!(matches!(result, Err(ResolveError::NotFound)));
     }
 }

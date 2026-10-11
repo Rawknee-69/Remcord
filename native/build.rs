@@ -194,8 +194,10 @@ const SETTINGS_PLUGIN_BOOT_MARKERS: &[&str] = &[
 /// `<bundle-dir>/plugins/settings/*` (`src/protocol.ts` maps the scheme onto
 /// `import.meta.dirname`, i.e. `ts-out/`), and the Shelter preload pins it as
 /// `"legcord-settings"` (`src/discord/preload/mods/shelter.mts`). The native
-/// shell has no `legcord://` protocol, so the only host-controlled path to
-/// that exact artifact is embedding it at compile time.
+/// shell serves the same files canonically as `remcord://plugins/settings/*`
+/// (legacy `legcord://` URLs embedded in the artifact rewrite to the same
+/// resolver), so the only host-controlled path to that exact artifact is
+/// embedding it at compile time.
 ///
 /// Build-pipeline decision: the existing JS build produces `ts-out` before
 /// cargo (candidate A). This script deliberately does NOT invoke `lune`/`pnpm`
@@ -397,7 +399,7 @@ fn generate_titlebar_plugin_artifact(out_dir: &str) {
 
 /// Stylesheet files backing the overlay chrome, resolved exactly like
 /// `src/discord/preload/newTitlebar.mts` (base plus one per-OS sheet).
-/// Embedded so titlebar styling never depends on a `legcord://` subresource
+/// Embedded so titlebar styling never depends on a `remcord://` subresource
 /// fetch: those stop reaching the host after a reload (two 200s on first
 /// load, zero afterwards in DEV logs — consistent with the page's service
 /// worker taking over subresource fetches), which silently unstyles the

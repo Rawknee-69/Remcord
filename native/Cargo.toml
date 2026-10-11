@@ -33,11 +33,11 @@ webview2-com = "0.39"
 # (GetAvailableCoreWebView2BrowserVersionString; the safe wrapper above
 # does not expose it). Pinned to the same 0.39 line.
 webview2-com-sys = "0.39"
-# URL parsing for legcord:// protocol
+# URL parsing for the remcord:// protocol
 url = "2.5"
-# Percent encoding/decoding for legcord:// protocol
+# Percent encoding/decoding for the remcord:// protocol
 percent-encoding = "2.3"
-# Error handling for legcord:// protocol
+# Error handling for the remcord:// protocol
 thiserror = "1.0"
 windows = { version = "0.62", features = [
     "Win32_Foundation",

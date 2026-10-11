@@ -8,7 +8,6 @@ mod css_watch;
 mod downloads;
 mod environment_observer;
 mod folders;
-mod legcord_protocol;
 mod localization;
 mod main_webview;
 mod mod_substrate;
@@ -23,6 +22,7 @@ mod profile_migration;
 mod protocol;
 mod quick_css;
 mod recovery;
+mod remcord_protocol;
 mod settings;
 mod settings_boot;
 mod settings_plugin;
@@ -61,8 +61,6 @@ use css_watch::{
 use folders::{
     ensure_folder_root, open_folder, resolve_theme_folder, reveal_folder, FolderLocation,
 };
-use legcord_protocol::scheme::create_environment as create_legcord_webview_environment;
-use legcord_protocol::{build_namespace_roots, extend_csp_for_legcord, register_legcord_protocol};
 use localization::{lookup as lookup_lang_string, validate_key as validate_lang_key};
 use navigation_completed::NavigationCompletedEvent;
 use plugin_storage::{read_plugin_file, write_plugin_file};
@@ -79,6 +77,8 @@ use protocol::{
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
+use remcord_protocol::scheme::create_environment as create_remcord_webview_environment;
+use remcord_protocol::{build_namespace_roots, extend_csp_for_remcord, register_remcord_protocol};
 use serde::Serialize;
 use settings::{apply_block_power_saving, apply_settings_set, load_settings};
 use tao::{
@@ -150,7 +150,7 @@ const VENCORD_MOD: ModDescriptor = ModDescriptor {
 ///   document start, same as every other client mod. Electron additionally
 ///   wraps the source in an IIFE that declares `SHELTER_INJECTOR_PLUGINS`;
 ///   natively that wrapper is deliberately NOT reproduced because the
-///   `legcord://` protocol and the preload plugin loader are both unimplemented,
+///   `remcord://` protocol serves local assets (legacy `legcord://` URLs rewritten by the host) while the preload plugin loader stays unimplemented,
 ///   and Shelter skips the injector entirely when the global is absent.
 /// - Initialization: Shelter publishes `window.shelter` from an inner async
 ///   IIFE only after Discord's `#app-mount` exists and has children, so the
@@ -276,7 +276,7 @@ const SHELTER_LOADER_PROBE_ENV: &str = "REMCORD_NATIVE_LOADER_PROBE";
 const SETTINGS_BOOT_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_BOOT_SMOKE";
 const SETTINGS_UI_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_UI_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "REMCORD_NATIVE_FOLDERS_SMOKE";
-const REMCORD_PROTOCOL_SMOKE_ENV: &str = "REMCORD_NATIVE_REMCORD_PROTOCOL_SMOKE";
+const REMCORD_PROTOCOL_SMOKE_ENV: &str = "REMCORD_NATIVE_PROTOCOL_SMOKE";
 const PERMISSIONS_SMOKE_ENV: &str = "REMCORD_NATIVE_PERMISSIONS_SMOKE";
 const THEMES_SMOKE_ENV: &str = "REMCORD_NATIVE_THEMES_SMOKE";
 const QUICKCSS_SMOKE_ENV: &str = "REMCORD_NATIVE_QUICKCSS_SMOKE";
@@ -1864,20 +1864,25 @@ fn settings_ui_probe_script(nonce: u64) -> Result<String, String> {
     }
     Ok(script)
 }
-/// DEV-only legcord:// protocol smoke probe
-/// (`REMCORD_NATIVE_REMCORD_PROTOCOL_SMOKE=1`). Loads three real bundle
+/// DEV-only remcord:// protocol smoke probe
+/// (`REMCORD_NATIVE_PROTOCOL_SMOKE=1`). Loads three real bundle
 /// resources that exist on disk through real WebView2 subresource/fetch
 /// paths and records the outcome in document dataset flags the host reads
 /// back:
 ///
-/// - a stylesheet (`legcord://assets/css/discord.css` via `<link>`,
+/// - a stylesheet (`remcord://assets/css/discord.css` via `<link>`,
 ///   exercises style-src CSP + 200 + text/css)
-/// - an image (`legcord://assets/desktop.png` via `<img>`, exercises
+/// - an image (`remcord://assets/desktop.png` via `<img>`, exercises
 ///   img-src CSP + 200 + image/png)
-/// - a plugin resource (`legcord://plugins/settings/plugin.js` via
+/// - a plugin resource (`remcord://plugins/settings/plugin.js` via
 ///   `fetch`, observed only — CORS headers are deliberately NOT added, so
 ///   a TypeError here proves the handler served while reporting the CORS
 ///   posture honestly)
+/// - a legacy stylesheet (`legcord://assets/css/discord.css` via `<link>`,
+///   exercises the narrow legacy-URL rewrite: old user content and the
+///   embedded upstream artifact still reference the Electron scheme, which
+///   the host rewrites into the canonical resolver without registering the
+///   old scheme)
 ///
 /// The host logs one `[RemcordProtocol][Smoke]` line per document; no bridge
 /// event, no new capability, no script execution of the fetched bytes.
@@ -1890,25 +1895,32 @@ const REMCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
     root.dataset.remcordProtocolCss = "pending";
     root.dataset.remcordProtocolImg = "pending";
     root.dataset.remcordProtocolPlugin = "pending";
+    root.dataset.remcordProtocolLegacy = "pending";
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = "legcord://assets/css/discord.css";
+    link.href = "remcord://assets/css/discord.css";
     link.onload = () => { root.dataset.remcordProtocolCss = "loaded"; };
     link.onerror = () => { root.dataset.remcordProtocolCss = "error"; };
     (document.head || document.documentElement).appendChild(link);
+    const legacyLink = document.createElement("link");
+    legacyLink.rel = "stylesheet";
+    legacyLink.href = "legcord://assets/css/discord.css";
+    legacyLink.onload = () => { root.dataset.remcordProtocolLegacy = "loaded"; };
+    legacyLink.onerror = () => { root.dataset.remcordProtocolLegacy = "error"; };
+    (document.head || document.documentElement).appendChild(legacyLink);
     const img = new Image();
     img.onload = () => { root.dataset.remcordProtocolImg = "loaded"; };
     img.onerror = () => { root.dataset.remcordProtocolImg = "error"; };
-    img.src = "legcord://assets/desktop.png";
+    img.src = "remcord://assets/desktop.png";
     // Distinguish CSP blocks from scheme/network failures: a
-    // securitypolicyviolation naming a legcord:// URI proves the scheme
-    // resolved and CSP refused it; silence + error proves the request never
-    // reached the handler.
+    // securitypolicyviolation naming a remcord:// (or legacy legcord://) URI
+    // proves the scheme resolved and CSP refused it; silence + error proves
+    // the request never reached the handler.
     root.dataset.remcordProtocolCsp = "none";
     document.addEventListener("securitypolicyviolation", (event) => {
       try {
         const blocked = String(event.blockedURI || "");
-        if (blocked.indexOf("legcord://") === 0) {
+        if (blocked.indexOf("remcord://") === 0 || blocked.indexOf("legcord://") === 0) {
           root.dataset.remcordProtocolCsp =
             String(event.violatedDirective || "unknown").slice(0, 48)
             + "|" + blocked.slice(0, 80);
@@ -1918,14 +1930,14 @@ const REMCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
     // CORS posture observation: a no-cors fetch that resolves opaque proves
     // the handler served bytes while a cors-mode rejection stands.
     root.dataset.remcordProtocolNoCors = "pending";
-    fetch("legcord://plugins/settings/plugin.js", { method: "GET", mode: "no-cors" }).then(
+    fetch("remcord://plugins/settings/plugin.js", { method: "GET", mode: "no-cors" }).then(
       () => { root.dataset.remcordProtocolNoCors = "resolved"; },
       (error) => {
         root.dataset.remcordProtocolNoCors =
           "rejected:" + String((error && error.name) || error).slice(0, 32);
       },
     );
-    fetch("legcord://plugins/settings/plugin.js", { method: "GET" }).then(
+    fetch("remcord://plugins/settings/plugin.js", { method: "GET" }).then(
       (response) => {
         root.dataset.remcordProtocolPlugin =
           "http-" + response.status + "-bytes-" + (response.headers.get("content-type") || "no-mime");
@@ -1942,7 +1954,7 @@ const REMCORD_PROTOCOL_SMOKE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Reads back the DEV-only legcord:// probe dataset flags. Returns JSON
+/// Reads back the DEV-only remcord:// probe dataset flags. Returns JSON
 /// through the evaluate callback (like the renderer health probe), never
 /// through the typed bridge.
 const REMCORD_PROTOCOL_SMOKE_READBACK_SCRIPT: &str = r#"
@@ -1953,6 +1965,7 @@ const REMCORD_PROTOCOL_SMOKE_READBACK_SCRIPT: &str = r#"
     css: root.dataset.remcordProtocolCss || "absent",
     img: root.dataset.remcordProtocolImg || "absent",
     plugin: root.dataset.remcordProtocolPlugin || "absent",
+    legacy: root.dataset.remcordProtocolLegacy || "absent",
     csp: root.dataset.remcordProtocolCsp || "absent",
     nocors: root.dataset.remcordProtocolNoCors || "absent",
   });
@@ -1971,58 +1984,58 @@ const PERMISSIONS_SMOKE_SCRIPT: &str = r#"
 (() => {
   try {
     const root = document.documentElement;
-    if (root.dataset.legcordPermissionsSmoke === "started") return;
-    root.dataset.legcordPermissionsSmoke = "started";
-    root.dataset.legcordPermissionsNotification = "pending";
-    root.dataset.legcordPermissionsMic = "pending";
-    root.dataset.legcordPermissionsCamera = "pending";
-    root.dataset.legcordPermissionsGeo = "pending";
+    if (root.dataset.remcordPermissionsSmoke === "started") return;
+    root.dataset.remcordPermissionsSmoke = "started";
+    root.dataset.remcordPermissionsNotification = "pending";
+    root.dataset.remcordPermissionsMic = "pending";
+    root.dataset.remcordPermissionsCamera = "pending";
+    root.dataset.remcordPermissionsGeo = "pending";
     try {
       const pending = Notification.requestPermission();
       if (pending && typeof pending.then === "function") {
         pending.then(
-          (value) => { root.dataset.legcordPermissionsNotification = String(value); },
-          (error) => { root.dataset.legcordPermissionsNotification = "error"; },
+          (value) => { root.dataset.remcordPermissionsNotification = String(value); },
+          (error) => { root.dataset.remcordPermissionsNotification = "error"; },
         );
       } else {
-        root.dataset.legcordPermissionsNotification = String(Notification.permission);
+        root.dataset.remcordPermissionsNotification = String(Notification.permission);
       }
     } catch (error) {
-      root.dataset.legcordPermissionsNotification = "error";
+      root.dataset.remcordPermissionsNotification = "error";
     }
     try {
       navigator.mediaDevices.getUserMedia({ audio: true }).then(
         (stream) => {
           try { stream.getTracks().forEach((track) => track.stop()); } catch (ignored) {}
-          root.dataset.legcordPermissionsMic = "live-stopped";
+          root.dataset.remcordPermissionsMic = "live-stopped";
         },
-        (error) => { root.dataset.legcordPermissionsMic = "denied:" + String((error && error.name) || error).slice(0, 32); },
+        (error) => { root.dataset.remcordPermissionsMic = "denied:" + String((error && error.name) || error).slice(0, 32); },
       );
     } catch (error) {
-      root.dataset.legcordPermissionsMic = "error";
+      root.dataset.remcordPermissionsMic = "error";
     }
     try {
       navigator.mediaDevices.getUserMedia({ video: true }).then(
         (stream) => {
           try { stream.getTracks().forEach((track) => track.stop()); } catch (ignored) {}
-          root.dataset.legcordPermissionsCamera = "live-stopped";
+          root.dataset.remcordPermissionsCamera = "live-stopped";
         },
-        (error) => { root.dataset.legcordPermissionsCamera = "denied:" + String((error && error.name) || error).slice(0, 32); },
+        (error) => { root.dataset.remcordPermissionsCamera = "denied:" + String((error && error.name) || error).slice(0, 32); },
       );
     } catch (error) {
-      root.dataset.legcordPermissionsCamera = "error";
+      root.dataset.remcordPermissionsCamera = "error";
     }
     try {
       navigator.geolocation.getCurrentPosition(
-        () => { root.dataset.legcordPermissionsGeo = "unexpected-allow"; },
-        (error) => { root.dataset.legcordPermissionsGeo = "denied:" + (error && error.code); },
+        () => { root.dataset.remcordPermissionsGeo = "unexpected-allow"; },
+        (error) => { root.dataset.remcordPermissionsGeo = "denied:" + (error && error.code); },
         { timeout: 8000 },
       );
     } catch (error) {
-      root.dataset.legcordPermissionsGeo = "error";
+      root.dataset.remcordPermissionsGeo = "error";
     }
   } catch (error) {
-    document.documentElement.dataset.legcordPermissionsSmoke =
+    document.documentElement.dataset.remcordPermissionsSmoke =
       "probe-failed:" + String((error && error.message) || error).slice(0, 64);
   }
 })();
@@ -2034,11 +2047,11 @@ const PERMISSIONS_SMOKE_READBACK_SCRIPT: &str = r#"
 (() => {
   const root = document.documentElement;
   return JSON.stringify({
-    smoke: root.dataset.legcordPermissionsSmoke || "absent",
-    notification: root.dataset.legcordPermissionsNotification || "absent",
-    mic: root.dataset.legcordPermissionsMic || "absent",
-    camera: root.dataset.legcordPermissionsCamera || "absent",
-    geo: root.dataset.legcordPermissionsGeo || "absent",
+    smoke: root.dataset.remcordPermissionsSmoke || "absent",
+    notification: root.dataset.remcordPermissionsNotification || "absent",
+    mic: root.dataset.remcordPermissionsMic || "absent",
+    camera: root.dataset.remcordPermissionsCamera || "absent",
+    geo: root.dataset.remcordPermissionsGeo || "absent",
   });
 })()
 "#;
@@ -2953,7 +2966,7 @@ struct TrustedLoadFlags {
     backup_restore_smoke: bool,
     shelter_loader_probe: bool,
     settings_boot_smoke: bool,
-    legcord_protocol_smoke: bool,
+    remcord_protocol_smoke: bool,
     settings_ui_smoke: bool,
     permissions_smoke: bool,
     mutation_stage: u8,
@@ -3294,7 +3307,7 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
                 eprintln!("[SettingsBoot][Smoke] probe failed: {error}");
             }
         }
-        if ctx.flags.legcord_protocol_smoke {
+        if ctx.flags.remcord_protocol_smoke {
             if let Err(error) = ctx.webview.evaluate_script(REMCORD_PROTOCOL_SMOKE_SCRIPT) {
                 eprintln!("[RemcordProtocol][Smoke] probe failed: {error}");
             } else {
@@ -3373,7 +3386,7 @@ struct PopupChild {
 /// only for the Discord popout. Renderer window features are never read.
 /// The child shares the main profile/session (same `WebContext` plus the
 /// same adopted `ICoreWebView2Environment`), the same document-start
-/// facade, the same bridge origin gate, the same `legcord://` registration,
+/// facade, the same bridge origin gate, the same `remcord://` registration (plus the legacy-URL rewrite filter),
 /// and the same permission policy; nested popups deny unconditionally and
 /// navigation stays clamped to Discord (plus the ICS blob shape for hidden
 /// ICS children only).
@@ -3386,7 +3399,7 @@ fn create_popup_child(
     #[cfg(target_os = "windows")] environment: ICoreWebView2Environment,
     initialization_script: &str,
     ipc_proxy: &EventLoopProxy<NativeEvent>,
-    roots: &crate::legcord_protocol::NamespaceRoots,
+    roots: &crate::remcord_protocol::NamespaceRoots,
     downloads_dir: &std::path::Path,
     always_on_top: bool,
     instance_id: u64,
@@ -3459,7 +3472,7 @@ fn create_popup_child(
     #[cfg(target_os = "windows")]
     {
         let core_webview2: ICoreWebView2 = child_webview.webview();
-        if let Err(error) = register_legcord_protocol(&core_webview2, roots.clone()) {
+        if let Err(error) = register_remcord_protocol(&core_webview2, roots.clone()) {
             eprintln!("[Popup][RemcordProtocol] registration failed: {error}");
         }
         if let Err(error) = permissions::register(&core_webview2) {
@@ -4390,14 +4403,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     // WebView2 environment with the legcord custom scheme registered (P0.2).
     // Created here — before the environment exists and before navigation —
-    // and adopted by wry below. Fail-fast: without registration, legcord://
+    // and adopted by wry below. Fail-fast: without registration, remcord://
     // subresources fail as an unknown scheme and no handler ever fires.
     #[cfg(target_os = "windows")]
     let webview_env = {
-        match create_legcord_webview_environment(&profile_path) {
+        match create_remcord_webview_environment(&profile_path) {
             Ok(env) => {
                 println!(
-                    "[RemcordProtocol] scheme registered: legcord (authority, secure, https://discord.com)"
+                    "[RemcordProtocol] scheme registered: remcord (authority, secure, https://discord.com)"
                 );
                 env
             }
@@ -4845,10 +4858,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_quickcss_smoke {
         println!("[QuickCss][Smoke] native Quick CSS smoke observation enabled");
     }
-    let diagnostic_legcord_protocol_smoke =
+    let diagnostic_remcord_protocol_smoke =
         std::env::var(REMCORD_PROTOCOL_SMOKE_ENV).is_ok_and(|value| value == "1");
-    if diagnostic_legcord_protocol_smoke {
-        println!("[RemcordProtocol][Smoke] legcord:// protocol smoke probe enabled");
+    if diagnostic_remcord_protocol_smoke {
+        println!("[RemcordProtocol][Smoke] remcord:// protocol smoke probe enabled");
     }
     let diagnostic_permissions_smoke =
         std::env::var(PERMISSIONS_SMOKE_ENV).is_ok_and(|value| value == "1");
@@ -4967,7 +4980,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // Per-WebView content interceptions (Phase 2F helper): the
-    // `legcord://` registration, the permission policy, and the CSP
+    // `remcord://` registration (plus legacy rewrite), the permission policy, and the CSP
     // request filter. Runs after `build()` and before the initial Discord
     // navigation, so the first document is intercepted like every later
     // one. Returns the namespace roots for the P0.4 popup child
@@ -5528,7 +5541,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     webview = builder.build(&window_for_webview).expect("failed to build replacement WebView");
                     println!("[BrowserRecovery] Replacement WebView built");
 
-                    // 9. Re-attach per-WebView content filters (legcord://, permissions, CSP).
+                    // 9. Re-attach per-WebView content filters (remcord:// + legacy rewrite, permissions, CSP).
                     #[cfg(target_os = "windows")]
                     {
                         let _ = main_webview::attach_main_content_filters(&webview, &profile_path, &profile_path);
@@ -5650,8 +5663,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         diagnostic_backup_restore_smoke,
                                     shelter_loader_probe: diagnostic_shelter_loader_probe,
                                     settings_boot_smoke: diagnostic_settings_boot_smoke,
-                                    legcord_protocol_smoke:
-                                        diagnostic_legcord_protocol_smoke,
+                                    remcord_protocol_smoke:
+                                        diagnostic_remcord_protocol_smoke,
                                     settings_ui_smoke: diagnostic_settings_ui_smoke,
                                     permissions_smoke: diagnostic_permissions_smoke,
                                     mutation_stage: mutation_smoke_stage,
@@ -5788,8 +5801,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         diagnostic_backup_restore_smoke,
                                     shelter_loader_probe: diagnostic_shelter_loader_probe,
                                     settings_boot_smoke: diagnostic_settings_boot_smoke,
-                                    legcord_protocol_smoke:
-                                        diagnostic_legcord_protocol_smoke,
+                                    remcord_protocol_smoke:
+                                        diagnostic_remcord_protocol_smoke,
                                     settings_ui_smoke: diagnostic_settings_ui_smoke,
                                     permissions_smoke: diagnostic_permissions_smoke,
                                     mutation_stage: mutation_smoke_stage,
@@ -5819,7 +5832,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             Event::UserEvent(NativeEvent::RemcordProtocolSmokeReadback) => {
-                if diagnostic_legcord_protocol_smoke {
+                if diagnostic_remcord_protocol_smoke {
                     if let Err(error) = webview.evaluate_script_with_callback(
                         REMCORD_PROTOCOL_SMOKE_READBACK_SCRIPT,
                         |result| {
@@ -8250,14 +8263,16 @@ mod tests {
     }
 
     #[test]
-    fn legcord_protocol_smoke_probe_uses_only_fixed_bundle_urls() {
-        // The DEV probe may request exactly three host-fixed bundle URLs that
-        // exist on disk; it must not accept input, execute fetched bytes, or
-        // open a generic fetch/eval surface.
+    fn remcord_protocol_smoke_probe_uses_only_fixed_bundle_urls() {
+        // The DEV probe may request exactly the host-fixed bundle URLs that
+        // exist on disk (canonical plus one legacy rewrite proof); it must
+        // not accept input, execute fetched bytes, or open a generic
+        // fetch/eval surface.
         for fixed in [
+            "remcord://assets/css/discord.css",
+            "remcord://assets/desktop.png",
+            "remcord://plugins/settings/plugin.js",
             "legcord://assets/css/discord.css",
-            "legcord://assets/desktop.png",
-            "legcord://plugins/settings/plugin.js",
         ] {
             assert!(
                 REMCORD_PROTOCOL_SMOKE_SCRIPT.contains(fixed),
@@ -8296,8 +8311,8 @@ mod tests {
         // The template is closed: host-fixed lifecycle calls and plain status
         // strings only — no protocol, bridge, URL, or path surface of its own.
         // (The embedded artifact legitimately carries legcord:// asset image
-        // references from the Electron UI; those load as broken images
-        // natively and are a documented cosmetic gap, not a loader input.)
+        // references from the Electron UI; the host legacy-URL rewrite serves
+        // them through the canonical resolver, so they render natively.)
         for token in [
             "removePlugin",
             "addLocalPlugin",
@@ -8341,7 +8356,7 @@ mod tests {
     #[test]
     fn titlebar_plugin_start_script_is_closed_and_embedded() {
         // The template is closed: host-fixed lifecycle calls, inline style
-        // management over build-embedded text (no legcord:// fetch, no
+        // management over build-embedded text (no remcord:// fetch, no
         // generic fetch at all), platform-gated attributes, and plain status
         // strings — no bridge, no renderer input.
         for token in [
