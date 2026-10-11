@@ -228,7 +228,7 @@ test("the loader probe adds no renderer-facing loader API", () => {
     // The probe script itself is a fixed host string: the only id, source,
     // and manifest in the chain are literals, never renderer input.
     assert.match(nativeMain, /SHELTER_LOADER_PROBE_SCRIPT/);
-    assert.match(nativeMain, /legcord-loader-probe/);
+    assert.match(nativeMain, /remcord-loader-probe/);
     // The probe re-runs after Shelter's own bootstrap marker (its global is
     // async), gated to Shelter so other mods never duplicate it.
     assert.match(nativeMain, /loader_probe_after_marker/);
