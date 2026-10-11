@@ -35,8 +35,9 @@
     //    awaited rather than read synchronously.
     // 3. Electron wraps Shelter's source in an IIFE that declares an injector
     //    plugin map. That wrapper is deliberately NOT reproduced here: the
-    //    `legcord://` protocol and the preload plugin loader are both
-    //    unimplemented natively, and Shelter skips the injector entirely when
+    //    preload plugin loader is unimplemented natively (the local-asset
+    //    protocol it would load from now exists as `remcord://` with a legacy
+    //    `legcord://` rewrite), and Shelter skips the injector entirely when
     //    the global is absent, so omitting it is exact native behavior rather
     //    than a stub.
     substrate.createModAdapter({

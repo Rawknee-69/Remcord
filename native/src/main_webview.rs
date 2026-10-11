@@ -8,7 +8,7 @@
 //!
 //! - **Per-WebView / per-instance** (must be re-applied to every newly
 //!   constructed WebView): the wry builder options and navigation setup,
-//!   download handlers, `legcord://` registration, CSP request filter,
+//!   download handlers, `remcord://` registration (+ legacy rewrite), CSP request filter,
 //!   permission handler, process-failure observer, and
 //!   navigation-completion observer, plus the initial Discord navigation.
 //! - **Process-lifetime / shared** (must never be duplicated by a future
@@ -196,7 +196,7 @@ pub fn main_webview_builder<'a>(
     // WebResourceRequested filter can exist), then the host navigates to
     // Discord AFTER both interception filters are registered below. Without
     // this, the first Discord document races filter registration and would
-    // keep Discord's original CSP (no `legcord:` allowance) until a reload.
+    // keep Discord's original CSP (no local-scheme allowance) until a reload.
     builder
         .with_url(MAIN_BOOT_URL)
         .with_initialization_script_for_main_only(initialization_script, true)
@@ -286,7 +286,7 @@ pub fn main_webview_builder<'a>(
 }
 
 /// Registers the per-WebView content interceptions for one main WebView:
-/// the `legcord://` protocol, the permission policy, and the CSP request
+/// the `remcord://` protocol (+ legacy rewrite), the permission policy, and the CSP request
 /// filter. Must run after `build()` (needs the core WebView) and before
 /// the initial Discord navigation, so the first Discord document is
 /// intercepted like every later one. Returns the namespace roots for the
@@ -332,7 +332,7 @@ pub fn attach_main_content_filters(
 /// Registers the CSP request filter for one main WebView (P0.2 + Phase F).
 /// Moved verbatim from the boot path: adds the `discord.com` document
 /// filter, then forwards the document through `ureq` to extend the CSP
-/// with the badges host and the `legcord:` scheme allowances. Fail-closed:
+/// with the badges host and the local-scheme allowances. Fail-closed:
 /// a forwarding failure leaves the original response untouched.
 #[cfg(target_os = "windows")]
 fn register_csp_interception(
@@ -493,7 +493,7 @@ fn register_csp_interception(
                     // Forwarding failed: leave the original response
                     // untouched (fail-closed, never stripped) and note it.
                     // Without forwarding, neither the badges patch nor
-                    // the legcord: scheme allowance can apply.
+                    // the local-scheme allowances can apply.
                     eprintln!("[CSP] document forward failed: {error}");
                     let _ = unsafe { deferral.Complete() };
                     return Ok(());
@@ -532,8 +532,9 @@ fn register_csp_interception(
                 if name_str.to_lowercase() == "content-security-policy" {
                     let mut csp = val_str.to_string();
                     // P0.2: WebView2 custom schemes participate in CSP (no
-                    // bypassCSP parity), so allow legcord: in exactly the
-                    // directives traced consumers need (default/script/
+                    // bypassCSP parity), so allow remcord: (canonical) plus
+                    // legcord: (legacy rewrite) in exactly the directives
+                    // traced consumers need (default/script/
                     // style/img/media/connect). Preservation + badges
                     // patch below stay unchanged in behavior.
                     csp = super::extend_csp_for_remcord(&csp);
@@ -556,11 +557,12 @@ fn register_csp_interception(
                         };
                     }
                     // Any CSP-bearing Discord response is now modified
-                    // (badges and/or legcord:), never removed.
+                    // (badges and/or local schemes), never removed.
                     csp_modified = true;
-                    let legcord_sources = csp.matches("legcord:").count();
+                    let remcord_sources = csp.matches("remcord:").count();
+                    let legacy_sources = csp.matches("legcord:").count();
                     println!(
-                        "[CSP] document policy extended badges={} legcord_sources={legcord_sources}",
+                        "[CSP] document policy extended badges={} remcord_sources={remcord_sources} legacy_sources={legacy_sources}",
                         csp.contains("badges.vencord.dev")
                     );
                     headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));

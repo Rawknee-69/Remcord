@@ -457,6 +457,7 @@ mod tests {
             "Uri(",
             "https://",
             "legcord://",
+            "remcord://",
         ] {
             assert!(
                 !shipped.contains(forbidden),

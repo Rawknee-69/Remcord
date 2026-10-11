@@ -132,7 +132,7 @@ mod tests {
 
     fn unique_temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "legcord-bundles-test-{}-{}-{tag}",
+            "remcord-bundles-test-{}-{}-{tag}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -441,7 +441,7 @@ mod tests {
             .expect("system time must be available")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "legcord-plugin-storage-{tag}-{nanos}-{}",
+            "remcord-plugin-storage-{tag}-{nanos}-{}",
             std::process::id()
         ))
     }
@@ -584,9 +584,9 @@ mod tests {
     fn round_trips_a_valid_write_and_read() {
         let profile = unique_profile_dir("roundtrip");
         seed_settings(&profile, true);
-        let written = write_plugin_file(&profile, "probe-1", "cache/note.txt", "hello legcord")
+        let written = write_plugin_file(&profile, "probe-1", "cache/note.txt", "hello remcord")
             .expect("a valid write must succeed");
-        assert_eq!(written.payload_bytes, "hello legcord".len());
+        assert_eq!(written.payload_bytes, "hello remcord".len());
         // No temp file may be left behind.
         let dir = profile.join("plugin-storage").join("probe-1").join("cache");
         assert_eq!(
@@ -598,8 +598,8 @@ mod tests {
             0
         );
         let read = read_plugin_file(&profile, "probe-1", "cache/note.txt").unwrap();
-        assert_eq!(read.data, "hello legcord");
-        assert_eq!(read.payload_bytes, "hello legcord".len());
+        assert_eq!(read.data, "hello remcord");
+        assert_eq!(read.payload_bytes, "hello remcord".len());
     }
 
     #[test]

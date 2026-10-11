@@ -445,6 +445,7 @@ mod tests {
             "cookie",
             "token",
             "legcord://",
+            "remcord://",
             "query",
         ] {
             assert!(
@@ -517,6 +518,7 @@ mod tests {
             "Source(",
             "Cookie",
             "legcord://",
+            "remcord://",
         ] {
             assert!(
                 !shipped.contains(forbidden),

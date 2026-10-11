@@ -1473,18 +1473,18 @@ test("the shared factory serves Shelter and Equicord without Vencord identifiers
         assert.doesNotMatch(code, /__remcordNativeVencord/);
         assert.doesNotMatch(code, /vencord-bootstrap-executed/);
         assert.doesNotMatch(code, /getModBundle\("vencord"\)/);
-        assert.doesNotMatch(code, /legcord-native-vencord/);
+        assert.doesNotMatch(code, /remcord-native-vencord/);
         assert.doesNotMatch(code, /vencord_css_result/);
     }
 });
 
 test("a synthetic second mod runs the full substrate cycle without Vencord", async () => {
     const { window, host } = createSyntheticModRuntime();
-    assert.equal(window.__legcordNativeTestMod.status, "pending");
+    assert.equal(window.__remcordNativeTestMod.status, "pending");
     assert.equal(window.__remcordNativeVencord, undefined);
 
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:testmod-bootstrap", {
+        new FakeCustomEvent("remcord-native:testmod-bootstrap", {
             detail: {
                 request_id: "testmod-1",
                 ok: true,
@@ -1496,10 +1496,10 @@ test("a synthetic second mod runs the full substrate cycle without Vencord", asy
     host().resolve({ marker: "testmod-bootstrap-executed", bundle_version: "9.9.9" });
     await Promise.resolve();
     await Promise.resolve();
-    assert.equal(window.__legcordNativeTestMod.status, "executed");
-    assert.equal(window.__legcordNativeTestMod.marker, "testmod-bootstrap-executed");
-    assert.equal(window.__legcordNativeTestMod.executionCount, 1);
-    assert.equal(window.__legcordNativeTestMod.bundleVersion, "9.9.9");
+    assert.equal(window.__remcordNativeTestMod.status, "executed");
+    assert.equal(window.__remcordNativeTestMod.marker, "testmod-bootstrap-executed");
+    assert.equal(window.__remcordNativeTestMod.executionCount, 1);
+    assert.equal(window.__remcordNativeTestMod.bundleVersion, "9.9.9");
     const result = window.messages.find((message) => message.event?.type === "testmod_bootstrap_result");
     assert.equal(result.event.payload.ok, true);
     assert.equal(result.event.payload.marker, "testmod-bootstrap-executed");
@@ -1512,17 +1512,17 @@ test("a synthetic second mod runs the full substrate cycle without Vencord", asy
 test("the synthetic adapter loads once and rejects a wrong execution marker", async () => {
     const { window, context, host } = createSyntheticModRuntime();
     vm.runInContext(testModAdapter, context);
-    assert.equal(window.__legcordNativeTestMod.status, "pending");
+    assert.equal(window.__remcordNativeTestMod.status, "pending");
 
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:testmod-bootstrap", {
+        new FakeCustomEvent("remcord-native:testmod-bootstrap", {
             detail: { request_id: "testmod-1", ok: true, marker: "testmod-bootstrap-executed", execution_ms: 1 },
         }),
     );
     host().resolve({ marker: "wrong-marker", bundle_version: "9.9.9" });
     await Promise.resolve();
     await Promise.resolve();
-    assert.equal(window.__legcordNativeTestMod.status, "failed");
+    assert.equal(window.__remcordNativeTestMod.status, "failed");
     assert.equal(
         window.messages.some((message) => message.event?.type === "testmod_response_ack"),
         false,
@@ -1569,7 +1569,7 @@ test("getLang sends one typed key-only request and resolves the string", async (
 
 test("getLang resolves missing keys to an empty string like Electron", async () => {
     const { window } = createLangRuntime();
-    const pending = window.legcord.getLang("legcord-native-no-such-key");
+    const pending = window.legcord.getLang("remcord-native-no-such-key");
     const message = window.messages.find((entry) => entry.command?.type === "localization_get_lang");
     respondLang(window, message, "");
     assert.equal(await pending, "");
@@ -1789,14 +1789,14 @@ test("the migrated update checker compares the host-confirmed version", async ()
 test("the synthetic adapter reports a failed bootstrap verdict without crashing", async () => {
     const { window, host } = createSyntheticModRuntime();
     window.dispatchEvent(
-        new FakeCustomEvent("legcord-native:testmod-bootstrap", {
+        new FakeCustomEvent("remcord-native:testmod-bootstrap", {
             detail: { request_id: "testmod-1", ok: false, marker: "", execution_ms: 1, error: "global missing" },
         }),
     );
     host().resolve({ marker: "testmod-bootstrap-executed", bundle_version: "9.9.9" });
     await Promise.resolve();
     await Promise.resolve();
-    assert.equal(window.__legcordNativeTestMod.status, "failed");
+    assert.equal(window.__remcordNativeTestMod.status, "failed");
     const result = window.messages.find((message) => message.event?.type === "testmod_bootstrap_result");
     assert.equal(result.event.payload.ok, false);
 });
@@ -1804,7 +1804,7 @@ test("the synthetic adapter reports a failed bootstrap verdict without crashing"
 test("the synthetic adapter is denied when its capability is not granted", async () => {
     const { window } = createSyntheticModRuntime(["bridge.ping"]);
     await Promise.resolve();
-    assert.equal(window.__legcordNativeTestMod.status, "failed");
+    assert.equal(window.__remcordNativeTestMod.status, "failed");
     assert.equal(
         window.messages.some((message) => message.event?.type === "testmod_adapter_error"),
         true,
@@ -1827,7 +1827,7 @@ test("document-start storage preservation survives Discord deleting window.local
         console: { error() {} },
     });
     vm.runInContext(storagePreservation, context);
-    assert.equal(window.__legcordNativeStorageAtDocumentStart.localStorageApi, "function");
+    assert.equal(window.__remcordNativeStorageAtDocumentStart.localStorageApi, "function");
     delete window.localStorage;
     assert.equal(window.localStorage, undefined);
     assert.equal(FakeStorageCtor.prototype.localStorage, storage);
@@ -2710,7 +2710,7 @@ test("a reloaded document gets a fresh theme install facade with no stale promis
     });
 });
 
-const WRITE_FIXTURE_CSS = ":root{\n  --legcord-native-write-probe: second;\n}\n";
+const WRITE_FIXTURE_CSS = ":root{\n  --remcord-native-write-probe: second;\n}\n";
 
 function respondThemeWritten(window, request, payload = { id: "my-theme", enabled: true }) {
     window.dispatchEvent(
@@ -3623,88 +3623,88 @@ function managedThemeRemove(document, styleId) {
 
 test("theme injection creates one managed style with the host identity", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     assert.equal(headChildren.length, 1);
-    assert.equal(headChildren[0].id, "legcord-native-theme-alpha");
+    assert.equal(headChildren[0].id, "remcord-native-theme-alpha");
     assert.equal(headChildren[0].textContent, ":root{--a:1;}");
 });
 
 test("theme injection reuses its style instead of duplicating", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:2;}");
     assert.equal(headChildren.length, 1);
-    assert.equal(document.getElementById("legcord-native-theme-alpha").textContent, ":root{--a:2;}");
+    assert.equal(document.getElementById("remcord-native-theme-alpha").textContent, ":root{--a:2;}");
 });
 
 test("themes keep host emission order in the document head", () => {
     const { document, headChildren } = createFakeThemeDocument();
     // The host emits sorted by theme id; append order is the cascade order.
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+        ["remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
 test("theme removal is idempotent and removes only its own style", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
-    managedThemeRemove(document, "legcord-native-theme-alpha");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
+    managedThemeRemove(document, "remcord-native-theme-alpha");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-native-theme-zulu"],
+        ["remcord-native-theme-zulu"],
     );
-    assert.equal(document.getElementById("legcord-native-theme-alpha"), null);
+    assert.equal(document.getElementById("remcord-native-theme-alpha"), null);
     // Removing a missing style (disabled theme, fresh document) is a no-op.
-    managedThemeRemove(document, "legcord-native-theme-alpha");
-    managedThemeRemove(document, "legcord-native-theme-never-enabled");
+    managedThemeRemove(document, "remcord-native-theme-alpha");
+    managedThemeRemove(document, "remcord-native-theme-never-enabled");
     assert.equal(headChildren.length, 1);
 });
 
 test("a reloaded document starts with no theme styles and re-injects cleanly", () => {
     const first = createFakeThemeDocument();
-    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(first.document, "remcord-native-theme-alpha", ":root{--a:1;}");
     assert.equal(first.headChildren.length, 1);
 
     // Reload: a fresh document has no carried-over nodes.
     const next = createFakeThemeDocument();
     assert.equal(next.headChildren.length, 0);
-    managedThemeRemove(next.document, "legcord-native-theme-alpha");
-    managedThemeInject(next.document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(next.document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    managedThemeRemove(next.document, "remcord-native-theme-alpha");
+    managedThemeInject(next.document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(next.document, "remcord-native-theme-zulu", ":root{--z:1;}");
     assert.deepEqual(
         next.headChildren.map((node) => node.id),
-        ["legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+        ["remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
 test("theme styles coexist with the Vencord managed style", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(document, "remcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-vencord-css", "/*vencord*/");
     const ids = headChildren.map((node) => node.id);
-    assert.ok(ids.includes("legcord-native-vencord-css"));
-    assert.ok(ids.includes("legcord-native-theme-alpha"));
-    assert.equal(ids.filter((id) => id === "legcord-native-vencord-css").length, 1);
-    assert.equal(ids.filter((id) => id === "legcord-native-theme-alpha").length, 1);
+    assert.ok(ids.includes("remcord-native-vencord-css"));
+    assert.ok(ids.includes("remcord-native-theme-alpha"));
+    assert.equal(ids.filter((id) => id === "remcord-native-vencord-css").length, 1);
+    assert.equal(ids.filter((id) => id === "remcord-native-theme-alpha").length, 1);
 });
 
 test("the theme smoke observation sees exactly the managed theme styles", () => {
     const { document } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     const observed = document
-        .querySelectorAll('style[id^="legcord-native-theme-"]')
+        .querySelectorAll('style[id^="remcord-native-theme-"]')
         .map((node) => ({ id: node.id, bytes: (node.textContent || "").length }));
-    assert.deepEqual(observed, [{ id: "legcord-native-theme-alpha", bytes: ":root{--a:1;}".length }]);
+    assert.deepEqual(observed, [{ id: "remcord-native-theme-alpha", bytes: ":root{--a:1;}".length }]);
     // The smoke observation also records head order and Vencord coexistence.
     const headOrder = document.head.querySelectorAll("style").map((node) => node.id);
-    assert.deepEqual(headOrder, ["legcord-native-vencord-css", "legcord-native-theme-alpha"]);
-    assert.ok(headOrder.includes("legcord-native-vencord-css"));
+    assert.deepEqual(headOrder, ["remcord-native-vencord-css", "remcord-native-theme-alpha"]);
+    assert.ok(headOrder.includes("remcord-native-vencord-css"));
 });
 
 // Managed Quick CSS lifecycle contract (Phase D Quick CSS host-push).
@@ -3744,60 +3744,60 @@ test("Quick CSS injects before themes in the document head", () => {
     // The host emits Quick CSS before the sorted theme set, matching
     // Electron's initQuickCss-before-theme-loop order.
     managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--probe:theme;}");
-    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--probe:theme;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--probe:theme;}");
+    managedThemeInject(document, "remcord-native-theme-zulu", ":root{--probe:theme;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
 test("disabled Quick CSS leaves no style while themes still inject", () => {
     const { document, headChildren } = createFakeThemeDocument();
     // Disabled means the host never pushes: no node is created at all.
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     assert.equal(document.getElementById("legcord-quick-css"), null);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-native-theme-alpha"],
+        ["remcord-native-theme-alpha"],
     );
     // Disabling after an injection removes exactly the Quick CSS style.
     managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
     managedThemeRemove(document, "legcord-quick-css");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-native-theme-alpha"],
+        ["remcord-native-theme-alpha"],
     );
 });
 
 test("a reloaded document resets Quick CSS alongside themes", () => {
     const first = createFakeThemeDocument();
     managedThemeInject(first.document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(first.document, "remcord-native-theme-alpha", ":root{--a:1;}");
     assert.equal(first.headChildren.length, 2);
 
     const next = createFakeThemeDocument();
     assert.equal(next.headChildren.length, 0);
     managedThemeRemove(next.document, "legcord-quick-css");
     managedThemeInject(next.document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(next.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(next.document, "remcord-native-theme-alpha", ":root{--a:1;}");
     assert.deepEqual(
         next.headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha"],
+        ["legcord-quick-css", "remcord-native-theme-alpha"],
     );
 });
 
 test("Quick CSS coexists with Vencord and themes in cascade order", () => {
     const { document, headChildren } = createFakeThemeDocument();
-    managedThemeInject(document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(document, "remcord-native-vencord-css", "/*vencord*/");
     managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--probe:theme;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--probe:theme;}");
     // Re-injecting everything (as a reload would) duplicates nothing.
     managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--probe:theme;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--probe:theme;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-native-vencord-css", "legcord-quick-css", "legcord-native-theme-alpha"],
+        ["remcord-native-vencord-css", "legcord-quick-css", "remcord-native-theme-alpha"],
     );
 });
 
@@ -3833,40 +3833,40 @@ test("the smoke observation reports Quick CSS presence and bytes", () => {
 test("a live content update never moves the style in the cascade", () => {
     const { document, headChildren } = createFakeThemeDocument();
     managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
     // Live: alpha CSS changes on disk -> in-place update, no order repair.
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:2;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
-    assert.equal(document.getElementById("legcord-native-theme-alpha").textContent, ":root{--a:2;}");
+    assert.equal(document.getElementById("remcord-native-theme-alpha").textContent, ":root{--a:2;}");
     // Live: Quick CSS changes -> still first, themes untouched.
     managedThemeInject(document, "legcord-quick-css", ":root{--probe:quickcss2;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
 test("a recreated Quick CSS style is repaired back before themes", () => {
     const { document, headChildren } = createFakeThemeDocument();
     managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     // Live: file deleted then recreated -> remove + fresh append lands last.
     managedThemeRemove(document, "legcord-quick-css");
     assert.equal(document.getElementById("legcord-quick-css"), null);
     managedThemeInject(document, "legcord-quick-css", ":root{--q:2;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-native-theme-alpha", "legcord-quick-css"],
+        ["remcord-native-theme-alpha", "legcord-quick-css"],
     );
     // Host structural repair: Quick CSS first, then sorted themes.
-    managedCssOrder(document, ["legcord-quick-css", "legcord-native-theme-alpha"]);
+    managedCssOrder(document, ["legcord-quick-css", "remcord-native-theme-alpha"]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha"],
+        ["legcord-quick-css", "remcord-native-theme-alpha"],
     );
     assert.equal(document.getElementById("legcord-quick-css").textContent, ":root{--q:2;}");
 });
@@ -3874,24 +3874,24 @@ test("a recreated Quick CSS style is repaired back before themes", () => {
 test("a newly added theme is repaired into sorted cascade position", () => {
     const { document, headChildren } = createFakeThemeDocument();
     managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
     // Live: theme "mike" created -> appended at the end, out of position.
-    managedThemeInject(document, "legcord-native-theme-mike", ":root{--m:1;}");
+    managedThemeInject(document, "remcord-native-theme-mike", ":root{--m:1;}");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu", "legcord-native-theme-mike"],
+        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu", "remcord-native-theme-mike"],
     );
     // Host structural repair restores sorted order without touching bytes.
     managedCssOrder(document, [
         "legcord-quick-css",
-        "legcord-native-theme-alpha",
-        "legcord-native-theme-mike",
-        "legcord-native-theme-zulu",
+        "remcord-native-theme-alpha",
+        "remcord-native-theme-mike",
+        "remcord-native-theme-zulu",
     ]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-mike", "legcord-native-theme-zulu"],
+        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-mike", "remcord-native-theme-zulu"],
     );
 });
 
@@ -3909,20 +3909,20 @@ test("rapid live edits collapse to one node with the final bytes", () => {
 test("disable removes the style and re-enable injects current bytes once", () => {
     const { document, headChildren } = createFakeThemeDocument();
     managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
     // Live: disabled while the file keeps changing -> style removed, file
     // writes issue no renderer work (nothing injected here).
     managedThemeRemove(document, "legcord-quick-css");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-native-theme-alpha"],
+        ["remcord-native-theme-alpha"],
     );
     // Live: re-enabled -> current bytes appear exactly once, before themes.
     managedThemeInject(document, "legcord-quick-css", ":root{--q:99;}");
-    managedCssOrder(document, ["legcord-quick-css", "legcord-native-theme-alpha"]);
+    managedCssOrder(document, ["legcord-quick-css", "remcord-native-theme-alpha"]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha"],
+        ["legcord-quick-css", "remcord-native-theme-alpha"],
     );
     assert.equal(headChildren.filter((node) => node.id === "legcord-quick-css").length, 1);
 });
@@ -3930,43 +3930,43 @@ test("disable removes the style and re-enable injects current bytes once", () =>
 test("deleted themes remove exactly their stale style", () => {
     const { document, headChildren } = createFakeThemeDocument();
     managedThemeInject(document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(document, "legcord-native-theme-alpha", ":root{--a:1;}");
-    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:1;}");
+    managedThemeInject(document, "remcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:1;}");
     // Live: zulu directory deleted -> stale style removed, rest untouched.
-    managedThemeRemove(document, "legcord-native-theme-zulu");
+    managedThemeRemove(document, "remcord-native-theme-zulu");
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha"],
+        ["legcord-quick-css", "remcord-native-theme-alpha"],
     );
     // Live: zulu recreated -> injected, then repaired into sorted position.
-    managedThemeInject(document, "legcord-native-theme-zulu", ":root{--z:2;}");
-    managedCssOrder(document, ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"]);
+    managedThemeInject(document, "remcord-native-theme-zulu", ":root{--z:2;}");
+    managedCssOrder(document, ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"]);
     assert.deepEqual(
         headChildren.map((node) => node.id),
-        ["legcord-quick-css", "legcord-native-theme-alpha", "legcord-native-theme-zulu"],
+        ["legcord-quick-css", "remcord-native-theme-alpha", "remcord-native-theme-zulu"],
     );
 });
 
 test("live updates keep Vencord first across reloads without duplication", () => {
     const first = createFakeThemeDocument();
-    managedThemeInject(first.document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(first.document, "remcord-native-vencord-css", "/*vencord*/");
     managedThemeInject(first.document, "legcord-quick-css", ":root{--q:1;}");
-    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:1;}");
+    managedThemeInject(first.document, "remcord-native-theme-alpha", ":root{--a:1;}");
     // Live content update: Vencord stays first, no duplicates.
-    managedThemeInject(first.document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    managedThemeInject(first.document, "remcord-native-theme-alpha", ":root{--a:2;}");
     managedThemeInject(first.document, "legcord-quick-css", ":root{--q:2;}");
     assert.deepEqual(
         first.headChildren.map((node) => node.id),
-        ["legcord-native-vencord-css", "legcord-quick-css", "legcord-native-theme-alpha"],
+        ["remcord-native-vencord-css", "legcord-quick-css", "remcord-native-theme-alpha"],
     );
     // Reload: fresh document re-pushes the same order, still no duplicates.
     const next = createFakeThemeDocument();
-    managedThemeInject(next.document, "legcord-native-vencord-css", "/*vencord*/");
+    managedThemeInject(next.document, "remcord-native-vencord-css", "/*vencord*/");
     managedThemeInject(next.document, "legcord-quick-css", ":root{--q:2;}");
-    managedThemeInject(next.document, "legcord-native-theme-alpha", ":root{--a:2;}");
+    managedThemeInject(next.document, "remcord-native-theme-alpha", ":root{--a:2;}");
     assert.deepEqual(
         next.headChildren.map((node) => node.id),
-        ["legcord-native-vencord-css", "legcord-quick-css", "legcord-native-theme-alpha"],
+        ["remcord-native-vencord-css", "legcord-quick-css", "remcord-native-theme-alpha"],
     );
     assert.equal(first.headChildren.length, 3);
 });

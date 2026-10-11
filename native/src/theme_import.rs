@@ -812,7 +812,7 @@ mod tests {
             let config = import_dialog_config(&profile);
             let (done_tx, done_rx) = mpsc::channel();
             std::thread::Builder::new()
-                .name("legcord-picker-ui-test-sta".to_owned())
+                .name("remcord-picker-ui-test-sta".to_owned())
                 .spawn(move || {
                     let com_init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
                     let com_owned = com_init == windows::core::HRESULT(0);
@@ -917,7 +917,7 @@ mod tests {
             let (done_tx, done_rx) = mpsc::channel();
             let worker_profile = profile.clone();
             std::thread::Builder::new()
-                .name("legcord-picker-select-test-sta".to_owned())
+                .name("remcord-picker-select-test-sta".to_owned())
                 .spawn(move || {
                     let com_init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
                     let com_owned = com_init == windows::core::HRESULT(0);

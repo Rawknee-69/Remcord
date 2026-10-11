@@ -1,7 +1,7 @@
 //! Native download filename/destination policy (P0.5).
 //!
 //! Electron contract: active source has NO `will-download` /
-//! `download-item` / `downloadURL` handler, so production Remcord uses the
+//! `download-item` / `downloadURL` handler, so production Legcord uses the
 //! Chromium/Electron default — a per-download Save dialog with the
 //! server-suggested filename and a user-chosen destination.
 //!
@@ -251,7 +251,7 @@ mod tests {
 
     fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "legcord-downloads-test-{}-{}-{tag}",
+            "remcord-downloads-test-{}-{}-{tag}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

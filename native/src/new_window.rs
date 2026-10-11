@@ -405,6 +405,7 @@ mod tests {
             "discord://-/channels/@me",
             "unknown://do-thing",
             "legcord://plugins/rpc/",
+            "remcord://plugins/rpc/",
         ] {
             assert_eq!(decide(url), Decision::ConfirmExternal, "{url}");
             assert!(!is_fast_path_external(url));

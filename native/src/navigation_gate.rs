@@ -423,6 +423,7 @@ mod tests {
                 "cookie",
                 "token",
                 "legcord://",
+                "remcord://",
                 "query",
             ] {
                 assert!(
@@ -456,6 +457,7 @@ mod tests {
             "Uri(",
             "https://",
             "legcord://",
+            "remcord://",
         ] {
             assert!(
                 !shipped.contains(forbidden),

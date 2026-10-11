@@ -251,7 +251,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time must be available")
             .as_nanos();
-        std::env::temp_dir().join(format!("legcord-lang-{tag}-{nanos}-{}", std::process::id()))
+        std::env::temp_dir().join(format!("remcord-lang-{tag}-{nanos}-{}", std::process::id()))
     }
 
     fn seed_lang(profile: &std::path::Path, body: impl AsRef<[u8]>) {

@@ -2716,7 +2716,7 @@ enum NativeEvent {
     /// page data, or interface objects. A `Failed` exit may approve one
     /// browser-process recreation through the separate browser-recovery budget.
     BrowserProcessExited(browser_recovery::BrowserProcessExitedEvent),
-    /// DEV-only delayed readback for the legcord:// protocol smoke probe.
+    /// DEV-only delayed readback for the remcord:// protocol smoke probe.
     /// Fired once per document ~5 s after the probe started, so async
     /// subresource loads have settled before the host reads the flags.
     RemcordProtocolSmokeReadback,
@@ -3316,7 +3316,7 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
                 // ~5 s later on the event loop (DEV only).
                 let readback_proxy = ctx.proxy.clone();
                 if let Err(error) = thread::Builder::new()
-                    .name("legcord-protocol-smoke-readback".to_owned())
+                    .name("remcord-protocol-smoke-readback".to_owned())
                     .spawn(move || {
                         thread::sleep(Duration::from_millis(5000));
                         queue_event(&readback_proxy, NativeEvent::RemcordProtocolSmokeReadback);
@@ -3340,7 +3340,7 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
                 // flags are read ~8 s later (DEV only).
                 let readback_proxy = ctx.proxy.clone();
                 if let Err(error) = thread::Builder::new()
-                    .name("legcord-permissions-smoke-readback".to_owned())
+                    .name("remcord-permissions-smoke-readback".to_owned())
                     .spawn(move || {
                         thread::sleep(Duration::from_millis(8000));
                         queue_event(&readback_proxy, NativeEvent::PermissionsSmokeReadback);
@@ -4401,7 +4401,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    // WebView2 environment with the legcord custom scheme registered (P0.2).
+    // WebView2 environment with the remcord custom scheme registered (P0.2).
     // Created here — before the environment exists and before navigation —
     // and adopted by wry below. Fail-fast: without registration, remcord://
     // subresources fail as an unknown scheme and no handler ever fires.
@@ -5876,7 +5876,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let timer_debouncer = Arc::clone(debouncer);
                     let timer_proxy = proxy.clone();
                     if let Err(error) = thread::Builder::new()
-                        .name(format!("legcord-livecss-{tag}"))
+                        .name(format!("remcord-livecss-{tag}"))
                         .spawn(move || {
                             thread::sleep(Duration::from_millis(CSS_DEBOUNCE_MS));
                             let (epoch, arm_generation) = match timer_debouncer.lock() {
@@ -7247,7 +7247,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 let cache_ref = Arc::clone(&bundle_cache);
                                 let worker_request_id = request_id.clone();
                                 if let Err(error) = thread::Builder::new()
-                                    .name(format!("legcord-{}-bundle", descriptor.id))
+                                    .name(format!("remcord-{}-bundle", descriptor.id))
                                     .spawn(move || {
                                         let retrieval_started_at = Instant::now();
                                         let result = load_mod_bundle(&descriptor, profile);
