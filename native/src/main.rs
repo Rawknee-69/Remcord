@@ -2288,12 +2288,11 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
     const styles = Array.from(document.querySelectorAll('style[data-remcord-titlebar-css]'));
     const platform = document.body.getAttribute("remcord-platform") || "none";
     const ready = document.readyState || "unknown";
-    const headerLabel = document.getElementById("remcordHeaderLabel") ? "yes" : "no";
     if (controls < 1) {
       return "titlebar-started:controls-missing";
     }
     return "titlebar-started:controls-" + controls + "-styles-" + styles.length
-      + "-platform-" + platform + "-ready-" + ready + "-label-" + headerLabel;
+      + "-platform-" + platform + "-ready-" + ready;
   } catch (error) {
     return "titlebar-failed: " + String((error && error.message) || error).slice(0, 256);
   }
