@@ -1224,8 +1224,10 @@ test("plugins UI reveals the plugins folder natively and sends otherwise", () =>
     );
     assert.match(pluginsPage, /revealFolderNative\("plugins"\)/);
     assert.match(pluginsPage, /window\.remcord\.plugins\.openFolder\(\)/);
-    // Both the toolbar button and the empty-state action dispatch once.
-    assert.equal((pluginsPage.match(/revealFolderNative\("plugins"\)/g) ?? []).length, 2);
+    // The toolbar button, the Electron empty-state action, and the native
+    // unavailable-state action each dispatch once (the native one has no
+    // Electron fallback: no `plugins.openFolder` capability exists natively).
+    assert.equal((pluginsPage.match(/revealFolderNative\("plugins"\)/g) ?? []).length, 3);
 });
 
 test("theme cards open the theme folder natively with the verbatim id", () => {

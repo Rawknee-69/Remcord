@@ -15,9 +15,11 @@ export const DropdownItem = (props: {
     options: { label: string; value: string | number }[];
     limitHeight?: boolean | undefined;
     extraItems?: JSXElement;
+    /** Native shell: unsupported settings render disabled with a reason in `note`. */
+    disabled?: boolean | undefined;
 }) => {
     return (
-        <div class={classes.item}>
+        <div class={classes.item} style={props.disabled ? { opacity: "0.55" } : undefined}>
             <Header class={classes.title} tag={HeaderTags.H3}>
                 {props.title}
             </Header>
@@ -32,6 +34,7 @@ export const DropdownItem = (props: {
                 onChange={props.onChange}
                 options={props.options}
                 limitHeight={props.limitHeight}
+                disabled={props.disabled}
             />
             <Show when={props.extraItems} keyed>
                 {props.extraItems}

@@ -117,6 +117,10 @@ export function withPreservedSettingsScroll<T>(run: () => T): T {
 
 export function setConfig<K extends keyof Settings>(key: K, value: Settings[K], shouldRestart?: boolean) {
     withPreservedSettingsScroll(() => {
+        if (isNativeWebView()) {
+            setConfigNative(key, value, shouldRestart);
+            return;
+        }
         // Mutate in place — do NOT replace store.settings (that remounts the page and jumps scroll).
         store.settings[key] = value;
         console.log(key, ":", store.settings[key]);
@@ -125,6 +129,69 @@ export function setConfig<K extends keyof Settings>(key: K, value: Settings[K], 
         }
         window.remcord.settings.setConfig(key, value);
     });
+}
+
+/**
+ * Settings keys the native shell can actually persist, mirroring the closed
+ * host `settings.set` allowlist (`native/src/settings.rs`) plus the
+ * dedicated voice-chat capability. Every other key is Electron-consumed,
+ * unsafe, or deferred with no native writer: natively those controls render
+ * disabled (see `isSettingWritableNatively`) instead of throwing.
+ */
+export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
+    "mods",
+    "supportBannerDismissed",
+    "showExperimentalPluginMenu",
+    "extendedPluginAbilities",
+    "blockPowerSavingInVoiceChat",
+];
+
+/** True when `key` has a native persistence path (closed allowlist). */
+export function isSettingWritableNatively(key: string): boolean {
+    return NATIVE_WRITABLE_SETTING_KEYS.includes(key);
+}
+
+/**
+ * Native WebView2 branch of `setConfig`. Allowlisted keys delegate to the
+ * typed async capabilities and update local state only from the
+ * host-confirmed value (reverting the optimistic write when the host
+ * rejects, so the UI never shows unpersisted state). Non-allowlisted keys
+ * are discarded with an honest warning — no store mutation, no restart
+ * flag, no call into a missing bridge member (previously this threw
+ * `setConfig is not a function` after flipping the switch, which reverted
+ * on restart and looked like a dead toggle).
+ */
+function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], shouldRestart?: boolean) {
+    if (key === "blockPowerSavingInVoiceChat") {
+        const previous = store.settings.blockPowerSavingInVoiceChat;
+        store.settings.blockPowerSavingInVoiceChat = value as Settings["blockPowerSavingInVoiceChat"];
+        void setBlockPowerSavingInVoiceChat(value as boolean).catch(() => {
+            withPreservedSettingsScroll(() => {
+                store.settings.blockPowerSavingInVoiceChat = previous;
+            });
+            console.warn(`[Remcord] Setting "${key}" was rejected by the native shell; change discarded.`);
+        });
+        return;
+    }
+    if (
+        key === "mods" ||
+        key === "supportBannerDismissed" ||
+        key === "showExperimentalPluginMenu" ||
+        key === "extendedPluginAbilities"
+    ) {
+        const previous = store.settings[key];
+        (store.settings as Record<string, unknown>)[key as string] = value;
+        void setNativeSetting(key, value, shouldRestart).catch(() => {
+            withPreservedSettingsScroll(() => {
+                (store.settings as Record<string, unknown>)[key as string] = previous;
+            });
+            console.warn(`[Remcord] Setting "${key}" was rejected by the native shell; change discarded.`);
+        });
+        return;
+    }
+    // Unsupported natively: never pretend success. The control stays at its
+    // persisted value and no restart is requested.
+    console.warn(`[Remcord] Setting "${String(key)}" is not supported by the native app shell; change discarded.`);
 }
 
 /** True when running under the native WebView2 shell (Phase C-3+). */
@@ -563,10 +630,13 @@ export function toggleMod(mod: ValidMods, enabled: boolean) {
         }
     };
     if (enabled) {
+        // Dedupe the id being enabled too: re-enabling an already-enabled
+        // mod previously appended a duplicate entry (observed as
+        // `["equicord", "equicord"]` in a real profile).
         if (mod === "vencord") {
-            writeMods([...removeMod(currentMods, "equicord"), "vencord"]);
+            writeMods([...removeMod(removeMod(currentMods, "equicord"), "vencord"), "vencord"]);
         } else if (mod === "equicord") {
-            writeMods([...removeMod(currentMods, "vencord"), "equicord"]);
+            writeMods([...removeMod(removeMod(currentMods, "vencord"), "equicord"), "equicord"]);
         }
     } else {
         writeMods(removeMod(currentMods, mod));

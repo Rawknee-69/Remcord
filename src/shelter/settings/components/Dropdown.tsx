@@ -9,6 +9,7 @@ export const Dropdown = (props: {
     limitHeight?: boolean | undefined;
     maxHeight?: number;
     class?: string;
+    disabled?: boolean | undefined;
 }) => {
     const [open, set] = createSignal(false);
     const [maxHeight, setMaxHeight] = createSignal(`${props.maxHeight}px`);
@@ -36,7 +37,10 @@ export const Dropdown = (props: {
             <button
                 type="button"
                 class={classes.valuewrapper}
-                onClick={() => set(!open())}
+                disabled={props.disabled}
+                onClick={() => {
+                    if (!props.disabled) set(!open());
+                }}
                 style={props.styles?.valuewrapper}
             >
                 <div class={classes.value} data-text-variant="text-md/medium" style={props.styles?.value}>

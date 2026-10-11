@@ -3,7 +3,7 @@ import type { RemcordPluginInfo } from "../../../@types/remcordWindow.js";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { PluginCard } from "../components/PluginCard.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
-import { revealFolderNative } from "../settings.js";
+import { isNativeWebView, revealFolderNative } from "../settings.js";
 import classes from "./PluginsPage.module.css";
 
 const {
@@ -32,6 +32,10 @@ export function PluginsPage() {
     const isBusy = (pluginId: string) => busyIds().includes(pluginId);
 
     const refreshPlugins = async () => {
+        // The native shell exposes no plugin list/enable/reload capability
+        // (only folder reveal plus scoped pluginStorage): never call into the
+        // missing `window.remcord.plugins` namespace here.
+        if (isNativeWebView()) return;
         const list = await window.remcord.plugins.list();
         setPlugins(list);
     };
@@ -92,7 +96,7 @@ export function PluginsPage() {
         <>
             <SettingsPageHeader title={t()["plugins-pageTitle"]} description={t()["plugins-pageDesc"]} />
             <div class={classes.toolbar}>
-                <Button size={ButtonSizes.LARGE} onClick={() => void refreshPlugins()}>
+                <Button size={ButtonSizes.LARGE} disabled={isNativeWebView()} onClick={() => void refreshPlugins()}>
                     {t()["plugins-refresh"]}
                 </Button>
                 <Button
@@ -107,28 +111,47 @@ export function PluginsPage() {
                 </Button>
             </div>
             <Show
-                when={plugins().length > 0}
+                when={!isNativeWebView()}
                 fallback={
                     <EmptyState
-                        message={t()["plugins-empty"]}
-                        description={t()["plugins-emptyDesc"]}
+                        message={
+                            t()["plugins-nativeUnavailable"] ?? "Plugin management is not available in the native app"
+                        }
+                        description={
+                            t()["plugins-nativeUnavailableDesc"] ??
+                            "The native Remcord shell does not support installing or toggling plugins yet. You can still open the plugins folder."
+                        }
                         actionLabel={t()["plugins-openFolder"]}
                         onAction={() => {
-                            if (!revealFolderNative("plugins")) window.remcord.plugins.openFolder();
+                            revealFolderNative("plugins");
                         }}
                     />
                 }
             >
-                <For each={plugins()}>
-                    {(plugin) => (
-                        <PluginCard
-                            plugin={plugin}
-                            busy={isBusy(plugin.id)}
-                            onToggle={(enabled) => void onToggle(plugin, enabled)}
-                            onReload={() => void onReload(plugin)}
+                <Show
+                    when={plugins().length > 0}
+                    fallback={
+                        <EmptyState
+                            message={t()["plugins-empty"]}
+                            description={t()["plugins-emptyDesc"]}
+                            actionLabel={t()["plugins-openFolder"]}
+                            onAction={() => {
+                                if (!revealFolderNative("plugins")) window.remcord.plugins.openFolder();
+                            }}
                         />
-                    )}
-                </For>
+                    }
+                >
+                    <For each={plugins()}>
+                        {(plugin) => (
+                            <PluginCard
+                                plugin={plugin}
+                                busy={isBusy(plugin.id)}
+                                onToggle={(enabled) => void onToggle(plugin, enabled)}
+                                onReload={() => void onReload(plugin)}
+                            />
+                        )}
+                    </For>
+                </Show>
             </Show>
         </>
     );
