@@ -276,6 +276,7 @@
         "window_maximize",
         "window_unmaximize",
         "window_drag",
+        "window_toggle_fullscreen",
         "window_quit",
     ];
     // Exact ValidMods union (src/@types/settings.d.ts). The renderer cannot
@@ -1203,6 +1204,10 @@
                 requireCapability("window.drag");
                 return request({ type: "window_drag", payload: {} });
             },
+            toggleFullscreen() {
+                requireCapability("window.toggle_fullscreen");
+                return request({ type: "window_toggle_fullscreen", payload: {} });
+            },
             quit() {
                 requireCapability("window.quit");
                 return request({ type: "window_quit", payload: {} });
@@ -1218,6 +1223,25 @@
             },
         }),
     });
+    // Frameless chrome has no system menu, so F11 is bound here (capture
+    // phase, every document) to the single fixed toggle_fullscreen
+    // operation. The host owns the fullscreen state; the key carries no
+    // payload and no other key is intercepted.
+    window.addEventListener(
+        "keydown",
+        (event) => {
+            if (event?.key !== "F11" || event.defaultPrevented) return;
+            event.preventDefault();
+            let pending;
+            try {
+                pending = native.window.toggleFullscreen();
+            } catch {
+                return;
+            }
+            if (pending && typeof pending.catch === "function") pending.catch(() => {});
+        },
+        true,
+    );
     // (settingsShim/themesShim below replace these narrow namespaces with
     // the shimmed versions; the originals are kept out of the surface so no
     // duplicate member can drift.)
@@ -1367,6 +1391,7 @@
                 maximize: native.window.maximize,
                 unmaximize: native.window.unmaximize,
                 drag: native.window.drag,
+                toggleFullscreen: native.window.toggleFullscreen,
                 quit: native.window.quit,
                 maximized: native.window.maximized,
                 isNormal: native.window.isNormal,

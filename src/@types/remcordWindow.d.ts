@@ -29,6 +29,8 @@ export interface RemcordWindow {
         unmaximize: () => void;
         /** Native shell only: begin a frameless-chrome drag. Absent in Electron. */
         drag?: () => void;
+        /** Native shell only: flip borderless fullscreen (F11). Absent in Electron. */
+        toggleFullscreen?: () => void;
         quit: () => void;
         maximized: () => boolean;
         isNormal: () => boolean;

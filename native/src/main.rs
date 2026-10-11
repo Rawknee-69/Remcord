@@ -318,6 +318,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "window.maximize",
         "window.unmaximize",
         "window.drag",
+        "window.toggle_fullscreen",
         "window.quit",
     ],
 };
@@ -6181,6 +6182,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     eprintln!("[Window] drag start failed: {error:?}");
                                 }
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_drag", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowToggleFullscreen(_) => {
+                                // The F11 contract: flip between windowed and
+                                // borderless fullscreen. The renderer owns
+                                // the key binding; the host owns the state,
+                                // so no boolean crosses the boundary and a
+                                // stuck renderer view cannot desync it.
+                                let next = if window.fullscreen().is_some() {
+                                    None
+                                } else {
+                                    Some(tao::window::Fullscreen::Borderless(None))
+                                };
+                                window.set_fullscreen(next);
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_toggle_fullscreen", &received_at);
                                 response_count += 1;
                             }
                             BridgeCommand::WindowQuit(_) => {

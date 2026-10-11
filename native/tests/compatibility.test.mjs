@@ -960,6 +960,27 @@ test("window operations require their capability", () => {
     );
 });
 
+test("F11 dispatches exactly the fixed fullscreen toggle", () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "window.toggle_fullscreen"]);
+    const keydown = (key) =>
+        window.dispatchEvent({ type: "keydown", key, defaultPrevented: false, preventDefault() {} });
+    keydown("F11");
+    const commands = window.messages.filter((message) => message.command).map((message) => message.command.type);
+    assert.deepEqual(commands, ["window_toggle_fullscreen"]);
+    // No other key is intercepted.
+    keydown("F12");
+    keydown("a");
+    assert.equal(window.messages.filter((message) => message.command).length, 1);
+    // Without the capability the key is swallowed silently: no message,
+    // no listener throw, no unhandled rejection.
+    const denied = createRuntime("https://discord.com", ["bridge.ping"]);
+    denied.window.dispatchEvent({ type: "keydown", key: "F11", defaultPrevented: false, preventDefault() {} });
+    assert.equal(
+        denied.window.messages.some((message) => message.command),
+        false,
+    );
+});
+
 test("identical consecutive renderer errors collapse with exact counts", () => {
     const { window, context } = createRuntime();
     vm.runInContext(
