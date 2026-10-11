@@ -3,6 +3,7 @@ mod backup;
 mod browser_recovery;
 mod bundles;
 mod child_recovery;
+mod close_behavior;
 mod css_watch;
 mod downloads;
 mod environment_observer;
@@ -3723,6 +3724,67 @@ fn sync_native_maximized_state(
     }
 }
 
+/// The orderly renderer-initiated shutdown shared by `window_quit` and a
+/// `window_hide` that cannot safely hide (release blocker 1: no native tray
+/// icon exists, so hiding would strand the app with no reopen path).
+///
+/// Prints the final failure counters, removes every observer subscription
+/// best-effort (already-dead COM objects only log), and exits the event
+/// loop — the same path as main-window `CloseRequested`, minus its extra
+/// bridge/mod/CSS metrics. Idempotent: every slot `take()`s to `None`, so a
+/// repeated close after shutdown started detaches nothing twice. The caller
+/// sends the wire-type ack matching the command it received.
+#[allow(clippy::too_many_arguments)]
+fn perform_orderly_shutdown(
+    control_flow: &mut ControlFlow,
+    shutdown_started: &mut bool,
+    main_process_failed_counters: &process_failure::ProcessFailedCounters,
+    child_process_failed_counters: &process_failure::ProcessFailedCounters,
+    main_navigation_counters: &navigation_completed::NavigationCompletedCounters,
+    child_navigation_counters: &navigation_completed::NavigationCompletedCounters,
+    #[cfg(target_os = "windows")] main_process_failed: &mut main_webview::ObserverSubscription,
+    #[cfg(target_os = "windows")]
+    main_navigation_completed: &mut main_webview::ObserverSubscription,
+    #[cfg(target_os = "windows")] popup_child: &mut Option<PopupChild>,
+    #[cfg(target_os = "windows")] env_browser_exited_token: &mut Option<i64>,
+    #[cfg(target_os = "windows")] webview_env: &ICoreWebView2Environment,
+) {
+    *shutdown_started = true;
+    println!(
+        "[WebView][ProcessFailed] final main_total={} child_total={}",
+        main_process_failed_counters.total, child_process_failed_counters.total,
+    );
+    println!(
+        "[WebView][NavigationCompleted] final main_total={} main_ok={} main_failed={} child_total={} child_ok={} child_failed={}",
+        main_navigation_counters.total,
+        main_navigation_counters.succeeded,
+        main_navigation_counters.failed,
+        child_navigation_counters.total,
+        child_navigation_counters.succeeded,
+        child_navigation_counters.failed,
+    );
+    #[cfg(target_os = "windows")]
+    {
+        main_webview::detach_main_observers(
+            main_process_failed.take(),
+            main_navigation_completed.take(),
+        );
+        if let Some(child) = popup_child.take() {
+            if let Some((core_webview2, token)) = child.process_failed {
+                process_failure::unregister(&core_webview2, token);
+            }
+            if let Some((core_webview2, token)) = child.navigation_completed {
+                navigation_completed::unregister(&core_webview2, token);
+            }
+        }
+        // Remove environment-level browser-process exit observer.
+        if let Some(token) = env_browser_exited_token.take() {
+            environment_observer::unregister(webview_env, token);
+        }
+    }
+    *control_flow = ControlFlow::Exit;
+}
+
 /// Acknowledges one typed window chrome command with the exact wire-type echo
 /// the facade correlates against its pending request.
 fn respond_window_ack(
@@ -5922,9 +5984,57 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 response_count += 1;
                             }
                             BridgeCommand::WindowHide(_) => {
-                                window.set_visible(false);
-                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_hide", &received_at);
-                                response_count += 1;
+                                // The titlebar × sends hide when
+                                // minimizeToTray=true, but no native tray
+                                // icon exists to reopen from: hiding would
+                                // strand the app running with no visible
+                                // window. With no usable tray every close
+                                // takes the orderly quit path instead,
+                                // regardless of minimizeToTray. Minimize,
+                                // maximize/restore, and explicit quit are
+                                // untouched.
+                                let action = close_behavior::decide(
+                                    true,
+                                    close_behavior::tray_available(),
+                                );
+                                println!(
+                                    "{}",
+                                    close_behavior::format_log(&action, true, close_behavior::tray_available())
+                                );
+                                match action {
+                                    close_behavior::CloseAction::Hide => {
+                                        window.set_visible(false);
+                                        respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_hide", &received_at);
+                                        response_count += 1;
+                                    }
+                                    close_behavior::CloseAction::Quit => {
+                                        #[cfg(target_os = "windows")]
+                                        perform_orderly_shutdown(
+                                            &mut *control_flow,
+                                            &mut shutdown_started,
+                                            &main_process_failed_counters,
+                                            &child_process_failed_counters,
+                                            &main_navigation_counters,
+                                            &child_navigation_counters,
+                                            &mut main_process_failed,
+                                            &mut main_navigation_completed,
+                                            &mut popup_child,
+                                            &mut env_browser_exited_token,
+                                            &webview_env,
+                                        );
+                                        #[cfg(not(target_os = "windows"))]
+                                        perform_orderly_shutdown(
+                                            &mut *control_flow,
+                                            &mut shutdown_started,
+                                            &main_process_failed_counters,
+                                            &child_process_failed_counters,
+                                            &main_navigation_counters,
+                                            &child_navigation_counters,
+                                        );
+                                        respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_hide", &received_at);
+                                        response_count += 1;
+                                    }
+                                }
                             }
                             BridgeCommand::WindowMinimize(_) => {
                                 window.set_minimized(true);
@@ -5945,44 +6055,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 // Renderer-initiated quit takes the same
                                 // shutdown path as CloseRequested: remove
                                 // observer subscriptions before exiting.
-                                shutdown_started = true;
-                                println!(
-                                    "[WebView][ProcessFailed] final main_total={} child_total={}",
-                                    main_process_failed_counters.total,
-                                    child_process_failed_counters.total,
-                                );
-                                println!(
-                                    "[WebView][NavigationCompleted] final main_total={} main_ok={} main_failed={} child_total={} child_ok={} child_failed={}",
-                                    main_navigation_counters.total,
-                                    main_navigation_counters.succeeded,
-                                    main_navigation_counters.failed,
-                                    child_navigation_counters.total,
-                                    child_navigation_counters.succeeded,
-                                    child_navigation_counters.failed,
-                                );
                                 #[cfg(target_os = "windows")]
-                                {
-                                    main_webview::detach_main_observers(
-                                        main_process_failed.take(),
-                                        main_navigation_completed.take(),
-                                    );
-                                    if let Some(child) = popup_child.take() {
-                                        if let Some((core_webview2, token)) = child.process_failed
-                                        {
-                                            process_failure::unregister(&core_webview2, token);
-                                        }
-                                        if let Some((core_webview2, token)) =
-                                            child.navigation_completed
-                                        {
-                                            navigation_completed::unregister(&core_webview2, token);
-                                        }
-                                    }
-                                    // Remove environment-level browser-process exit observer.
-                                    if let Some(token) = env_browser_exited_token.take() {
-                                        environment_observer::unregister(&webview_env, token);
-                                    }
-                                }
-                                *control_flow = ControlFlow::Exit;
+                                perform_orderly_shutdown(
+                                    &mut *control_flow,
+                                    &mut shutdown_started,
+                                    &main_process_failed_counters,
+                                    &child_process_failed_counters,
+                                    &main_navigation_counters,
+                                    &child_navigation_counters,
+                                    &mut main_process_failed,
+                                    &mut main_navigation_completed,
+                                    &mut popup_child,
+                                    &mut env_browser_exited_token,
+                                    &webview_env,
+                                );
+                                #[cfg(not(target_os = "windows"))]
+                                perform_orderly_shutdown(
+                                    &mut *control_flow,
+                                    &mut shutdown_started,
+                                    &main_process_failed_counters,
+                                    &child_process_failed_counters,
+                                    &main_navigation_counters,
+                                    &child_navigation_counters,
+                                );
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_quit", &received_at);
                                 response_count += 1;
                             }
