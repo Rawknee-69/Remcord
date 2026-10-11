@@ -1,4 +1,4 @@
-import { createSignal, For, onMount } from "solid-js";
+import { createSignal, For } from "solid-js";
 import classes from "./SupportBanner.module.css";
 
 const {
@@ -14,26 +14,16 @@ interface Contributor {
     type: string;
 }
 
-export const AboutPopup = (props: { close: () => void }) => {
-    const [contributors, setContributors] = createSignal<Contributor[]>([]);
-    const [loading, setLoading] = createSignal(true);
-    const [error, setError] = createSignal<string | null>(null);
+/** Neutral state when no Remcord-owned contributor source is configured. */
+export const CONTRIBUTORS_UNCONFIGURED_MESSAGE = "Contributor information is not configured for this build.";
 
-    onMount(() => {
-        fetch("https://api.github.com/repos/Legcord/Legcord/contributors")
-            .then((response) => {
-                if (!response.ok) throw new Error("Failed to fetch contributors");
-                return response.json();
-            })
-            .then((data) => {
-                setContributors(data);
-                setLoading(false);
-            })
-            .catch((err) => {
-                setError(err.message);
-                setLoading(false);
-            });
-    });
+export const AboutPopup = (props: { close: () => void }) => {
+    // No Remcord-owned contributor source exists yet, so contributor data is
+    // explicitly unavailable in this build. This screen performs no network
+    // request and never attributes another product's contributors to Remcord.
+    const [contributors] = createSignal<Contributor[]>([]);
+    const [loading] = createSignal(false);
+    const [error] = createSignal<string | null>(CONTRIBUTORS_UNCONFIGURED_MESSAGE);
 
     return (
         <ModalRoot size={ModalSizes.MEDIUM} class={classes.modal}>
@@ -168,7 +158,7 @@ export const AboutPopup = (props: { close: () => void }) => {
                             <span class={classes.contributorBadge}>{contributors().length} contributors</span>
                         )}
                         {loading() && <div class={classes.loadingState}>Loading contributors...</div>}
-                        {error() && <div class={classes.errorState}>Failed to load contributors: {error()}</div>}
+                        {error() && <div class={classes.errorState}>{error()}</div>}
                         {!loading() && !error() && (
                             <div class={classes.contributorsGrid}>
                                 <For each={contributors()}>

@@ -40,12 +40,8 @@
                 --text-muted: #72767d;
             }
 
-            @font-face {
-                font-family: Whitney;
-                font-weight: 400;
-                font-style: normal;
-                src: url(https://legcord.app/whitney_400.woff) format("woff");
-            }
+            /* Splash uses only system fonts: no remote font is fetched. The
+               family below falls back to local system typefaces. */
 
             html,
             body {
@@ -185,19 +181,9 @@
                 } else if (internal.isMicrosoftStore) {
                     console.log("Microsoft Store build detected. Skipping updater.")
                 } else {
-                    const response = await fetch("https://legcord.app/latest.json");
-                    const data = await response.json();
-                    const remoteVersion = data.version.replace(/\./g, ""); // easy to compare
-                    if (remoteVersion > window.internal.version.replace(/\./g, "")) {
-                        const elem = document.createElement("img");
-                        elem.classList.add("logo");
-                        elem.src = "remcord://assets/Update.webp";
-                        document.body.prepend(elem);
-                        document.getElementById("splashscreen-remcord").remove();
-                        text.innerHTML = await internal.getLang("loading_screen_update");
-                    } else {
-                        console.log("Remcord is up to date.");
-                    }
+                    // No Remcord update feed is configured for this build:
+                    // skip the remote version check entirely (no request).
+                    console.log("Updates are not configured for this build. Skipping updater.");
                 }
 
                 while (check() === false) await new Promise((r) => setTimeout(r, 10));

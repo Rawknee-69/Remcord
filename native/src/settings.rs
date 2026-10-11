@@ -36,11 +36,13 @@ fn default_overlay_button_color() -> String {
 }
 
 fn default_custom_js_bundle() -> String {
-    "https://legcord.app/placeholder.js".to_owned()
+    // Unset by default: never point at another product's bundle endpoint.
+    String::new()
 }
 
 fn default_custom_css_bundle() -> String {
-    "https://legcord.app/placeholder.css".to_owned()
+    // Unset by default: never point at another product's bundle endpoint.
+    String::new()
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -642,6 +644,18 @@ mod tests {
         assert_eq!(load.snapshot.window_style, "overlay");
         assert!(load.snapshot.minimize_to_tray);
         assert!(load.payload_bytes > 100);
+    }
+
+    #[test]
+    fn custom_bundle_defaults_are_empty_and_never_point_off_host() {
+        // Remcord ships no bundle endpoint: an empty default must deserialize
+        // cleanly and must never trigger a download from another product.
+        let profile = unique_profile_dir("bundle-defaults");
+        let load = load_settings(&profile).expect("a missing file must yield defaults");
+        assert_eq!(load.snapshot.custom_js_bundle, "");
+        assert_eq!(load.snapshot.custom_css_bundle, "");
+        assert!(!load.snapshot.custom_js_bundle.contains("://"));
+        assert!(!load.snapshot.custom_css_bundle.contains("://"));
     }
 
     #[test]

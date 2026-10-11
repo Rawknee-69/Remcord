@@ -8,6 +8,7 @@ import { promises as fs } from "node:fs";
 
 import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
 import xmlFormat from "xml-formatter";
+import { metaReleasesUrl, resolveMetaRepo } from "./metaRepo.ts";
 
 function generateDescription(description: string, descriptionNode: Element) {
     const lines = description.replace(/\r/g, "").split("\n");
@@ -43,7 +44,15 @@ function generateDescription(description: string, descriptionNode: Element) {
     }
 }
 
-const latestReleaseInformation = await fetch("https://api.github.com/repos/Legcord/Legcord/releases/latest", {
+let metaSource: { owner: string; repo: string };
+try {
+    metaSource = resolveMetaRepo();
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
+
+const latestReleaseInformation = await fetch(metaReleasesUrl(metaSource), {
     headers: {
         Accept: "application/vnd.github+json",
         "X-Github-Api-Version": "2022-11-28",

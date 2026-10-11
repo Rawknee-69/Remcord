@@ -3,6 +3,7 @@ import { platform } from "node:os";
 import { dirname, join } from "node:path";
 import { app, dialog } from "electron";
 import type { Settings } from "../@types/settings.js";
+import { DEFAULT_CUSTOM_CSS_BUNDLE, DEFAULT_CUSTOM_JS_BUNDLE } from "./customBundles.js";
 import { getLang } from "./lang.js";
 import { getWindowStateLocation } from "./windowState.js";
 export let firstRun: boolean;
@@ -54,8 +55,8 @@ const defaults: Settings = {
     inviteWebsocket: true,
     startMinimized: "off",
     disableHttpCache: false,
-    customJsBundle: "https://legcord.app/placeholder.js",
-    customCssBundle: "https://legcord.app/placeholder.css",
+    customJsBundle: DEFAULT_CUSTOM_JS_BUNDLE,
+    customCssBundle: DEFAULT_CUSTOM_CSS_BUNDLE,
     disableAutogain: false,
     autoHideMenuBar: true,
     blockPowerSavingInVoiceChat: false,
