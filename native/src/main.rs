@@ -19,6 +19,7 @@ mod permissions;
 mod plugin_storage;
 mod process_failure;
 mod profile;
+mod profile_migration;
 mod protocol;
 mod quick_css;
 mod recovery;
@@ -4277,14 +4278,63 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Release blocker 2: the profile root is resolved per build, never
     // hardcoded. Debug takes the isolated DEV profile; release takes
     // `%LOCALAPPDATA%\Remcord`; an explicit absolute
-    // `REMCORD_NATIVE_PROFILE_DIR` wins in both. Any failure fails startup
+    // `REMCORD_NATIVE_PROFILE_DIR` wins in both (the deprecated
+    // `LEGCORD_NATIVE_PROFILE_DIR` is honored as a fallback for existing test
+    // setups and logs a deprecation notice). Any failure fails startup
     // — never a silent fallback to another product's data.
+    let (override_raw, override_was_legacy) = profile_migration::read_override();
+    if override_was_legacy {
+        println!(
+            "[Profile] LEGCORD_NATIVE_PROFILE_DIR is deprecated; use REMCORD_NATIVE_PROFILE_DIR"
+        );
+    }
     let resolved_profile = profile::resolve_for_build(
         cfg!(debug_assertions),
-        std::env::var(profile::PROFILE_OVERRIDE_ENV).ok().as_deref(),
+        override_raw.as_deref(),
         std::env::var("LOCALAPPDATA").ok().as_deref(),
     )
     .map_err(|error| format!("profile resolution failed: {error}"))?;
+    // Remcord rebrand migration: copy the old native profile into the Remcord
+    // profile once (copy-only; the old tree is never modified or deleted).
+    // Explicit overrides skip migration (isolated testing). Any migration
+    // failure fails startup — never a silent fallback to the old profile.
+    if resolved_profile.kind != profile::ProfileKind::Override {
+        let is_dev = cfg!(debug_assertions);
+        let (old_root, expected_leaf) = if is_dev {
+            (
+                PathBuf::from(profile_migration::LEGACY_DEV_DIR),
+                profile::DEV_PROFILE_DIR
+                    .rsplit('\\')
+                    .next()
+                    .unwrap_or("Remcord.webview-dev-user-data"),
+            )
+        } else {
+            let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            (
+                profile_migration::legacy_release_dir(&local_app_data),
+                profile::RELEASE_PROFILE_LEAF,
+            )
+        };
+        match profile_migration::migrate_native_profile(
+            &old_root,
+            &resolved_profile.path,
+            expected_leaf,
+        ) {
+            Ok(report) => {
+                if report.files_copied > 0 {
+                    println!(
+                        "[Profile][Migration] legacy profile migrated files={} bytes={} already_migrated=false",
+                        report.files_copied, report.bytes_copied
+                    );
+                } else if report.already_migrated {
+                    println!("[Profile][Migration] already migrated; nothing to copy");
+                }
+            }
+            Err(error) => {
+                return Err(format!("profile migration failed: {error}").into());
+            }
+        }
+    }
     let profile_path = resolved_profile.path;
     profile::ensure_profile_dir(&profile_path)
         .map_err(|error| format!("profile resolution failed: {error}"))?;
