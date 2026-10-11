@@ -220,6 +220,18 @@
         "show_experimental_plugin_menu",
         "extended_plugin_abilities",
     ];
+    // Exact wire types the host echoes in `window_ack` responses. The echo
+    // must be one of these; an acknowledgement for any other (or missing)
+    // command never resolves a window call.
+    const WINDOW_ACK_COMMANDS = [
+        "window_show",
+        "window_hide",
+        "window_minimize",
+        "window_maximize",
+        "window_unmaximize",
+        "window_drag",
+        "window_quit",
+    ];
     // Exact ValidMods union (src/@types/settings.d.ts). The renderer cannot
     // invent a mod id through this capability.
     const SETTINGS_VALID_MODS = ["vencord", "equicord", "custom", "shelter"];
@@ -987,6 +999,18 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "window_ack") {
+            const payload = response.payload.payload;
+            // Command echo only: it must be one of the closed window wire
+            // types, and no state, handle, or geometry may ride along.
+            // (Previously this branch did not exist, so every window-button
+            // click rejected as "Native bridge request failed" and logged a
+            // bogus renderer error via the unhandled-rejection reporter.)
+            if (!payload || Object.keys(payload).length !== 1 || !WINDOW_ACK_COMMANDS.includes(payload.command)) {
+                request.reject(new Error("Native window acknowledgement response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "backup_saved") {
             const payload = response.payload.payload;
             // Bounded save outcome only: cancellation plus the final archive
@@ -1128,6 +1152,10 @@
             unmaximize() {
                 requireCapability("window.unmaximize");
                 return request({ type: "window_unmaximize", payload: {} });
+            },
+            drag() {
+                requireCapability("window.drag");
+                return request({ type: "window_drag", payload: {} });
             },
             quit() {
                 requireCapability("window.quit");
@@ -1292,6 +1320,7 @@
                 minimize: native.window.minimize,
                 maximize: native.window.maximize,
                 unmaximize: native.window.unmaximize,
+                drag: native.window.drag,
                 quit: native.window.quit,
                 maximized: native.window.maximized,
                 isNormal: native.window.isNormal,

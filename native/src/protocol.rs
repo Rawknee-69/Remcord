@@ -80,6 +80,7 @@ pub enum BridgeCommand {
     WindowMinimize(WindowMinimizeRequest),
     WindowMaximize(WindowMaximizeRequest),
     WindowUnmaximize(WindowUnmaximizeRequest),
+    WindowDrag(WindowDragRequest),
     WindowQuit(WindowQuitRequest),
 }
 
@@ -323,6 +324,16 @@ pub struct WindowMaximizeRequest {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowUnmaximizeRequest {}
+
+/// Empty request for the `window.drag` capability: begin a native
+/// titlebar drag of the single host window (frameless chrome has no
+/// OS-provided drag region; the titlebar plugin calls this from an
+/// explicit drag handle). No parameter of any kind; any extra field is
+/// rejected. This is a single fixed operation, not a generic host-control
+/// RPC: no window id, coordinate, or message can be supplied.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowDragRequest {}
 
 /// Empty request for the `window.quit` capability: terminate the application
 /// through the existing native shutdown path. No parameter of any kind; any
@@ -1104,7 +1115,8 @@ pub struct BackupRestoredResponse {
 
 /// Acknowledgement for one typed window chrome command. `command` echoes the
 /// exact wire type the renderer sent (`window_show`, `window_hide`,
-/// `window_minimize`, `window_maximize`, `window_unmaximize`, `window_quit`),
+/// `window_minimize`, `window_maximize`, `window_unmaximize`, `window_drag`,
+/// `window_quit`),
 /// so one window's acknowledgement can never resolve another command's call.
 /// Electron's `send` commands return `void`; the async bridge needs this
 /// minimal correlation instead of a value. No state, handle, or geometry
@@ -1340,6 +1352,7 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::WindowMinimize(_)
                 | BridgeCommand::WindowMaximize(_)
                 | BridgeCommand::WindowUnmaximize(_)
+                | BridgeCommand::WindowDrag(_)
                 | BridgeCommand::WindowQuit(_) => {}
                 BridgeCommand::BackupSave(payload) => {
                     // The seven include flags are typed booleans by serde
@@ -2089,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_all_six_window_chrome_commands_without_parameters() {
+    fn accepts_all_seven_window_chrome_commands_without_parameters() {
         // Each typed window command carries an exact empty payload: no
         // window id, handle, coordinate, style, message, or process member
         // exists to supply.
@@ -2099,7 +2112,8 @@ mod tests {
             ("window_minimize", "win-3"),
             ("window_maximize", "win-4"),
             ("window_unmaximize", "win-5"),
-            ("window_quit", "win-6"),
+            ("window_drag", "win-6"),
+            ("window_quit", "win-7"),
         ] {
             let message = format!(
                 "{{\"version\":1,\"request_id\":\"{request_id}\",\"command\":{{\"type\":\"{wire}\",\"payload\":{{}}}}}}"
@@ -2116,6 +2130,7 @@ mod tests {
                 "window_minimize" => matches!(command, BridgeCommand::WindowMinimize(_)),
                 "window_maximize" => matches!(command, BridgeCommand::WindowMaximize(_)),
                 "window_unmaximize" => matches!(command, BridgeCommand::WindowUnmaximize(_)),
+                "window_drag" => matches!(command, BridgeCommand::WindowDrag(_)),
                 "window_quit" => matches!(command, BridgeCommand::WindowQuit(_)),
                 _ => unreachable!(),
             };
@@ -2162,6 +2177,7 @@ mod tests {
                 "window_minimize",
                 "window_maximize",
                 "window_unmaximize",
+                "window_drag",
                 "window_quit",
             ] {
                 let message = format!(

@@ -317,6 +317,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "window.minimize",
         "window.maximize",
         "window.unmaximize",
+        "window.drag",
         "window.quit",
     ],
 };
@@ -6165,6 +6166,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                             BridgeCommand::WindowUnmaximize(_) => {
                                 window.set_maximized(false);
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_unmaximize", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowDrag(_) => {
+                                // Frameless chrome has no OS drag region
+                                // (wry honors no `-webkit-app-region`): the
+                                // titlebar plugin calls this fixed operation
+                                // from its explicit drag handle on mousedown.
+                                // A failed drag start is loud but never
+                                // fatal: the window simply stays put.
+                                if let Err(error) = window.drag_window() {
+                                    eprintln!("[Window] drag start failed: {error:?}");
+                                }
+                                respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_drag", &received_at);
                                 response_count += 1;
                             }
                             BridgeCommand::WindowQuit(_) => {

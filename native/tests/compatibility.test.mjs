@@ -898,6 +898,68 @@ test("reports renderer exception stacks and source locations to the native log",
     assert.match(reports[1].event.payload.message, /settings access failed/);
 });
 
+test("window acknowledgements resolve by exact command echo", async () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "window.minimize", "window.drag"]);
+    const minimize = window.remcord.native.window.minimize();
+    const drag = window.remcord.native.window.drag();
+    // Top-level Electron-shaped mirror dispatches the same typed operations.
+    const topDrag = window.remcord.window.drag();
+    const commands = window.messages.filter((message) => message.command).map((message) => message.command.type);
+    assert.deepEqual(commands, ["window_minimize", "window_drag", "window_drag"]);
+    const requests = window.messages.filter((message) => message.command);
+    assert.equal(requests.length, 3);
+    for (const [index, [pending, type]] of [
+        [minimize, "window_minimize"],
+        [drag, "window_drag"],
+        [topDrag, "window_drag"],
+    ].entries()) {
+        const request = requests[index];
+        window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: request.request_id,
+                    ok: true,
+                    payload: { type: "window_ack", payload: { command: type } },
+                    error: null,
+                },
+            }),
+        );
+        assert.deepEqual(await pending, { command: type });
+    }
+    // A wrong or extra echo never resolves a window call.
+    const bad = window.remcord.native.window.minimize();
+    const badRequest = window.messages.filter((message) => message.command?.type === "window_minimize").at(-1);
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: badRequest.request_id,
+                ok: true,
+                payload: { type: "window_ack", payload: { command: "window_maximize", extra: 1 } },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(bad, /window acknowledgement response schema is invalid/);
+});
+
+test("window operations require their capability", () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping"]);
+    assert.throws(
+        () => window.remcord.native.window.drag(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.native.window.minimize(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command),
+        false,
+    );
+});
+
 test("requests only the shared bundle capability with the registered mod id", async () => {
     const { window } = createRuntime();
     const request = window.remcord.native.getVencordBundle();

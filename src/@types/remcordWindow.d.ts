@@ -27,6 +27,8 @@ export interface RemcordWindow {
         minimize: () => void;
         maximize: () => void;
         unmaximize: () => void;
+        /** Native shell only: begin a frameless-chrome drag. Absent in Electron. */
+        drag?: () => void;
         quit: () => void;
         maximized: () => boolean;
         isNormal: () => boolean;
