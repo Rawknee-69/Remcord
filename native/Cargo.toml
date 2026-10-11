@@ -10,8 +10,11 @@ description = "Remcord is a custom client designed to enhance your Discord exper
 # Display name differs in case from the package/exe name (`remcord`).
 ProductName = "Remcord"
 OriginalFilename = "remcord.exe"
-# Set explicitly: must match the package description verbatim.
-FileDescription = "Remcord is a custom client designed to enhance your Discord experience while keeping everything lightweight."
+# User-facing Windows process label (Task Manager, etc.): exactly the short
+# product name. This deliberately does NOT mirror the package `description`
+# sentence — Windows derives the Task Manager display name from
+# FileDescription, and the long sentence truncated into noise there.
+FileDescription = "Remcord"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
