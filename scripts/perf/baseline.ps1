@@ -128,7 +128,7 @@ function Get-ConfigEvidence {
         }
     $folders = @("themes", "plugins", "extensions") | ForEach-Object {
         $candidate = Join-Path $Path $_
-        [ordered]@{ RelativePath = $_; Exists = Test-Path -LiteralPath $candidate -PathType Container; Entries = if (Test-Path -LiteralPath $candidate -PathType Container) { @(Get-ChildItem -LiteralPath $candidate -Force).Name } else { "UNKNOWN" } }
+        [ordered]@{ RelativePath = $_; Exists = Test-Path -LiteralPath $candidate -PathType Container; Entries = if (Test-Path -LiteralPath $candidate -PathType Container) { @(Get-ChildItem -LiteralPath $candidate -Force | Select-Object -ExpandProperty Name) } else { "UNKNOWN" } }
     }
     return [ordered]@{ UserDataPath = $Path; Files = $files; Folders = $folders; Note = "Presence and names only; no user-data file contents are copied." }
 }
