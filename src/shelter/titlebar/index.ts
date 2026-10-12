@@ -3,6 +3,9 @@ const {
     util: { log },
     flux: { dispatcher },
 } = shelter;
+
+import { shouldSkipTopBandDrag, TOP_BAND_HEIGHT_PX } from "./dragGuard.js";
+
 const titlebarOverlayHTML = `<nav class="titlebar">
           <div class="window-title" id="window-title"></div>
         </nav>`;
@@ -129,15 +132,21 @@ function bindTopBandDrag() {
         (event) => {
             try {
                 if (event.button !== 0) return;
-                if (event.clientY > 64) return;
-                const target = event.target as HTMLElement | null;
-                if (!target || (target as unknown as { nodeType?: number }).nodeType !== 1) return;
-                if (
-                    target.closest(
-                        "#minimize,#maximize,#quit,#remcordNavControls,a,button,[role='button'],input,textarea,select,[role='textbox'],[role='menuitem'],[role='option'],[contenteditable='true']",
-                    )
-                )
-                    return;
+                if (event.clientY > TOP_BAND_HEIGHT_PX) return;
+                const target = event.target as (Element & { nodeType?: number }) | null;
+                if (!target || (target as { nodeType?: number }).nodeType !== 1) return;
+                // Discord's guild rail (incl. the home/DM button) is div-based
+                // with React handlers, not links/buttons: anything the guard
+                // recognizes as interactive — or with a pointer cursor —
+                // keeps its click. A swallowed mouse-up never becomes a click.
+                let cursor = "";
+                try {
+                    const view = target.ownerDocument?.defaultView;
+                    if (view) cursor = view.getComputedStyle(target).cursor ?? "";
+                } catch {
+                    cursor = "";
+                }
+                if (shouldSkipTopBandDrag(target, cursor)) return;
                 event.preventDefault();
                 ops.drag!();
             } catch {
