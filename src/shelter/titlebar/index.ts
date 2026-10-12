@@ -149,6 +149,40 @@ function bindTopBandDrag() {
 }
 
 /**
+ * Native-shell document title pin: Task Manager names the expanded WebView
+ * child row after the page's document title, so as long as Discord owns it
+ * the row reads "Discord". Pinning it to the product name makes the row
+ * read "Remcord". Scoped to <head>/<title> only — no obfuscated-DOM scan,
+ * no polling, no layout work. Electron is untouched (its window title keeps
+ * following Discord).
+ */
+let documentTitlePinBound = false;
+function pinNativeDocumentTitle() {
+    if (documentTitlePinBound) return;
+    documentTitlePinBound = true;
+    try {
+        document.title = "Remcord";
+    } catch {
+        return;
+    }
+    try {
+        const head = document.head ?? document.documentElement;
+        if (!head) return;
+        const observer = new MutationObserver(() => {
+            try {
+                // Discord's SPA rewrites the title on navigation; re-pin.
+                if (document.title !== "Remcord") document.title = "Remcord";
+            } catch {
+                /* never break page input */
+            }
+        });
+        observer.observe(head, { childList: true, subtree: true, characterData: true });
+    } catch {
+        /* the one-shot assignment above still holds until Discord rewrites it */
+    }
+}
+
+/**
  * Native-shell titlebar assembly: working controls plus top-band dragging.
  * No separate strip, no layout push, no extra vertical space, no header
  * labeling: the chrome lives in the top bar Discord already draws.
@@ -156,6 +190,7 @@ function bindTopBandDrag() {
 function injectNativeTitlebar() {
     injectButtonControls();
     bindTopBandDrag();
+    pinNativeDocumentTitle();
 }
 
 function layerPush(payload: { type: string; component: string }) {

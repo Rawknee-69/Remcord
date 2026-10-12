@@ -186,4 +186,25 @@ mod tests {
         assert!(super::css_for("../escape").is_none());
         assert!(super::css_for("").is_none());
     }
+
+    #[test]
+    fn embedded_artifact_pins_the_native_document_title() {
+        // Task Manager names the expanded WebView child row after the page's
+        // document title; the embedded titlebar plugin must pin it to the
+        // product name (one-shot assignment plus a re-pin when Discord's SPA
+        // rewrites it), native-shell only.
+        let embedded = artifact();
+        assert!(
+            embedded.js.contains("pinNativeDocumentTitle"),
+            "the titlebar plugin must carry the document-title pin"
+        );
+        assert!(
+            embedded.js.contains("document.title"),
+            "the pin must write document.title"
+        );
+        assert!(
+            embedded.js.contains("MutationObserver"),
+            "the pin must observe title rewrites instead of polling"
+        );
+    }
 }
