@@ -79,8 +79,10 @@ export interface RemcordWindow {
         venmicStop: () => Promise<void>;
     };
     themes: {
-        install: (url: string) => void;
+        install: (url: string) => Promise<unknown>;
         openImportPicker: () => void;
+        /** Electron-only picker completion event; absent in the native shell. */
+        onThemesChanged?: (callback: (summary: { imported: number; failed: number }) => void) => () => void;
         uninstall: (id: string) => void;
         set: (id: string, state: boolean) => void;
         getThemes: () => Readonly<ThemeManifest[]>;

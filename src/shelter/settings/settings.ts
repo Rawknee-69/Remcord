@@ -526,6 +526,17 @@ export async function importNativeThemes(): Promise<NativeThemeImportResult | nu
     }
 }
 
+/** One honest outcome per completed theme import: full success, a mix, or
+ * total failure. Cancellation never reaches this helper — it stays silent.
+ * Shared by the native picker summary and the Electron `themesChanged`
+ * event so both shells toast identically. */
+export type ThemeImportOutcome = "success" | "partial" | "failed";
+
+export function themeImportOutcome(imported: number, failed: number): ThemeImportOutcome {
+    if (failed === 0) return "success";
+    return imported > 0 ? "partial" : "failed";
+}
+
 /** Bounded restore outcome shared by the native object shape and the parsed
  * Electron string shape. `error` is `"CANCELLED"`, a typed host code,
  * `"UNKNOWN"` (explicit failure without a message — the caller's generic

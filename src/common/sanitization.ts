@@ -86,3 +86,32 @@ export function isBlockedLocalhostWebSocket(
     if (!Number.isFinite(port)) return true;
     return !allowedPorts.has(port);
 }
+
+/**
+ * True when a theme id is a single safe path component under the
+ * host-controlled themes root. Deliberately looser than the native
+ * `validate_theme_id` allowlist: Electron-created directories may contain
+ * spaces or parentheses (first-space-only derivation), so those stay usable;
+ * only escape shapes are rejected (separators, drive/ADS syntax, `.`/`..`).
+ */
+export function isSafeThemeId(id: string): boolean {
+    if (typeof id !== "string" || id.length === 0 || id.length > 128) return false;
+    if (id === "." || id === "..") return false;
+    if (id.includes("/") || id.includes("\\") || id.includes("\0") || id.includes(":")) return false;
+    return true;
+}
+
+/**
+ * True when a manifest-provided theme stylesheet name is a bare `*.css`
+ * filename with no path content. Guards the `themesFolder/id/theme` join
+ * that Electron performs without validation.
+ */
+export function isSafeThemeCssFile(filename: string): boolean {
+    if (typeof filename !== "string" || filename.length === 0 || filename.length > 128) return false;
+    if (filename === "." || filename === ".." || filename === ".css") return false;
+    if (!filename.toLowerCase().endsWith(".css")) return false;
+    if (filename.includes("/") || filename.includes("\\") || filename.includes("\0") || filename.includes(":")) {
+        return false;
+    }
+    return true;
+}

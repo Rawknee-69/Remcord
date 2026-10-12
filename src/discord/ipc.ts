@@ -21,6 +21,7 @@ import {
 import { getConfig, getConfigLocation, getEntireConfig, setConfig, setConfigBulk } from "../common/config.js";
 import { addDetectable, getDetectables, removeDetectable } from "../common/detectables.js";
 import { getLang, getLangName, getRawLang, setLang } from "../common/lang.js";
+import { isSafeThemeId } from "../common/sanitization.js";
 import {
     disableQuickCss,
     getCachedThemeList,
@@ -176,11 +177,23 @@ export function registerIpc(passedWindow: BrowserWindow): void {
                     },
                 ],
             })
-            .then((result) => {
+            .then(async (result) => {
                 if (result.canceled) return;
+                // Sequential so the completion summary below is honest:
+                // one bad file never blocks its siblings, and the renderer
+                // refreshes from the exact counts instead of guessing.
+                let imported = 0;
+                let failed = 0;
                 for (const file of result.filePaths) {
-                    installTheme(file);
+                    try {
+                        await installTheme(file);
+                        imported++;
+                    } catch (err) {
+                        failed++;
+                        console.log(err);
+                    }
                 }
+                passedWindow.webContents.send("themesChanged", { imported, failed });
             })
             .catch((err) => {
                 console.log(err);
@@ -191,6 +204,10 @@ export function registerIpc(passedWindow: BrowserWindow): void {
         setThemeEnabled(name, enabled);
     });
     ipcMain.on("editTheme", (_event, id: string) => {
+        if (!isSafeThemeId(id)) {
+            console.error(`[Theme Manager] Refusing unsafe theme id ${JSON.stringify(id)}`);
+            return;
+        }
         const manifest = JSON.parse(readFileSync(`${themesPath}/${id}/manifest.json`, "utf8")) as ThemeManifest;
         if (getConfig("useSystemCssEditor")) {
             void shell.openPath(`${themesPath}/${id}/${manifest.theme}`);
@@ -199,6 +216,10 @@ export function registerIpc(passedWindow: BrowserWindow): void {
         }
     });
     ipcMain.on("openThemeFolder", (_event, id: string) => {
+        if (!isSafeThemeId(id)) {
+            console.error(`[Theme Manager] Refusing unsafe theme id ${JSON.stringify(id)}`);
+            return;
+        }
         void shell.openPath(path.join(themesPath, id));
     });
     ipcMain.on("uninstallTheme", (_event, id: string) => {

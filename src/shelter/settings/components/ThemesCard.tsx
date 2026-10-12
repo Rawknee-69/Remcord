@@ -57,16 +57,29 @@ export const ThemesCard = (props: { theme: ThemeManifest }) => {
     }
     function updateTheme() {
         if (props.theme.updateSrc) {
-            window.remcord.themes.install(props.theme.updateSrc);
+            // The bridge rejects when the fetch or reinstall fails: refresh
+            // and toast the real outcome instead of always claiming success.
+            void window.remcord.themes.install(props.theme.updateSrc).then(
+                () => {
+                    refreshThemes();
+                    showToast({
+                        title: store.i18n["themes-success"],
+                        content: store.i18n["themes-updated"],
+                        duration: 3000,
+                    });
+                },
+                () => {
+                    refreshThemes();
+                    showToast({
+                        title: store.i18n["themes-success"],
+                        content:
+                            store.i18n["themes-importFailed"] ??
+                            "No themes could be imported. The files were not valid BetterDiscord themes.",
+                        duration: 4000,
+                    });
+                },
+            );
         }
-        setTimeout(() => {
-            refreshThemes();
-        }, 1000);
-        showToast({
-            title: store.i18n["themes-success"],
-            content: store.i18n["themes-updated"],
-            duration: 3000,
-        });
     }
     function openThemesFolder() {
         if (props.theme.id) {

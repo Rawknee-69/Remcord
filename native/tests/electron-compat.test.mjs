@@ -959,8 +959,10 @@ test("Electron keeps the import picker dialog configuration", () => {
     // The picker is a host file dialog with no defaultPath, translated
     // title/button/filter names, open-file multi-selection, the SCSS/CSS
     // filter first and the all-files filter second. Cancellation returns
-    // silently; each selected file dispatches WITHOUT awaiting the previous
-    // one; installTheme reads local files unbounded as UTF-8.
+    // silently; each selected file installs sequentially with per-file
+    // continue-after-failure, and one `themesChanged` summary event carries
+    // the exact counts so the renderer refreshes from host truth.
+    // `installTheme` reads local files unbounded as UTF-8.
     assert.match(ipc, /ipcMain\.on\("openImportPicker"/);
     assert.match(ipc, /title: getLang\("dialog-importTheme-title"\)/);
     assert.match(ipc, /buttonLabel: getLang\("dialog-importTheme-button"\)/);
@@ -969,7 +971,8 @@ test("Electron keeps the import picker dialog configuration", () => {
     assert.match(ipc, /extensions: \["scss", "css"\]/);
     assert.match(ipc, /name: getLang\("dialog-importTheme-allFiles"\)/);
     assert.match(ipc, /if \(result\.canceled\) return;/);
-    assert.match(ipc, /for \(const file of result\.filePaths\) \{\s*installTheme\(file\);\s*\}/);
+    assert.match(ipc, /for \(const file of result\.filePaths\) \{[\s\S]{0,400}?await installTheme\(file\);/);
+    assert.match(ipc, /webContents\.send\("themesChanged", \{ imported, failed \}\)/);
     assert.match(bridge, /openImportPicker: \(\) => ipcRenderer\.send\("openImportPicker"\)/);
     const lang = readFileSync(new URL("../../assets/lang/en-US.json", import.meta.url), "utf8");
     assert.match(lang, /"dialog-importTheme-title": "Select a theme you want to import"/);

@@ -1,4 +1,4 @@
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { Settings } from "../../../@types/settings.js";
 import type { ThemeManifest } from "../../../@types/themeManifest.js";
 import { EmptyState } from "../components/EmptyState.jsx";
@@ -13,6 +13,7 @@ import {
     refreshThemes,
     revealFolderNative,
     setConfig,
+    themeImportOutcome,
 } from "../settings.js";
 import classes from "./ThemesPages.module.css";
 
@@ -48,22 +49,77 @@ export function ThemesPage() {
 
     onMount(() => {
         void loadThemesOnce();
+        // Electron-only completion event (the native facade has no picker
+        // callback surface): guard on function presence, not just on the
+        // absent native capability, so an older native host can never throw.
+        if (!isNativeThemeImportAvailable() && typeof window.remcord.themes.onThemesChanged === "function") {
+            const dispose = window.remcord.themes.onThemesChanged((summary) => {
+                refreshThemes();
+                showImportToasts(summary.imported, summary.failed);
+            });
+            onCleanup(dispose);
+        }
     });
     if (!isNativeThemeListAvailable()) {
         refreshThemes();
     }
 
+    function showImportToasts(imported: number, failed: number) {
+        switch (themeImportOutcome(imported, failed)) {
+            case "success":
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content: store.i18n["themes-bdInstalled"],
+                    duration: 3000,
+                });
+                break;
+            case "partial":
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content: `${store.i18n["themes-bdInstalled"]} (${
+                        store.i18n["themes-importPartial"] ??
+                        "Some themes failed to import. Valid themes were installed; check the list."
+                    })`,
+                    duration: 4000,
+                });
+                break;
+            case "failed":
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content:
+                        store.i18n["themes-importFailed"] ??
+                        "No themes could be imported. The files were not valid BetterDiscord themes.",
+                    duration: 4000,
+                });
+                break;
+        }
+    }
+
     function installTheme() {
-        window.remcord.themes.install(downloadUrl());
-        setDownloadUrl("");
-        setTimeout(() => {
-            refreshThemes();
-        }, 1000);
-        showToast({
-            title: store.i18n["themes-success"],
-            content: store.i18n["themes-bdInstalled"],
-            duration: 3000,
-        });
+        // The bridge rejects when the URL fetch or the theme install fails:
+        // toast success only on resolve so a failure never looks installed.
+        void window.remcord.themes.install(downloadUrl()).then(
+            () => {
+                setDownloadUrl("");
+                refreshThemes();
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content: store.i18n["themes-bdInstalled"],
+                    duration: 3000,
+                });
+            },
+            () => {
+                setDownloadUrl("");
+                refreshThemes();
+                showToast({
+                    title: store.i18n["themes-success"],
+                    content:
+                        store.i18n["themes-importFailed"] ??
+                        "No themes could be imported. The files were not valid BetterDiscord themes.",
+                    duration: 4000,
+                });
+            },
+        );
     }
 
     async function handleRefresh() {
@@ -83,30 +139,7 @@ export function ThemesPage() {
             // like a broken importer), a partial import names both counts.
             if (!result || result.canceled) return;
             await loadThemesOnce();
-            if (result.failed === 0) {
-                showToast({
-                    title: store.i18n["themes-success"],
-                    content: store.i18n["themes-bdInstalled"],
-                    duration: 3000,
-                });
-            } else if (result.imported > 0) {
-                showToast({
-                    title: store.i18n["themes-success"],
-                    content: `${store.i18n["themes-bdInstalled"]} (${
-                        store.i18n["themes-importPartial"] ??
-                        "Some themes failed to import. Valid themes were installed; check the list."
-                    })`,
-                    duration: 4000,
-                });
-            } else {
-                showToast({
-                    title: store.i18n["themes-success"],
-                    content:
-                        store.i18n["themes-importFailed"] ??
-                        "No themes could be imported. The files were not valid BetterDiscord themes.",
-                    duration: 4000,
-                });
-            }
+            showImportToasts(result.imported, result.failed);
             return;
         }
         window.remcord.themes.openImportPicker();

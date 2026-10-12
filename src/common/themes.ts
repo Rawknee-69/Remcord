@@ -4,6 +4,7 @@ import { app, type BrowserWindow } from "electron";
 import type { ThemeManifest } from "../@types/themeManifest.js";
 import { mainWindows } from "../discord/window.js";
 import { getConfig } from "./config.js";
+import { isSafeThemeCssFile, isSafeThemeId } from "./sanitization.js";
 
 const themeManifestCache = new Map<string, { manifest: ThemeManifest; mtime: number }>();
 const themeCssCache = new Map<string, string>();
@@ -11,7 +12,7 @@ let quickCssWatcher: fs.FSWatcher | null = null;
 
 const userDataPath = app.getPath("userData");
 const themesFolder = path.join(userDataPath, "/themes/");
-function parseBDManifest(content: string) {
+export function parseBDManifest(content: string) {
     const metaReg = /@([^ ]*) (.*)/g;
     if (!content.startsWith("/**")) {
         throw new Error("Not a manifest.");
@@ -227,6 +228,10 @@ function buildThemeCssCache(): void {
             try {
                 const themeFile = getThemeManifest(file);
                 if (!themeFile) continue;
+                if (!isSafeThemeCssFile(themeFile.theme)) {
+                    console.error(`[Theme Manager] Refusing unsafe stylesheet name for ${file}`);
+                    continue;
+                }
 
                 if (themeFile.enabled === undefined) {
                     const disabledPath = `${userDataPath}/disabled.txt`;
@@ -262,26 +267,48 @@ export function injectThemesMain(browserWindow: BrowserWindow): void {
 }
 
 export function uninstallTheme(id: string) {
-    const themePath = path.join(themesFolder, id);
+    if (!isSafeThemeId(id)) {
+        console.error(`[Theme Manager] Refusing unsafe theme id ${JSON.stringify(id)}`);
+        return;
+    }
+    const directPath = path.join(themesFolder, id);
+    const suffixedPath = path.join(themesFolder, `${id}-BD`);
+    const themePath = fs.existsSync(directPath) ? directPath : suffixedPath;
+    const key = themePath === directPath ? id : `${id}-BD`;
+    const wasEnabled = getThemeManifest(key)?.enabled ?? themeCssCache.has(key);
     if (fs.existsSync(themePath)) {
-        fs.rmdirSync(themePath, { recursive: true });
-        console.log(`Removed ${id} folder`);
-    } else if (fs.existsSync(path.join(themesFolder, `${id}-BD`))) {
-        fs.rmdirSync(path.join(themesFolder, `${id}-BD`), { recursive: true });
-        console.log(`Removed ${id} folder`);
+        fs.rmSync(themePath, { recursive: true, force: true });
+        console.log(`Removed ${key} folder`);
+    }
+    if (wasEnabled) {
+        themeCssCache.delete(key);
+        for (const passedWindow of mainWindows) {
+            passedWindow.webContents.send("removeTheme", key);
+        }
+        console.log(`[Theme Manager] Removed live styles for ${key}`);
     }
     themeCssCache.delete(id);
     themeManifestCache.delete(id);
+    themeManifestCache.delete(key);
     invalidateThemeListCache();
 }
 
 export function setThemeEnabled(id: string, enabled: boolean) {
-    let manifest = getThemeManifest(id);
+    if (!isSafeThemeId(id)) {
+        console.error(`[Theme Manager] Refusing unsafe theme id ${JSON.stringify(id)}`);
+        return;
+    }
+    const manifest = getThemeManifest(id);
     if (!manifest) {
-        manifest = JSON.parse(fs.readFileSync(path.join(themesFolder, id, "/manifest.json"), "utf8")) as ThemeManifest;
+        console.error(`[Theme Manager] No readable manifest for ${id}`);
+        return;
     }
 
     if (enabled !== manifest.enabled) {
+        if (enabled && !isSafeThemeCssFile(manifest.theme)) {
+            console.error(`[Theme Manager] Refusing unsafe stylesheet name for ${id}`);
+            return;
+        }
         mainWindows.every((passedWindow) => {
             if (enabled) {
                 const css = fs.readFileSync(path.join(themesFolder, id, manifest.theme), "utf-8");
@@ -305,6 +332,9 @@ export function setThemeEnabled(id: string, enabled: boolean) {
 
 function installThemeFromCode(code: string, linkOrPath?: string): void {
     const manifest = parseBDManifest(code);
+    if (!manifest.name || manifest.name.trim() === "" || manifest.name === "null") {
+        throw new Error("Not a manifest.");
+    }
     const themePath = path.join(themesFolder, `${manifest.name?.replace(" ", "-")}-BD`);
     if (!fs.existsSync(themePath)) {
         fs.mkdirSync(themePath);

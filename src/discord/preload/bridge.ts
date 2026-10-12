@@ -121,6 +121,12 @@ contextBridge.exposeInMainWorld("remcord", {
         getThemes: () => ipcRenderer.sendSync("getThemes") as ThemeManifest[],
         refresh: () => ipcRenderer.sendSync("refreshThemesCache") as ThemeManifest[],
         openImportPicker: () => ipcRenderer.send("openImportPicker"),
+        onThemesChanged: (callback: (summary: { imported: number; failed: number }) => void) => {
+            const listener = (_event: Electron.IpcRendererEvent, summary: { imported: number; failed: number }) =>
+                callback(summary);
+            ipcRenderer.on("themesChanged", listener);
+            return () => ipcRenderer.removeListener("themesChanged", listener);
+        },
         set: (id: string, state: boolean) => ipcRenderer.send("setThemeEnabled", id, state),
         folder: (id: string) => ipcRenderer.send("openThemeFolder", id),
         openQuickCss: () => ipcRenderer.send("openQuickCss"),

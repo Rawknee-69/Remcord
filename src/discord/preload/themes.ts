@@ -7,5 +7,5 @@ ipcRenderer.on("addTheme", (_event: unknown, name: string, css: string) => {
     addTheme(name, css);
 });
 ipcRenderer.on("removeTheme", (_event: unknown, name: string) => {
-    document.getElementById(name)!.remove();
+    document.getElementById(name)?.remove();
 });
