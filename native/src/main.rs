@@ -66,14 +66,15 @@ use navigation_completed::NavigationCompletedEvent;
 use plugin_storage::{read_plugin_file, write_plugin_file};
 use process_failure::ProcessFailedEvent;
 use protocol::{
-    parse_bridge_message, validate_mod_bundle_id, window_state_event_json, AppVersionResponse,
-    BackupRestoredResponse, BackupSavedResponse, BridgeCommand, BridgeError, BridgeEvent,
-    BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse, BridgeResponsePayload,
-    BundleFileEntry, BundlesListResponse, FoldersOpenedResponse, LocalizationStringResponse,
-    ModBundleResponse, PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse,
-    RequestTracker, SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse,
-    ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse,
-    ThemeWrittenResponse, ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
+    parse_bridge_message, validate_mod_bundle_id, validate_vencord_css_mod_id,
+    window_state_event_json, AppVersionResponse, BackupRestoredResponse, BackupSavedResponse,
+    BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest,
+    BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
+    FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse, PingResponse,
+    PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse,
+    SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
+    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
+    WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -3760,6 +3761,29 @@ fn sync_native_maximized_state(
         send_window_state_event(webview, state.focused, state.maximized);
         println!("[Window] maximized={maximized} ({reason})");
     }
+}
+
+/// Builds the application relaunch command for the settings-restart path.
+///
+/// Mod adapters are resolved once at startup and baked into the WebView's
+/// document-start script, so a document reload can never activate a newly
+/// enabled mod: restart must be a real relaunch. The command re-executes the
+/// currently running binary with no arguments (the native shell takes none;
+/// profile and diagnostics travel via the inherited environment) and, on
+/// Windows, detached so it survives the parent's orderly shutdown. Pure
+/// construction — the caller spawns, then shuts down; a spawn failure keeps
+/// the running app alive instead of stranding the user.
+fn relaunch_command() -> Result<std::process::Command, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("relaunch cannot locate the running executable: {error}"))?;
+    let mut command = std::process::Command::new(&exe);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS: the child keeps running after this process exits.
+        command.creation_flags(0x00000008);
+    }
+    Ok(command)
 }
 
 /// The orderly renderer-initiated shutdown shared by `window_quit` and a
@@ -7762,17 +7786,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // the already-validated Vencord wire contract is unchanged;
                     // each is normalized into the same mod-agnostic handlers.
                     BridgeEvent::VencordCssResult(payload) => {
-                        handle_mod_css_result(
-                            &VENCORD_MOD,
-                            payload.request_id,
-                            payload.ok,
-                            payload.error,
-                            &webview,
-                            &mut pending_mods,
-                            &mut document_lifecycle,
-                            &mut request_tracker,
-                            &mut response_count,
-                        );
+                        // The shared CSS builder echoes the registry id; the
+                        // legacy shape predates the echo and omits it. A
+                        // foreign claim is refused loudly before any handler
+                        // runs (the fixed-descriptor gate below re-checks the
+                        // correlated request as well).
+                        if let Err(error) = validate_vencord_css_mod_id(&payload.mod_id) {
+                            eprintln!("[Mod:Vencord][css_injection] {error}");
+                        } else {
+                            handle_mod_css_result(
+                                &VENCORD_MOD,
+                                payload.request_id,
+                                payload.ok,
+                                payload.error,
+                                &webview,
+                                &mut pending_mods,
+                                &mut document_lifecycle,
+                                &mut request_tracker,
+                                &mut response_count,
+                            );
+                        }
                     }
                     BridgeEvent::VencordBootstrapResult(payload) => {
                         handle_mod_bootstrap_result(
@@ -8125,13 +8158,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     BridgeEvent::SettingsBootRestart(_) => {
-                        // Documented boundary: Electron relaunches the
-                        // application (`app.relaunch()` + `app.exit()`); the
-                        // native shell has no relauncher yet, so restart
-                        // currently means a document reload.
-                        println!("[SettingsBoot] restart requested; reloading document");
-                        if let Err(error) = webview.evaluate_script("window.location.reload();") {
-                            eprintln!("[SettingsBoot] restart reload failed: {error}");
+                        // Electron relaunches the application
+                        // (`app.relaunch()` + `app.exit()`), and the native
+                        // shell must match that: mod adapters are resolved
+                        // once at startup and baked into the document-start
+                        // script, so a document reload could never activate a
+                        // newly enabled mod. Relaunch this executable, then
+                        // take the existing orderly quit path. A spawn
+                        // failure is loud and keeps the app running (fail
+                        // safe); the user can still quit manually.
+                        match relaunch_command()
+                            .and_then(|mut command| {
+                                command.spawn().map_err(|error| {
+                                    format!("relaunch spawn failed: {error}")
+                                })
+                            }) {
+                            Ok(_) => {
+                                println!(
+                                    "[SettingsBoot] restart requested; relaunched executable, shutting down"
+                                );
+                                #[cfg(target_os = "windows")]
+                                perform_orderly_shutdown(
+                                    &mut *control_flow,
+                                    &mut shutdown_started,
+                                    &main_process_failed_counters,
+                                    &child_process_failed_counters,
+                                    &main_navigation_counters,
+                                    &child_navigation_counters,
+                                    &mut main_process_failed,
+                                    &mut main_navigation_completed,
+                                    &mut popup_child,
+                                    &mut env_browser_exited_token,
+                                    &webview_env,
+                                );
+                                #[cfg(not(target_os = "windows"))]
+                                perform_orderly_shutdown(
+                                    &mut *control_flow,
+                                    &mut shutdown_started,
+                                    &main_process_failed_counters,
+                                    &child_process_failed_counters,
+                                    &main_navigation_counters,
+                                    &child_navigation_counters,
+                                );
+                            }
+                            Err(error) => {
+                                eprintln!("[SettingsBoot] restart {error}; staying running")
+                            }
                         }
                     }
                     BridgeEvent::SettingsBootProbe(payload) => {
@@ -8186,10 +8258,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
-        lookup_mod_descriptor, mod_adapter_script, resolve_active_mods, settings_plugin_start_due,
-        settings_plugin_start_script, settings_ui_probe_script, startup_visibility,
-        titlebar_plugin_start_script, StartupVisibility, EQUICORD_MOD, KNOWN_MODS,
-        PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
+        lookup_mod_descriptor, mod_adapter_script, relaunch_command, resolve_active_mods,
+        settings_plugin_start_due, settings_plugin_start_script, settings_ui_probe_script,
+        startup_visibility, titlebar_plugin_start_script, StartupVisibility, EQUICORD_MOD,
+        KNOWN_MODS, PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
         SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
         TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
     };
@@ -8516,6 +8588,50 @@ mod tests {
             .unwrap()
             .contains("getModBundle(\"shelter\""));
         }
+    }
+
+    #[test]
+    fn persisted_mods_rebuild_the_matching_document_start_adapters() {
+        // The restart contract: a new process resolves adapters from the
+        // persisted `mods` value, so enabling Vencord then restarting injects
+        // exactly the Vencord (+ always-on Shelter) adapters, and disabling
+        // drops them again. A document reload cannot do this — the script
+        // below is built once per process — which is why the settings-restart
+        // path must be a real relaunch rather than a reload.
+        let boot = crate::settings_boot::test_fixture_json();
+        let platform = crate::app::test_fixture_json();
+        let script_for = |mods: &[&str]| {
+            let settings_mods = mods
+                .iter()
+                .map(|entry| entry.to_string())
+                .collect::<Vec<_>>();
+            let active = resolve_active_mods(&settings_mods, None);
+            initialization_script(&active, boot, platform).unwrap()
+        };
+        let enabled = script_for(&["vencord"]);
+        assert!(enabled.contains("__remcordNativeVencordAdapter"));
+        assert!(enabled.contains("__remcordNativeShelterAdapter"));
+        assert!(!enabled.contains("__remcordNativeEquicordAdapter"));
+        let equicord = script_for(&["equicord"]);
+        assert!(equicord.contains("__remcordNativeEquicordAdapter"));
+        assert!(equicord.contains("__remcordNativeShelterAdapter"));
+        assert!(!equicord.contains("__remcordNativeVencordAdapter"));
+        let disabled = script_for(&[]);
+        assert!(!disabled.contains("__remcordNativeVencordAdapter"));
+        assert!(!disabled.contains("__remcordNativeEquicordAdapter"));
+        assert!(disabled.contains("__remcordNativeShelterAdapter"));
+    }
+
+    #[test]
+    fn relaunch_command_targets_the_running_executable_with_no_args() {
+        // The settings-restart path re-executes this binary with no arguments
+        // (the shell takes none; profile and diagnostics inherit through the
+        // environment). Spawning itself is never exercised here — that would
+        // launch a real process.
+        let command = relaunch_command().expect("relaunch must resolve");
+        let exe = std::env::current_exe().expect("the test process has an image");
+        assert_eq!(command.get_program(), exe.as_os_str());
+        assert_eq!(command.get_args().len(), 0);
     }
 
     #[test]

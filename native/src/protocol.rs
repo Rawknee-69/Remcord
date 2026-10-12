@@ -123,6 +123,18 @@ pub fn validate_mod_bundle_id(mod_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates the echoed registry id on a legacy Vencord CSS result. `None`
+/// is the original legacy shape (no echo) and stays accepted; `Some("vencord")`
+/// is the shared CSS builder's echo and is accepted; anything else claims a
+/// different mod's gate and is refused before any handler runs.
+pub fn validate_vencord_css_mod_id(mod_id: &Option<String>) -> Result<(), String> {
+    match mod_id {
+        None => Ok(()),
+        Some(id) if id == "vencord" => Ok(()),
+        Some(_) => Err("Vencord CSS result claims a different mod".to_owned()),
+    }
+}
+
 /// Empty request for the read-only `settings.get_config` capability. There
 /// are no renderer-supplied parameters by design: no config key, no file
 /// path, no selector. Any extra field is rejected.
@@ -448,11 +460,13 @@ pub enum BridgeEvent {
     /// catalog selector can cross this event.
     SettingsBootSetLang(SettingsBootSetLang),
     /// Shipped one-way event posted by the `settingsBoot.restart()` boot-surface
-    /// function. Empty payload (any member is rejected); the host reloads the
-    /// WebView document. Electron relaunch semantics (`app.relaunch()` +
-    /// `app.exit()`) are deliberately NOT claimed: the native shell has no
-    /// application updater/relauncher yet, so restart currently means a
-    /// document reload. This boundary is documented, not hidden.
+    /// function. Empty payload (any member is rejected); the host relaunches
+    /// the application executable and then shuts down orderly, matching
+    /// Electron's relaunch semantics (`app.relaunch()` + `app.exit()`). A
+    /// document reload would be insufficient: mod adapters are resolved once
+    /// at startup and baked into the document-start script, so only a new
+    /// process activates newly enabled mods. A spawn failure is loud and
+    /// keeps the running app alive instead of stranding the user.
     SettingsBootRestart(SettingsBootRestart),
     /// DEV-only diagnostic posted by the settings boot snapshot smoke probe
     /// (`REMCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`). Never sent by shipped code.
@@ -541,6 +555,12 @@ pub struct VencordCssResult {
     pub request_id: String,
     pub ok: bool,
     pub error: Option<String>,
+    /// Registry id echoed by the shared CSS builder (which always echoes it,
+    /// exactly like the mod-agnostic family). Absent on the original legacy
+    /// shape, which still parses. When present it must name Vencord — any
+    /// other value is a cross-mod claim and is rejected at dispatch.
+    #[serde(default)]
+    pub mod_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1995,6 +2015,39 @@ mod tests {
                 if matches!(&message.event, BridgeEvent::VencordBootstrapResult(_))
         ));
         assert!(parse_bridge_message(malformed).is_err());
+    }
+
+    #[test]
+    fn vencord_css_result_accepts_the_builder_echo_and_refuses_foreign_claims() {
+        // The exact shape the shared CSS builder posts for Vencord: the
+        // echoed registry id plus the legacy members. Before the echo was
+        // accepted, this real-world message was rejected and Vencord could
+        // never complete its CSS gate (style landed, marker never ran).
+        let echoed = r#"{"version":1,"event":{"type":"vencord_css_result","payload":{"mod_id":"vencord","request_id":"vencord-1","ok":true,"error":null}}}"#;
+        let parsed = parse_bridge_message(echoed).expect("the builder echo must parse");
+        let echo_id = match parsed {
+            BridgeMessage::Event(message) => match message.event {
+                BridgeEvent::VencordCssResult(payload) => {
+                    assert_eq!(payload.request_id, "vencord-1");
+                    assert!(payload.ok);
+                    payload.mod_id
+                }
+                _ => panic!("expected the legacy Vencord CSS variant"),
+            },
+            _ => panic!("expected an event message"),
+        };
+        assert!(super::validate_vencord_css_mod_id(&echo_id).is_ok());
+        // The original echoless legacy shape still parses.
+        assert!(super::validate_vencord_css_mod_id(&None).is_ok());
+        // A foreign claim is refused before any handler runs.
+        assert!(super::validate_vencord_css_mod_id(&Some("shelter".to_owned())).is_err());
+        assert!(super::validate_vencord_css_mod_id(&Some(String::new())).is_err());
+        // And it never parses as the mod-agnostic family: the tag stays legacy.
+        assert!(matches!(
+            parse_bridge_message(echoed),
+            Ok(BridgeMessage::Event(ref message))
+                if matches!(&message.event, BridgeEvent::VencordCssResult(_))
+        ));
     }
 
     #[test]
