@@ -2,7 +2,14 @@
     // biome-ignore lint/suspicious/noRedundantUseStrict: Injected as a classic document-start script.
     "use strict";
 
-    if (window.location.origin !== "https://discord.com") return;
+    // Entry origins for the three release channels (stable/canary/ptb).
+    // Exact match only — no subdomains, no other hosts.
+    if (
+        window.location.origin !== "https://discord.com" &&
+        window.location.origin !== "https://canary.discord.com" &&
+        window.location.origin !== "https://ptb.discord.com"
+    )
+        return;
     if (Object.hasOwn(window, "__remcordNativeModSubstrate")) return;
 
     /**

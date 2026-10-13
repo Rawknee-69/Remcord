@@ -315,7 +315,10 @@ pub struct SettingsMutation {
 ///   `windowMaterial`, `tray`, `minimizeToTray`, `startMinimized`,
 ///   `skipSplash`, `mobileMode`, `autoHideMenuBar`, `overlayButtonColor`,
 ///   `bounceOnPing`, `popoutPiP`, `sleepInBackground`): ELECTRON-ONLY, no
-///   native window shell consumes them yet.
+///   native window shell consumes them yet. `channel` is allowlisted below
+///   (the native boot maps it to its Discord entry URL); `startMinimized`
+///   stays out (only its `"minimized"` arm has a native consumer and it
+///   rides on window visibility, not on a mutated value).
 /// - network / process surface (`proxyMode`, `proxyRules`,
 ///   `proxyBypassRules`, `proxyPacScript`, `customJsBundle`,
 ///   `customCssBundle`, `additionalArguments`, `customIcon`,
@@ -365,6 +368,11 @@ pub enum SettingsSetKey {
     /// pushes (or removes) the managed style from this flag, and a
     /// post-mutation re-push applies the flip live, so no restart is needed.
     QuickCss,
+    /// Discord release channel (`"stable"` | `"canary"` | `"ptb"`).
+    /// Native consumer: startup navigation selects the channel's entry URL
+    /// (`src/splash/redirect.html` parity, whose default is also stable).
+    /// Takes effect on next launch (restart-required model).
+    Channel,
 }
 
 impl SettingsSetKey {
@@ -377,20 +385,23 @@ impl SettingsSetKey {
             SettingsSetKey::ExtendedPluginAbilities => "extendedPluginAbilities",
             SettingsSetKey::Csp => "csp",
             SettingsSetKey::QuickCss => "quickCss",
+            SettingsSetKey::Channel => "channel",
         }
     }
 }
 
 /// Bounded value union for the allowlist. The key selects which variant is
 /// legal; anything else is a type error. There is deliberately no number,
-/// object, or null variant: no allowlisted key needs one. The single string
-/// variant serves exactly the `csp` mode; no other key accepts it.
+/// object, or null variant: no allowlisted key needs one. The two string
+/// variants serve exactly one key each (`csp` mode, `channel` id), so a
+/// value for one can never land in the other's document field.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SettingsSetValue {
     Bool(bool),
     Mods(Vec<String>),
     Csp(String),
+    Channel(String),
 }
 
 /// Maximum accepted mod-enablement entries. Electron's `ValidMods` has four
@@ -434,6 +445,12 @@ pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> R
         (SettingsSetKey::Csp, SettingsSetValue::Csp(mode)) => {
             if !VALID_CSP_MODES.contains(&mode.as_str()) {
                 return Err("csp mode is not a supported policy".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::Channel, SettingsSetValue::Channel(channel)) => {
+            if !crate::channel::VALID_CHANNELS.contains(&channel.as_str()) {
+                return Err("channel is not a supported release channel".to_owned());
             }
             Ok(())
         }
@@ -591,6 +608,9 @@ pub fn apply_settings_set(
         ),
         (SettingsSetKey::Csp, SettingsSetValue::Csp(mode)) => {
             serde_json::Value::String(mode.clone())
+        }
+        (SettingsSetKey::Channel, SettingsSetValue::Channel(channel)) => {
+            serde_json::Value::String(channel.clone())
         }
         (
             SettingsSetKey::SupportBannerDismissed
@@ -1069,6 +1089,74 @@ mod tests {
         assert_eq!(document["csp"], "strict");
         let reread = load_settings(&profile).expect("the mutated file must load");
         assert_eq!(reread.snapshot.csp, "strict");
+    }
+
+    #[test]
+    fn set_applies_channel_and_round_trips() {
+        for channel in ["stable", "canary", "ptb"] {
+            let profile = unique_profile_dir("set-channel");
+            std::fs::create_dir_all(profile.join("storage")).unwrap();
+            let path = profile.join("storage").join("settings.json");
+            std::fs::write(&path, r#"{"channel":"stable"}"#).unwrap();
+            let mutation = apply_settings_set(
+                &profile,
+                SettingsSetKey::Channel,
+                &SettingsSetValue::Channel(channel.to_owned()),
+            )
+            .expect("an allowlisted channel mutation must persist");
+            assert_eq!(mutation.key, SettingsSetKey::Channel);
+            assert_eq!(
+                mutation.value,
+                SettingsSetValue::Channel(channel.to_owned())
+            );
+            let document: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(document["channel"], channel);
+            let reread = load_settings(&profile).expect("the mutated file must load");
+            assert_eq!(reread.snapshot.channel, channel);
+        }
+        assert_eq!(SettingsSetKey::Channel.storage_key(), "channel");
+    }
+
+    #[test]
+    fn set_rejects_unknown_channels_and_crossed_string_variants() {
+        for hostile in [
+            "",
+            "STABLE",
+            "beta",
+            "stable ",
+            "canary.discord.com",
+            "ptb\0",
+        ] {
+            assert!(
+                validate_settings_set(
+                    SettingsSetKey::Channel,
+                    &SettingsSetValue::Channel(hostile.to_owned()),
+                )
+                .is_err(),
+                "{hostile:?} must be refused"
+            );
+        }
+        // A csp string can never validate as a channel (or vice versa): the
+        // key owns its variant, so values cannot cross document fields.
+        assert!(validate_settings_set(
+            SettingsSetKey::Channel,
+            &SettingsSetValue::Csp("none".to_owned()),
+        )
+        .is_err());
+        assert!(validate_settings_set(
+            SettingsSetKey::Csp,
+            &SettingsSetValue::Channel("stable".to_owned()),
+        )
+        .is_err());
+        assert!(
+            validate_settings_set(SettingsSetKey::Channel, &SettingsSetValue::Bool(true),).is_err()
+        );
+        assert!(validate_settings_set(
+            SettingsSetKey::Channel,
+            &SettingsSetValue::Mods(vec!["vencord".to_owned()]),
+        )
+        .is_err());
     }
 
     #[test]

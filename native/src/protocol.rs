@@ -75,6 +75,8 @@ pub enum BridgeCommand {
     ThemesList(ThemesListRequest),
     QuickCssRead(QuickCssReadRequest),
     QuickCssWrite(QuickCssWriteRequest),
+    DiagnosticsGetInfo(DiagnosticsGetInfoRequest),
+    ModClearCache(ModClearCacheRequest),
     BackupSave(BackupSaveRequest),
     BackupInspect(BackupInspectRequest),
     BackupCommitRestore(BackupCommitRestoreRequest),
@@ -158,15 +160,56 @@ pub struct SettingsSetBlockPowerSavingRequest {
 
 /// The closed `settings.set` mutation: exactly one allowlisted key plus its
 /// bounded value. The key is an enum (unknown keys fail deserialization
-/// before dispatch); the value union plus [`crate::settings::validate_settings_set`]
-/// enforces the key↔variant pairing and per-key rules (bool-only flags,
-/// `ValidMods`-only arrays). There is deliberately NO path, JSON patch,
-/// object, string, number, or null variant: no allowlisted key needs one.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// before dispatch); the value is keyed to the key by the custom
+/// [`Deserialize`] impl below, so a `csp` string can never parse as a
+/// `channel` value (or vice versa) even though both are JSON strings —
+/// untagged string variants would accept either. There is deliberately NO
+/// path, JSON patch, object, number, or null shape: no allowlisted key
+/// needs one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SettingsSetRequest {
     pub key: SettingsSetKey,
     pub value: SettingsSetValue,
+}
+
+impl<'de> serde::Deserialize<'de> for SettingsSetRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRequest {
+            key: SettingsSetKey,
+            value: serde_json::Value,
+        }
+        let raw = RawRequest::deserialize(deserializer)?;
+        // The key selects the ONLY legal value shape: a bare JSON string
+        // parses into the key's own variant, never the other string key's.
+        // `serde_json::from_value` rejects wrong JSON types (bool/array/
+        // null/object) with a type error before validation or dispatch.
+        let value = match raw.key {
+            SettingsSetKey::Mods => SettingsSetValue::Mods(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::Csp => SettingsSetValue::Csp(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::Channel => SettingsSetValue::Channel(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::SupportBannerDismissed
+            | SettingsSetKey::ShowExperimentalPluginMenu
+            | SettingsSetKey::ExtendedPluginAbilities
+            | SettingsSetKey::QuickCss => SettingsSetValue::Bool(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+        };
+        Ok(SettingsSetRequest {
+            key: raw.key,
+            value,
+        })
+    }
 }
 
 /// The single allowed `localization.get_lang` parameter: one catalog key.
@@ -302,6 +345,24 @@ pub struct QuickCssReadRequest {}
 pub struct QuickCssWriteRequest {
     pub css: String,
 }
+
+/// Empty request for the read-only `diagnostics.get_info` capability.
+/// Returns the host-owned facts from `crate::diagnostics` (app version,
+/// WebView2 Runtime version, profile kind, channel, csp, mod ids). There
+/// are no renderer-supplied parameters by design: no key, path, selector,
+/// or detail flag. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsGetInfoRequest {}
+
+/// Empty request for the `mod.clear_cache` capability. Deletes the five
+/// host-managed downloaded bundle caches and resets the stored `modCache`
+/// map (`crate::mod_cache`). There are no renderer-supplied parameters by
+/// design: no mod id, path, filename, or selector. Any extra field is
+/// rejected, so user-owned `custom.js`/`custom.css` can never be selected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModClearCacheRequest {}
 
 /// Save request for the `backup.save` capability: exactly the include flags
 /// plus the bounded renderer-built client-mod envelope. There is deliberately
@@ -956,6 +1017,8 @@ pub enum BridgeResponsePayload {
     ThemesList(ThemesListResponse),
     QuickCssRead(QuickCssReadResponse),
     QuickCssWritten(QuickCssWrittenResponse),
+    DiagnosticsInfo(DiagnosticsInfoResponse),
+    ModCacheCleared(ModCacheClearedResponse),
     BackupSaved(BackupSavedResponse),
     BackupInspected(BackupInspectedResponse),
     BackupRestored(BackupRestoredResponse),
@@ -1175,6 +1238,29 @@ pub struct QuickCssReadResponse {
 #[derive(Serialize)]
 pub struct QuickCssWrittenResponse {
     pub bytes: usize,
+}
+
+/// Readout response for the `diagnostics.get_info` capability: the
+/// host-owned facts from `crate::diagnostics` re-exported verbatim.
+/// Fixed-vocabulary strings plus the filtered mod-id list only — no
+/// paths, tokens, cookies, or file contents.
+#[derive(Serialize)]
+pub struct DiagnosticsInfoResponse {
+    pub app_version: String,
+    pub webview2_runtime: String,
+    pub profile_kind: &'static str,
+    pub channel: String,
+    pub csp: String,
+    pub mods: Vec<String>,
+}
+
+/// Outcome response for the `mod.clear_cache` capability: which
+/// host-managed cache files were deleted plus whether a stored `modCache`
+/// map existed and was reset. Fixed allowlisted names only — no paths.
+#[derive(Serialize)]
+pub struct ModCacheClearedResponse {
+    pub cleared: Vec<String>,
+    pub mod_cache_cleared: bool,
 }
 
 /// Bounded save response for the `backup.save` capability: cancellation plus
@@ -1474,6 +1560,13 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("Quick CSS exceeds the size limit".to_owned());
                     }
                 }
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
+                // is needed. The facts live in `diagnostics` (host-owned
+                // version/runtime/profile/mode/mod facts); the cache roots
+                // and file allowlist live in `mod_cache`. Neither takes a
+                // selector, so there is nothing to validate.
+                BridgeCommand::DiagnosticsGetInfo(_) | BridgeCommand::ModClearCache(_) => {}
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
@@ -3347,6 +3440,7 @@ mod tests {
         let abilities = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set","payload":{"key":"extended_plugin_abilities","value":true}}}"#;
         let csp = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"csp","value":"strict"}}}"#;
         let quick_css = r#"{"version":1,"request_id":"settings-5b","command":{"type":"settings_set","payload":{"key":"quick_css","value":true}}}"#;
+        let channel = r#"{"version":1,"request_id":"settings-5c","command":{"type":"settings_set","payload":{"key":"channel","value":"canary"}}}"#;
         assert!(matches!(
             parse_bridge_message(mods),
             Ok(BridgeMessage::Request(_))
@@ -3371,6 +3465,10 @@ mod tests {
             parse_bridge_message(quick_css),
             Ok(BridgeMessage::Request(_))
         ));
+        assert!(matches!(
+            parse_bridge_message(channel),
+            Ok(BridgeMessage::Request(_))
+        ));
 
         // Unknown keys never parse: the allowlist is the enum.
         let unknown = r#"{"version":1,"request_id":"settings-6","command":{"type":"settings_set","payload":{"key":"minimizeToTray","value":true}}}"#;
@@ -3382,12 +3480,64 @@ mod tests {
         let smuggled = r#"{"version":1,"request_id":"settings-10","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":"none"}}}"#;
         // An unknown csp mode parses the wire shape but fails validation.
         let hostile_mode = r#"{"version":1,"request_id":"settings-11","command":{"type":"settings_set","payload":{"key":"csp","value":"none; script-src *"}}}"#;
+        // An unknown channel parses the wire shape but fails validation;
+        // a channel string through the csp key (and vice versa) is refused
+        // by the key-owned variant pairing.
+        let hostile_channel = r#"{"version":1,"request_id":"settings-12","command":{"type":"settings_set","payload":{"key":"channel","value":"beta"}}}"#;
+        let crossed_csp = r#"{"version":1,"request_id":"settings-13","command":{"type":"settings_set","payload":{"key":"channel","value":"strict"}}}"#;
+        let crossed_channel = r#"{"version":1,"request_id":"settings-14","command":{"type":"settings_set","payload":{"key":"csp","value":"canary"}}}"#;
         assert!(parse_bridge_message(unknown).is_err());
         assert!(parse_bridge_message(tray).is_err());
         assert!(parse_bridge_message(proxy).is_err());
         assert!(parse_bridge_message(icon).is_err());
         assert!(parse_bridge_message(smuggled).is_err());
         assert!(parse_bridge_message(hostile_mode).is_err());
+        assert!(parse_bridge_message(hostile_channel).is_err());
+        assert!(parse_bridge_message(crossed_csp).is_err());
+        assert!(parse_bridge_message(crossed_channel).is_err());
+    }
+
+    #[test]
+    fn accepts_diagnostics_and_mod_cache_commands_without_parameters() {
+        // Both new capabilities are parameter-free reads/wipes of
+        // host-owned state: any renderer-supplied member is rejected.
+        for (wire, request_id) in [
+            ("diagnostics_get_info", "diag-1"),
+            ("mod_clear_cache", "modcache-1"),
+        ] {
+            let message = format!(
+                "{{\"version\":1,\"request_id\":\"{request_id}\",\"command\":{{\"type\":\"{wire}\",\"payload\":{{}}}}}}"
+            );
+            let parsed = parse_bridge_message(&message);
+            assert!(parsed.is_ok(), "{wire} must parse: {parsed:?}");
+            let command = match parsed.unwrap() {
+                BridgeMessage::Request(request) => request.command,
+                BridgeMessage::Event(_) => panic!("{wire} must parse as a request"),
+            };
+            let expected = match wire {
+                "diagnostics_get_info" => matches!(command, BridgeCommand::DiagnosticsGetInfo(_)),
+                "mod_clear_cache" => matches!(command, BridgeCommand::ModClearCache(_)),
+                _ => unreachable!(),
+            };
+            assert!(expected, "{wire} must dispatch to its own typed variant");
+        }
+        for payload in [
+            r#"{"key":"mods"}"#,
+            r#"{"mod_id":"vencord"}"#,
+            r#"{"path":"C:\\secret"}"#,
+            r#"{"detail":"full"}"#,
+            r#"{"targets":["vencord.js"]}"#,
+        ] {
+            for wire in ["diagnostics_get_info", "mod_clear_cache"] {
+                let message = format!(
+                    "{{\"version\":1,\"request_id\":\"x\",\"command\":{{\"type\":\"{wire}\",\"payload\":{payload}}}}}"
+                );
+                assert!(
+                    parse_bridge_message(&message).is_err(),
+                    "{wire} with {payload} must be rejected"
+                );
+            }
+        }
     }
 
     #[test]

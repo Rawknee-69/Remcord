@@ -17,6 +17,8 @@ import { matchesSettingsQuery, SearchableSetting, SettingsSearchProvider } from 
 import { SupportBanner } from "../components/SupportBanner.jsx";
 import { TextBoxItem } from "../components/TextBoxItem.jsx";
 import {
+    clearNativeModCache,
+    copyNativeDiagnostics,
     isMinWindowsVersion,
     isNativeSettingsSetAvailable,
     isNativeWebView,
@@ -1164,13 +1166,19 @@ export function SettingsPage() {
                     <SearchableSetting keywords={[t["settings-copyDebugInfo"], "debug"]}>
                         <Button
                             size={ButtonSizes.MAX}
-                            disabled={isNativeWebView()}
-                            title={
-                                isNativeWebView()
-                                    ? (t["settings-nativeUnsupported"] ?? "Not available in the native Remcord app")
-                                    : undefined
-                            }
-                            onClick={window.remcord.settings.copyDebugInfo}
+                            onClick={() => {
+                                // Native WebView2 copies the host-owned
+                                // diagnostics readout via navigator.clipboard;
+                                // Electron keeps the original clipboard dump.
+                                if (isNativeWebView()) {
+                                    void copyNativeDiagnostics("debug").then((ok) => {
+                                        if (!ok)
+                                            console.warn("[Remcord] Could not copy debug info in the native shell.");
+                                    });
+                                } else {
+                                    window.remcord.settings.copyDebugInfo();
+                                }
+                            }}
                         >
                             {t["settings-copyDebugInfo"]}
                         </Button>
@@ -1178,13 +1186,19 @@ export function SettingsPage() {
                     <SearchableSetting keywords={[t["settings-copyGPUInfo"], "GPU"]}>
                         <Button
                             size={ButtonSizes.MAX}
-                            disabled={isNativeWebView()}
-                            title={
-                                isNativeWebView()
-                                    ? (t["settings-nativeUnsupported"] ?? "Not available in the native Remcord app")
-                                    : undefined
-                            }
-                            onClick={window.remcord.settings.copyGPUInfo}
+                            onClick={() => {
+                                // Native WebView2 reports the graphics stack
+                                // (WebView2 Runtime version — WebView2 exposes
+                                // no device inventory to copy); Electron keeps
+                                // the complete GPU dump.
+                                if (isNativeWebView()) {
+                                    void copyNativeDiagnostics("gpu").then((ok) => {
+                                        if (!ok) console.warn("[Remcord] Could not copy GPU info in the native shell.");
+                                    });
+                                } else {
+                                    window.remcord.settings.copyGPUInfo();
+                                }
+                            }}
                         >
                             {t["settings-copyGPUInfo"]}
                         </Button>
@@ -1220,13 +1234,21 @@ export function SettingsPage() {
                     <SearchableSetting keywords={[t["settings-clearClientModCache"], "cache"]}>
                         <Button
                             size={ButtonSizes.MAX}
-                            disabled={isNativeWebView()}
-                            title={
-                                isNativeWebView()
-                                    ? (t["settings-nativeUnsupported"] ?? "Not available in the native Remcord app")
-                                    : undefined
-                            }
-                            onClick={() => setConfig("modCache", {} as Settings["modCache"])}
+                            onClick={() => {
+                                // Native WebView2 wipes the host-downloaded
+                                // bundle caches and resets the stored modCache
+                                // map (Electron parity for the map); Electron
+                                // keeps the original setConfig reset.
+                                if (isNativeWebView()) {
+                                    void clearNativeModCache().catch(() =>
+                                        console.warn(
+                                            "[Remcord] Could not clear the client-mod cache in the native shell.",
+                                        ),
+                                    );
+                                } else {
+                                    setConfig("modCache", {} as Settings["modCache"]);
+                                }
+                            }}
                         >
                             {t["settings-clearClientModCache"]}
                         </Button>

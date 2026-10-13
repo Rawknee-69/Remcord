@@ -40,12 +40,11 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use webview2_com::PermissionRequestedEventHandler;
 use windows::core::{Interface, BOOL, PWSTR};
 
-/// The single allowed origin. Extended only with a traced consumer behind
-/// the addition; never `*.discord.com` in this milestone.
-pub const TRUSTED_PERMISSION_ORIGIN: &str = "https://discord.com";
-
 /// Policy outcome. There is no "default": every handled request gets an
 /// explicit ALLOW or DENY, never WebView2 DEFAULT (which may prompt).
+/// Allowed origins are exactly the three release-channel entry points
+/// (stable/canary/ptb, see `crate::channel::ENTRY_HOSTS`); never
+/// `*.discord.com`. Matched by [`is_trusted_origin`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
@@ -61,26 +60,22 @@ impl Decision {
     }
 }
 
-/// Strict origin check against [`TRUSTED_PERMISSION_ORIGIN`]: `https`
-/// scheme, exact host `discord.com` (case-insensitive, hosts are
-/// case-insensitive per RFC), no port (an explicitly written port — even
-/// `:443` — denies), no userinfo, no opaque origin, no `about:blank`, no
-/// subdomains. Anything else denies.
+/// Strict origin check against [`TRUSTED_PERMISSION_ORIGINS`]: `https`
+/// scheme, exact entry host (`discord.com`, `canary.discord.com`, or
+/// `ptb.discord.com`, case-insensitive), no port (an explicitly written
+/// port — even `:443` — denies), no userinfo, no opaque origin, no
+/// `about:blank`, no other subdomains. Anything else denies.
 pub fn is_trusted_origin(uri: &str) -> bool {
-    let allow = match url::Url::parse(TRUSTED_PERMISSION_ORIGIN) {
-        Ok(allow) => allow,
-        Err(_) => return false,
-    };
     let parsed = match url::Url::parse(uri) {
         Ok(parsed) => parsed,
         Err(_) => return false,
     };
-    if parsed.scheme() != allow.scheme() {
+    if parsed.scheme() != "https" {
         return false;
     }
-    let hosts_match = match (parsed.host_str(), allow.host_str()) {
-        (Some(candidate), Some(allowlisted)) => candidate.eq_ignore_ascii_case(allowlisted),
-        _ => false,
+    let hosts_match = match parsed.host_str() {
+        Some(candidate) => crate::channel::is_entry_host(candidate),
+        None => false,
     };
     if !hosts_match {
         return false;
@@ -360,11 +355,29 @@ mod tests {
     }
 
     #[test]
-    fn trusted_origin_accepts_exact_form_only() {
-        assert!(is_trusted_origin("https://discord.com"));
-        assert!(is_trusted_origin("https://discord.com/"));
-        assert!(is_trusted_origin("https://discord.com/app"));
-        assert!(is_trusted_origin("HTTPS://DISCORD.COM"));
+    fn trusted_origin_accepts_exact_entry_forms_only() {
+        // The three entry origins, and only they (see
+        // `crate::channel::ENTRY_HOSTS` for the closed host list).
+        for origin in [
+            "https://discord.com",
+            "https://discord.com/",
+            "https://discord.com/app",
+            "HTTPS://DISCORD.COM",
+            "https://canary.discord.com",
+            "https://canary.discord.com/app",
+            "https://ptb.discord.com",
+            "https://ptb.discord.com/app",
+        ] {
+            assert!(is_trusted_origin(origin), "origin {origin:?} trusted");
+        }
+        for origin in [
+            "https://canary.discord.com:443",
+            "https://user@canary.discord.com",
+            "https://ptb.discord.com.evil.com",
+            "https://stable.discord.com",
+        ] {
+            assert!(!is_trusted_origin(origin), "origin {origin:?} untrusted");
+        }
     }
 
     #[test]

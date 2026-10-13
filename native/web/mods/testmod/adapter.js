@@ -5,8 +5,14 @@
     // Synthetic second consumer of the shared mod substrate. It proves the
     // factory is not Vencord-specific without loading Shelter or Equicord.
     // This file is never included in the native document-start script, never
-    // touches Discord UI, and never submits account state.
-    if (window.location.origin !== "https://discord.com") return;
+    // touches Discord UI, and never submits account state. Same three-entry
+    // origin gate as the shipped adapters.
+    if (
+        window.location.origin !== "https://discord.com" &&
+        window.location.origin !== "https://canary.discord.com" &&
+        window.location.origin !== "https://ptb.discord.com"
+    )
+        return;
     const substrate = window.__remcordNativeModSubstrate;
     if (!substrate) return;
 

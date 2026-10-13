@@ -11,7 +11,16 @@
     const textEncoder = new TextEncoder();
     let sequence = 0;
 
-    if (window.location.origin !== "https://discord.com") return;
+    // Entry origins for the three release channels (stable/canary/ptb):
+    // the channel setting selects which one the host navigates to, and the
+    // facade must initialize on any of them. Exact match only — no
+    // subdomains, no other hosts.
+    if (
+        window.location.origin !== "https://discord.com" &&
+        window.location.origin !== "https://canary.discord.com" &&
+        window.location.origin !== "https://ptb.discord.com"
+    )
+        return;
 
     function freezeDeep(value) {
         if (value && typeof value === "object" && !Object.isFrozen(value)) {
@@ -266,6 +275,8 @@
         "show_experimental_plugin_menu",
         "extended_plugin_abilities",
         "csp",
+        "quick_css",
+        "channel",
     ];
     // Exact wire types the host echoes in `window_ack` responses. The echo
     // must be one of these; an acknowledgement for any other (or missing)
@@ -287,6 +298,10 @@
     // Exact CSP modes the host implements (Electron csp.ts parity). The
     // renderer cannot invent a policy through this capability.
     const SETTINGS_VALID_CSP_MODES = ["none", "strict", "vanilla"];
+    // Exact release channels the host implements (redirect.html parity).
+    // The renderer cannot invent a channel or smuggle a URL through this
+    // capability.
+    const SETTINGS_VALID_CHANNELS = ["stable", "canary", "ptb"];
 
     function setSetting(key, value, timeoutMs = 5000) {
         requireCapability("settings.set");
@@ -304,6 +319,10 @@
         } else if (key === "csp") {
             if (typeof value !== "string" || !SETTINGS_VALID_CSP_MODES.includes(value)) {
                 return Promise.reject(new TypeError("value must be one of the supported CSP modes"));
+            }
+        } else if (key === "channel") {
+            if (typeof value !== "string" || !SETTINGS_VALID_CHANNELS.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported release channels"));
             }
         } else if (typeof value !== "boolean") {
             return Promise.reject(new TypeError("value must be a boolean for this key"));
@@ -326,9 +345,13 @@
                       ? typeof payload.value === "string" && SETTINGS_VALID_CSP_MODES.includes(payload.value)
                           ? payload.value
                           : undefined
-                      : typeof payload.value === "boolean"
-                        ? payload.value
-                        : undefined;
+                      : key === "channel"
+                        ? typeof payload.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
+                            ? payload.value
+                            : undefined
+                        : typeof payload.value === "boolean"
+                          ? payload.value
+                          : undefined;
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -349,6 +372,30 @@
             return Promise.reject(new TypeError("timeout must be a positive finite number"));
         }
         return request({ type: "app_get_version", payload: {} }, timeoutMs).then((payload) => payload.version);
+    }
+
+    // Read-only host facts for the debug/GPU copy actions: app version,
+    // WebView2 Runtime version, profile-kind label, channel, csp, mod ids.
+    // Fixed-vocabulary strings plus the filtered id list only — no paths,
+    // tokens, or file contents. The caller performs the clipboard write
+    // with `navigator.clipboard`; there is no host clipboard surface.
+    function getDiagnosticsInfo(timeoutMs = 5000) {
+        requireCapability("diagnostics.get_info");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "diagnostics_get_info", payload: {} }, timeoutMs);
+    }
+
+    // Client-mod cache wipe: the five host-managed downloaded bundle
+    // caches plus the stored `modCache` map reset. Parameter-free by
+    // protocol — user-owned custom bundles can never be selected.
+    function clearModCache(timeoutMs = 30000) {
+        requireCapability("mod.clear_cache");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "mod_clear_cache", payload: {} }, timeoutMs);
     }
 
     const PLUGIN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -426,6 +473,10 @@
     // Closed location enum for the three host-controlled roots. The
     // renderer selects a variant only; the host builds the directory.
     const FOLDER_LOCATIONS = ["storage", "themes", "plugins"];
+    // Host-managed downloaded bundle caches the `mod.clear_cache`
+    // wipe may delete. User-owned custom.js/custom.css are deliberately
+    // absent: they can never be selected for deletion.
+    const BUNDLE_MOD_CACHE_NAMES = ["vencord.js", "vencord.css", "equicord.js", "equicord.css", "shelter.js"];
     // Same rule the host enforces for theme ids ([A-Za-z0-9._-]{1,64},
     // never "." or ".."); separators are impossible by charset.
     const THEME_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
@@ -982,7 +1033,9 @@
                       payload.value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
                     : payload?.key === "csp"
                       ? typeof payload?.value === "string" && SETTINGS_VALID_CSP_MODES.includes(payload.value)
-                      : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
+                      : payload?.key === "channel"
+                        ? typeof payload?.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
+                        : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -1018,6 +1071,54 @@
                 textEncoder.encode(payload.version).length > 64
             ) {
                 request.reject(new Error("Native app version response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "diagnostics_info") {
+            const payload = response.payload.payload;
+            // Host-owned facts only: fixed-vocabulary strings plus the
+            // filtered mod-id list. No paths, tokens, or file contents may
+            // ride along.
+            const modsValid =
+                Array.isArray(payload?.mods) &&
+                payload.mods.length <= MAX_SETTINGS_MODS_ENTRIES &&
+                payload.mods.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry));
+            if (
+                !payload ||
+                Object.keys(payload).length !== 6 ||
+                typeof payload.app_version !== "string" ||
+                payload.app_version.length === 0 ||
+                textEncoder.encode(payload.app_version).length > 64 ||
+                typeof payload.webview2_runtime !== "string" ||
+                payload.webview2_runtime.length === 0 ||
+                textEncoder.encode(payload.webview2_runtime).length > 64 ||
+                typeof payload.profile_kind !== "string" ||
+                !["dev", "release", "override"].includes(payload.profile_kind) ||
+                typeof payload.channel !== "string" ||
+                !SETTINGS_VALID_CHANNELS.includes(payload.channel) ||
+                typeof payload.csp !== "string" ||
+                !SETTINGS_VALID_CSP_MODES.includes(payload.csp) ||
+                !modsValid
+            ) {
+                request.reject(new Error("Native diagnostics response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "mod_cache_cleared") {
+            const payload = response.payload.payload;
+            // Fixed allowlisted cache names plus the map-reset flag only.
+            // No paths, sizes, or contents may ride along.
+            const clearedValid =
+                Array.isArray(payload?.cleared) &&
+                payload.cleared.length <= 5 &&
+                payload.cleared.every((entry) => typeof entry === "string" && BUNDLE_MOD_CACHE_NAMES.includes(entry));
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                !clearedValid ||
+                typeof payload.mod_cache_cleared !== "boolean"
+            ) {
+                request.reject(new Error("Native mod cache response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -1626,6 +1727,12 @@
         read: readQuickCss,
         write: writeQuickCss,
     });
+    // Diagnostics readout only: host-owned facts in, no parameters out.
+    // The caller performs the clipboard write with `navigator.clipboard`.
+    const diagnostics = Object.freeze({ getInfo: getDiagnosticsInfo });
+    // Client-mod cache wipe only: an exact empty payload in, the fixed
+    // allowlist outcome out. User-owned bundles can never be selected.
+    const mod = Object.freeze({ clearCache: clearModCache });
 
     Object.defineProperty(window, "remcord", {
         configurable: false,
@@ -1658,6 +1765,8 @@
             folders,
             themes: themesShim,
             quickcss: quickcssShim,
+            diagnostics,
+            mod,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,
             restart: bootRestart,

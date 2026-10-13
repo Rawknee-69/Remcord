@@ -6,7 +6,15 @@
     // Discord can delete `window.localStorage` during SPA initialization; the
     // capture below keeps standard web storage reachable through
     // `Window.prototype` so mod bundles keep working on fast reloads.
-    if (location.origin !== "https://discord.com") return;
+    // Entry origins for the three release channels (stable/canary/ptb):
+    // the channel setting selects which one the host navigates to, and this
+    // script must initialize on any of them. Exact match only.
+    if (
+        location.origin !== "https://discord.com" &&
+        location.origin !== "https://canary.discord.com" &&
+        location.origin !== "https://ptb.discord.com"
+    )
+        return;
     const describe = (descriptor) => {
         if (!descriptor) return "missing";
         if (Object.hasOwn(descriptor, "value")) return `value:${typeof descriptor.value}`;

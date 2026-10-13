@@ -717,6 +717,31 @@ test("settings.set sends key plus bounded value and resolves the key echo", asyn
     assert.deepEqual(JSON.parse(JSON.stringify(await cspPending)), { key: "csp", value: "strict" });
 });
 
+test("settings.set carries the channel and quick_css keys end to end", async () => {
+    const { window } = createSettingsSetRuntime();
+    const channelPending = window.remcord.settings.set("channel", "canary");
+    const channelMessage = window.messages.find((entry) => entry.command?.type === "settings_set");
+    assert.ok(channelMessage);
+    assert.deepEqual(channelMessage.command, {
+        type: "settings_set",
+        payload: { key: "channel", value: "canary" },
+    });
+    respondSettingsSet(window, channelMessage, "channel", "canary");
+    assert.deepEqual(JSON.parse(JSON.stringify(await channelPending)), { key: "channel", value: "canary" });
+
+    const quickCssPending = window.remcord.settings.set("quick_css", false);
+    const quickCssMessage = window.messages.find(
+        (entry) => entry.command?.type === "settings_set" && entry.request_id !== channelMessage.request_id,
+    );
+    assert.ok(quickCssMessage);
+    assert.deepEqual(quickCssMessage.command, {
+        type: "settings_set",
+        payload: { key: "quick_css", value: false },
+    });
+    respondSettingsSet(window, quickCssMessage, "quick_css", false);
+    assert.deepEqual(JSON.parse(JSON.stringify(await quickCssPending)), { key: "quick_css", value: false });
+});
+
 test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createSettingsSetRuntime(["bridge.ping", "settings.get_config"]);
     assert.equal(window.remcord.native.supports("settings.set"), false);
@@ -744,6 +769,17 @@ test("settings.set rejects unknown keys and mismatched types without sending", a
     await assert.rejects(window.remcord.settings.set("csp", ["none"]), /CSP modes/);
     await assert.rejects(window.remcord.settings.set("csp", "permissive"), /CSP modes/);
     await assert.rejects(window.remcord.settings.set("csp", "none; script-src *"), /CSP modes/);
+    // Channel values pair only with the channel key (and only exact modes
+    // there); a channel string through the csp key, or vice versa, is
+    // refused, and bool/mods keys refuse channel strings.
+    await assert.rejects(window.remcord.settings.set("channel", "beta"), /release channels/);
+    await assert.rejects(window.remcord.settings.set("channel", "canary.discord.com"), /release channels/);
+    await assert.rejects(window.remcord.settings.set("channel", true), /release channels/);
+    await assert.rejects(window.remcord.settings.set("channel", ["stable"]), /release channels/);
+    await assert.rejects(window.remcord.settings.set("csp", "canary"), /CSP modes/);
+    await assert.rejects(window.remcord.settings.set("channel", "strict"), /release channels/);
+    await assert.rejects(window.remcord.settings.set("mods", "canary"), /known mod ids/);
+    await assert.rejects(window.remcord.settings.set("support_banner_dismissed", "stable"), /boolean/);
     await assert.rejects(window.remcord.settings.set("mods", "none"), /known mod ids/);
     await assert.rejects(window.remcord.settings.set("support_banner_dismissed", "none"), /boolean/);
     // Strings are never valid values; unknown mod ids are refused.
@@ -896,10 +932,26 @@ test("disposes pending requests on navigation and initializes fresh document sta
     assert.equal(firstDocument.window.remcord === nextDocument.window.remcord, false);
 });
 
-test("does not expose the facade outside the exact trusted origin", () => {
-    const { window } = createRuntime("https://canary.discord.com");
-    assert.equal(window.remcord, undefined);
-    assert.equal(window.messages.length, 0);
+test("does not expose the facade outside the entry origins", () => {
+    for (const origin of [
+        "https://evil.discord.com",
+        "https://deep.sub.discord.com",
+        "https://discord.com.attacker.invalid",
+        "https://example.com",
+        "http://discord.com",
+    ]) {
+        const { window } = createRuntime(origin);
+        assert.equal(window.remcord, undefined, origin);
+        assert.equal(window.messages.length, 0, origin);
+    }
+});
+
+test("exposes the facade on every release-channel entry origin", () => {
+    for (const origin of ["https://discord.com", "https://canary.discord.com", "https://ptb.discord.com"]) {
+        const { window } = createRuntime(origin, ["bridge.ping"]);
+        assert.ok(window.remcord, origin);
+        assert.equal(typeof window.remcord.native.ping, "function", origin);
+    }
 });
 
 test("reports renderer exception stacks and source locations to the native log", () => {
@@ -1610,9 +1662,10 @@ for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
         );
     });
 
-    test(`${modId} does not expose the facade or request anything off the trusted origin`, () => {
+    test(`${modId} does not expose the facade or request anything off the entry origins`, () => {
         for (const origin of [
-            "https://canary.discord.com",
+            "https://evil.discord.com",
+            "https://deep.sub.discord.com",
             "https://example.com",
             "https://discord.com.attacker.invalid",
         ]) {
@@ -1623,14 +1676,29 @@ for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
         }
     });
 
+    test(`${modId} initializes on every release-channel entry origin`, () => {
+        for (const origin of ["https://discord.com", "https://canary.discord.com", "https://ptb.discord.com"]) {
+            const { window, context } = createRuntime(origin);
+            vm.runInContext(adapter, context);
+            assert.ok(
+                window.messages.some((message) => message.command?.type === "mod_get_bundle"),
+                `${modId} on ${origin}`,
+            );
+        }
+    });
+
     test(`${modId} adapter carries no artifact URL, path, source, or eval surface`, () => {
         // Assertions run on executable/configuration content only: comments
         // legitimately document what the adapter deliberately omits.
         const code = stripComments(adapter);
-        // The ONLY URL an adapter may name is the exact trusted Discord origin
-        // it gates on. No bundle source, no upstream host, no cache file.
+        // The ONLY URLs an adapter may name are the three entry origins it
+        // gates on. No bundle source, no upstream host, no cache file.
         const urls = code.match(/https?:\/\/[^\s"'`)]+/g) ?? [];
-        assert.deepEqual(urls, ["https://discord.com"], `${modId} names only the origin gate`);
+        assert.deepEqual(
+            urls,
+            ["https://discord.com", "https://canary.discord.com", "https://ptb.discord.com"],
+            `${modId} names only the entry-origin gate`,
+        );
         assert.doesNotMatch(code, /shelter-builds|githubusercontent|github\.com|releases\/download/);
         assert.doesNotMatch(code, /\.css["'`]/, "an adapter names no cache file");
         assert.doesNotMatch(code, /readFile|writeFile|loadScript|executeSource|executeScript/);
@@ -3937,6 +4005,184 @@ test("quickcss.write rejects malformed write responses", async () => {
 
 test("quickcss editor requests stay inert off the trusted origin", async () => {
     const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "quickcss.read", "quickcss.write"]);
+    assert.equal(window.remcord, undefined);
+});
+
+function createDiagnosticsRuntime(capabilities = ["bridge.ping", "diagnostics.get_info", "mod.clear_cache"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const DIAGNOSTICS_FIXTURE = {
+    app_version: "1.3.0",
+    webview2_runtime: "154.0.4258.62",
+    profile_kind: "release",
+    channel: "stable",
+    csp: "none",
+    mods: ["vencord"],
+};
+
+function respondDiagnostics(window, request, payload = DIAGNOSTICS_FIXTURE) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "diagnostics_info", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondModCacheCleared(window, request, payload = { cleared: ["vencord.js"], mod_cache_cleared: true }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "mod_cache_cleared", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes namespaced diagnostics and mod cache capabilities and no generic surface", () => {
+    const { window } = createDiagnosticsRuntime();
+    assert.equal(typeof window.remcord.diagnostics.getInfo, "function");
+    assert.equal(typeof window.remcord.mod.clearCache, "function");
+    assert.equal(Object.isFrozen(window.remcord.diagnostics), true);
+    assert.equal(Object.isFrozen(window.remcord.mod), true);
+    assert.equal(window.remcord.native.supports("diagnostics.get_info"), true);
+    assert.equal(window.remcord.native.supports("mod.clear_cache"), true);
+    // Exactly one member each: no clipboard, delete, or selector surface.
+    assert.deepEqual(Object.keys(window.remcord.diagnostics).sort(), ["getInfo"]);
+    assert.deepEqual(Object.keys(window.remcord.mod).sort(), ["clearCache"]);
+    assert.equal(window.remcord.clipboard, undefined);
+    assert.equal(window.remcord.fs, undefined);
+});
+
+test("diagnostics.getInfo sends an exact empty payload and resolves the readout", async () => {
+    const { window } = createDiagnosticsRuntime();
+    const pending = window.remcord.diagnostics.getInfo();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "diagnostics_get_info");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "diagnostics_get_info", payload: {} });
+    respondDiagnostics(window, message);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), DIAGNOSTICS_FIXTURE);
+});
+
+test("diagnostics.getInfo throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createDiagnosticsRuntime(["bridge.ping", "mod.clear_cache"]);
+    assert.equal(window.remcord.native.supports("diagnostics.get_info"), false);
+    assert.throws(
+        () => window.remcord.diagnostics.getInfo(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "diagnostics_get_info"),
+        false,
+    );
+});
+
+test("diagnostics.getInfo rejects malformed readouts", async () => {
+    for (const payload of [
+        { ...DIAGNOSTICS_FIXTURE, app_version: "" },
+        { ...DIAGNOSTICS_FIXTURE, webview2_runtime: "x".repeat(65) },
+        { ...DIAGNOSTICS_FIXTURE, profile_kind: "roaming" },
+        { ...DIAGNOSTICS_FIXTURE, channel: "beta" },
+        { ...DIAGNOSTICS_FIXTURE, csp: "permissive" },
+        { ...DIAGNOSTICS_FIXTURE, mods: ["Vencord"] },
+        { ...DIAGNOSTICS_FIXTURE, mods: ["vencord", "vencord", "shelter", "equicord", "custom", "x", "y", "z", "w"] },
+        { ...DIAGNOSTICS_FIXTURE, profile_path: "C:\\secret" },
+        { ...DIAGNOSTICS_FIXTURE, token: "abc" },
+        { app_version: "1.3.0" },
+    ]) {
+        const runtime = createDiagnosticsRuntime();
+        const pending = runtime.window.remcord.diagnostics.getInfo();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "diagnostics_get_info");
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: true,
+                    payload: { type: "diagnostics_info", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /diagnostics response schema is invalid/);
+    }
+});
+
+test("mod.clearCache sends an exact empty payload and resolves the outcome", async () => {
+    const { window } = createDiagnosticsRuntime();
+    const pending = window.remcord.mod.clearCache();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "mod_clear_cache");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "mod_clear_cache", payload: {} });
+    respondModCacheCleared(window, message);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        cleared: ["vencord.js"],
+        mod_cache_cleared: true,
+    });
+});
+
+test("mod.clearCache throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createDiagnosticsRuntime(["bridge.ping", "diagnostics.get_info"]);
+    assert.equal(window.remcord.native.supports("mod.clear_cache"), false);
+    assert.throws(
+        () => window.remcord.mod.clearCache(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "mod_clear_cache"),
+        false,
+    );
+});
+
+test("mod.clearCache rejects malformed outcomes", async () => {
+    for (const payload of [
+        { cleared: ["custom.js"], mod_cache_cleared: true },
+        { cleared: ["../escape"], mod_cache_cleared: false },
+        { cleared: "vencord.js", mod_cache_cleared: true },
+        {
+            cleared: ["vencord.js", "vencord.css", "equicord.js", "equicord.css", "shelter.js", "extra.js"],
+            mod_cache_cleared: true,
+        },
+        { cleared: [], mod_cache_cleared: "yes" },
+        { cleared: [] },
+        { cleared: [], mod_cache_cleared: false, path: "C:\\x" },
+    ]) {
+        const runtime = createDiagnosticsRuntime();
+        const pending = runtime.window.remcord.mod.clearCache();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "mod_clear_cache");
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: true,
+                    payload: { type: "mod_cache_cleared", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /mod cache response schema is invalid/);
+    }
+});
+
+test("diagnostics and mod cache requests stay inert off the trusted origin", async () => {
+    const { window } = createRuntime("https://attacker.invalid", [
+        "bridge.ping",
+        "diagnostics.get_info",
+        "mod.clear_cache",
+    ]);
     assert.equal(window.remcord, undefined);
 });
 

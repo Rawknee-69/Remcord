@@ -161,6 +161,7 @@ export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
     "blockPowerSavingInVoiceChat",
     "csp",
     "quickCss",
+    "channel",
 ];
 
 /** True when `key` has a native persistence path (closed allowlist). */
@@ -196,7 +197,8 @@ function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], s
         key === "showExperimentalPluginMenu" ||
         key === "extendedPluginAbilities" ||
         key === "csp" ||
-        key === "quickCss"
+        key === "quickCss" ||
+        key === "channel"
     ) {
         const previous = store.settings[key];
         (store.settings as Record<string, unknown>)[key as string] = value;
@@ -262,7 +264,8 @@ export type NativeSettingsSetKey =
     | "showExperimentalPluginMenu"
     | "extendedPluginAbilities"
     | "csp"
-    | "quickCss";
+    | "quickCss"
+    | "channel";
 
 /** Wire keys for the closed native `settings.set` capability. */
 const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
@@ -272,6 +275,7 @@ const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
     extendedPluginAbilities: "extended_plugin_abilities",
     csp: "csp",
     quickCss: "quick_css",
+    channel: "channel",
 };
 
 /** Minimal native `settings.set` shape (closed allowlist, key echo + value). */
@@ -385,6 +389,148 @@ export function openThemeFolderNative(id: string): boolean {
         .openTheme(id)
         .catch(() => console.warn("[Remcord] Could not open the theme folder in the native shell."));
     return true;
+}
+
+/** Host-owned diagnostics facts (read-only `diagnostics.get_info` contract). */
+export interface NativeDiagnosticsInfo {
+    app_version: string;
+    webview2_runtime: string;
+    profile_kind: string;
+    channel: string;
+    csp: string;
+    mods: string[];
+}
+
+/** Outcome of the native client-mod cache wipe (`mod.clear_cache`). */
+export interface NativeModCacheOutcome {
+    cleared: string[];
+    mod_cache_cleared: boolean;
+}
+
+interface NativeDiagnosticsNamespace {
+    getInfo: () => Promise<NativeDiagnosticsInfo>;
+}
+
+interface NativeModNamespace {
+    clearCache: () => Promise<NativeModCacheOutcome>;
+}
+
+function nativeDiagnostics(): NativeDiagnosticsNamespace | undefined {
+    if (!isNativeWebView()) return undefined;
+    const diagnostics = (window.remcord as unknown as { diagnostics?: NativeDiagnosticsNamespace }).diagnostics;
+    if (!diagnostics || typeof diagnostics.getInfo !== "function") return undefined;
+    return diagnostics;
+}
+
+function nativeMod(): NativeModNamespace | undefined {
+    if (!isNativeWebView()) return undefined;
+    const mod = (window.remcord as unknown as { mod?: NativeModNamespace }).mod;
+    if (!mod || typeof mod.clearCache !== "function") return undefined;
+    return mod;
+}
+
+/** True when the native diagnostics readout is the active path. */
+export function isNativeDiagnosticsAvailable(): boolean {
+    return nativeDiagnostics() !== undefined;
+}
+
+/** True when the native client-mod cache wipe is the active path. */
+export function isNativeModCacheAvailable(): boolean {
+    return nativeMod() !== undefined;
+}
+
+function isDiagnosticsInfo(value: unknown): value is NativeDiagnosticsInfo {
+    if (!isRecord(value)) return false;
+    return (
+        typeof value.app_version === "string" &&
+        typeof value.webview2_runtime === "string" &&
+        typeof value.profile_kind === "string" &&
+        typeof value.channel === "string" &&
+        typeof value.csp === "string" &&
+        Array.isArray(value.mods) &&
+        value.mods.every((entry) => typeof entry === "string")
+    );
+}
+
+/**
+ * Native diagnostics readout. Shape-checked renderer-side (the host owns
+ * value validation; this only guards the UI against malformed bridge
+ * data). Rejects with a path-free Error on host failure or misshapen data.
+ */
+export async function getNativeDiagnosticsInfo(): Promise<NativeDiagnosticsInfo> {
+    const namespace = nativeDiagnostics();
+    if (!namespace) throw new Error("[Remcord] Native diagnostics are unavailable.");
+    let raw: unknown;
+    try {
+        raw = await namespace.getInfo();
+    } catch {
+        throw new Error("[Remcord] Could not load diagnostics in the native shell.");
+    }
+    if (!isDiagnosticsInfo(raw)) throw new Error("[Remcord] Could not load diagnostics in the native shell.");
+    return raw;
+}
+
+/**
+ * Copies host diagnostics text to the clipboard through
+ * `navigator.clipboard` (renderer-side write — no host clipboard surface).
+ * Resolves `true` on success, `false` when the clipboard write or the host
+ * readout fails. Exactly one path per click: native readout, else Electron.
+ */
+export async function copyNativeDiagnostics(kind: "debug" | "gpu"): Promise<boolean> {
+    let text: string;
+    try {
+        const info = await getNativeDiagnosticsInfo();
+        text =
+            kind === "gpu"
+                ? [
+                      `Graphics stack: WebView2 Runtime ${info.webview2_runtime}`,
+                      `Renderer: WebView2 (Chromium, system default settings)`,
+                      `App: Remcord ${info.app_version} (profile: ${info.profile_kind}, channel: ${info.channel})`,
+                  ].join("\n")
+                : [
+                      `Remcord ${info.app_version} (native WebView2 app)`,
+                      `WebView2 Runtime: ${info.webview2_runtime}`,
+                      `Profile: ${info.profile_kind}`,
+                      `Channel: ${info.channel}`,
+                      `CSP: ${info.csp}`,
+                      `Mods: ${info.mods.length > 0 ? info.mods.join(", ") : "(none)"}`,
+                  ].join("\n");
+    } catch {
+        console.warn("[Remcord] Could not load diagnostics in the native shell.");
+        return false;
+    }
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch {
+        console.warn("[Remcord] Could not write diagnostics to the clipboard.");
+        return false;
+    }
+}
+
+/**
+ * Native client-mod cache wipe. The host deletes its downloaded bundle
+ * caches and resets the stored `modCache` map; user-owned custom bundles
+ * are never touched. Resolves the host outcome so the caller can report
+ * what was cleared; rejects with a path-free Error on host failure.
+ */
+export async function clearNativeModCache(): Promise<NativeModCacheOutcome> {
+    const namespace = nativeMod();
+    if (!namespace) throw new Error("[Remcord] Native mod cache clearing is unavailable.");
+    try {
+        const outcome = await namespace.clearCache();
+        if (
+            !isRecord(outcome) ||
+            !Array.isArray(outcome.cleared) ||
+            !outcome.cleared.every((entry) => typeof entry === "string") ||
+            typeof outcome.mod_cache_cleared !== "boolean"
+        ) {
+            throw new Error("invalid outcome");
+        }
+        return { cleared: [...outcome.cleared], mod_cache_cleared: outcome.mod_cache_cleared };
+    } catch {
+        throw new Error("[Remcord] Could not clear the client-mod cache in the native shell.");
+    }
 }
 
 /** Bounded display metadata for one native theme (Phase D Step 3d-1 list contract). */

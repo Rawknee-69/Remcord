@@ -2,14 +2,17 @@ mod app;
 mod backup;
 mod browser_recovery;
 mod bundles;
+mod channel;
 mod child_recovery;
 mod close_behavior;
 mod css_watch;
+mod diagnostics;
 mod downloads;
 mod environment_observer;
 mod folders;
 mod localization;
 mod main_webview;
+mod mod_cache;
 mod mod_substrate;
 mod navigation_completed;
 mod navigation_gate;
@@ -71,12 +74,13 @@ use protocol::{
     window_state_event_json, AppVersionResponse, BackupInspectedResponse,
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BridgeCommand,
     BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
-    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, FoldersOpenedResponse,
-    LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
-    PluginStorageWriteResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
-    SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
-    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
+    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, DiagnosticsInfoResponse,
+    FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse, ModCacheClearedResponse,
+    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, QuickCssReadResponse,
+    QuickCssWrittenResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
+    SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
+    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
+    PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -107,7 +111,6 @@ use wry::{
 #[cfg(target_os = "windows")]
 use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
 
-const DISCORD_URL: &str = "https://discord.com/app";
 /// Vencord as the first consumer of the shared mod substrate. Every bundle
 /// identity value lives in this descriptor; the substrate mechanics in
 /// `mod_substrate.rs` never name Vencord. Registering Shelter or Equicord
@@ -319,6 +322,8 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "themes.list",
         "quickcss.read",
         "quickcss.write",
+        "diagnostics.get_info",
+        "mod.clear_cache",
         "window.show",
         "window.hide",
         "window.minimize",
@@ -2777,10 +2782,19 @@ fn is_discord_uri(uri: &Uri) -> bool {
 }
 
 fn is_trusted_bridge_origin(uri: &Uri) -> bool {
+    // The three first-party entry hosts (stable/canary/ptb): the channel
+    // setting selects which one the host navigates to, and the bridge must
+    // initialize on any of them. Exact hosts only — navigation still permits
+    // the wider `*.discord.com` surface, but subdomains, lookalikes, ports,
+    // and userinfo never carry a trusted bridge (see the entry-host tests).
     is_discord_uri(uri)
-        && uri
-            .authority()
-            .is_some_and(|authority| authority.host().eq_ignore_ascii_case("discord.com"))
+        && uri.authority().is_some_and(|authority| {
+            // No explicit port (even :443) and no userinfo: both are
+            // rejected shapes, matching the permission origin gate.
+            authority.port_u16().is_none()
+                && !authority.as_str().contains('@')
+                && crate::channel::is_entry_host(authority.host())
+        })
 }
 
 fn is_allowed_navigation(url: &str) -> bool {
@@ -4605,6 +4619,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
     }
+    // Owned copy for the read-only diagnostics readout: the loader is
+    // queried once at boot, never per request.
+    let runtime_version: Option<String> = match &runtime_check {
+        webview_runtime::RuntimeCheck::Present { version } => Some(version.clone()),
+        webview_runtime::RuntimeCheck::Absent => None,
+    };
     // WebView2 environment with the remcord custom scheme registered (P0.2).
     // Created here — before the environment exists and before navigation —
     // and adopted by wry below. Fail-fast: without registration, remcord://
@@ -4916,17 +4936,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
-    let settings_mods = match load_settings(&profile_path) {
-        Ok(loaded) => loaded.snapshot.mods,
+    let (settings_mods, discord_channel) = match load_settings(&profile_path) {
+        Ok(loaded) => (loaded.snapshot.mods, loaded.snapshot.channel),
         Err(error) => {
             // Corrupt/unreadable settings fail closed to "no extra mods", the
             // same parity the Quick CSS enablement already uses.
             eprintln!(
                 "[Mod:Registry] mod enablement could not be resolved from settings; treating as none ({error})"
             );
-            Vec::new()
+            (Vec::new(), "stable".to_owned())
         }
     };
+    // Release-channel entry URL, resolved once per process from the same
+    // authoritative snapshot (restart-required model, redirect.html parity).
+    // Hand-edited or forward-compat values fail safe to stable.
+    let discord_url = channel::resolve_channel_url(&discord_channel);
+    println!("[Channel] channel={discord_channel} url={discord_url}");
     let mod_override = std::env::var(MOD_ADAPTER_OVERRIDE_ENV).ok();
     let active_mods = resolve_active_mods(&settings_mods, mod_override.as_deref());
     for descriptor in KNOWN_MODS {
@@ -5227,10 +5252,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // WebResourceRequested filters exist, so the first Discord document is
     // intercepted like every later one. `about:blank` has no CSP of its own
     // and the navigation handler allows only it plus HTTPS Discord hosts.
-    if let Err(error) = main_webview::navigate_to_discord(&webview, DISCORD_URL) {
+    if let Err(error) = main_webview::navigate_to_discord(&webview, discord_url) {
         return Err(error.into());
     }
-    println!("[Native] Initial navigation: {DISCORD_URL}");
+    println!("[Native] Initial navigation: {discord_url}");
     let mut smoke_reloads_remaining: u32 = std::env::var("REMCORD_NATIVE_SMOKE_RELOAD")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -5793,7 +5818,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     // 11. Re-run the initial Discord navigation (two-phase: about:blank -> Discord).
                     // The builder already navigated to about:blank; now navigate to Discord.
-                    if let Err(error) = main_webview::navigate_to_discord(&webview, DISCORD_URL) {
+                    if let Err(error) = main_webview::navigate_to_discord(&webview, discord_url) {
                         eprintln!("[BrowserRecovery] Initial Discord navigation failed: {error}");
                         browser_recovery.on_recreation_error();
                         println!("[BrowserRecovery] Recreation failed; parked. Manual restart required.");
@@ -7421,6 +7446,123 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         error: Some(BridgeError {
                                             code: "QUICKCSS_UNAVAILABLE",
                                             message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::DiagnosticsGetInfo(_) => {
+                            // Read-only facts for the debug/GPU copy actions:
+                            // compile-time app version, boot-time Runtime
+                            // version, profile-kind label (never a path),
+                            // validated channel/csp modes, and ValidMods-only
+                            // ids from the authoritative snapshot. A corrupt
+                            // snapshot fails closed like every other reader.
+                            let request_id = request.request_id;
+                            match load_settings(&profile_path) {
+                                Ok(loaded) => {
+                                    let info = diagnostics::collect_debug_info(
+                                        current_app_version(),
+                                        runtime_version.as_deref(),
+                                        resolved_profile.kind.as_str(),
+                                        &loaded.snapshot.channel,
+                                        &loaded.snapshot.csp,
+                                        &loaded.snapshot.mods,
+                                    );
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::DiagnosticsInfo(
+                                            DiagnosticsInfoResponse {
+                                                app_version: info.app_version,
+                                                webview2_runtime: info.webview2_runtime,
+                                                profile_kind: info.profile_kind,
+                                                channel: info.channel,
+                                                csp: info.csp,
+                                                mods: info.mods,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Diagnostics][Metrics] request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("[Diagnostics][DIAGNOSTICS_UNAVAILABLE] {error}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "DIAGNOSTICS_UNAVAILABLE",
+                                            message: error,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::ModClearCache(_) => {
+                            // Client-mod cache wipe: the five host-managed
+                            // downloaded bundle caches plus the stored
+                            // `modCache` map reset (Electron parity for the
+                            // map). User-owned custom bundles are never
+                            // touched; links are skipped, never followed.
+                            let request_id = request.request_id;
+                            match mod_cache::clear_mod_cache(&profile_path) {
+                                Ok(cleared) => {
+                                    let cleared_count = cleared.cleared.len();
+                                    let mod_cache_cleared = cleared.mod_cache_cleared;
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::ModCacheCleared(
+                                            ModCacheClearedResponse {
+                                                cleared: cleared.cleared,
+                                                mod_cache_cleared,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[ModCache][Metrics] cleared={cleared_count} mod_cache_cleared={mod_cache_cleared} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[ModCache][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
                                         }),
                                     };
                                     send_bridge_response(&webview, &response);
@@ -9583,23 +9725,42 @@ mod tests {
     }
 
     #[test]
-    fn bridge_origin_is_limited_to_stable_discord() {
-        assert!(is_trusted_bridge_origin(
-            &"https://discord.com/app".parse().unwrap()
-        ));
-        assert!(!is_trusted_bridge_origin(
-            &"https://canary.discord.com/app".parse().unwrap()
-        ));
-        assert!(!is_trusted_bridge_origin(
-            &"https://discord.com:443/app".parse().unwrap()
-        ));
-        assert!(!is_trusted_bridge_origin(
-            &"https://example.com/app".parse().unwrap()
-        ));
+    fn bridge_origin_trusts_exactly_the_three_entry_hosts() {
+        // The channel setting selects which entry host the app runs on, so
+        // the bridge must initialize on stable, canary, and ptb alike.
+        for url in [
+            "https://discord.com/app",
+            "https://canary.discord.com/app",
+            "https://ptb.discord.com/app",
+            "HTTPS://CANARY.DISCORD.COM/app",
+        ] {
+            assert!(
+                is_trusted_bridge_origin(&url.parse().unwrap()),
+                "{url} must be trusted"
+            );
+        }
+        // Everything else still denies: ports, userinfo, lookalikes,
+        // non-entry subdomains, other schemes, other hosts.
+        for url in [
+            "https://canary.discord.com:443/app",
+            "https://discord.com:443/app",
+            "https://evil@discord.com/app",
+            "https://evil@canary.discord.com/app",
+            "https://discord.com.attacker.invalid/app",
+            "https://evil.discord.com/app",
+            "https://deep.sub.discord.com/app",
+            "http://discord.com/app",
+            "https://example.com/app",
+        ] {
+            assert!(
+                !is_trusted_bridge_origin(&url.parse().unwrap()),
+                "{url} must not be trusted"
+            );
+        }
     }
 
     #[test]
-    fn settings_requests_require_the_stable_discord_origin() {
+    fn settings_requests_require_an_entry_discord_origin() {
         // The origin gate runs before command dispatch, so a settings
         // capability request from any other origin never reaches the
         // settings reader, including lookalike hosts.
@@ -9646,7 +9807,7 @@ mod tests {
     }
 
     #[test]
-    fn localization_requests_require_the_stable_discord_origin() {
+    fn localization_requests_require_an_entry_discord_origin() {
         // The origin gate runs before command dispatch, so a localization
         // request from any other origin never reaches the catalog lookup.
         assert!(is_trusted_bridge_origin(
@@ -9702,6 +9863,61 @@ mod tests {
             .capabilities
             .contains(&"settings.write"));
         assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_diagnostics_and_mod_cache_capabilities() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"diagnostics.get_info"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"mod.clear_cache"));
+        // No generic surface may exist alongside them: no clipboard handle,
+        // no file deletion selector, no bundle-reader, no eval.
+        for capability in [
+            "diagnostics.set",
+            "diagnostics.get_all",
+            "mod.delete_bundle",
+            "mod.get_bundle_source",
+            "clipboard",
+            "filesystem",
+            "invoke",
+            "eval",
+        ] {
+            assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&capability));
+        }
+    }
+
+    #[test]
+    fn startup_channel_resolution_matches_redirect_parity() {
+        // The channel setting selects the entry URL the host navigates to
+        // (redirect.html parity); unknown values fail safe to stable.
+        assert_eq!(
+            crate::channel::resolve_channel_url("stable"),
+            "https://discord.com/app"
+        );
+        assert_eq!(
+            crate::channel::resolve_channel_url("canary"),
+            "https://canary.discord.com/app"
+        );
+        assert_eq!(
+            crate::channel::resolve_channel_url("ptb"),
+            "https://ptb.discord.com/app"
+        );
+        assert_eq!(
+            crate::channel::resolve_channel_url("beta"),
+            "https://discord.com/app"
+        );
+        // Every resolved URL is navigable and carries a trusted bridge.
+        for channel in ["stable", "canary", "ptb"] {
+            let url = crate::channel::resolve_channel_url(channel);
+            assert!(super::is_allowed_navigation(url), "{channel}");
+            assert!(
+                super::is_trusted_bridge_origin(&url.parse().unwrap()),
+                "{channel}"
+            );
+        }
     }
 
     #[test]

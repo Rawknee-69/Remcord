@@ -363,16 +363,21 @@ fn register_csp_interception(
         Win32::System::Com::IStream,
     };
 
-    // Add filter for main frame document resources on discord.com
-    let filter = HSTRING::from("https://discord.com/*");
-    if let Ok(webview2) = core_webview2.cast::<ICoreWebView2_2>() {
-        unsafe {
-            webview2
-                .AddWebResourceRequestedFilter(
-                    &filter,
-                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT(1), // DOCUMENT
-                )
-                .ok();
+    // Add filters for main frame document resources on the three
+    // release-channel entry hosts (stable/canary/ptb): the channel setting
+    // selects which one the app runs on, and the persisted `csp` mode must
+    // apply on any of them. Three exact host filters — never a wildcard.
+    for host in crate::channel::ENTRY_HOSTS {
+        let filter = HSTRING::from(format!("https://{host}/*"));
+        if let Ok(webview2) = core_webview2.cast::<ICoreWebView2_2>() {
+            unsafe {
+                webview2
+                    .AddWebResourceRequestedFilter(
+                        &filter,
+                        COREWEBVIEW2_WEB_RESOURCE_CONTEXT(1), // DOCUMENT
+                    )
+                    .ok();
+            }
         }
     }
     // Get environment for creating WebResourceResponse
@@ -406,8 +411,14 @@ fn register_csp_interception(
                 }
                 unsafe { uri.to_string().unwrap_or_default() }
             };
-            // Only process main document navigation to /app
-            if !uri.starts_with("https://discord.com/app") {
+            // Only process main document navigation to /app on any of the
+            // three entry hosts (stable/canary/ptb, per the channel
+            // setting). Exact `/app` prefixes only — no other page, host,
+            // or scheme is forwarded.
+            if !crate::channel::ENTRY_HOSTS
+                .iter()
+                .any(|host| uri.starts_with(&format!("https://{host}/app")))
+            {
                 return Ok(());
             }
             // Resolve the persisted `csp` mode for this document. The read

@@ -97,6 +97,7 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "blockPowerSavingInVoiceChat",
             "csp",
             "quickCss",
+            "channel",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), true, `${key} must be writable`);
         }
@@ -267,6 +268,33 @@ test("native csp change persists through the closed allowlist", async () => {
         await tick();
         assert.deepEqual(calls.nativeSet, [["csp", "strict"]]);
         assert.equal(storeSettings().csp, "strict");
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native channel change persists through the closed allowlist with restart", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return Promise.resolve({ key, value });
+            },
+        },
+        seed: { channel: "stable" },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // The channel dropdown path: setConfig routes the string-valued key
+        // to the native allowlist (wire "channel") with restart requested —
+        // the host maps it to the entry URL on next launch.
+        helpers.setConfig("channel", "canary", true);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet, [["channel", "canary"]]);
+        assert.equal(storeSettings().channel, "canary");
         assert.deepEqual(calls.electronSetConfig, []);
     } finally {
         restoreConsole();
@@ -464,6 +492,7 @@ test("unsupported settings stay disabled instead of rendering a broken control",
         assert.equal(helpers.isSettingWritableNatively("mods"), true);
         assert.equal(helpers.isSettingWritableNatively("csp"), true);
         assert.equal(helpers.isSettingWritableNatively("quickCss"), true);
+        assert.equal(helpers.isSettingWritableNatively("channel"), true);
         assert.equal(helpers.isNativeSettingsSetAvailable(), false);
     } finally {
         restoreConsole();
@@ -491,6 +520,121 @@ test("duplicate toggles never duplicate ids and each click dispatches once", asy
         assert.deepEqual(calls.nativeSet[0], ["mods", ["vencord"]]);
         assert.deepEqual(calls.nativeSet[1], ["mods", ["vencord"]]);
         assert.deepEqual(storeSettings().mods, ["vencord"]);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native diagnostics copy writes the host readout to the clipboard", async () => {
+    const written: string[] = [];
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {},
+        seed: {},
+    });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    win.remcord.diagnostics = {
+        getInfo: () =>
+            Promise.resolve({
+                app_version: "1.3.0",
+                webview2_runtime: "154.0.4258.62",
+                profile_kind: "release",
+                channel: "canary",
+                csp: "strict",
+                mods: ["equicord"],
+            }),
+    };
+    // Node ships a global `navigator` without `clipboard`: override it as
+    // an own property so the renderer clipboard path is exercisable here.
+    Object.defineProperty(globalThis, "navigator", {
+        value: {
+            clipboard: {
+                writeText: (text: string) => {
+                    written.push(text);
+                    return Promise.resolve();
+                },
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeDiagnosticsAvailable(), true);
+        assert.equal(await helpers.copyNativeDiagnostics("debug"), true);
+        assert.equal(written.length, 1);
+        assert.match(written[0], /Remcord 1\.3\.0/);
+        assert.match(written[0], /154\.0\.4258\.62/);
+        assert.match(written[0], /canary/);
+        assert.match(written[0], /equicord/);
+        assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
+        assert.equal(written.length, 2);
+        assert.match(written[1], /WebView2 Runtime 154\.0\.4258\.62/);
+        assert.doesNotMatch(written[1], /token|cookie/i);
+    } finally {
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});
+
+test("native diagnostics copy fails honestly when the host readout fails", async () => {
+    installGlobals({ runtime: "webview2", settingsImpl: {}, seed: {} });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    win.remcord.diagnostics = { getInfo: () => Promise.reject(new Error("bridge down")) };
+    Object.defineProperty(globalThis, "navigator", {
+        value: { clipboard: { writeText: () => Promise.resolve() } },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(await helpers.copyNativeDiagnostics("debug"), false);
+    } finally {
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});
+
+test("native diagnostics are unavailable outside the native shell", async () => {
+    installGlobals({ seed: {} });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeDiagnosticsAvailable(), false);
+        assert.equal(helpers.isNativeModCacheAvailable(), false);
+        await assert.rejects(helpers.getNativeDiagnosticsInfo(), /unavailable/);
+        await assert.rejects(helpers.clearNativeModCache(), /unavailable/);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native mod cache wipe resolves the host outcome and validates its shape", async () => {
+    installGlobals({ runtime: "webview2", settingsImpl: {}, seed: {} });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    win.remcord.mod = {
+        clearCache: () => Promise.resolve({ cleared: ["vencord.js", "shelter.js"], mod_cache_cleared: true }),
+    };
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeModCacheAvailable(), true);
+        assert.deepEqual(await helpers.clearNativeModCache(), {
+            cleared: ["vencord.js", "shelter.js"],
+            mod_cache_cleared: true,
+        });
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native mod cache wipe rejects a misshapen host outcome", async () => {
+    installGlobals({ runtime: "webview2", settingsImpl: {}, seed: {} });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    // Fixed-name enforcement lives in the facade response schema; the page
+    // helper guards the envelope shape only (array of strings + flag).
+    win.remcord.mod = { clearCache: () => Promise.resolve("wiped") };
+    try {
+        const helpers = await loadHelpers();
+        await assert.rejects(helpers.clearNativeModCache(), /Could not clear/);
     } finally {
         restoreConsole();
     }
