@@ -20,6 +20,7 @@ import {
     isMinWindowsVersion,
     isNativeSettingsSetAvailable,
     isNativeWebView,
+    isRestartRequiredSignal,
     isSettingWritableNatively,
     revealFolderNative,
     setBlockPowerSavingInVoiceChat,
@@ -207,6 +208,36 @@ export function SettingsPage() {
         <SettingsSearchProvider query={query}>
             <Show when={!settings.supportBannerDismissed}>
                 <SupportBanner />
+            </Show>
+
+            {/* Immediate restart indication: the TRACK-based modal only fires
+                on the next pane view, so a toggle flipped while already on
+                this page previously showed nothing. This banner appears the
+                moment a restart-requesting change commits and persists until
+                the restart happens. */}
+            <Show when={isRestartRequiredSignal()}>
+                <div
+                    style={{
+                        background: "rgba(240, 71, 71, 0.12)",
+                        border: "1px solid #f04747",
+                        color: "var(--text-normal, #dbdee1)",
+                        "border-radius": "8px",
+                        padding: "12px 16px",
+                        margin: "0 0 16px 0",
+                        display: "flex",
+                        "align-items": "center",
+                        gap: "12px",
+                        "justify-content": "space-between",
+                    }}
+                >
+                    <div>
+                        <strong>{t["settings-restartRequired"] ?? "Restart required"}</strong>
+                        <div>{t["settings-restartRequiredBody"] ?? "A restart is required to apply changes."}</div>
+                    </div>
+                    <Button size={ButtonSizes.LARGE} onClick={() => window.remcord.restart()}>
+                        {t["settings-restart"] ?? "Restart"}
+                    </Button>
+                </div>
             </Show>
 
             <div class={classes.search}>

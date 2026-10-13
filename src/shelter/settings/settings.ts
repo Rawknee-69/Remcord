@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import type { Settings, ValidMods } from "../../@types/settings.js";
 import { createSettingsScrollRestoration } from "./settingsScrollRestoration.js";
 
@@ -7,8 +8,22 @@ const {
 
 export let isRestartRequired = false;
 
-export function setRestartRequired() {
+// Reactive twin of `isRestartRequired` for the in-page restart banner: the
+// plain flag only surfaces on the next settings/games pane view (the TRACK
+// modal), so a toggle flipped while already on the page showed no
+// indication at all. Every restart-requesting mutation funnels through
+// `markRestartRequired`, which sets both.
+const [restartRequiredSignal, setRestartRequiredSignal] = createSignal(false);
+
+export { restartRequiredSignal as isRestartRequiredSignal };
+
+export function markRestartRequired() {
     isRestartRequired = true;
+    setRestartRequiredSignal(true);
+}
+
+export function setRestartRequired() {
+    markRestartRequired();
 }
 
 export function refreshSettings() {
@@ -125,7 +140,7 @@ export function setConfig<K extends keyof Settings>(key: K, value: Settings[K], 
         store.settings[key] = value;
         console.log(key, ":", store.settings[key]);
         if (shouldRestart) {
-            isRestartRequired = true;
+            markRestartRequired();
         }
         window.remcord.settings.setConfig(key, value);
     });
@@ -233,7 +248,7 @@ export async function setBlockPowerSavingInVoiceChat(value: boolean): Promise<bo
     withPreservedSettingsScroll(() => {
         store.settings.blockPowerSavingInVoiceChat = applied;
         console.log("blockPowerSavingInVoiceChat", ":", store.settings.blockPowerSavingInVoiceChat);
-        isRestartRequired = true;
+        markRestartRequired();
     });
     return applied;
 }
@@ -309,7 +324,7 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
         (store.settings as Record<string, unknown>)[key] = applied.value;
         console.log(key, ":", store.settings[key]);
         if (shouldRestart) {
-            isRestartRequired = true;
+            markRestartRequired();
         }
     });
     return applied.value as Settings[K];
@@ -676,7 +691,7 @@ export function toggleMod(mod: ValidMods, enabled: boolean) {
             // on success) instead of setting a bogus restart flag up front.
             setConfig("mods", next, true);
         } else {
-            isRestartRequired = true;
+            markRestartRequired();
             setConfig("mods", next);
         }
     };

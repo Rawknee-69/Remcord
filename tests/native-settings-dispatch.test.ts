@@ -127,6 +127,7 @@ test("native unsupported key is discarded honestly", async () => {
         // No store mutation, no restart request, no Electron call, one warning.
         assert.equal(storeSettings().windowStyle, undefined);
         assert.equal(helpers.isRestartRequired, false);
+        assert.equal(helpers.isRestartRequiredSignal(), false);
         assert.deepEqual(calls.electronSetConfig, []);
         assert.deepEqual(calls.nativeSet, []);
         assert.equal(calls.warnings.length, 1);
@@ -155,6 +156,9 @@ test("native allowlisted key persists from the host-confirmed value", async () =
         assert.deepEqual(calls.nativeSet, [["extended_plugin_abilities", true]]);
         assert.equal(storeSettings().extendedPluginAbilities, true);
         assert.equal(helpers.isRestartRequired, true);
+        // The in-page banner signal flips with the flag, so the indication
+        // is immediate instead of waiting for the next pane view.
+        assert.equal(helpers.isRestartRequiredSignal(), true);
         assert.deepEqual(calls.electronSetConfig, []);
     } finally {
         restoreConsole();
