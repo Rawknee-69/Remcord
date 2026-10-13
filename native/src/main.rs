@@ -9515,7 +9515,7 @@ mod tests {
     fn document_start_script_unknown_mode_fails_safe_to_default() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "ultra-hd").expect("must build");
+        let script = document_start_script(&[], boot, platform, "8k").expect("must build");
         assert!(script.contains("\"default\""));
         assert!(!script.contains("applyConstraints"));
     }

@@ -19,6 +19,15 @@
 //!   without touching `getDisplayMedia`.
 //! - **Balanced** (`"balanced"`): targets up to 1280x720 at 30 FPS.
 //! - **Low resource** (`"low"`): targets up to 960x540 at 15 FPS.
+//! - **Ultra low** (`"ultra-low"`): targets up to 256x144 at 15 FPS.
+//! - **Full HD** (`"full-hd"`): targets up to 1920x1080 at 30 FPS.
+//! - **Quad HD** (`"quad-hd"`): targets up to 2560x1440 at 30 FPS.
+//! - **Ultra HD** (`"ultra-hd"`): targets up to 3840x2160 at 30 FPS.
+//!
+//! Ceilings above the shared source change nothing (Discord adapts below
+//! maxima anyway); they exist so high-end setups can pin a ceiling instead
+//! of leaving the choice fully to Discord. All presets above Low are 30
+//! FPS; the two low tiers are 15 FPS to cut capture/encode cost harder.
 //!
 //! Active modes also carry a Discord-picker guard: Discord keeps its own
 //! stream-quality picker, which the capture target would silently cap, so
@@ -61,27 +70,56 @@
 //!   `aria-disabled`, so unrelated Discord UI is never touched.
 
 /// Closed mode vocabulary. The renderer can never invent a mode: unknown
-/// input normalizes to [`DEFAULT_MODE`].
-pub const VALID_SCREENSHARE_QUALITY_MODES: &[&str] = &["default", "balanced", "low"];
+/// input normalizes to [`DEFAULT_MODE`]. `low`/`balanced` keep their exact
+/// ids so existing profiles survive the preset expansion.
+pub const VALID_SCREENSHARE_QUALITY_MODES: &[&str] = &[
+    "default",
+    "ultra-low",
+    "low",
+    "balanced",
+    "full-hd",
+    "quad-hd",
+    "ultra-hd",
+];
 /// Preserves the existing Discord/WebView2 capture behavior. No wrapping.
 pub const DEFAULT_MODE: &str = "default";
+/// Targets up to 256x144 at 15 FPS through the existing capture path.
+pub const ULTRA_LOW_MODE: &str = "ultra-low";
 /// Targets up to 1280x720 at 30 FPS through the existing capture path.
 pub const BALANCED_MODE: &str = "balanced";
 /// Targets up to 960x540 at 15 FPS through the existing capture path.
 pub const LOW_MODE: &str = "low";
+/// Targets up to 1920x1080 at 30 FPS through the existing capture path.
+pub const FULL_HD_MODE: &str = "full-hd";
+/// Targets up to 2560x1440 at 30 FPS through the existing capture path.
+pub const QUAD_HD_MODE: &str = "quad-hd";
+/// Targets up to 3840x2160 at 30 FPS through the existing capture path.
+pub const ULTRA_HD_MODE: &str = "ultra-hd";
 
+/// Ultra-low target: 256x144 at 15 FPS.
+pub const ULTRA_LOW_TARGET: (u32, u32, u32) = (256, 144, 15);
 /// Balanced target: 1280x720 at 30 FPS.
 pub const BALANCED_TARGET: (u32, u32, u32) = (1280, 720, 30);
 /// Low-resource target: 960x540 at 15 FPS.
 pub const LOW_TARGET: (u32, u32, u32) = (960, 540, 15);
+/// Full-HD target: 1920x1080 at 30 FPS.
+pub const FULL_HD_TARGET: (u32, u32, u32) = (1920, 1080, 30);
+/// Quad-HD target: 2560x1440 at 30 FPS.
+pub const QUAD_HD_TARGET: (u32, u32, u32) = (2560, 1440, 30);
+/// Ultra-HD target: 3840x2160 at 30 FPS.
+pub const ULTRA_HD_TARGET: (u32, u32, u32) = (3840, 2160, 30);
 
 /// Normalize one raw mode string to the closed vocabulary. Empty, unknown,
 /// or differently-cased input fails safe to [`DEFAULT_MODE`]: an unrecognized
 /// value must never alter capture behavior.
 pub fn normalize_mode(raw: &str) -> &'static str {
     match raw {
+        "ultra-low" => ULTRA_LOW_MODE,
         "balanced" => BALANCED_MODE,
         "low" => LOW_MODE,
+        "full-hd" => FULL_HD_MODE,
+        "quad-hd" => QUAD_HD_MODE,
+        "ultra-hd" => ULTRA_HD_MODE,
         _ => DEFAULT_MODE,
     }
 }
@@ -90,8 +128,12 @@ pub fn normalize_mode(raw: &str) -> &'static str {
 /// `None` for [`DEFAULT_MODE`] (no constraining).
 pub fn constraint_target(mode: &str) -> Option<(u32, u32, u32)> {
     match normalize_mode(mode) {
+        ULTRA_LOW_MODE => Some(ULTRA_LOW_TARGET),
         BALANCED_MODE => Some(BALANCED_TARGET),
         LOW_MODE => Some(LOW_TARGET),
+        FULL_HD_MODE => Some(FULL_HD_TARGET),
+        QUAD_HD_MODE => Some(QUAD_HD_TARGET),
+        ULTRA_HD_MODE => Some(ULTRA_HD_TARGET),
         _ => None,
     }
 }
@@ -114,8 +156,12 @@ const SCREENSHARE_QUALITY_SCRIPT_TEMPLATE: &str = r#"(() => {
   const mode = __REMCORD_SCREENSHARE_QUALITY_MODE__;
   const ENTRY_ORIGINS = ["https://discord.com", "https://canary.discord.com", "https://ptb.discord.com"];
   const TARGETS = {
+    "ultra-low": { width: 256, height: 144, fps: 15 },
     balanced: { width: 1280, height: 720, fps: 30 },
-    low: { width: 960, height: 540, fps: 15 }
+    low: { width: 960, height: 540, fps: 15 },
+    "full-hd": { width: 1920, height: 1080, fps: 30 },
+    "quad-hd": { width: 2560, height: 1440, fps: 30 },
+    "ultra-hd": { width: 3840, height: 2160, fps: 30 }
   };
   const publishStatus = (active, target) => {
     try {
@@ -381,24 +427,37 @@ mod tests {
             "DEFAULT",
             "Balanced",
             "ultra",
+            "ultrahd",
+            "4k",
+            "1080p",
             "720p",
             "none",
             "  balanced  ",
+            "full_hd",
         ] {
             assert_eq!(normalize_mode(raw), DEFAULT_MODE, "{raw:?} must fail safe");
         }
+        assert_eq!(normalize_mode("ultra-low"), ULTRA_LOW_MODE);
         assert_eq!(normalize_mode("balanced"), BALANCED_MODE);
         assert_eq!(normalize_mode("low"), LOW_MODE);
+        assert_eq!(normalize_mode("full-hd"), FULL_HD_MODE);
+        assert_eq!(normalize_mode("quad-hd"), QUAD_HD_MODE);
+        assert_eq!(normalize_mode("ultra-hd"), ULTRA_HD_MODE);
         assert_eq!(normalize_mode("default"), DEFAULT_MODE);
     }
 
     #[test]
     fn targets_match_the_candidate_presets() {
         assert_eq!(constraint_target("default"), None);
+        assert_eq!(constraint_target("ultra-low"), Some((256, 144, 15)));
         assert_eq!(constraint_target("balanced"), Some((1280, 720, 30)));
         assert_eq!(constraint_target("low"), Some((960, 540, 15)));
+        assert_eq!(constraint_target("full-hd"), Some((1920, 1080, 30)));
+        assert_eq!(constraint_target("quad-hd"), Some((2560, 1440, 30)));
+        assert_eq!(constraint_target("ultra-hd"), Some((3840, 2160, 30)));
         // Unknown input constrains nothing.
         assert_eq!(constraint_target("ultra"), None);
+        assert_eq!(constraint_target("4k"), None);
         assert_eq!(constraint_target(""), None);
     }
 
@@ -434,7 +493,14 @@ mod tests {
 
     #[test]
     fn active_modes_constrain_through_the_existing_capture_path() {
-        for (mode, dims) in [("balanced", "1280"), ("low", "960")] {
+        for (mode, dims) in [
+            ("ultra-low", "256"),
+            ("balanced", "1280"),
+            ("low", "960"),
+            ("full-hd", "1920"),
+            ("quad-hd", "2560"),
+            ("ultra-hd", "3840"),
+        ] {
             let script = screenshare_quality_script(mode).expect("must build");
             assert!(
                 script.contains(&format!("\"{mode}\"")),
@@ -483,11 +549,30 @@ mod tests {
         assert!(low.contains("width: 960"));
         assert!(low.contains("height: 540"));
         assert!(low.contains("fps: 15"));
+        let ultra_low = screenshare_quality_script("ultra-low").expect("must build");
+        assert!(ultra_low.contains("width: 256"));
+        assert!(ultra_low.contains("height: 144"));
+        assert!(ultra_low.contains("fps: 15"));
+        let full_hd = screenshare_quality_script("full-hd").expect("must build");
+        assert!(full_hd.contains("width: 1920"));
+        assert!(full_hd.contains("height: 1080"));
+        assert!(full_hd.contains("fps: 30"));
+        let ultra_hd = screenshare_quality_script("ultra-hd").expect("must build");
+        assert!(ultra_hd.contains("width: 3840"));
+        assert!(ultra_hd.contains("height: 2160"));
+        assert!(ultra_hd.contains("fps: 30"));
     }
 
     #[test]
     fn active_modes_guard_discords_picker_and_fail_open() {
-        for mode in ["balanced", "low"] {
+        for mode in [
+            "ultra-low",
+            "balanced",
+            "low",
+            "full-hd",
+            "quad-hd",
+            "ultra-hd",
+        ] {
             let script = screenshare_quality_script(mode).expect("must build");
             // Discord keeps its own quality picker: quality-looking controls
             // in overlay dialogs are disabled, attempts show a toast naming
@@ -570,7 +655,14 @@ mod tests {
         // Active modes add exactly one delegated click listener, one
         // MutationObserver, and one toast-dismiss timer — everything else
         // stays forbidden.
-        for mode in ["balanced", "low"] {
+        for mode in [
+            "ultra-low",
+            "balanced",
+            "low",
+            "full-hd",
+            "quad-hd",
+            "ultra-hd",
+        ] {
             let script = screenshare_quality_script(mode).expect("must build");
             assert!(
                 !script.contains(MODE_PLACEHOLDER),
@@ -608,7 +700,7 @@ mod tests {
 
     #[test]
     fn unknown_raw_mode_builds_the_inert_default_script() {
-        let script = screenshare_quality_script("ultra-hd").expect("must build");
+        let script = screenshare_quality_script("ultra").expect("must build");
         assert!(script.contains("\"default\""));
         assert!(!script.contains("applyConstraints"));
         assert!(!script.contains("MutationObserver"));

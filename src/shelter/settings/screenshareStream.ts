@@ -53,8 +53,12 @@ export const STREAM_TARGETS: Record<
     Exclude<ScreenshareQualityMode, "default">,
     { width: number; height: number; fps: number }
 > = {
-    balanced: { width: 1280, height: 720, fps: 30 },
+    "ultra-low": { width: 256, height: 144, fps: 15 },
     low: { width: 960, height: 540, fps: 15 },
+    balanced: { width: 1280, height: 720, fps: 30 },
+    "full-hd": { width: 1920, height: 1080, fps: 30 },
+    "quad-hd": { width: 2560, height: 1440, fps: 30 },
+    "ultra-hd": { width: 3840, height: 2160, fps: 30 },
 };
 
 /** Discord-like Go Live targets (bits/s) by height and fps band (Electron parity). */
@@ -101,8 +105,12 @@ function fluxShape(): FluxShape | null {
 
 function currentMode(): ScreenshareQualityMode {
     try {
+        // Single source of truth: any non-default id with a stream target
+        // is active, so new presets need no branch updates here.
         const raw = storeSettings()?.screenshareQuality;
-        return raw === "balanced" || raw === "low" ? raw : "default";
+        return typeof raw === "string" && raw !== "default" && raw in STREAM_TARGETS
+            ? (raw as ScreenshareQualityMode)
+            : "default";
     } catch {
         return "default";
     }

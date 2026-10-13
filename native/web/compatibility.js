@@ -305,9 +305,17 @@
     const SETTINGS_VALID_CHANNELS = ["stable", "canary", "ptb"];
     // Exact screenshare capture-quality modes the host implements
     // (screenshare_quality.rs parity: default preserves behavior exactly,
-    // balanced/low constrain the display track). The renderer cannot invent
-    // a mode through this capability.
-    const SETTINGS_VALID_SCREENSHARE_QUALITY_MODES = ["default", "balanced", "low"];
+    // the rest constrain the display track and/or the sent stream). The
+    // renderer cannot invent a mode through this capability.
+    const SETTINGS_VALID_SCREENSHARE_QUALITY_MODES = [
+        "default",
+        "ultra-low",
+        "low",
+        "balanced",
+        "full-hd",
+        "quad-hd",
+        "ultra-hd",
+    ];
 
     function setSetting(key, value, timeoutMs = 5000) {
         requireCapability("settings.set");

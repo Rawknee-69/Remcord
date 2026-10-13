@@ -753,6 +753,18 @@ test("settings.set carries the screenshare_quality key end to end", async () => 
     });
     respondSettingsSet(window, message, "screenshare_quality", "low");
     assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { key: "screenshare_quality", value: "low" });
+
+    const hdPending = window.remcord.settings.set("screenshare_quality", "ultra-hd");
+    const hdMessage = window.messages.find(
+        (entry) => entry.command?.type === "settings_set" && entry.request_id !== message.request_id,
+    );
+    assert.ok(hdMessage);
+    assert.deepEqual(hdMessage.command, {
+        type: "settings_set",
+        payload: { key: "screenshare_quality", value: "ultra-hd" },
+    });
+    respondSettingsSet(window, hdMessage, "screenshare_quality", "ultra-hd");
+    assert.deepEqual(JSON.parse(JSON.stringify(await hdPending)), { key: "screenshare_quality", value: "ultra-hd" });
 });
 
 test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
@@ -796,6 +808,9 @@ test("settings.set rejects unknown keys and mismatched types without sending", a
     await assert.rejects(window.remcord.settings.set("screenshare_quality", "ultra"), /screenshare quality/);
     await assert.rejects(window.remcord.settings.set("screenshare_quality", "720p"), /screenshare quality/);
     await assert.rejects(window.remcord.settings.set("screenshare_quality", "Balanced"), /screenshare quality/);
+    await assert.rejects(window.remcord.settings.set("screenshare_quality", "4k"), /screenshare quality/);
+    await assert.rejects(window.remcord.settings.set("screenshare_quality", "1080p"), /screenshare quality/);
+    await assert.rejects(window.remcord.settings.set("screenshare_quality", "full_hd"), /screenshare quality/);
     await assert.rejects(window.remcord.settings.set("screenshare_quality", true), /screenshare quality/);
     await assert.rejects(window.remcord.settings.set("screenshare_quality", ["low"]), /screenshare quality/);
     await assert.rejects(window.remcord.settings.set("csp", "low"), /CSP modes/);

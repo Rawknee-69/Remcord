@@ -343,9 +343,17 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
 }
 
 /** Closed screenshare capture-quality vocabulary (native `screenshare_quality.rs` parity). */
-export type ScreenshareQualityMode = "default" | "balanced" | "low";
+export type ScreenshareQualityMode = "default" | "ultra-low" | "low" | "balanced" | "full-hd" | "quad-hd" | "ultra-hd";
 
-const VALID_SCREENSHARE_QUALITY_MODES: ReadonlyArray<string> = ["default", "balanced", "low"];
+const VALID_SCREENSHARE_QUALITY_MODES: ReadonlyArray<string> = [
+    "default",
+    "ultra-low",
+    "low",
+    "balanced",
+    "full-hd",
+    "quad-hd",
+    "ultra-hd",
+];
 
 /** Normalize one raw mode to the closed vocabulary (fail-safe to `"default"`). */
 export function normalizeScreenshareQualityMode(raw: unknown): ScreenshareQualityMode {

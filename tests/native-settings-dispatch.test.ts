@@ -985,7 +985,11 @@ test("screenshare quality mode normalizes unknown input to default", async () =>
         assert.equal(helpers.normalizeScreenshareQualityMode("balanced"), "balanced");
         assert.equal(helpers.normalizeScreenshareQualityMode("low"), "low");
         assert.equal(helpers.normalizeScreenshareQualityMode("default"), "default");
-        for (const raw of ["", "Balanced", "ultra", "720p", null, undefined, 720, ["low"]]) {
+        assert.equal(helpers.normalizeScreenshareQualityMode("ultra-low"), "ultra-low");
+        assert.equal(helpers.normalizeScreenshareQualityMode("full-hd"), "full-hd");
+        assert.equal(helpers.normalizeScreenshareQualityMode("quad-hd"), "quad-hd");
+        assert.equal(helpers.normalizeScreenshareQualityMode("ultra-hd"), "ultra-hd");
+        for (const raw of ["", "Balanced", "ultra", "4k", "1080p", "720p", null, undefined, 720, ["low"]]) {
             assert.equal(helpers.normalizeScreenshareQualityMode(raw), "default");
         }
     } finally {

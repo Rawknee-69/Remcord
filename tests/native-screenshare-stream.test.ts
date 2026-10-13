@@ -213,3 +213,36 @@ test("misshapen connections fail open without throwing", async () => {
         (await loadStream()).resetScreenshareStreamControlForTests();
     }
 });
+
+test("new presets apply Electron-parity bitrate math per height", async () => {
+    // [mode, width, height, fps, target, min, max]
+    const cases: Array<[string, number, number, number, number, number, number]> = [
+        ["ultra-low", 256, 144, 15, 2_500_000, 2_000_000, 3_000_000],
+        ["full-hd", 1920, 1080, 30, 8_000_000, 6_400_000, 9_600_000],
+        ["quad-hd", 2560, 1440, 30, 12_000_000, 9_600_000, 14_400_000],
+        ["ultra-hd", 3840, 2160, 30, 18_000_000, 14_400_000, 21_600_000],
+    ];
+    for (const [mode, width, height, fps, target, min, max] of cases) {
+        const setParametersCalls: unknown[][] = [];
+        const connection = makeConnection(makeSender(setParametersCalls));
+        installShelter({ mode, connections: [connection] });
+        try {
+            const stream = await loadStream();
+            stream.resetScreenshareStreamControlForTests();
+            assert.equal(stream.patchScreenshareStream("test"), true, `${mode} must patch`);
+            const params = connection.videoStreamParameters[0] as Record<string, unknown>;
+            assert.equal(params.maxFrameRate, fps, `${mode} fps`);
+            assert.deepEqual(params.maxResolution, { type: "fixed", width, height }, `${mode} resolution`);
+            assert.equal(params.maxPixelCount, width * height, `${mode} pixel count`);
+            assert.equal(params.maxBitrate, max, `${mode} stream max`);
+            const golive = connection.videoQualityManager.goliveMaxQuality as Record<string, unknown>;
+            assert.equal(golive.bitrateTarget, target, `${mode} target`);
+            assert.equal(golive.bitrateMin, min, `${mode} min`);
+            assert.equal(golive.bitrateMax, max, `${mode} max`);
+            const encodings = (setParametersCalls[0][0] as { encodings: Array<Record<string, unknown>> }).encodings;
+            assert.equal(encodings[0].maxFramerate, fps, `${mode} sender fps`);
+        } finally {
+            (await loadStream()).resetScreenshareStreamControlForTests();
+        }
+    }
+});

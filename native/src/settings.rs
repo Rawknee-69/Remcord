@@ -379,7 +379,9 @@ pub enum SettingsSetKey {
     /// (`src/splash/redirect.html` parity, whose default is also stable).
     /// Takes effect on next launch (restart-required model).
     Channel,
-    /// Screenshare capture-quality mode (`"default"` | `"balanced"` | `"low"`).
+    /// Screenshare capture-quality mode (closed seven-value vocabulary:
+    /// `"default"` | `"ultra-low"` | `"low"` | `"balanced"` | `"full-hd"` |
+    /// `"quad-hd"` | `"ultra-hd").
     /// Native consumer: the document-start capture script constrains the
     /// display track only when the mode is not `"default"` (Electron
     /// `ScreensharePicker` parity for the active modes; `"default"`
@@ -1186,8 +1188,16 @@ mod tests {
     }
 
     #[test]
-    fn set_accepts_only_the_three_screenshare_quality_modes() {
-        for mode in ["default", "balanced", "low"] {
+    fn set_accepts_only_the_seven_screenshare_quality_modes() {
+        for mode in [
+            "default",
+            "ultra-low",
+            "low",
+            "balanced",
+            "full-hd",
+            "quad-hd",
+            "ultra-hd",
+        ] {
             assert!(
                 validate_settings_set(
                     SettingsSetKey::ScreenshareQuality,
@@ -1203,6 +1213,10 @@ mod tests {
             "Balanced",
             "balanced ",
             "720p",
+            "4k",
+            "1080p",
+            "ultra",
+            "full_hd",
             "low;evil",
             "low\0",
         ] {
@@ -1240,7 +1254,15 @@ mod tests {
 
     #[test]
     fn set_applies_screenshare_quality_and_round_trips() {
-        for mode in ["default", "balanced", "low"] {
+        for mode in [
+            "default",
+            "ultra-low",
+            "low",
+            "balanced",
+            "full-hd",
+            "quad-hd",
+            "ultra-hd",
+        ] {
             let profile = unique_profile_dir("set-quality");
             std::fs::create_dir_all(profile.join("storage")).unwrap();
             let path = profile.join("storage").join("settings.json");

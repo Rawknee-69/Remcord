@@ -514,8 +514,12 @@ export function SettingsPage() {
                         t["settings-screenshareQuality"] ?? "Screenshare quality",
                         t["settings-screenshareQuality-desc"] ?? "capture target",
                         "screenshare",
-                        "720p",
+                        "144p",
                         "540p",
+                        "720p",
+                        "1080p",
+                        "1440p",
+                        "4K",
                     ]}
                 >
                     <DropdownItem
@@ -534,12 +538,28 @@ export function SettingsPage() {
                                 value: "default",
                             },
                             {
-                                label: t["settings-screenshareQuality-balanced"] ?? "Balanced (up to 720p30)",
-                                value: "balanced",
+                                label: t["settings-screenshareQuality-ultraLow"] ?? "Ultra low (up to 144p15)",
+                                value: "ultra-low",
                             },
                             {
                                 label: t["settings-screenshareQuality-low"] ?? "Low resource (up to 540p15)",
                                 value: "low",
+                            },
+                            {
+                                label: t["settings-screenshareQuality-balanced"] ?? "Balanced (up to 720p30)",
+                                value: "balanced",
+                            },
+                            {
+                                label: t["settings-screenshareQuality-fullHd"] ?? "Full HD (up to 1080p30)",
+                                value: "full-hd",
+                            },
+                            {
+                                label: t["settings-screenshareQuality-quadHd"] ?? "Quad HD (up to 1440p30)",
+                                value: "quad-hd",
+                            },
+                            {
+                                label: t["settings-screenshareQuality-ultraHd"] ?? "Ultra HD (up to 4K30)",
+                                value: "ultra-hd",
                             },
                         ]}
                         extraItems={
