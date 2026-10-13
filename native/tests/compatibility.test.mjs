@@ -2100,15 +2100,28 @@ function respondBundlesList(window, request, bundles = BUNDLE_FIXTURE) {
     );
 }
 
-test("the facade exposes backup save, restore, plus discovery", () => {
-    const { window } = createBundlesRuntime(["bridge.ping", "backup.list_bundles", "backup.save", "backup.restore"]);
+test("the facade exposes backup save, inspect/commit/discard, plus discovery", () => {
+    const { window } = createBundlesRuntime([
+        "bridge.ping",
+        "backup.list_bundles",
+        "backup.save",
+        "backup.inspect",
+        "backup.commit_restore",
+        "backup.discard_restore",
+    ]);
     assert.equal(typeof window.remcord.backup.listBundles, "function");
     assert.equal(typeof window.remcord.backup.save, "function");
-    assert.equal(typeof window.remcord.backup.restore, "function");
+    assert.equal(typeof window.remcord.backup.inspect, "function");
+    assert.equal(typeof window.remcord.backup.commitRestore, "function");
+    assert.equal(typeof window.remcord.backup.discardRestore, "function");
+    assert.equal(window.remcord.backup.restore, undefined);
     assert.equal(Object.isFrozen(window.remcord.backup), true);
     assert.equal(window.remcord.native.supports("backup.list_bundles"), true);
     assert.equal(window.remcord.native.supports("backup.save"), true);
-    assert.equal(window.remcord.native.supports("backup.restore"), true);
+    assert.equal(window.remcord.native.supports("backup.inspect"), true);
+    assert.equal(window.remcord.native.supports("backup.commit_restore"), true);
+    assert.equal(window.remcord.native.supports("backup.discard_restore"), true);
+    assert.equal(window.remcord.native.supports("backup.restore"), false);
     // No generic restore/filesystem surface may ride along: the Electron
     // channel names and dialog sends stay out of the native facade.
     assert.doesNotMatch(bootstrapTemplate, /backupRestore/);
@@ -2398,7 +2411,9 @@ test("backup.save rejects pending requests when the document is disposed", async
     await rejection;
 });
 
-function createBackupRestoreRuntime(capabilities = ["bridge.ping", "backup.restore"]) {
+function createBackupRestoreRuntime(
+    capabilities = ["bridge.ping", "backup.inspect", "backup.commit_restore", "backup.discard_restore"],
+) {
     return createRuntime("https://discord.com", capabilities);
 }
 
@@ -2407,6 +2422,42 @@ const BACKUP_RESTORE_ENVELOPE = {
     equicordLocalStorage: null,
     shelter: { plugins: {}, enabledPlugins: [] },
 };
+
+const BACKUP_PREVIEW_PAYLOAD = {
+    canceled: false,
+    includes: {
+        remcordConfig: true,
+        remcordThemesAndQuickCss: true,
+        remcordExtensionPlugins: true,
+        vencordModData: true,
+        equicordModData: false,
+        shelterModData: false,
+        modBundles: false,
+    },
+    archive_bytes: 100,
+    uncompressed_bytes: 200,
+    entry_count: 2,
+    client_mods_bytes: 10,
+    has_vencord_mod_data: true,
+    has_equicord_mod_data: false,
+    has_shelter_mod_data: false,
+    entries: ["data/quickCss.css", "data/themes/t/src.css"],
+    entries_truncated: false,
+};
+
+function respondBackupInspected(window, request, payload = BACKUP_PREVIEW_PAYLOAD) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "backup_inspected", payload },
+                error: null,
+            },
+        }),
+    );
+}
 
 function respondBackupRestored(window, request, payload = { canceled: false, client_mods: BACKUP_RESTORE_ENVELOPE }) {
     window.dispatchEvent(
@@ -2422,35 +2473,66 @@ function respondBackupRestored(window, request, payload = { canceled: false, cli
     );
 }
 
-test("backup.restore sends a parameter-free typed request and resolves the envelope", async () => {
+function respondBackupDiscarded(window, request, payload = { discarded: true }) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "backup_restore_discarded", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("backup.inspect sends a parameter-free typed request and resolves the preview", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.remcord.backup.restore();
+    const pending = window.remcord.backup.inspect();
     assert.ok(pending instanceof Promise);
-    const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
+    const message = window.messages.find((entry) => entry.command?.type === "backup_inspect");
     assert.ok(message);
     // No archive path, filename, URL, filter, or dialog option may ride along.
-    assert.deepEqual(message.command, { type: "backup_restore", payload: {} });
+    assert.deepEqual(message.command, { type: "backup_inspect", payload: {} });
 
-    respondBackupRestored(window, message);
-    const restored = await pending;
-    assert.equal(restored.ok, true);
-    assert.deepEqual(restored.clientMods, BACKUP_RESTORE_ENVELOPE);
+    respondBackupInspected(window, message);
+    const inspected = await pending;
+    assert.equal(inspected.ok, true);
+    assert.equal(inspected.preview.entry_count, 2);
+    assert.equal(inspected.preview.entries.length, 2);
+    assert.equal(inspected.preview.entries[0], "data/quickCss.css");
+    assert.equal(inspected.preview.entries[1], "data/themes/t/src.css");
+    assert.equal(inspected.preview.includes.remcordConfig, true);
+    assert.equal(inspected.preview.has_vencord_mod_data, true);
 });
 
-test("backup.restore resolves cancellation as the silent Electron shape", async () => {
+test("backup.inspect resolves cancellation as the silent Electron shape", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.remcord.backup.restore();
-    const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
-    respondBackupRestored(window, message, { canceled: true, client_mods: null });
+    const pending = window.remcord.backup.inspect();
+    const message = window.messages.find((entry) => entry.command?.type === "backup_inspect");
+    respondBackupInspected(window, message, {
+        canceled: true,
+        includes: BACKUP_PREVIEW_PAYLOAD.includes,
+        archive_bytes: 0,
+        uncompressed_bytes: 0,
+        entry_count: 0,
+        client_mods_bytes: 0,
+        has_vencord_mod_data: false,
+        has_equicord_mod_data: false,
+        has_shelter_mod_data: false,
+        entries: [],
+        entries_truncated: false,
+    });
     const canceled = await pending;
     assert.equal(canceled.ok, false);
     assert.equal(canceled.error, "CANCELLED");
 });
 
-test("backup.restore maps typed host failures to the Electron error shape", async () => {
+test("backup.inspect maps typed host failures to the Electron error shape", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.remcord.backup.restore();
-    const message = window.messages.find((entry) => entry.command?.type === "backup_restore");
+    const pending = window.remcord.backup.inspect();
+    const message = window.messages.find((entry) => entry.command?.type === "backup_inspect");
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:response", {
             detail: {
@@ -2468,24 +2550,115 @@ test("backup.restore maps typed host failures to the Electron error shape", asyn
     });
 });
 
-test("backup.restore throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
-    const { window } = createBackupRestoreRuntime(["bridge.ping", "backup.save"]);
-    assert.equal(window.remcord.native.supports("backup.restore"), false);
+test("backup.inspect throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createBackupRestoreRuntime(["bridge.ping", "backup.commit_restore"]);
+    assert.equal(window.remcord.native.supports("backup.inspect"), false);
     assert.throws(
-        () => window.remcord.backup.restore(),
+        () => window.remcord.backup.inspect(),
         (error) => error.code === "UNSUPPORTED_CAPABILITY",
     );
     assert.equal(
-        window.messages.some((message) => message.command?.type === "backup_restore"),
+        window.messages.some((message) => message.command?.type === "backup_inspect"),
         false,
     );
 });
 
-test("backup.restore surfaces malformed restore outcomes without paths", async () => {
+test("backup.inspect surfaces malformed previews without paths", async () => {
+    // Like the rest of the backup facade, schema violations resolve the
+    // shared { ok: false, error } shape (UNKNOWN for a failed schema —
+    // never a path, never a rejection).
+    // A path riding along with the preview.
+    const withPath = createBackupRestoreRuntime();
+    const pendingPath = withPath.window.remcord.backup.inspect();
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_inspect");
+    respondBackupInspected(withPath.window, messagePath, { ...BACKUP_PREVIEW_PAYLOAD, path: "C:\\x.zip" });
+    assert.deepEqual(await pendingPath.then((result) => ({ ok: result.ok, error: result.error })), {
+        ok: false,
+        error: "UNKNOWN",
+    });
+
+    // An over-long listing the host should have truncated itself.
+    const longListing = createBackupRestoreRuntime();
+    const pendingLong = longListing.window.remcord.backup.inspect();
+    const messageLong = longListing.window.messages.find((entry) => entry.command?.type === "backup_inspect");
+    respondBackupInspected(longListing.window, messageLong, {
+        ...BACKUP_PREVIEW_PAYLOAD,
+        entries: new Array(129).fill("data/x.css"),
+    });
+    assert.deepEqual(await pendingLong.then((result) => ({ ok: result.ok, error: result.error })), {
+        ok: false,
+        error: "UNKNOWN",
+    });
+
+    // An unknown include key.
+    const unknownKey = createBackupRestoreRuntime();
+    const pendingUnknown = unknownKey.window.remcord.backup.inspect();
+    const messageUnknown = unknownKey.window.messages.find((entry) => entry.command?.type === "backup_inspect");
+    respondBackupInspected(unknownKey.window, messageUnknown, {
+        ...BACKUP_PREVIEW_PAYLOAD,
+        includes: { ...BACKUP_PREVIEW_PAYLOAD.includes, evil: true },
+    });
+    assert.deepEqual(await pendingUnknown.then((result) => ({ ok: result.ok, error: result.error })), {
+        ok: false,
+        error: "UNKNOWN",
+    });
+});
+
+test("backup.commit_restore sends a parameter-free typed request and resolves the envelope", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.remcord.backup.commitRestore();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "backup_commit_restore");
+    assert.ok(message);
+    // No archive path, bytes, manifest, or selector may ride along: the
+    // commit applies exactly the held staged bytes.
+    assert.deepEqual(message.command, { type: "backup_commit_restore", payload: {} });
+
+    respondBackupRestored(window, message);
+    const restored = await pending;
+    assert.equal(restored.ok, true);
+    assert.deepEqual(restored.clientMods, BACKUP_RESTORE_ENVELOPE);
+});
+
+test("backup.commit_restore maps a missing hold to the typed error shape", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.remcord.backup.commitRestore();
+    const message = window.messages.find((entry) => entry.command?.type === "backup_commit_restore");
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "NO_STAGED_RESTORE", message: "no staged restore is held" },
+            },
+        }),
+    );
+    assert.deepEqual(await pending.then((result) => ({ ok: result.ok, error: result.error })), {
+        ok: false,
+        error: "NO_STAGED_RESTORE",
+    });
+});
+
+test("backup.commit_restore throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createBackupRestoreRuntime(["bridge.ping", "backup.inspect"]);
+    assert.equal(window.remcord.native.supports("backup.commit_restore"), false);
+    assert.throws(
+        () => window.remcord.backup.commitRestore(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "backup_commit_restore"),
+        false,
+    );
+});
+
+test("backup.commit_restore surfaces malformed commit outcomes without paths", async () => {
     // A path riding along with the outcome.
     const withPath = createBackupRestoreRuntime();
-    const pendingPath = withPath.window.remcord.backup.restore();
-    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_restore");
+    const pendingPath = withPath.window.remcord.backup.commitRestore();
+    const messagePath = withPath.window.messages.find((entry) => entry.command?.type === "backup_commit_restore");
     respondBackupRestored(withPath.window, messagePath, {
         canceled: false,
         client_mods: BACKUP_RESTORE_ENVELOPE,
@@ -2498,8 +2671,8 @@ test("backup.restore surfaces malformed restore outcomes without paths", async (
     // An unknown clientMods key: the dispatcher rejects the schema before
     // the facade ever sees it.
     const unknownKey = createBackupRestoreRuntime();
-    const pendingUnknown = unknownKey.window.remcord.backup.restore();
-    const messageUnknown = unknownKey.window.messages.find((entry) => entry.command?.type === "backup_restore");
+    const pendingUnknown = unknownKey.window.remcord.backup.commitRestore();
+    const messageUnknown = unknownKey.window.messages.find((entry) => entry.command?.type === "backup_commit_restore");
     respondBackupRestored(unknownKey.window, messageUnknown, {
         canceled: false,
         client_mods: { discordToken: "x" },
@@ -2507,53 +2680,78 @@ test("backup.restore surfaces malformed restore outcomes without paths", async (
     const malformedUnknown = await pendingUnknown;
     assert.equal(malformedUnknown.ok, false);
     assert.equal(malformedUnknown.error, "UNKNOWN");
-
-    // A non-object envelope is not valid clientMods.
-    const arrayEnvelope = createBackupRestoreRuntime();
-    const pendingArray = arrayEnvelope.window.remcord.backup.restore();
-    const messageArray = arrayEnvelope.window.messages.find((entry) => entry.command?.type === "backup_restore");
-    respondBackupRestored(arrayEnvelope.window, messageArray, {
-        canceled: false,
-        client_mods: ["x"],
-    });
-    const malformedArray = await pendingArray;
-    assert.equal(malformedArray.ok, false);
-    assert.equal(malformedArray.error, "UNKNOWN");
-
-    // Cancellation must carry a null envelope.
-    const canceledEnvelope = createBackupRestoreRuntime();
-    const pendingCanceled = canceledEnvelope.window.remcord.backup.restore();
-    const messageCanceled = canceledEnvelope.window.messages.find((entry) => entry.command?.type === "backup_restore");
-    respondBackupRestored(canceledEnvelope.window, messageCanceled, {
-        canceled: true,
-        client_mods: BACKUP_RESTORE_ENVELOPE,
-    });
-    const malformedCanceled = await pendingCanceled;
-    assert.equal(malformedCanceled.ok, false);
-    assert.equal(malformedCanceled.error, "UNKNOWN");
 });
 
-test("backup.restore maps its timeout through the Electron error shape", async () => {
-    // Like save, restore never rejects on timeout: the shared pending map
-    // rejects with REQUEST_TIMEOUT and the facade maps it to the resolved
+test("backup.discard_restore sends a parameter-free typed request and resolves the ack", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.remcord.backup.discardRestore();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "backup_discard_restore");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "backup_discard_restore", payload: {} });
+
+    respondBackupDiscarded(window, message, { discarded: true });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { discarded: true });
+
+    // Discarding with nothing held resolves false, never an error.
+    const second = createBackupRestoreRuntime();
+    const pendingSecond = second.window.remcord.backup.discardRestore();
+    const messageSecond = second.window.messages.find((entry) => entry.command?.type === "backup_discard_restore");
+    respondBackupDiscarded(second.window, messageSecond, { discarded: false });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pendingSecond)), { discarded: false });
+});
+
+test("backup.discard_restore throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createBackupRestoreRuntime(["bridge.ping", "backup.inspect"]);
+    assert.equal(window.remcord.native.supports("backup.discard_restore"), false);
+    assert.throws(
+        () => window.remcord.backup.discardRestore(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "backup_discard_restore"),
+        false,
+    );
+});
+
+test("backup.discard_restore rejects malformed acks", async () => {
+    const { window } = createBackupRestoreRuntime();
+    const pending = window.remcord.backup.discardRestore();
+    const message = window.messages.find((entry) => entry.command?.type === "backup_discard_restore");
+    respondBackupDiscarded(window, message, { discarded: true, path: "C:\\x" });
+    await assert.rejects(pending, /backup discard response schema is invalid/);
+});
+
+test("backup trio maps timeouts through the Electron error shape", async () => {
+    // Like save, no trio member rejects on timeout: the shared pending map
+    // rejects with REQUEST_TIMEOUT and each facade maps it to the resolved
     // { ok: false, error } shape (transport misuse still throws
     // synchronously before dispatch).
     const { window } = createBackupRestoreRuntime();
-    const result = await window.remcord.backup.restore(50);
-    assert.equal(result.ok, false);
-    assert.equal(result.error, "REQUEST_TIMEOUT");
+    const inspectTimeout = await window.remcord.backup.inspect(50);
+    assert.equal(inspectTimeout.ok, false);
+    assert.equal(inspectTimeout.error, "REQUEST_TIMEOUT");
+    const commitTimeout = await window.remcord.backup.commitRestore(50);
+    assert.equal(commitTimeout.ok, false);
+    assert.equal(commitTimeout.error, "REQUEST_TIMEOUT");
 });
 
-test("backup.restore rejects pending requests when the document is disposed", async () => {
+test("backup trio rejects pending requests when the document is disposed", async () => {
     const { window } = createBackupRestoreRuntime();
-    const pending = window.remcord.backup.restore();
-    // Cancellation-by-disposal maps through the Electron error shape, never
-    // an unhandled rejection: the pending promise settles as ok:false.
-    const rejection = pending.then((result) => {
-        assert.equal(result.ok, false);
-    });
+    const pendingInspect = window.remcord.backup.inspect();
+    const pendingCommit = window.remcord.backup.commitRestore();
+    const pendingDiscard = window.remcord.backup.discardRestore();
+    // Cancellation-by-disposal maps through the resolved error shape, never
+    // an unhandled rejection: each pending promise settles as ok:false
+    // (inspect/commit) or rejects honestly (discard, which has no Electron
+    // error shape of its own).
+    const settled = Promise.all([
+        pendingInspect.then((result) => assert.equal(result.ok, false)),
+        pendingCommit.then((result) => assert.equal(result.ok, false)),
+        assert.rejects(pendingDiscard, /document was disposed/),
+    ]);
     window.dispatchEvent(new FakeCustomEvent("pagehide"));
-    await rejection;
+    await settled;
 });
 
 function createFoldersRuntime(capabilities = ["bridge.ping", "folders.open", "folders.open_theme"]) {
@@ -4508,11 +4706,14 @@ test("the shim exposes no generic sync API beyond the closed members", () => {
     assert.equal(remcord.version, undefined);
     assert.equal(remcord.fs, undefined);
     assert.equal(remcord.plugins, undefined);
-    // backup.save and backup.restore are closed members (D4-1/D4-2): the
-    // typed JSON-string save and the parameter-free restore, both with the
-    // long-operation timeout. Neither takes a path.
+    // backup.save plus the inspect/commit/discard trio are closed members:
+    // the typed JSON-string save and the parameter-free preview/commit/
+    // discard, each with the long-operation timeout. None takes a path.
     assert.equal(typeof remcord.backup.save, "function");
-    assert.equal(typeof remcord.backup.restore, "function");
+    assert.equal(typeof remcord.backup.inspect, "function");
+    assert.equal(typeof remcord.backup.commitRestore, "function");
+    assert.equal(typeof remcord.backup.discardRestore, "function");
+    assert.equal(remcord.backup.restore, undefined);
     assert.equal(typeof remcord.translations, "object");
 });
 

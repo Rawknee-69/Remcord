@@ -579,16 +579,20 @@ test("custom bundles stay inventory-only and non-executable natively", () => {
     // never become execution (the pre-existing "custom" settings-gate test
     // below only proves an unregistered id enables nothing).
     assert.doesNotMatch(main, /id: "custom"/);
-    // The native backup facade exposes discovery plus save plus restore: no
-    // Electron channel name, dialog send, zip/generic member, or bundle
-    // content may exist alongside them, and custom artifacts stay DATA ONLY
-    // inside the archive (never executed).
+    // The native backup facade exposes discovery plus save plus the
+    // inspect/commit/discard trio: no Electron channel name, dialog send,
+    // zip/generic member, or bundle content may exist alongside them, and
+    // custom artifacts stay DATA ONLY inside the archive (never executed).
     assert.match(nativeFacade, /function listBundles\(/);
     assert.match(nativeFacade, /function saveBackup\(/);
-    assert.match(nativeFacade, /function restoreBackup\(/);
+    assert.match(nativeFacade, /function inspectBackup\(/);
+    assert.match(nativeFacade, /function commitRestore\(/);
+    assert.match(nativeFacade, /function discardRestore\(/);
     assert.match(nativeFacade, /backup_saved/);
+    assert.match(nativeFacade, /backup_inspected/);
     assert.match(nativeFacade, /backup_restored/);
-    assert.match(nativeFacade, /backup_restore/);
+    assert.match(nativeFacade, /backup_restore_discarded/);
+    assert.doesNotMatch(nativeFacade, /function restoreBackup\(/);
     assert.doesNotMatch(nativeFacade, /backupSave/);
     assert.doesNotMatch(nativeFacade, /backupRestore/);
     assert.doesNotMatch(nativeFacade, /showSaveDialog/);
@@ -644,14 +648,22 @@ test("the native backup restore preserves the Electron restore contract", () => 
     assert.match(nativeBackup, /"runtime-plugins"/);
     assert.match(nativeBackup, /"plugin-storage"/);
     assert.match(nativeBackup, /BUNDLE_FILES/);
-    // The dialog is host-owned with the translated open title; the renderer
+    // The dialog is host-owned with the translated open title; every trio
     // request is exactly empty.
     assert.match(nativeBackup, /backup-dialogOpen-title/);
     assert.match(nativeBackup, /Open Remcord backup/);
-    assert.match(nativeProtocol, /BackupRestore/);
-    assert.match(nativeProtocol, /backup_restore/);
+    assert.match(nativeProtocol, /BackupInspect/);
+    assert.match(nativeProtocol, /BackupCommitRestore/);
+    assert.match(nativeProtocol, /BackupDiscardRestore/);
+    assert.match(nativeProtocol, /backup_inspect/);
+    assert.match(nativeProtocol, /backup_commit_restore/);
+    assert.match(nativeProtocol, /backup_discard_restore/);
+    assert.match(nativeProtocol, /BackupInspected/);
     assert.match(nativeProtocol, /BackupRestored/);
-    assert.match(nativeFacade, /function restoreBackup\(/);
+    assert.match(nativeProtocol, /BackupRestoreDiscarded/);
+    assert.match(nativeFacade, /function inspectBackup\(/);
+    assert.match(nativeFacade, /function commitRestore\(/);
+    assert.match(nativeFacade, /function discardRestore\(/);
     // Hardening markers: closed routing (no generic extract), whole-archive
     // duplicate/collision rejection, staging outside the profile, commit
     // with rollback, existing section validators, and bounded clientMods.
@@ -680,25 +692,36 @@ test("the native backup restore preserves the Electron restore contract", () => 
     );
     assert.match(backupSection, /applyClientModsFromRestore/);
     assert.match(backupSection, /addRemotePlugin/);
-    // No BackupSection UI wiring: the native restore capability is not
-    // referenced from src/ (a branch there would be fabrication). The
-    // Electron `window.remcord.backup.restore()` call stays byte-identical,
-    // so the check targets the native wire type and native branches only.
+    // Native trio wiring lives in src/ deliberately: inspect stages and
+    // holds host-side, the preview modal confirms, commit applies the held
+    // bytes, and any other dismissal discards the hold. The Electron
+    // `window.remcord.backup.restore()` call stays byte-identical, so the
+    // check targets the native trio and native branches only.
+    assert.match(backupSection, /inspectBackupNative\(\)/);
+    assert.match(backupSection, /commitRestoreNative\(\)/);
+    assert.match(backupSection, /discardRestoreNative\(\)/);
+    assert.match(backupSection, /BackupRestorePreviewModal/);
+    assert.match(backupSection, /normalizeNativeInspectResult\(inspected\)/);
     for (const source of [bridge, ipc, types]) {
-        assert.doesNotMatch(source, /backup_restore/);
+        assert.doesNotMatch(source, /backup_inspect/);
+        assert.doesNotMatch(source, /backup_commit_restore/);
+        assert.doesNotMatch(source, /backup_discard_restore/);
     }
-    assert.doesNotMatch(backupSection, /backup_restore/);
+    assert.doesNotMatch(backupSection, /backup_inspect/);
+    assert.doesNotMatch(backupSection, /backup_commit_restore/);
+    assert.doesNotMatch(backupSection, /backup_discard_restore/);
     assert.doesNotMatch(backupSection, /isNativeWebView/);
     assert.match(backupSection, /window\.remcord\.backup\.restore\(\)/);
 });
 
 test("BackupSection dispatches native vs Electron backup without a generic surface", () => {
-    // D4-3 wiring: the existing section calls the shared save helper (one
-    // call site, exact payload preserved) and branches restore on the native
-    // capability gate — native object shape vs Electron JSON-string shape —
-    // with a busy guard against duplicate dialogs/operations. No generic
-    // filesystem, dialog, IPC, or ZIP surface may appear in either file, and
-    // the declared Electron contract stays untouched.
+    // Trio wiring: the existing section calls the shared save helper (one
+    // call site, exact payload preserved) and previews-then-commits restore
+    // on the native capability gate — inspect stages and holds, the preview
+    // modal confirms, commit applies the held bytes, discard drops the hold.
+    // Electron keeps the JSON-string restore. No generic filesystem, dialog,
+    // IPC, or ZIP surface may appear in either file, and the declared
+    // Electron contract stays untouched.
     const backupSection = readFileSync(
         new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
         "utf8",
@@ -706,25 +729,36 @@ test("BackupSection dispatches native vs Electron backup without a generic surfa
     const settingsHelpers = readFileSync(new URL("../../src/shelter/settings/settings.ts", import.meta.url), "utf8");
     // Save: one helper call site with the exact payload expression.
     assert.match(backupSection, /saveBackup\(JSON\.stringify\(payload\)\)/);
-    // Restore: capability-gated branch, exactly one path per click.
+    // Restore: capability-gated branch, preview modal, exactly one commit
+    // path plus the best-effort discard on every non-commit dismissal.
     assert.match(backupSection, /isNativeBackupAvailable\(\)/);
-    assert.match(backupSection, /normalizeNativeRestoreResult\(await restoreBackupNative\(\)\)/);
+    assert.match(backupSection, /inspectBackupNative\(\)/);
+    assert.match(backupSection, /normalizeNativeInspectResult\(inspected\)/);
+    assert.match(backupSection, /BackupRestorePreviewModal/);
+    assert.match(backupSection, /commitRestoreNative\(\)/);
+    assert.match(backupSection, /discardRestoreNative\(\)/);
+    assert.match(backupSection, /normalizeNativeRestoreResult\(await commitRestoreNative\(\)\)/);
     assert.match(backupSection, /parseElectronRestoreResult\(await window\.remcord\.backup\.restore\(\)\)/);
     // The existing renderer clientMods path is preserved verbatim.
     assert.match(backupSection, /applyClientModsFromRestore\(outcome\.clientMods\)/);
     // Async UI state: busy guard on both buttons and every exit path.
     assert.match(backupSection, /disabled=\{busy\(\)\}/);
     assert.match(backupSection, /if \(busy\(\)\) return;/);
-    // Helpers: gate on environment + function presence, shared outcome, no
+    // Helpers: gate on environment + trio presence, shared outcomes, no
     // generic surface. remcordWindow.d.ts keeps the Electron string shape.
     assert.match(settingsHelpers, /export function isNativeBackupAvailable/);
     assert.match(settingsHelpers, /export async function saveBackup/);
-    assert.match(settingsHelpers, /export async function restoreBackupNative/);
+    assert.match(settingsHelpers, /export async function inspectBackupNative/);
+    assert.match(settingsHelpers, /export async function commitRestoreNative/);
+    assert.match(settingsHelpers, /export async function discardRestoreNative/);
+    assert.match(settingsHelpers, /export function normalizeNativeInspectResult/);
     assert.match(settingsHelpers, /export function normalizeNativeRestoreResult/);
     assert.match(settingsHelpers, /export function parseElectronRestoreResult/);
     assert.match(types, /restore\(\): Promise<string>/);
     for (const source of [backupSection, settingsHelpers]) {
-        assert.doesNotMatch(source, /backup_restore/);
+        assert.doesNotMatch(source, /backup_inspect/);
+        assert.doesNotMatch(source, /backup_commit_restore/);
+        assert.doesNotMatch(source, /backup_discard_restore/);
         assert.doesNotMatch(source, /showOpenDialog|showSaveDialog/);
         assert.doesNotMatch(source, /AdmZip|readBackupZipToMap|buildBackupZipBuffer/);
         assert.doesNotMatch(source, /fetch\(/);

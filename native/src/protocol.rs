@@ -76,7 +76,9 @@ pub enum BridgeCommand {
     QuickCssRead(QuickCssReadRequest),
     QuickCssWrite(QuickCssWriteRequest),
     BackupSave(BackupSaveRequest),
-    BackupRestore(BackupRestoreRequest),
+    BackupInspect(BackupInspectRequest),
+    BackupCommitRestore(BackupCommitRestoreRequest),
+    BackupDiscardRestore(BackupDiscardRestoreRequest),
     WindowShow(WindowShowRequest),
     WindowHide(WindowHideRequest),
     WindowMinimize(WindowMinimizeRequest),
@@ -314,15 +316,31 @@ pub struct BackupSaveRequest {
     pub client_mods: crate::backup::BackupClientMods,
 }
 
-/// Empty request for the `backup.restore` capability: the host-owned open
-/// dialog plus bounded validation, staging, and commit. There is deliberately
-/// NO archive path, filename, URL, filter, or dialog option: the host owns
-/// the entire picker configuration and reads only the host-selected file.
-/// Any extra field is rejected, so a renderer cannot select, narrow, or
-/// redirect what the host reads.
+/// Empty request for the `backup.inspect` capability: the host-owned open
+/// dialog plus bounded validation and staging, WITHOUT committing. The
+/// staged bytes are held host-side for one explicit commit or discard, so
+/// the preview the renderer shows cannot drift from what the commit would
+/// apply. Same no-parameter contract as the restore picker it replaces.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BackupRestoreRequest {}
+pub struct BackupInspectRequest {}
+
+/// Empty request for the `backup.commit_restore` capability: commits the
+/// single held staged restore into the profile. There is deliberately NO
+/// archive path, bytes, manifest, or selector: the commit applies exactly
+/// the held staged bytes (validated at inspect time, never out of host
+/// hands), so preview and commit cannot disagree. Committing with nothing
+/// held is a typed error, never a silent no-op.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupCommitRestoreRequest {}
+
+/// Empty request for the `backup.discard_restore` capability: drops the
+/// single held staged restore without touching the profile. Discarding with
+/// nothing held resolves `discarded: false`, never an error.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupDiscardRestoreRequest {}
 
 /// Empty request for the `window.show` capability: reveal the single host
 /// window (restore when minimized, clear skip-taskbar where supported, show,
@@ -939,7 +957,9 @@ pub enum BridgeResponsePayload {
     QuickCssRead(QuickCssReadResponse),
     QuickCssWritten(QuickCssWrittenResponse),
     BackupSaved(BackupSavedResponse),
+    BackupInspected(BackupInspectedResponse),
     BackupRestored(BackupRestoredResponse),
+    BackupRestoreDiscarded(BackupRestoreDiscardedResponse),
     WindowAck(WindowAckResponse),
 }
 
@@ -1169,7 +1189,46 @@ pub struct BackupSavedResponse {
     pub bytes: u64,
 }
 
-/// Bounded restore response for the `backup.restore` capability:
+/// Bounded inspect response for the `backup.inspect` capability: the
+/// user-facing preview of the held staged restore, or cancellation. Counts,
+/// flags, and the bounded display listing only — never host paths, never
+/// file contents, never the clientMods envelope itself.
+#[derive(Serialize)]
+pub struct BackupInspectedResponse {
+    /// True when the user dismissed the picker. Every other field is then
+    /// zeroed/empty (no restore is held).
+    pub canceled: bool,
+    /// Manifest include flags: which sections the commit would apply.
+    pub includes: crate::backup::BackupIncludes,
+    /// Picked archive size in bytes.
+    pub archive_bytes: usize,
+    /// Total staged uncompressed content in bytes.
+    pub uncompressed_bytes: usize,
+    /// Staged file entries (manifest excluded).
+    pub entry_count: usize,
+    /// Serialized clientMods envelope size in bytes.
+    pub client_mods_bytes: usize,
+    /// Envelope presence flags (contents never cross here).
+    pub has_vencord_mod_data: bool,
+    /// Envelope presence flags (contents never cross here).
+    pub has_equicord_mod_data: bool,
+    /// Envelope presence flags (contents never cross here).
+    pub has_shelter_mod_data: bool,
+    /// Accepted archive names in archive order (display only, bounded).
+    pub entries: Vec<String>,
+    /// True when `entry_count` exceeds the listing length.
+    pub entries_truncated: bool,
+}
+
+/// Discard response for the `backup.discard_restore` capability: whether a
+/// held staged restore was actually dropped. Discarding with nothing held
+/// resolves `discarded: false`, never an error.
+#[derive(Serialize)]
+pub struct BackupRestoreDiscardedResponse {
+    pub discarded: bool,
+}
+
+/// Bounded restore response for the `backup.commit_restore` capability:
 /// cancellation plus the filtered clientMods envelope for the renderer to
 /// apply through the existing mechanism. No archive path, profile path,
 /// filename, or filesystem error text — the host never applies clientMods
@@ -1419,8 +1478,13 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
                 // manifest, path, size, and clientMods bounds live in
-                // `backup` and are enforced at dispatch.
-                BridgeCommand::BackupRestore(_) => {}
+                // `backup` and are enforced at dispatch. The inspect/commit/
+                // discard trio shares the same empty contract: staging is
+                // held host-side between inspect and commit, so preview and
+                // commit cannot disagree.
+                BridgeCommand::BackupInspect(_)
+                | BridgeCommand::BackupCommitRestore(_)
+                | BridgeCommand::BackupDiscardRestore(_) => {}
                 // Window chrome commands are parameter-free by protocol
                 // (`deny_unknown_fields` already rejected any
                 // renderer-supplied member: no window id, handle,
@@ -2394,29 +2458,48 @@ mod tests {
         // an empty payload is rejected; restore (D4-2) is parameter-free, so
         // its exact empty payload parses while any member is rejected.
         let save = r#"{"version":1,"request_id":"bundles-1","command":{"type":"backup_save","payload":{}}}"#;
-        let restore = r#"{"version":1,"request_id":"bundles-2","command":{"type":"backup_restore","payload":{}}}"#;
+        let legacy_restore = r#"{"version":1,"request_id":"bundles-2","command":{"type":"backup_restore","payload":{}}}"#;
+        let inspect = r#"{"version":1,"request_id":"bundles-2b","command":{"type":"backup_inspect","payload":{}}}"#;
+        let commit = r#"{"version":1,"request_id":"bundles-2c","command":{"type":"backup_commit_restore","payload":{}}}"#;
+        let discard = r#"{"version":1,"request_id":"bundles-2d","command":{"type":"backup_discard_restore","payload":{}}}"#;
         let invoke = r#"{"version":1,"request_id":"bundles-3","command":{"type":"invoke","payload":{"method":"backup.save"}}}"#;
         assert!(parse_bridge_message(save).is_err());
+        // The single-call restore is gone: preview-then-commit replaced it.
+        assert!(parse_bridge_message(legacy_restore).is_err());
         assert!(matches!(
-            parse_bridge_message(restore),
+            parse_bridge_message(inspect),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(commit),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(discard),
             Ok(BridgeMessage::Request(_))
         ));
         assert!(parse_bridge_message(invoke).is_err());
-        // The restore request carries no archive path, filename, URL,
-        // filter, or dialog option: any member is rejected.
+        // None of the trio carries an archive path, filename, URL, filter,
+        // dialog option, or staged bytes: any member is rejected.
         for payload in [
             r#"{"path":"C:\\x.zip"}"#,
             r#"{"filename":"x.zip"}"#,
             r#"{"url":"https://attacker.invalid/x.zip"}"#,
             r#"{"archive":"e30="}"#,
         ] {
-            let request = format!(
-                "{{\"version\":1,\"request_id\":\"restore-x\",\"command\":{{\"type\":\"backup_restore\",\"payload\":{payload}}}}}"
-            );
-            assert!(
-                parse_bridge_message(&request).is_err(),
-                "{payload} must be rejected"
-            );
+            for wire in [
+                "backup_inspect",
+                "backup_commit_restore",
+                "backup_discard_restore",
+            ] {
+                let request = format!(
+                    "{{\"version\":1,\"request_id\":\"restore-x\",\"command\":{{\"type\":\"{wire}\",\"payload\":{payload}}}}}"
+                );
+                assert!(
+                    parse_bridge_message(&request).is_err(),
+                    "{wire} with {payload} must be rejected"
+                );
+            }
         }
     }
 
@@ -2443,6 +2526,54 @@ mod tests {
             value["payload"]["payload"]["client_mods"]["vencordLocalStorage"],
             "x"
         );
+    }
+
+    #[test]
+    fn serializes_a_typed_backup_inspected_preview() {
+        use super::BackupInspectedResponse;
+        use crate::backup::BackupIncludes;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "inspect-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::BackupInspected(
+                BackupInspectedResponse {
+                    canceled: false,
+                    includes: BackupIncludes {
+                        remcord_config: true,
+                        remcord_themes_and_quick_css: true,
+                        remcord_extension_plugins: false,
+                        vencord_mod_data: true,
+                        equicord_mod_data: false,
+                        shelter_mod_data: false,
+                        mod_bundles: false,
+                    },
+                    archive_bytes: 100,
+                    uncompressed_bytes: 200,
+                    entry_count: 2,
+                    client_mods_bytes: 10,
+                    has_vencord_mod_data: true,
+                    has_equicord_mod_data: false,
+                    has_shelter_mod_data: false,
+                    entries: vec!["data/quickCss.css".to_owned()],
+                    entries_truncated: true,
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["payload"]["type"], "backup_inspected");
+        let preview = &value["payload"]["payload"];
+        assert_eq!(preview["canceled"], false);
+        assert_eq!(preview["includes"]["remcordConfig"], true);
+        assert_eq!(preview["includes"]["modBundles"], false);
+        assert_eq!(preview["entry_count"], 2);
+        assert_eq!(preview["entries"], serde_json::json!(["data/quickCss.css"]));
+        assert_eq!(preview["entries_truncated"], true);
+        assert_eq!(preview["has_vencord_mod_data"], true);
+        // No contents, no paths beyond display names, no envelope.
+        assert!(preview.get("client_mods").is_none());
+        assert_eq!(preview.as_object().map(|object| object.len()), Some(11));
     }
 
     #[test]

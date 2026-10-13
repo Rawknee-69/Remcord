@@ -571,28 +571,37 @@ export function themeImportOutcome(imported: number, failed: number): ThemeImpor
 export type BackupRestoreOutcome = { ok: true; clientMods: unknown } | { ok: false; error: string };
 
 /**
- * Minimal native backup namespace (Phase D4-3). `remcordWindow.d.ts` stays
- * Electron-shaped (`restore(): Promise<string>`); the native object result
- * is described only here, at the single restore call site that consumes it.
- * No generic filesystem/dialog API.
+ * Minimal native backup namespace. `remcordWindow.d.ts` stays
+ * Electron-shaped (`restore(): Promise<string>`); the native trio result
+ * shapes are described only here, at the single restore call site that
+ * consumes them. No generic filesystem/dialog API.
  */
 interface NativeBackupNamespace {
     save: (data: string) => Promise<{ ok: boolean; error?: string }>;
-    restore?: () => Promise<unknown>;
+    inspect?: () => Promise<unknown>;
+    commitRestore?: () => Promise<unknown>;
+    discardRestore?: () => Promise<unknown>;
 }
 
 /**
  * Native backup namespace when the WebView2 shell grants it, `undefined`
  * otherwise. Gated on BOTH the existing `isNativeWebView` environment check
  * AND function presence: an Electron `window.remcord.backup` also carries
- * `save`/`restore` functions (with the STRING restore shape), so the
- * environment check is what selects the native OBJECT result shape. No
+ * backup functions (with the STRING restore shape), so the environment
+ * check is what selects the native OBJECT result shapes. All three trio
+ * members must be present — a partial namespace falls back safely. No
  * second detection mechanism.
  */
 function nativeBackup(): NativeBackupNamespace | undefined {
     if (!isNativeWebView()) return undefined;
     const backup = (window.remcord as unknown as { backup?: NativeBackupNamespace }).backup;
-    if (!backup || typeof backup.save !== "function" || typeof backup.restore !== "function") {
+    if (
+        !backup ||
+        typeof backup.save !== "function" ||
+        typeof backup.inspect !== "function" ||
+        typeof backup.commitRestore !== "function" ||
+        typeof backup.discardRestore !== "function"
+    ) {
         return undefined;
     }
     return backup;
@@ -620,18 +629,137 @@ export async function saveBackup(payload: string): Promise<{ ok: boolean; error?
 }
 
 /**
- * Native backup restore. Gate with `isNativeBackupAvailable` first so
- * exactly one path executes per restore: the native OBJECT result here, the
- * Electron JSON-string path otherwise. Rejects when the capability is absent
- * (caller falls back); host failures resolve into the result shape via the
- * facade, transport rejections propagate to the caller's error state. The
- * host owns picker/validation/staging/commit; the caller only feeds the
- * returned clientMods into the existing renderer application path.
+ * Native backup inspect: the host-owned picker plus validation and staging.
+ * Gate with `isNativeBackupAvailable` first so exactly one path executes
+ * per restore. Resolves the raw preview payload (or the canceled shape);
+ * the caller normalizes via `normalizeNativeInspectResult`. The staged
+ * bytes stay held host-side until `commitRestoreNative` or
+ * `discardRestoreNative` resolves the hold. Rejects when the capability is
+ * absent (caller falls back); host failures resolve into the result shape
+ * via the facade, transport rejections propagate to the caller's error
+ * state.
  */
-export async function restoreBackupNative(): Promise<unknown> {
-    const restore = nativeBackup()?.restore;
-    if (typeof restore !== "function") throw new Error("[Remcord] Native backup restore is unavailable.");
-    return await restore();
+export async function inspectBackupNative(): Promise<unknown> {
+    const inspect = nativeBackup()?.inspect;
+    if (typeof inspect !== "function") throw new Error("[Remcord] Native backup inspect is unavailable.");
+    return await inspect();
+}
+
+/**
+ * Native backup commit: applies exactly the held staged bytes the preview
+ * described. The caller feeds the returned clientMods into the existing
+ * renderer application path.
+ */
+export async function commitRestoreNative(): Promise<unknown> {
+    const commit = nativeBackup()?.commitRestore;
+    if (typeof commit !== "function") throw new Error("[Remcord] Native backup commit is unavailable.");
+    return await commit();
+}
+
+/**
+ * Native backup discard: drops the held staged restore without touching
+ * the profile. Best-effort by design (a failed discard only orphans bounded
+ * host temp state); callers never surface it as an error.
+ */
+export async function discardRestoreNative(): Promise<boolean> {
+    try {
+        const discard = nativeBackup()?.discardRestore;
+        if (typeof discard !== "function") return false;
+        const result = (await discard()) as { discarded?: unknown };
+        return result?.discarded === true;
+    } catch {
+        return false;
+    }
+}
+
+/** User-facing preview of one held staged restore (normalized, never throwing). */
+export interface NativeRestorePreview {
+    includes: Record<string, boolean>;
+    archiveBytes: number;
+    uncompressedBytes: number;
+    entryCount: number;
+    clientModsBytes: number;
+    hasVencordModData: boolean;
+    hasEquicordModData: boolean;
+    hasShelterModData: boolean;
+    entries: string[];
+    entriesTruncated: boolean;
+}
+
+export type NativeInspectOutcome =
+    | { canceled: true }
+    | { preview: NativeRestorePreview }
+    | { error: string }
+    | { invalid: true };
+
+function isPreviewIncludes(value: unknown): value is Record<string, boolean> {
+    if (!isRecord(value)) return false;
+    const keys = [
+        "remcordConfig",
+        "remcordThemesAndQuickCss",
+        "remcordExtensionPlugins",
+        "vencordModData",
+        "equicordModData",
+        "shelterModData",
+        "modBundles",
+    ];
+    return Object.keys(value).length === keys.length && keys.every((key) => typeof value[key] === "boolean");
+}
+
+function isNonNegativeInt(value: unknown): value is number {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Normalize the native inspect outcome. Never throws and never surfaces
+ * paths: cancellation stays silent (`canceled`), typed host failures carry
+ * their code (`error`), and misshapen results become `{ invalid: true }`
+ * for the caller's invalid-file state. A valid preview passes through with
+ * bounded display fields only (entry names are capped for rendering; the
+ * authoritative total rides in `entryCount`).
+ */
+export function normalizeNativeInspectResult(result: unknown): NativeInspectOutcome {
+    if (!isRecord(result)) return { invalid: true };
+    if (result.ok === false) {
+        if (result.error === "CANCELLED") return { canceled: true };
+        if (typeof result.error === "string" && result.error.length > 0) return { error: result.error };
+        return { invalid: true };
+    }
+    if (result.ok !== true) return { invalid: true };
+    const preview = result.preview;
+    if (
+        !isRecord(preview) ||
+        Object.keys(preview).length !== 11 ||
+        preview.canceled !== false ||
+        !isPreviewIncludes(preview.includes) ||
+        !isNonNegativeInt(preview.archive_bytes) ||
+        !isNonNegativeInt(preview.uncompressed_bytes) ||
+        !isNonNegativeInt(preview.entry_count) ||
+        !isNonNegativeInt(preview.client_mods_bytes) ||
+        typeof preview.has_vencord_mod_data !== "boolean" ||
+        typeof preview.has_equicord_mod_data !== "boolean" ||
+        typeof preview.has_shelter_mod_data !== "boolean" ||
+        !Array.isArray(preview.entries) ||
+        preview.entries.length > 128 ||
+        !preview.entries.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 512) ||
+        typeof preview.entries_truncated !== "boolean"
+    ) {
+        return { invalid: true };
+    }
+    return {
+        preview: {
+            includes: preview.includes as unknown as Record<string, boolean>,
+            archiveBytes: preview.archive_bytes as unknown as number,
+            uncompressedBytes: preview.uncompressed_bytes as unknown as number,
+            entryCount: preview.entry_count as unknown as number,
+            clientModsBytes: preview.client_mods_bytes as unknown as number,
+            hasVencordModData: preview.has_vencord_mod_data as unknown as boolean,
+            hasEquicordModData: preview.has_equicord_mod_data as unknown as boolean,
+            hasShelterModData: preview.has_shelter_mod_data as unknown as boolean,
+            entries: (preview.entries as unknown as string[]).slice(0, 128),
+            entriesTruncated: preview.entries_truncated as unknown as boolean,
+        },
+    };
 }
 
 /**

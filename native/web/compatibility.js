@@ -763,26 +763,106 @@
         return true;
     }
 
-    function restoreBackup(timeoutMs = 120_000) {
-        requireCapability("backup.restore");
+    // The exact seven include flags an inspect preview carries. Unknown
+    // keys are rejected: the renderer cannot invent an archive section.
+    const BACKUP_PREVIEW_INCLUDE_KEYS = [
+        "remcordConfig",
+        "remcordThemesAndQuickCss",
+        "remcordExtensionPlugins",
+        "vencordModData",
+        "equicordModData",
+        "shelterModData",
+        "modBundles",
+    ];
+    // Maximum preview listing length, mirroring the host bound. Longer
+    // listings are rejected: the host truncates past this bound itself.
+    const MAX_BACKUP_PREVIEW_ENTRIES = 128;
+    const MAX_BACKUP_PREVIEW_ENTRY_BYTES = 512;
+
+    function isBackupPreviewIncludes(value) {
+        return (
+            value &&
+            typeof value === "object" &&
+            !Array.isArray(value) &&
+            Object.keys(value).length === BACKUP_PREVIEW_INCLUDE_KEYS.length &&
+            BACKUP_PREVIEW_INCLUDE_KEYS.every((key) => typeof value[key] === "boolean")
+        );
+    }
+
+    function inspectBackup(timeoutMs = 120_000) {
+        requireCapability("backup.inspect");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
             return Promise.reject(new TypeError("timeout must be a positive finite number"));
         }
         // Parameter-free by protocol: the host owns the entire open picker
-        // plus validation, staging, and commit. No archive path, filename,
-        // URL, filter, or dialog option may be supplied. The modal picker
-        // stays open as long as the user needs, so this uses the
-        // long-operation timeout like save and the theme import.
-        // Cancellation resolves { ok: false, error: "CANCELLED" } (silent
-        // typed control flow, never a rejection); host failures resolve
-        // { ok: false, error: <typed code> }. Success resolves
-        // { ok: true, clientMods } for the existing renderer mechanism to
-        // apply — the host never applies clientMods itself.
-        return request({ type: "backup_restore", payload: {} }, timeoutMs).then(
+        // plus validation and staging. No archive path, filename, URL,
+        // filter, or dialog option may be supplied. The modal picker stays
+        // open as long as the user needs, so this uses the long-operation
+        // timeout like save and the theme import. The staged bytes are HELD
+        // host-side for one explicit commit or discard; only the preview
+        // crosses back here. Cancellation resolves { ok: false, error:
+        // "CANCELLED" } (silent typed control flow, never a rejection);
+        // host failures resolve { ok: false, error: <typed code> }. Success
+        // resolves { ok: true, preview } for the preview UI — the commit
+        // step applies exactly these held bytes.
+        return request({ type: "backup_inspect", payload: {} }, timeoutMs).then(
+            (payload) => {
+                if (payload.canceled === true) return { ok: false, error: "CANCELLED" };
+                if (
+                    !payload ||
+                    Object.keys(payload).length !== 11 ||
+                    payload.canceled !== false ||
+                    !isBackupPreviewIncludes(payload.includes) ||
+                    !Number.isSafeInteger(payload.archive_bytes) ||
+                    payload.archive_bytes < 0 ||
+                    !Number.isSafeInteger(payload.uncompressed_bytes) ||
+                    payload.uncompressed_bytes < 0 ||
+                    !Number.isSafeInteger(payload.entry_count) ||
+                    payload.entry_count < 0 ||
+                    !Number.isSafeInteger(payload.client_mods_bytes) ||
+                    payload.client_mods_bytes < 0 ||
+                    typeof payload.has_vencord_mod_data !== "boolean" ||
+                    typeof payload.has_equicord_mod_data !== "boolean" ||
+                    typeof payload.has_shelter_mod_data !== "boolean" ||
+                    !Array.isArray(payload.entries) ||
+                    payload.entries.length > MAX_BACKUP_PREVIEW_ENTRIES ||
+                    !payload.entries.every(
+                        (entry) =>
+                            typeof entry === "string" &&
+                            entry.length > 0 &&
+                            textEncoder.encode(entry).length <= MAX_BACKUP_PREVIEW_ENTRY_BYTES,
+                    ) ||
+                    typeof payload.entries_truncated !== "boolean"
+                ) {
+                    throw new Error("Native backup inspect response schema is invalid");
+                }
+                return { ok: true, preview: payload };
+            },
+            (error) => ({
+                ok: false,
+                error: typeof error?.code === "string" ? error.code : "UNKNOWN",
+            }),
+        );
+    }
+
+    function commitRestore(timeoutMs = 120_000) {
+        requireCapability("backup.commit_restore");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the commit applies exactly the held
+        // staged bytes (validated at inspect time, never out of host
+        // hands), so preview and commit cannot disagree. No archive path,
+        // bytes, manifest, or selector may be supplied. Committing with
+        // nothing held resolves { ok: false, error: "NO_STAGED_RESTORE" },
+        // never a silent no-op. Success resolves { ok: true, clientMods }
+        // for the existing renderer mechanism to apply — the host never
+        // applies clientMods itself.
+        return request({ type: "backup_commit_restore", payload: {} }, timeoutMs).then(
             (payload) => {
                 if (payload.canceled === true) return { ok: false, error: "CANCELLED" };
                 if (!isBoundedClientMods(payload.client_mods)) {
-                    throw new Error("Native backup restore response schema is invalid");
+                    throw new Error("Native backup commit response schema is invalid");
                 }
                 return { ok: true, clientMods: payload.client_mods };
             },
@@ -791,6 +871,22 @@
                 error: typeof error?.code === "string" ? error.code : "UNKNOWN",
             }),
         );
+    }
+
+    function discardRestore(timeoutMs = 5000) {
+        requireCapability("backup.discard_restore");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: drops the held staged restore without
+        // touching the profile. Resolves { discarded } — false when nothing
+        // was held, never an error for the empty case.
+        return request({ type: "backup_discard_restore", payload: {} }, timeoutMs).then((payload) => {
+            if (!payload || Object.keys(payload).length !== 1 || typeof payload.discarded !== "boolean") {
+                throw new Error("Native backup discard response schema is invalid");
+            }
+            return payload;
+        });
     }
 
     window.addEventListener("remcord-native:response", (event) => {
@@ -1175,6 +1271,42 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "backup_inspected") {
+            const payload = response.payload.payload;
+            // Bounded preview only: cancellation plus counts, flags, and the
+            // bounded display listing. No contents, no paths beyond display
+            // names, no envelope may ride along. Cancellation carries the
+            // zeroed shape; success carries the held restore's preview.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 11 ||
+                typeof payload.canceled !== "boolean" ||
+                !isBackupPreviewIncludes(payload.includes) ||
+                !Number.isSafeInteger(payload.archive_bytes) ||
+                payload.archive_bytes < 0 ||
+                !Number.isSafeInteger(payload.uncompressed_bytes) ||
+                payload.uncompressed_bytes < 0 ||
+                !Number.isSafeInteger(payload.entry_count) ||
+                payload.entry_count < 0 ||
+                !Number.isSafeInteger(payload.client_mods_bytes) ||
+                payload.client_mods_bytes < 0 ||
+                typeof payload.has_vencord_mod_data !== "boolean" ||
+                typeof payload.has_equicord_mod_data !== "boolean" ||
+                typeof payload.has_shelter_mod_data !== "boolean" ||
+                !Array.isArray(payload.entries) ||
+                payload.entries.length > MAX_BACKUP_PREVIEW_ENTRIES ||
+                !payload.entries.every(
+                    (entry) =>
+                        typeof entry === "string" &&
+                        entry.length > 0 &&
+                        textEncoder.encode(entry).length <= MAX_BACKUP_PREVIEW_ENTRY_BYTES,
+                ) ||
+                typeof payload.entries_truncated !== "boolean"
+            ) {
+                request.reject(new Error("Native backup inspect response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "backup_restored") {
             const payload = response.payload.payload;
             // Bounded restore outcome only: cancellation plus the filtered
@@ -1193,6 +1325,15 @@
                 !envelopeValid
             ) {
                 request.reject(new Error("Native backup restore response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "backup_restore_discarded") {
+            const payload = response.payload.payload;
+            // Discard acknowledgement only: whether a held restore was
+            // actually dropped. Nothing else may ride along.
+            if (!payload || Object.keys(payload).length !== 1 || typeof payload.discarded !== "boolean") {
+                request.reject(new Error("Native backup discard response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -1352,7 +1493,13 @@
     // shape ({ ok } / { ok: false, error }); `restore` is parameter-free and
     // resolves { ok: true, clientMods } / { ok: false, error } with the same
     // silent CANCELLED control flow.
-    const backup = Object.freeze({ listBundles, save: saveBackup, restore: restoreBackup });
+    const backup = Object.freeze({
+        listBundles,
+        save: saveBackup,
+        inspect: inspectBackup,
+        commitRestore,
+        discardRestore,
+    });
     // Folder opening only: reveal for the three fixed roots, open for one
     // validated theme id. No path, dialog, picker, or shell surface.
     const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });

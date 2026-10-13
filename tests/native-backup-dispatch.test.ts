@@ -3,7 +3,9 @@ import test from "node:test";
 
 type Calls = {
     nativeSave: string[];
-    nativeRestore: number;
+    nativeInspect: number;
+    nativeCommit: number;
+    nativeDiscard: number;
     electronSave: string[];
     electronRestore: number;
     remotePlugins: Array<{ id: string; src: string; update: boolean }>;
@@ -13,13 +15,17 @@ type Calls = {
 function installGlobals(options: {
     runtime?: string;
     saveImpl?: (payload: string) => Promise<{ ok: boolean; error?: string }>;
-    restoreImpl?: () => Promise<unknown>;
+    inspectImpl?: () => Promise<unknown>;
+    commitImpl?: () => Promise<unknown>;
+    discardImpl?: () => Promise<unknown>;
     electronSaveImpl?: (payload: string) => Promise<{ ok: boolean; error?: string }>;
     electronRestoreImpl?: () => Promise<string>;
 }): Calls {
     const calls: Calls = {
         nativeSave: [],
-        nativeRestore: 0,
+        nativeInspect: 0,
+        nativeCommit: 0,
+        nativeDiscard: 0,
         electronSave: [],
         electronRestore: 0,
         remotePlugins: [],
@@ -42,9 +48,10 @@ function installGlobals(options: {
     if (options.runtime !== undefined) {
         remcord.boot = { runtime: options.runtime, platform: "win32", protocol_version: 1, capabilities: [] };
     }
-    // One `backup` namespace per shell: the native shell carries the OBJECT
-    // restore shape, Electron the JSON-STRING shape. Same member names.
-    if (options.saveImpl || options.restoreImpl) {
+    // One `backup` namespace per shell: the native shell carries the
+    // inspect/commit/discard trio (OBJECT shapes), Electron the
+    // JSON-STRING save/restore. Same save member name.
+    if (options.saveImpl || options.inspectImpl || options.commitImpl || options.discardImpl) {
         const namespace: Record<string, unknown> = {};
         if (options.saveImpl) {
             const impl = options.saveImpl;
@@ -53,10 +60,24 @@ function installGlobals(options: {
                 return impl(payload);
             };
         }
-        if (options.restoreImpl) {
-            const impl = options.restoreImpl;
-            namespace.restore = () => {
-                calls.nativeRestore += 1;
+        if (options.inspectImpl) {
+            const impl = options.inspectImpl;
+            namespace.inspect = () => {
+                calls.nativeInspect += 1;
+                return impl();
+            };
+        }
+        if (options.commitImpl) {
+            const impl = options.commitImpl;
+            namespace.commitRestore = () => {
+                calls.nativeCommit += 1;
+                return impl();
+            };
+        }
+        if (options.discardImpl) {
+            const impl = options.discardImpl;
+            namespace.discardRestore = () => {
+                calls.nativeDiscard += 1;
                 return impl();
             };
         }
@@ -106,21 +127,71 @@ const PAYLOAD = JSON.stringify({
     },
 });
 
-test("native shell with both backup members selects the native path", async () => {
+const PREVIEW_PAYLOAD = {
+    canceled: false,
+    includes: {
+        remcordConfig: true,
+        remcordThemesAndQuickCss: true,
+        remcordExtensionPlugins: true,
+        vencordModData: true,
+        equicordModData: true,
+        shelterModData: true,
+        modBundles: true,
+    },
+    archive_bytes: 100,
+    uncompressed_bytes: 200,
+    entry_count: 2,
+    client_mods_bytes: 10,
+    has_vencord_mod_data: true,
+    has_equicord_mod_data: false,
+    has_shelter_mod_data: false,
+    entries: ["data/quickCss.css", "data/themes/t/src.css"],
+    entries_truncated: false,
+};
+
+function trioImpls(
+    overrides: {
+        inspectImpl?: () => Promise<unknown>;
+        commitImpl?: () => Promise<unknown>;
+        discardImpl?: () => Promise<unknown>;
+    } = {},
+) {
+    return {
+        inspectImpl: () => Promise.resolve({ ok: true, preview: PREVIEW_PAYLOAD }),
+        commitImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        discardImpl: () => Promise.resolve({ discarded: true }),
+        ...overrides,
+    };
+}
+
+test("native shell with save only selects no native restore path", async () => {
     installGlobals({ runtime: "webview2", saveImpl: () => Promise.resolve({ ok: true }) });
     const { isNativeBackupAvailable } = await loadHelpers();
-    // Save-only namespace is NOT enough: restore needs the object shape.
+    // Save-only namespace is NOT enough: the inspect/commit/discard trio
+    // must all be present.
     assert.equal(isNativeBackupAvailable(), false);
 });
 
-test("native shell with save and restore selects the native path", async () => {
+test("native shell with the full trio selects the native path", async () => {
     installGlobals({
         runtime: "webview2",
         saveImpl: () => Promise.resolve({ ok: true }),
-        restoreImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        inspectImpl: () => Promise.resolve({ ok: true, preview: PREVIEW_PAYLOAD }),
+        commitImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        discardImpl: () => Promise.resolve({ discarded: true }),
     });
     const { isNativeBackupAvailable } = await loadHelpers();
     assert.equal(isNativeBackupAvailable(), true);
+});
+
+test("native shell with a partial trio falls back safely", async () => {
+    installGlobals({
+        runtime: "webview2",
+        saveImpl: () => Promise.resolve({ ok: true }),
+        inspectImpl: () => Promise.resolve({ ok: true, preview: PREVIEW_PAYLOAD }),
+    });
+    const { isNativeBackupAvailable } = await loadHelpers();
+    assert.equal(isNativeBackupAvailable(), false);
 });
 
 test("Electron shell never selects the native path", async () => {
@@ -136,7 +207,9 @@ test("non-WebView2 runtime never selects the native path", async () => {
     installGlobals({
         runtime: "electron",
         saveImpl: () => Promise.resolve({ ok: true }),
-        restoreImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        inspectImpl: () => Promise.resolve({ ok: true, preview: PREVIEW_PAYLOAD }),
+        commitImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        discardImpl: () => Promise.resolve({ discarded: true }),
     });
     const { isNativeBackupAvailable } = await loadHelpers();
     assert.equal(isNativeBackupAvailable(), false);
@@ -144,16 +217,17 @@ test("non-WebView2 runtime never selects the native path", async () => {
 
 test("native shell without the backup namespace falls back safely", async () => {
     installGlobals({ runtime: "webview2" });
-    const { isNativeBackupAvailable, restoreBackupNative } = await loadHelpers();
+    const { isNativeBackupAvailable, inspectBackupNative, commitRestoreNative } = await loadHelpers();
     assert.equal(isNativeBackupAvailable(), false);
-    await assert.rejects(restoreBackupNative(), /unavailable/);
+    await assert.rejects(inspectBackupNative(), /unavailable/);
+    await assert.rejects(commitRestoreNative(), /unavailable/);
 });
 
 test("save calls the shell backup.save exactly once with the exact payload", async () => {
     const calls = installGlobals({
         runtime: "webview2",
         saveImpl: () => Promise.resolve({ ok: true }),
-        restoreImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        ...trioImpls(),
     });
     const { saveBackup } = await loadHelpers();
     const result = await saveBackup(PAYLOAD);
@@ -183,7 +257,7 @@ test("save cancellation and failure pass through for the existing toasts", async
             Promise.resolve(
                 payload === "cancel" ? { ok: false, error: "CANCELLED" } : { ok: false, error: "BACKUP_TOO_LARGE" },
             ),
-        restoreImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        ...trioImpls(),
     });
     const { saveBackup } = await loadHelpers();
     assert.deepEqual(await saveBackup("cancel"), { ok: false, error: "CANCELLED" });
@@ -194,24 +268,75 @@ test("save rejections propagate so the caller shows the error state", async () =
     installGlobals({
         runtime: "webview2",
         saveImpl: () => Promise.reject(new Error("transport down")),
-        restoreImpl: () => Promise.resolve({ ok: true, clientMods: {} }),
+        ...trioImpls(),
     });
     const { saveBackup } = await loadHelpers();
     await assert.rejects(saveBackup(PAYLOAD), /transport down/);
 });
 
-test("native restore calls the native method exactly once and nothing else", async () => {
+test("native inspect stages exactly once and normalizes the preview", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        saveImpl: () => Promise.resolve({ ok: true }),
+        ...trioImpls(),
+    });
+    const { isNativeBackupAvailable, inspectBackupNative, normalizeNativeInspectResult } = await loadHelpers();
+    assert.equal(isNativeBackupAvailable(), true);
+    const raw = await inspectBackupNative();
+    assert.equal(calls.nativeInspect, 1);
+    assert.equal(calls.nativeCommit, 0);
+    assert.equal(calls.nativeDiscard, 0);
+    assert.equal(calls.electronRestore, 0);
+    const outcome = normalizeNativeInspectResult(raw);
+    assert.ok("preview" in outcome);
+    if ("preview" in outcome) {
+        assert.equal(outcome.preview.entryCount, 2);
+        assert.deepEqual(outcome.preview.entries, ["data/quickCss.css", "data/themes/t/src.css"]);
+        assert.equal(outcome.preview.entriesTruncated, false);
+        assert.equal(outcome.preview.includes.remcordConfig, true);
+        assert.equal(outcome.preview.hasVencordModData, true);
+        assert.equal(outcome.preview.hasShelterModData, false);
+    }
+});
+
+test("native inspect maps cancellation, typed failures, and garbage", async () => {
+    installGlobals({ runtime: "webview2", saveImpl: () => Promise.resolve({ ok: true }), ...trioImpls() });
+    const { normalizeNativeInspectResult } = await loadHelpers();
+    assert.deepEqual(normalizeNativeInspectResult({ ok: false, error: "CANCELLED" }), { canceled: true });
+    assert.deepEqual(normalizeNativeInspectResult({ ok: false, error: "INVALID_ARCHIVE" }), {
+        error: "INVALID_ARCHIVE",
+    });
+    for (const garbage of [
+        null,
+        undefined,
+        "string",
+        42,
+        [],
+        {},
+        { ok: "yes" },
+        { ok: false },
+        { ok: true },
+        { ok: true, preview: null },
+        { ok: true, preview: { ...PREVIEW_PAYLOAD, entries: ["x".repeat(513)] } },
+        { ok: true, preview: { ...PREVIEW_PAYLOAD, extra: 1 } },
+    ]) {
+        assert.deepEqual(normalizeNativeInspectResult(garbage), { invalid: true });
+    }
+    // A preview missing the canceled flag is misshapen, never a silent pass.
+    const { canceled: _dropped, ...noFlag } = PREVIEW_PAYLOAD;
+    assert.deepEqual(normalizeNativeInspectResult({ ok: true, preview: noFlag }), { invalid: true });
+});
+
+test("native commit applies the held envelope and nothing else", async () => {
     const envelope = { vencordLocalStorage: '{"a":1}', shelter: { plugins: {} } };
     const calls = installGlobals({
         runtime: "webview2",
         saveImpl: () => Promise.resolve({ ok: true }),
-        restoreImpl: () => Promise.resolve({ ok: true, clientMods: envelope }),
+        ...trioImpls({ commitImpl: () => Promise.resolve({ ok: true, clientMods: envelope }) }),
     });
-    const { isNativeBackupAvailable, restoreBackupNative, normalizeNativeRestoreResult } = await loadHelpers();
-    assert.equal(isNativeBackupAvailable(), true);
-    const raw = await restoreBackupNative();
-    assert.equal(calls.nativeRestore, 1);
-    assert.equal(calls.electronRestore, 0);
+    const { commitRestoreNative, normalizeNativeRestoreResult } = await loadHelpers();
+    const raw = await commitRestoreNative();
+    assert.equal(calls.nativeCommit, 1);
     const outcome = normalizeNativeRestoreResult(raw);
     assert.equal(outcome.ok, true);
     // The envelope passes through for the existing renderer application
@@ -221,34 +346,35 @@ test("native restore calls the native method exactly once and nothing else", asy
     assert.deepEqual(calls.remotePlugins, []);
 });
 
-test("native restore maps cancellation and typed failures without paths", async () => {
+test("native commit maps cancellation and typed failures without paths", async () => {
     installGlobals({
         runtime: "webview2",
         saveImpl: () => Promise.resolve({ ok: true }),
-        restoreImpl: () => Promise.resolve({ ok: false, error: "INVALID_ARCHIVE" }),
+        ...trioImpls({ commitImpl: () => Promise.resolve({ ok: false, error: "NO_STAGED_RESTORE" }) }),
     });
-    const { restoreBackupNative, normalizeNativeRestoreResult } = await loadHelpers();
-    assert.deepEqual(normalizeNativeRestoreResult(await restoreBackupNative()), {
+    const { commitRestoreNative, normalizeNativeRestoreResult } = await loadHelpers();
+    assert.deepEqual(normalizeNativeRestoreResult(await commitRestoreNative()), {
         ok: false,
-        error: "INVALID_ARCHIVE",
+        error: "NO_STAGED_RESTORE",
     });
 });
 
-test("native restore normalizes misshapen results to INVALID, never throwing", async () => {
+test("native discard is best-effort and never throws", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        saveImpl: () => Promise.resolve({ ok: true }),
+        ...trioImpls({ discardImpl: () => Promise.reject(new Error("transport down")) }),
+    });
+    const { discardRestoreNative } = await loadHelpers();
+    assert.equal(await discardRestoreNative(), false);
+    assert.equal(calls.nativeDiscard, 1);
     installGlobals({
         runtime: "webview2",
         saveImpl: () => Promise.resolve({ ok: true }),
-        restoreImpl: () => Promise.resolve(null),
+        ...trioImpls(),
     });
-    const { normalizeNativeRestoreResult } = await loadHelpers();
-    for (const garbage of [null, undefined, "string", 42, [], {}, { ok: "yes" }, { ok: false }]) {
-        assert.deepEqual(normalizeNativeRestoreResult(garbage), { ok: false, error: "INVALID" });
-    }
-    // Extra members are ignored; only ok/error/clientMods are read.
-    assert.deepEqual(normalizeNativeRestoreResult({ ok: true, clientMods: { a: 1 }, path: "C:\\x.zip" }), {
-        ok: true,
-        clientMods: { a: 1 },
-    });
+    const helpers = await loadHelpers();
+    assert.equal(await helpers.discardRestoreNative(), true);
 });
 
 test("Electron restore parses the JSON string into the shared outcome", async () => {

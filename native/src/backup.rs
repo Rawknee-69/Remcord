@@ -1,11 +1,16 @@
-//! Native backup save (export) + secure restore (import) for Phase D (D4-1/D4-2):
-//! `backup.save` AND `backup.restore`.
+//! Native backup save (export) + secure restore (import) for Phase D:
+//! `backup.save` plus the inspect/commit/discard trio.
 //!
 //! This module is the native counterpart of the Electron backup handlers in
 //! `src/common/backup.ts` (`buildBackupZipBuffer` / `applyBackupFromMap` as
 //! invoked from `src/discord/ipc.ts` `backupSave` / `backupRestore`, exposed
 //! as `window.remcord.backup.save` / `.restore` via
 //! `src/discord/preload/bridge.ts`).
+//!
+//! The native restore splits Electron's single apply step into
+//! preview-then-commit: inspect validates, stages, and holds the bytes
+//! host-side; the renderer shows the preview; commit applies exactly the
+//! held bytes (or discard drops them).
 //!
 //! Traced Electron SAVE behavior (actual implementation, not declarations):
 //! - Request: one JSON string `{ includes, clientMods }` — no path, no
@@ -976,20 +981,26 @@ pub fn write_backup_file(target: &Path, zip_bytes: &[u8]) -> Result<u64, BackupF
 }
 
 // ============================================================================
-// Restore (D4-2): `backup.restore`.
+// Restore: the inspect/commit/discard trio (`backup.inspect`,
+// `backup.commit_restore`, `backup.discard_restore`).
 //
 // The archive is untrusted input. The lifecycle is:
 //
-//     open (host dialog, bounded read)
+//     inspect: open (host dialog, bounded read)
 //       -> parse + validate the ENTIRE archive (manifest, every entry name,
 //          section routing, sizes, counts, duplicates, collisions)
 //       -> stage every byte outside the profile (host temp dir)
+//       -> HOLD the staged bytes worker-side; report the preview
+//          (counts, flags, bounded display listing — never contents/paths)
+//     commit: apply exactly the held staged bytes (no re-read, no drift)
 //       -> pre-commit destination check (no writes yet)
 //       -> commit (per-file atomic temp + rename, settings merged) with
 //          rollback state for already-replaced files
 //       -> delete staging (success AND failure)
+//     discard: delete the held staging without touching the profile
 //
-// No final-profile mutation happens before validation + staging complete.
+// No final-profile mutation happens before validation + staging complete,
+// and nothing commits without the explicit commit step.
 // ============================================================================
 
 /// Maximum picked archive file size in bytes: the 64 MiB uncompressed budget
@@ -1485,12 +1496,20 @@ fn reject_duplicate_names(normalized: &[String]) -> Result<(), BackupFailure> {
 /// borrows mutably per entry), then each entry is validated (name, routing,
 /// duplicates, collisions, header size), streamed to staging with a bounded
 /// `take`, and length-verified. The manifest is required exactly once.
-/// Returns the includes, the filtered clientMods envelope, and the staged
-/// writes in archive order.
+/// Returns the includes, the filtered clientMods envelope, the staged
+/// writes, and the accepted entry names in archive order.
 fn validate_and_stage(
     archive_bytes: &[u8],
     staging_dir: &Path,
-) -> Result<(BackupIncludes, serde_json::Value, Vec<StagedWrite>), BackupFailure> {
+) -> Result<
+    (
+        BackupIncludes,
+        serde_json::Value,
+        Vec<StagedWrite>,
+        Vec<String>,
+    ),
+    BackupFailure,
+> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive_bytes))
         .map_err(|_| failure("INVALID_ARCHIVE", "backup archive is invalid"))?;
     if archive.len() > MAX_BACKUP_ENTRIES {
@@ -1566,6 +1585,7 @@ fn validate_and_stage(
     // Second pass: route + bound + stage every entry. Nothing has been
     // written to the profile; staging lives under the host temp dir.
     let mut staged: Vec<StagedWrite> = Vec::new();
+    let mut accepted_names: Vec<String> = Vec::new();
     let mut total_bytes: usize = 0;
     for index in content_indices {
         let components = split_archive_name(&names[index])?;
@@ -1610,8 +1630,11 @@ fn validate_and_stage(
             target,
             sequence: staged.len(),
         });
+        // The normalized archive name is the preview identity: it names
+        // what will change, never a host path.
+        accepted_names.push(names[index].replace('\\', "/"));
     }
-    Ok((includes, client_mods, staged))
+    Ok((includes, client_mods, staged, accepted_names))
 }
 
 /// Merge the staged settings blob over the live file (Electron
@@ -1951,17 +1974,95 @@ fn commit_staged(
     Ok(())
 }
 
-/// Validate, stage, and commit one archive's bytes into the profile.
-///
-/// Creates a private staging directory, validates + stages the entire
-/// archive, commits, and ALWAYS removes staging (success and failure leave
-/// no temp residue). `fail_after` is the failure-injection hook (production
-/// passes `None`; tests prove first/middle/final-commit recovery).
-fn restore_profile_from_bytes_with_hook(
-    profile_dir: &Path,
-    archive_bytes: &[u8],
-    fail_after: Option<usize>,
-) -> Result<RestoreSummary, BackupFailure> {
+/// One held restore: a fully validated + staged archive waiting for an
+/// explicit commit or discard. The staging directory is host-owned (outside
+/// every profile root); dropping it without commit changes nothing. The
+/// struct is opaque to the holder except for the preview fields: staging
+/// paths and routing never cross the boundary.
+#[derive(Debug)]
+pub struct StagedRestore {
+    staging_dir: PathBuf,
+    staged: Vec<StagedWrite>,
+    /// Manifest include flags: which sections the commit would apply.
+    pub includes: BackupIncludes,
+    /// Filtered clientMods envelope the renderer would apply on commit.
+    pub client_mods: serde_json::Value,
+    /// Picked archive size in bytes.
+    pub archive_bytes: usize,
+    /// Total staged uncompressed content in bytes.
+    pub uncompressed_bytes: usize,
+    /// Staged file entries (manifest excluded).
+    pub entry_count: usize,
+    /// Accepted archive names in archive order: what the commit would
+    /// change. Host paths never appear here. Bounded by
+    /// [`MAX_PREVIEW_ENTRY_NAMES`] for the bridge; `entry_count` is the
+    /// authoritative total.
+    pub entry_names: Vec<String>,
+}
+
+/// Maximum entry names carried in a restore preview. The authoritative
+/// total rides in `entry_count`; the listing is display-only and truncated
+/// past this bound (oldest archive order first).
+pub const MAX_PREVIEW_ENTRY_NAMES: usize = 128;
+
+/// User-facing preview of one held restore: what the commit would change.
+/// Counts and flags only, plus the bounded display listing — never host
+/// paths, never file contents, never the clientMods envelope itself.
+#[derive(Debug, Clone)]
+pub struct RestorePreview {
+    /// Manifest include flags: which sections the commit would apply.
+    pub includes: BackupIncludes,
+    /// Picked archive size in bytes.
+    pub archive_bytes: usize,
+    /// Total staged uncompressed content in bytes.
+    pub uncompressed_bytes: usize,
+    /// Staged file entries (manifest excluded).
+    pub entry_count: usize,
+    /// Serialized clientMods envelope size in bytes.
+    pub client_mods_bytes: usize,
+    /// Whether the envelope carries each mod payload (presence only).
+    pub has_vencord_mod_data: bool,
+    /// Whether the envelope carries each mod payload (presence only).
+    pub has_equicord_mod_data: bool,
+    /// Whether the envelope carries each mod payload (presence only).
+    pub has_shelter_mod_data: bool,
+    /// Accepted archive names in archive order (display only, bounded by
+    /// [`MAX_PREVIEW_ENTRY_NAMES`]).
+    pub entry_names: Vec<String>,
+    /// True when `entry_count` exceeds the listing length.
+    pub entries_truncated: bool,
+}
+
+impl StagedRestore {
+    /// Builds the user-facing preview of this held restore.
+    pub fn preview(&self) -> RestorePreview {
+        let client_mods_bytes = serde_json::to_string(&self.client_mods)
+            .map(|text| text.len())
+            .unwrap_or(0);
+        let envelope = self.client_mods.as_object();
+        let present = |key: &str| {
+            envelope.is_some_and(|map| map.get(key).is_some_and(|value| !value.is_null()))
+        };
+        RestorePreview {
+            includes: self.includes,
+            archive_bytes: self.archive_bytes,
+            uncompressed_bytes: self.uncompressed_bytes,
+            entry_count: self.entry_count,
+            client_mods_bytes,
+            has_vencord_mod_data: present("vencordLocalStorage"),
+            has_equicord_mod_data: present("equicordLocalStorage"),
+            has_shelter_mod_data: present("shelter"),
+            entry_names: self.entry_names.clone(),
+            entries_truncated: self.entry_count > self.entry_names.len(),
+        }
+    }
+}
+
+/// Validate + stage one archive's bytes and hold the result for an explicit
+/// commit or discard. NOTHING is written to the profile here: staging lives
+/// under the host temp dir. On validation failure no staging directory is
+/// left behind.
+pub fn stage_restore_from_bytes(archive_bytes: &[u8]) -> Result<StagedRestore, BackupFailure> {
     if archive_bytes.len() > MAX_RESTORE_ARCHIVE_BYTES {
         return Err(failure(
             "BACKUP_TOO_LARGE",
@@ -1973,67 +2074,93 @@ fn restore_profile_from_bytes_with_hook(
     }
     let validate_started = std::time::Instant::now();
     let staging_dir = create_staging_dir()?;
+    let (includes, client_mods, staged, accepted_names) =
+        match validate_and_stage(archive_bytes, &staging_dir) {
+            Ok(staged) => staged,
+            // A failed stage leaves no temp residue; a held stage is removed
+            // by the commit or discard that resolves it.
+            Err(failure) => {
+                std::fs::remove_dir_all(&staging_dir).ok();
+                return Err(failure);
+            }
+        };
+    let validate_ms = validate_started.elapsed().as_secs_f64() * 1000.0;
+    let uncompressed: usize = staged
+        .iter()
+        .map(|write| {
+            std::fs::symlink_metadata(staging_dir.join(format!("entry-{}.bin", write.sequence)))
+                .ok()
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len() as usize)
+                .unwrap_or(0)
+        })
+        .sum();
+    let entry_count = staged.len();
+    let entry_names: Vec<String> = accepted_names
+        .into_iter()
+        .take(MAX_PREVIEW_ENTRY_NAMES)
+        .collect();
+    println!(
+        "[Backup][Restore] staged entries={} uncompressed={} archive={} validate_ms={:.3}",
+        entry_count,
+        uncompressed,
+        archive_bytes.len(),
+        validate_ms,
+    );
+    Ok(StagedRestore {
+        staging_dir,
+        staged,
+        includes,
+        client_mods,
+        archive_bytes: archive_bytes.len(),
+        uncompressed_bytes: uncompressed,
+        entry_count,
+        entry_names,
+    })
+}
+
+/// Commit one held restore into the profile, then remove its staging
+/// (success AND failure leave no temp residue). Validation is NOT repeated:
+/// the held bytes were validated at stage time and never left host hands,
+/// so there is no window for the archive to change between preview and
+/// commit. Rollback on partial failure is unchanged.
+pub fn commit_staged_restore(
+    profile_dir: &Path,
+    staged: StagedRestore,
+    fail_after: Option<usize>,
+) -> Result<RestoreSummary, BackupFailure> {
     let outcome = (|| {
-        let (includes, client_mods, staged) = validate_and_stage(archive_bytes, &staging_dir)?;
-        let _ = &includes;
-        let validate_ms = validate_started.elapsed().as_secs_f64() * 1000.0;
-        let uncompressed: usize = staged
-            .iter()
-            .map(|write| {
-                std::fs::symlink_metadata(staging_dir.join(format!("entry-{}.bin", write.sequence)))
-                    .ok()
-                    .filter(|metadata| metadata.is_file())
-                    .map(|metadata| metadata.len() as usize)
-                    .unwrap_or(0)
-            })
-            .sum();
-        let entry_count = staged.len();
         let commit_started = std::time::Instant::now();
-        commit_staged(profile_dir, &staged, &staging_dir, fail_after)?;
+        commit_staged(profile_dir, &staged.staged, &staged.staging_dir, fail_after)?;
         let commit_ms = commit_started.elapsed().as_secs_f64() * 1000.0;
-        let client_mods_bytes = serde_json::to_string(&client_mods)
+        let client_mods_bytes = serde_json::to_string(&staged.client_mods)
             .map(|text| text.len())
             .unwrap_or(0);
         println!(
-            "[Backup][Restore] entries={} uncompressed={} archive={} client_mods={} validate_ms={:.3} commit_ms={:.3}",
-            entry_count,
-            uncompressed,
-            archive_bytes.len(),
+            "[Backup][Restore] committed entries={} uncompressed={} archive={} client_mods={} commit_ms={:.3}",
+            staged.entry_count,
+            staged.uncompressed_bytes,
+            staged.archive_bytes,
             client_mods_bytes,
-            validate_ms,
             commit_ms,
         );
         Ok(RestoreSummary {
             canceled: false,
-            client_mods,
-            archive_bytes: archive_bytes.len(),
-            uncompressed_bytes: uncompressed,
-            entry_count,
+            client_mods: staged.client_mods.clone(),
+            archive_bytes: staged.archive_bytes,
+            uncompressed_bytes: staged.uncompressed_bytes,
+            entry_count: staged.entry_count,
             client_mods_bytes,
         })
     })();
-    // Staging is removed on success AND failure: no temp residue either way.
-    std::fs::remove_dir_all(&staging_dir).ok();
+    std::fs::remove_dir_all(&staged.staging_dir).ok();
     outcome
 }
 
-/// Validate, stage, and commit one archive's bytes into the profile.
-/// Production entry point (no failure injection).
-pub fn restore_profile_from_bytes(
-    profile_dir: &Path,
-    archive_bytes: &[u8],
-) -> Result<RestoreSummary, BackupFailure> {
-    restore_profile_from_bytes_with_hook(profile_dir, archive_bytes, None)
-}
-
-/// Read one host-picked archive through the bounded policy and restore it.
-/// Used by the dedicated STA worker after the host-owned open dialog.
-pub fn restore_profile_from_picked_file(
-    profile_dir: &Path,
-    picked: &Path,
-) -> Result<RestoreSummary, BackupFailure> {
-    let bytes = read_archive_file(picked)?;
-    restore_profile_from_bytes(profile_dir, &bytes)
+/// Discard one held restore without touching the profile. Staging is
+/// removed; nothing else changes.
+pub fn discard_staged_restore(staged: StagedRestore) {
+    std::fs::remove_dir_all(&staged.staging_dir).ok();
 }
 
 /// Resolve the host-owned restore-dialog configuration: translated title
@@ -2803,6 +2930,20 @@ mod restore_tests {
         writer.finish().unwrap().into_inner()
     }
 
+    /// Test-only one-shot restore: stage then commit, propagating stage
+    /// failures as the operation error (the production UI stages and
+    /// commits as separate steps; these tests assert end-to-end
+    /// rejection/behavior, not the split seam — the split seam has its own
+    /// tests above).
+    fn restore_now(
+        profile: &Path,
+        archive: &[u8],
+        fail_after: Option<usize>,
+    ) -> Result<RestoreSummary, BackupFailure> {
+        let staged = stage_restore_from_bytes(archive)?;
+        commit_staged_restore(profile, staged, fail_after)
+    }
+
     fn profile_files(profile: &Path) -> Vec<String> {
         let mut out = Vec::new();
         let mut stack = vec![profile.to_path_buf()];
@@ -2948,7 +3089,7 @@ mod restore_tests {
             ],
             false,
         );
-        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        let summary = restore_now(&profile, &archive, None).unwrap();
         assert_eq!(summary.entry_count, 9);
         assert_eq!(summary.client_mods["vencordLocalStorage"], "{\"a\":1}");
         // Settings land as a merged document (pretty-printed): compare values.
@@ -3040,7 +3181,7 @@ mod restore_tests {
         let entries = collect_backup_entries(&source, &request.includes).unwrap();
         let archive = build_backup_zip(&manifest, &entries).unwrap();
         let dest = restore_profile("roundtrip-dst");
-        let summary = restore_profile_from_bytes(&dest, &archive).unwrap();
+        let summary = restore_now(&dest, &archive, None).unwrap();
         assert_eq!(summary.entry_count, 3);
         assert_eq!(summary.client_mods["vencordLocalStorage"], "v");
         assert!(summary.client_mods.get("equicordLocalStorage").is_none());
@@ -3058,7 +3199,7 @@ mod restore_tests {
             b"t"
         );
         // Repeated restore is deterministic.
-        let again = restore_profile_from_bytes(&dest, &archive).unwrap();
+        let again = restore_now(&dest, &archive, None).unwrap();
         assert_eq!(again.entry_count, summary.entry_count);
         assert_eq!(profile_files(&dest), profile_files(&dest));
         std::fs::remove_dir_all(&source).ok();
@@ -3152,7 +3293,7 @@ mod restore_tests {
                     .collect::<Vec<_>>(),
                 false,
             );
-            let failure = restore_profile_from_bytes(&profile, &archive).unwrap_err();
+            let failure = restore_now(&profile, &archive, None).unwrap_err();
             assert_eq!(failure.code, code, "case {tag}");
             assert_eq!(
                 std::fs::read(profile.join("quickCss.css")).unwrap(),
@@ -3184,13 +3325,13 @@ mod restore_tests {
         // Malformed bytes and empty input are structural failures too.
         let profile = restore_profile("malformed");
         assert_eq!(
-            restore_profile_from_bytes(&profile, b"not a zip at all".as_slice())
+            restore_now(&profile, b"not a zip at all".as_slice(), None)
                 .unwrap_err()
                 .code,
             "INVALID_ARCHIVE"
         );
         assert_eq!(
-            restore_profile_from_bytes(&profile, b"".as_slice())
+            restore_now(&profile, b"".as_slice(), None)
                 .unwrap_err()
                 .code,
             "INVALID_ARCHIVE"
@@ -3216,12 +3357,12 @@ mod restore_tests {
             false,
         );
         let profile = restore_profile("flags-off");
-        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        let summary = restore_now(&profile, &archive, None).unwrap();
         assert_eq!(summary.entry_count, 0);
         assert!(profile_files(&profile).is_empty());
         // A section absent while its flag is true restores nothing, cleanly.
         let sparse = raw_zip(&[("manifest.json", default_manifest().as_bytes())], false);
-        let summary = restore_profile_from_bytes(&profile, &sparse).unwrap();
+        let summary = restore_now(&profile, &sparse, None).unwrap();
         assert_eq!(summary.entry_count, 0);
         assert_eq!(summary.client_mods["vencordLocalStorage"], "{\"a\":1}");
         std::fs::remove_dir_all(&profile).ok();
@@ -3250,7 +3391,7 @@ mod restore_tests {
                 false,
             );
             assert!(
-                restore_profile_from_bytes(&profile, &archive).is_err(),
+                restore_now(&profile, &archive, None).is_err(),
                 "must reject {name:?}"
             );
             assert!(profile_files(&profile).is_empty());
@@ -3276,7 +3417,7 @@ mod restore_tests {
         }
         let profile = restore_profile("bundles");
         let archive = raw_zip(&entries, false);
-        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        let summary = restore_now(&profile, &archive, None).unwrap();
         assert_eq!(summary.entry_count, 7);
         for name in bundle_names {
             assert_eq!(std::fs::read(profile.join(name)).unwrap(), b"b");
@@ -3297,9 +3438,7 @@ mod restore_tests {
             true,
         );
         assert_eq!(
-            restore_profile_from_bytes(&profile, &archive)
-                .unwrap_err()
-                .code,
+            restore_now(&profile, &archive, None).unwrap_err().code,
             "BACKUP_TOO_LARGE"
         );
         assert!(profile_files(&profile).is_empty());
@@ -3313,9 +3452,7 @@ mod restore_tests {
             true,
         );
         assert_eq!(
-            restore_profile_from_bytes(&profile, &archive)
-                .unwrap_err()
-                .code,
+            restore_now(&profile, &archive, None).unwrap_err().code,
             "BACKUP_TOO_LARGE"
         );
         assert!(profile_files(&profile).is_empty());
@@ -3332,9 +3469,7 @@ mod restore_tests {
         }
         let archive = raw_zip(&entries, true);
         assert_eq!(
-            restore_profile_from_bytes(&profile, &archive)
-                .unwrap_err()
-                .code,
+            restore_now(&profile, &archive, None).unwrap_err().code,
             "BACKUP_TOO_LARGE"
         );
         assert!(profile_files(&profile).is_empty());
@@ -3354,9 +3489,7 @@ mod restore_tests {
         let profile = restore_profile("crowd");
         let archive = raw_zip(&entries, true);
         assert_eq!(
-            restore_profile_from_bytes(&profile, &archive)
-                .unwrap_err()
-                .code,
+            restore_now(&profile, &archive, None).unwrap_err().code,
             "BACKUP_TOO_LARGE"
         );
         assert!(profile_files(&profile).is_empty());
@@ -3382,7 +3515,7 @@ mod restore_tests {
             ],
             false,
         );
-        restore_profile_from_bytes(&profile, &archive).unwrap();
+        restore_now(&profile, &archive, None).unwrap();
         let merged: serde_json::Value = serde_json::from_slice(
             &std::fs::read(profile.join("storage").join("settings.json")).unwrap(),
         )
@@ -3393,7 +3526,7 @@ mod restore_tests {
         assert_eq!(merged["futureKey"]["nested"], 1);
         // A corrupt existing file merges from {} (Electron cache parity).
         std::fs::write(profile.join("storage").join("settings.json"), b"{broken").unwrap();
-        restore_profile_from_bytes(&profile, &archive).unwrap();
+        restore_now(&profile, &archive, None).unwrap();
         let merged: serde_json::Value = serde_json::from_slice(
             &std::fs::read(profile.join("storage").join("settings.json")).unwrap(),
         )
@@ -3408,7 +3541,7 @@ mod restore_tests {
             false,
         );
         assert_eq!(
-            restore_profile_from_bytes(&profile, &bad).unwrap_err().code,
+            restore_now(&profile, &bad, None).unwrap_err().code,
             "INVALID_BACKUP"
         );
         std::fs::remove_dir_all(&profile).ok();
@@ -3426,26 +3559,147 @@ mod restore_tests {
             ],
             false,
         );
-        restore_profile_from_bytes(&profile, &first).unwrap();
+        restore_now(&profile, &first, None).unwrap();
         assert_eq!(std::fs::read(profile.join("quickCss.css")).unwrap(), b"new");
         assert_eq!(
             std::fs::read(profile.join("unrelated.txt")).unwrap(),
             b"keep"
         );
         // Exact replacement twice converges.
-        restore_profile_from_bytes(&profile, &first).unwrap();
+        restore_now(&profile, &first, None).unwrap();
         assert_eq!(std::fs::read(profile.join("quickCss.css")).unwrap(), b"new");
         // A directory at a file position fails BEFORE any write (Electron
         // would fail mid-loop with earlier entries already committed).
         std::fs::remove_file(profile.join("quickCss.css")).unwrap();
         std::fs::create_dir_all(profile.join("quickCss.css")).unwrap();
-        let failure = restore_profile_from_bytes(&profile, &first).unwrap_err();
+        let failure = restore_now(&profile, &first, None).unwrap_err();
         assert_eq!(failure.code, "BACKUP_FAILED");
         assert!(profile.join("quickCss.css").is_dir());
         assert_eq!(
             std::fs::read(profile.join("unrelated.txt")).unwrap(),
             b"keep"
         );
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn stage_commit_split_previews_then_applies() {
+        let profile = restore_profile("split-preview");
+        std::fs::write(profile.join("quickCss.css"), "old").unwrap();
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/storage/settings.json", b"{\"a\":1}"),
+                ("data/quickCss.css", b"new-css".as_slice()),
+                ("data/themes/t/src.css", b"new-theme".as_slice()),
+            ],
+            false,
+        );
+        let staged = stage_restore_from_bytes(&archive).expect("valid archive must stage");
+        // NOTHING is written before commit: the profile still holds the old
+        // bytes and no theme tree exists.
+        assert_eq!(std::fs::read(profile.join("quickCss.css")).unwrap(), b"old");
+        assert!(!profile.join("themes").exists());
+        // The preview names exactly what the commit would change.
+        assert!(staged.includes.remcord_config);
+        assert!(staged.includes.remcord_themes_and_quick_css);
+        assert_eq!(staged.entry_count, 3);
+        assert_eq!(
+            staged.entry_names,
+            vec![
+                "data/storage/settings.json".to_owned(),
+                "data/quickCss.css".to_owned(),
+                "data/themes/t/src.css".to_owned(),
+            ]
+        );
+        assert_eq!(staged.archive_bytes, archive.len());
+        assert!(staged.uncompressed_bytes > 0);
+        assert_eq!(staged.client_mods["vencordLocalStorage"], "{\"a\":1}");
+        // Commit applies everything the preview named.
+        let summary =
+            commit_staged_restore(&profile, staged, None).expect("held stage must commit");
+        assert_eq!(summary.entry_count, 3);
+        assert_eq!(summary.archive_bytes, archive.len());
+        assert!(!summary.canceled);
+        assert_eq!(
+            std::fs::read(profile.join("quickCss.css")).unwrap(),
+            b"new-css"
+        );
+        assert_eq!(
+            std::fs::read(profile.join("themes").join("t").join("src.css")).unwrap(),
+            b"new-theme"
+        );
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn discard_leaves_profile_untouched_and_removes_staging() {
+        let profile = restore_profile("split-discard");
+        std::fs::write(profile.join("quickCss.css"), "old").unwrap();
+        let archive = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/quickCss.css", b"new-css".as_slice()),
+            ],
+            false,
+        );
+        let staged = stage_restore_from_bytes(&archive).expect("valid archive must stage");
+        let staging_dir = staged.staging_dir.clone();
+        assert!(staging_dir.exists());
+        discard_staged_restore(staged);
+        assert!(!staging_dir.exists());
+        assert_eq!(std::fs::read(profile.join("quickCss.css")).unwrap(), b"old");
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn failed_stage_is_rejected_before_any_hold_exists() {
+        // A hostile or empty archive never produces a hold: there is nothing
+        // to commit or discard afterwards. (Staging-dir cleanup on these
+        // paths is structural — the Err branch removes the directory before
+        // returning — and the held-path removal is proven by
+        // `discard_leaves_profile_untouched_and_removes_staging`; asserting
+        // on the shared temp root here would race parallel tests.)
+        let bad = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/themes/../escape.css", b"x".as_slice()),
+            ],
+            false,
+        );
+        assert!(stage_restore_from_bytes(&bad).is_err());
+        assert!(stage_restore_from_bytes(b"").is_err());
+        // The profile is untouched and a later valid stage still works.
+        let profile = restore_profile("split-reject");
+        let good = raw_zip(
+            &[
+                ("manifest.json", default_manifest().as_bytes()),
+                ("data/quickCss.css", b"q".as_slice()),
+            ],
+            false,
+        );
+        let staged = stage_restore_from_bytes(&good).expect("valid stage must work after rejects");
+        discard_staged_restore(staged);
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn preview_listing_is_bounded_while_count_stays_authoritative() {
+        let profile = restore_profile("split-truncate");
+        let mut entries: Vec<(String, Vec<u8>)> =
+            vec![("manifest.json".to_owned(), default_manifest().into_bytes())];
+        for index in 0..(super::MAX_PREVIEW_ENTRY_NAMES + 5) {
+            entries.push((format!("data/themes/t{index}/src.css"), b":root{}".to_vec()));
+        }
+        let refs: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
+        let archive = raw_zip(&refs, false);
+        let staged = stage_restore_from_bytes(&archive).expect("many-theme archive must stage");
+        assert_eq!(staged.entry_count, super::MAX_PREVIEW_ENTRY_NAMES + 5);
+        assert_eq!(staged.entry_names.len(), super::MAX_PREVIEW_ENTRY_NAMES);
+        discard_staged_restore(staged);
         std::fs::remove_dir_all(&profile).ok();
     }
 
@@ -3463,8 +3717,12 @@ mod restore_tests {
             ],
             false,
         );
-        let failure =
-            restore_profile_from_bytes_with_hook(&profile, &archive, Some(1)).unwrap_err();
+        let failure = commit_staged_restore(
+            &profile,
+            stage_restore_from_bytes(&archive).unwrap(),
+            Some(1),
+        )
+        .unwrap_err();
         assert_eq!(failure.code, "BACKUP_FAILED");
         assert_eq!(
             std::fs::read(profile.join("quickCss.css")).unwrap(),
@@ -3474,8 +3732,12 @@ mod restore_tests {
             .iter()
             .all(|name| !name.starts_with("themes/")));
         // fail_after covers the final commit too: everything rolls back.
-        let failure =
-            restore_profile_from_bytes_with_hook(&profile, &archive, Some(2)).unwrap_err();
+        let failure = commit_staged_restore(
+            &profile,
+            stage_restore_from_bytes(&archive).unwrap(),
+            Some(2),
+        )
+        .unwrap_err();
         assert_eq!(failure.code, "BACKUP_FAILED");
         assert_eq!(
             std::fs::read(profile.join("quickCss.css")).unwrap(),
@@ -3485,7 +3747,7 @@ mod restore_tests {
             .iter()
             .all(|name| !name.starts_with("themes/")));
         // ... and a clean run commits everything.
-        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        let summary = restore_now(&profile, &archive, None).unwrap();
         assert_eq!(summary.entry_count, 2);
         assert_eq!(
             std::fs::read(profile.join("quickCss.css")).unwrap(),
@@ -3506,8 +3768,12 @@ mod restore_tests {
             ],
             false,
         );
-        let failure =
-            restore_profile_from_bytes_with_hook(&profile, &settings_archive, Some(1)).unwrap_err();
+        let failure = commit_staged_restore(
+            &profile,
+            stage_restore_from_bytes(&settings_archive).unwrap(),
+            Some(1),
+        )
+        .unwrap_err();
         assert_eq!(failure.code, "BACKUP_FAILED");
         let settings: serde_json::Value = serde_json::from_slice(
             &std::fs::read(profile.join("storage").join("settings.json")).unwrap(),
@@ -3543,7 +3809,7 @@ mod restore_tests {
             false,
         );
         let before = profile_files(&profile);
-        assert!(restore_profile_from_bytes(&profile, &archive).is_err());
+        assert!(restore_now(&profile, &archive, None).is_err());
         assert!(!outside.join("x.css").exists());
         assert_eq!(profile_files(&profile), before);
         // A symlink AT a file destination fails in the pre-commit check.
@@ -3563,7 +3829,12 @@ mod restore_tests {
                 ],
                 false,
             );
-            assert!(restore_profile_from_bytes(&profile, &archive).is_err());
+            assert!(commit_staged_restore(
+                &profile,
+                stage_restore_from_bytes(&archive).unwrap(),
+                None
+            )
+            .is_err());
             assert_eq!(
                 std::fs::read(outside.join("secret.txt")).unwrap(),
                 b"outside"
@@ -3588,14 +3859,12 @@ mod restore_tests {
         );
         let archive = raw_zip(&[("manifest.json", manifest.as_bytes())], false);
         assert_eq!(
-            restore_profile_from_bytes(&profile, &archive)
-                .unwrap_err()
-                .code,
+            restore_now(&profile, &archive, None).unwrap_err().code,
             "BACKUP_TOO_LARGE"
         );
         // A bounded envelope restores with byte-exact fidelity.
         let archive = raw_zip(&[("manifest.json", default_manifest().as_bytes())], false);
-        let summary = restore_profile_from_bytes(&profile, &archive).unwrap();
+        let summary = restore_now(&profile, &archive, None).unwrap();
         assert_eq!(summary.entry_count, 0);
         assert_eq!(
             summary.client_mods["shelter"]["plugins"],
@@ -3616,7 +3885,7 @@ mod restore_tests {
             ],
             false,
         );
-        let failure = restore_profile_from_bytes(&profile, &archive).unwrap_err();
+        let failure = restore_now(&profile, &archive, None).unwrap_err();
         assert!(!failure.message.contains("escape"));
         assert!(!failure.message.contains("themes"));
         assert!(!failure.message.contains('\\'));

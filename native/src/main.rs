@@ -49,9 +49,10 @@ use mod_substrate::{
 
 use app::{current_app_version, validate_version};
 use backup::{
-    build_backup_manifest, build_backup_zip, collect_backup_entries, created_at_now,
-    restore_profile_from_picked_file, show_open_picker, show_save_picker, validate_backup_request,
-    BackupFailure, BackupSaveSummary, OpenPickerOutcome, RestoreSummary, SavePickerOutcome,
+    build_backup_manifest, build_backup_zip, collect_backup_entries, commit_staged_restore,
+    created_at_now, discard_staged_restore, read_archive_file, show_open_picker, show_save_picker,
+    stage_restore_from_bytes, validate_backup_request, BackupFailure, BackupSaveSummary,
+    OpenPickerOutcome, RestorePreview, RestoreSummary, SavePickerOutcome, StagedRestore,
 };
 use bundles::{describe_bundle_files, BUNDLE_FILES};
 use css_watch::{
@@ -67,15 +68,15 @@ use plugin_storage::{read_plugin_file, write_plugin_file};
 use process_failure::ProcessFailedEvent;
 use protocol::{
     parse_bridge_message, validate_mod_bundle_id, validate_vencord_css_mod_id,
-    window_state_event_json, AppVersionResponse, BackupRestoredResponse, BackupSavedResponse,
-    BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest,
-    BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
-    FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse, PingResponse,
-    PluginStorageReadResponse, PluginStorageWriteResponse, QuickCssReadResponse,
-    QuickCssWrittenResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
-    SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
-    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
-    PROTOCOL_VERSION,
+    window_state_event_json, AppVersionResponse, BackupInspectedResponse,
+    BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BridgeCommand,
+    BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
+    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, FoldersOpenedResponse,
+    LocalizationStringResponse, ModBundleResponse, PingResponse, PluginStorageReadResponse,
+    PluginStorageWriteResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
+    SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
+    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
+    ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -306,7 +307,9 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "plugin_storage.write",
         "backup.list_bundles",
         "backup.save",
-        "backup.restore",
+        "backup.inspect",
+        "backup.commit_restore",
+        "backup.discard_restore",
         "folders.open",
         "folders.open_theme",
         "themes.install_code",
@@ -1255,16 +1258,18 @@ const BACKUP_SAVE_SMOKE_SCRIPT: &str = r#"
 "#;
 
 /// DEV-only backup restore probe (`REMCORD_NATIVE_BACKUP_RESTORE_SMOKE=1`).
-/// Opens the REAL host picker through the `backup.restore` capability and
-/// reports the bounded outcome as one typed `backup_restore_probe` event per
-/// document with `stage: "restore"`. Completion validates, stages, commits,
-/// and reports the clientMods byte size (the host never applies clientMods —
-/// no localStorage write, no remote-plugin fetch, no script execution);
-/// dismissal resolves `{ canceled: true }` and the probe reports the silent
-/// path. Like the save probe there is no `attacks_blocked`: the facade takes
-/// no input, so there is no client-side attack shape to block. The probe
-/// never carries settings, themes, paths, URLs, or client-mod contents —
-/// only stage strings, flags, and byte counts.
+/// Opens the REAL host picker through the `backup.inspect` capability,
+/// previews, then commits through `backup.commit_restore`, and reports the
+/// bounded outcome as one typed `backup_restore_probe` event per document
+/// with `stage: "restore"`. Completion validates, stages, previews,
+/// commits, and reports the clientMods byte size (the host never applies
+/// clientMods — no localStorage write, no remote-plugin fetch, no script
+/// execution); dismissal resolves `{ canceled: true }` and the probe
+/// reports the silent path without committing anything. Like the save probe
+/// there is no `attacks_blocked`: the facade takes no input, so there is no
+/// client-side attack shape to block. The probe never carries settings,
+/// themes, paths, URLs, or client-mod contents — only stage strings, flags,
+/// and byte counts.
 const BACKUP_RESTORE_SMOKE_SCRIPT: &str = r#"
 (() => {
   const probe = (payload) => window.ipc.postMessage(
@@ -1277,23 +1282,34 @@ const BACKUP_RESTORE_SMOKE_SCRIPT: &str = r#"
   (async () => {
     try {
       const backup = window.remcord?.backup;
-      if (typeof backup?.restore !== "function") {
-        fail("backup restore facade missing");
+      if (typeof backup?.inspect !== "function" || typeof backup?.commitRestore !== "function") {
+        fail("backup inspect/commit facade missing");
         return;
       }
       // Parameter-free by protocol: no archive path, filename, URL,
-      // filter, or dialog option may exist alongside the capability.
-      if (backup.restore.length !== 0) {
-        fail("restore facade must take no arguments");
+      // filter, or dialog option may exist alongside the capabilities.
+      if (backup.inspect.length !== 0 || backup.commitRestore.length !== 0) {
+        fail("inspect/commit facades must take no arguments");
         return;
       }
-      // Opens the real host picker; user completion or dismissal resolves.
-      // Cancellation is control flow ({ ok: false, error: "CANCELLED" }),
-      // never a rejection. The host never applies clientMods: the probe
-      // reports the envelope size only.
-      const result = await backup.restore();
+      // Opens the real host picker and stages; user completion or
+      // dismissal resolves. Cancellation is control flow, never a
+      // rejection, and commits nothing.
+      const inspected = await backup.inspect();
+      if (!inspected || typeof inspected.canceled !== "boolean") {
+        fail("backup inspect result shape is invalid");
+        return;
+      }
+      if (inspected.canceled === true) {
+        probe({ ok: true, stage: "restore", canceled: true, client_mods_bytes: 0, error: null });
+        return;
+      }
+      // Preview-then-commit: the commit applies exactly the held staged
+      // bytes the preview described. The host never applies clientMods:
+      // the probe reports the envelope size only.
+      const result = await backup.commitRestore();
       if (!result || typeof result.ok !== "boolean") {
-        fail("backup restore result shape is invalid");
+        fail("backup commit result shape is invalid");
         return;
       }
       if (result.ok === true) {
@@ -2671,15 +2687,34 @@ enum NativeEvent {
         received_at: Instant,
         result: Result<BackupSaveSummary, BackupFailure>,
     },
-    /// Completed backup restore from the dedicated STA restore worker. The
-    /// worker owns the modal open dialog, the bounded archive read, full
-    /// validation, staging, and the commit with rollback, so the WebView/UI
-    /// thread never blocks; the bounded outcome (cancellation plus the
-    /// clientMods envelope — never a path) is delivered here.
+    /// Completed backup restore COMMIT from the dedicated STA restore
+    /// worker. The worker owns the commit with rollback of the previously
+    /// inspected held staging, so the WebView/UI thread never blocks; the
+    /// bounded outcome (the clientMods envelope — never a path) is
+    /// delivered here.
     BackupRestoreReady {
         request_id: String,
         received_at: Instant,
         result: Result<RestoreSummary, BackupFailure>,
+    },
+    /// Completed backup INSPECT from the dedicated STA restore worker. The
+    /// worker owns the modal open dialog, the bounded archive read, full
+    /// validation, and staging; the staged bytes are HELD worker-side for
+    /// one explicit commit or discard, and only the preview (counts, flags,
+    /// bounded display listing — never contents or paths) is delivered
+    /// here.
+    BackupInspectReady {
+        request_id: String,
+        received_at: Instant,
+        result: Result<Option<RestorePreview>, BackupFailure>,
+    },
+    /// Completed backup DISCARD from the dedicated STA restore worker. The
+    /// held staged restore (if any) was dropped without touching the
+    /// profile; `discarded` tells whether anything was actually held.
+    BackupDiscardReady {
+        request_id: String,
+        received_at: Instant,
+        discarded: bool,
     },
     /// One DEV-only window chrome smoke step (`REMCORD_NATIVE_WINDOW_SMOKE=1`).
     /// Drives the shipped renderer facade through the real typed bridge and
@@ -3685,58 +3720,190 @@ fn run_backup_save_job(job: &BackupSaveJob) -> Result<BackupSaveSummary, BackupF
 const BACKUP_RESTORE_WORKER_NAME: &str = "remcord-backup-restore-sta";
 
 /// One backup-restore job for the dedicated STA worker thread. The renderer
-/// supplies nothing: the dialog, the picked path, validation, staging, and
-/// commit are all host-owned.
+/// supplies nothing: the dialog, the picked path, validation, staging,
+/// commit, and discard are all host-owned. Inspect/commit/discard share the
+/// worker (and its one held staged restore) so the three steps serialize:
+/// a second inspect replaces the previous hold, and a commit applies
+/// exactly the held staged bytes the preview described.
 struct BackupRestoreJob {
+    kind: BackupRestoreKind,
     request_id: String,
     received_at: Instant,
     profile: PathBuf,
     proxy: EventLoopProxy<NativeEvent>,
 }
 
-/// Run one backup-restore job on the STA worker: show the host-owned open
-/// dialog, read the picked archive bounded, validate the entire archive,
-/// stage outside the profile, and commit with rollback. Cancellation is
-/// normal control flow (`canceled: true`, zeroed envelope). Timings are
-/// logged by stage (dialog wait, validation + staging, commit) so dialog
-/// wait never masquerades as host work.
-fn run_backup_restore_job(job: &BackupRestoreJob) -> Result<RestoreSummary, BackupFailure> {
-    let dialog_started = Instant::now();
-    let picked = match show_open_picker(&job.profile) {
-        OpenPickerOutcome::Canceled => {
-            println!("[Backup][Restore] picker dismissed by the user");
-            return Ok(RestoreSummary {
-                canceled: true,
-                client_mods: serde_json::Value::Null,
-                archive_bytes: 0,
-                uncompressed_bytes: 0,
-                entry_count: 0,
-                client_mods_bytes: 0,
-            });
-        }
-        OpenPickerOutcome::Selected(path) => path,
-        OpenPickerOutcome::Failed(failure) => {
-            eprintln!("[Backup][Restore:{}] {}", failure.code, failure.message);
-            return Err(failure);
-        }
+/// Which restore step one worker job performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackupRestoreKind {
+    /// Show the host-owned open dialog; on selection, read bounded,
+    /// validate the entire archive, and stage outside the profile. The
+    /// staged bytes are HELD worker-side; only the preview crosses back.
+    /// Cancellation is normal control flow (`None`, no hold).
+    Inspect,
+    /// Commit the held staged restore with rollback. With nothing held this
+    /// is a typed error, never a silent no-op.
+    Commit,
+    /// Drop the held staged restore without touching the profile.
+    Discard,
+}
+
+/// Shared send path for the three restore steps: queue the job on the
+/// dedicated STA restore worker, or fail loud and inline when the worker is
+/// gone (the renderer must never hang waiting for a dead worker).
+#[allow(clippy::too_many_arguments)]
+fn send_backup_restore_job(
+    restore_tx: &std::sync::mpsc::Sender<BackupRestoreJob>,
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    kind: BackupRestoreKind,
+    request_id: String,
+    received_at: Instant,
+    profile_path: &std::path::Path,
+    proxy: &EventLoopProxy<NativeEvent>,
+    step: &str,
+) {
+    let job = BackupRestoreJob {
+        kind,
+        request_id: request_id.clone(),
+        received_at,
+        profile: profile_path.to_path_buf(),
+        proxy: proxy.clone(),
     };
-    let dialog_ms = dialog_started.elapsed().as_secs_f64() * 1000.0;
-    let restore_started = Instant::now();
-    let summary =
-        restore_profile_from_picked_file(&job.profile, &picked).inspect_err(|failure| {
-            eprintln!("[Backup][Restore:{}] {}", failure.code, failure.message);
-        })?;
-    let restore_ms = restore_started.elapsed().as_secs_f64() * 1000.0;
-    println!(
-        "[Backup][Restore] entries={} uncompressed={} archive={} client_mods={} dialog_wait_ms={:.3} restore_ms={:.3}",
-        summary.entry_count,
-        summary.uncompressed_bytes,
-        summary.archive_bytes,
-        summary.client_mods_bytes,
-        dialog_ms,
-        restore_ms,
-    );
-    Ok(summary)
+    match restore_tx.send(job) {
+        Ok(()) => {
+            println!("[Backup][Restore] {step} request accepted");
+        }
+        Err(_) => {
+            eprintln!("[Backup][Restore:BACKUP_UNAVAILABLE] restore worker is unavailable");
+            let response = BridgeResponse {
+                version: PROTOCOL_VERSION,
+                request_id: request_id.clone(),
+                ok: false,
+                payload: None,
+                error: Some(BridgeError {
+                    code: "BACKUP_UNAVAILABLE",
+                    message: "backup restore is unavailable".to_owned(),
+                }),
+            };
+            send_bridge_response(webview, &response);
+            if let Err(error) = request_tracker.complete(&request_id) {
+                eprintln!("[Bridge] correlation failure after response: {error}");
+            }
+            *response_count += 1;
+        }
+    }
+}
+
+/// Outcome of one backup-restore worker job, delivered to the event loop.
+#[derive(Debug)]
+enum BackupRestoreOutcome {
+    /// Inspect finished: `None` when the user dismissed the picker (no
+    /// hold), otherwise the preview of the newly held staged restore.
+    Inspected(Result<Option<RestorePreview>, BackupFailure>),
+    /// Commit finished: the restore summary, or the failure (including
+    /// committing with nothing held).
+    Committed(Result<RestoreSummary, BackupFailure>),
+    /// Discard finished: whether a held staged restore was actually
+    /// dropped.
+    Discarded(bool),
+}
+
+/// Run one backup-restore job on the STA worker. `held` is the worker-local
+/// single staged-restore slot, threaded through every job so inspect holds,
+/// commit consumes, and discard drops.
+///
+/// Inspect timings are logged by stage (dialog wait, validation + staging)
+/// so dialog wait never masquerades as host work.
+fn run_backup_restore_job(
+    job: &BackupRestoreJob,
+    held: &mut Option<StagedRestore>,
+) -> BackupRestoreOutcome {
+    match job.kind {
+        BackupRestoreKind::Inspect => {
+            let dialog_started = Instant::now();
+            let picked = match show_open_picker(&job.profile) {
+                OpenPickerOutcome::Canceled => {
+                    println!("[Backup][Inspect] picker dismissed by the user");
+                    return BackupRestoreOutcome::Inspected(Ok(None));
+                }
+                OpenPickerOutcome::Selected(path) => path,
+                OpenPickerOutcome::Failed(failure) => {
+                    eprintln!("[Backup][Inspect:{}] {}", failure.code, failure.message);
+                    return BackupRestoreOutcome::Inspected(Err(failure));
+                }
+            };
+            let dialog_ms = dialog_started.elapsed().as_secs_f64() * 1000.0;
+            let stage_started = Instant::now();
+            let staged = (|| {
+                let bytes = read_archive_file(&picked).inspect_err(|failure| {
+                    eprintln!("[Backup][Inspect:{}] {}", failure.code, failure.message);
+                })?;
+                stage_restore_from_bytes(&bytes).inspect_err(|failure| {
+                    eprintln!("[Backup][Inspect:{}] {}", failure.code, failure.message);
+                })
+            })();
+            let stage_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+            match staged {
+                Ok(staged) => {
+                    // A second inspect replaces the previous hold: the old
+                    // staging is discarded, never committed behind the new
+                    // preview's back.
+                    if let Some(previous) = held.replace(staged) {
+                        discard_staged_restore(previous);
+                        println!("[Backup][Inspect] replaced a previous held restore");
+                    }
+                    let preview = held.as_ref().map(StagedRestore::preview);
+                    println!(
+                        "[Backup][Inspect] held entries={} dialog_wait_ms={:.3} stage_ms={:.3}",
+                        preview
+                            .as_ref()
+                            .map(|preview| preview.entry_count)
+                            .unwrap_or(0),
+                        dialog_ms,
+                        stage_ms,
+                    );
+                    BackupRestoreOutcome::Inspected(Ok(preview))
+                }
+                Err(failure) => BackupRestoreOutcome::Inspected(Err(failure)),
+            }
+        }
+        BackupRestoreKind::Commit => {
+            let Some(staged) = held.take() else {
+                eprintln!("[Backup][Commit:NO_STAGED_RESTORE] no staged restore is held");
+                return BackupRestoreOutcome::Committed(Err(BackupFailure {
+                    code: "NO_STAGED_RESTORE",
+                    message: "no staged restore is held; inspect a backup first".to_owned(),
+                }));
+            };
+            let summary =
+                commit_staged_restore(&job.profile, staged, None).inspect_err(|failure| {
+                    eprintln!("[Backup][Commit:{}] {}", failure.code, failure.message);
+                });
+            if let Ok(summary) = &summary {
+                println!(
+                    "[Backup][Commit] entries={} uncompressed={} archive={} client_mods={}",
+                    summary.entry_count,
+                    summary.uncompressed_bytes,
+                    summary.archive_bytes,
+                    summary.client_mods_bytes,
+                );
+            }
+            BackupRestoreOutcome::Committed(summary)
+        }
+        BackupRestoreKind::Discard => {
+            let discarded = match held.take() {
+                Some(staged) => {
+                    discard_staged_restore(staged);
+                    true
+                }
+                None => false,
+            };
+            println!("[Backup][Discard] discarded={discarded}");
+            BackupRestoreOutcome::Discarded(discarded)
+        }
+    }
 }
 
 fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
@@ -4678,16 +4845,47 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                 }
                 let com_owned = com_init == windows::core::HRESULT(0);
+                // Worker-local single staged-restore slot: inspect holds,
+                // commit consumes, discard drops. It never leaves this
+                // thread except through commit (profile) or discard
+                // (deleted); only previews and summaries cross back.
+                let mut held: Option<StagedRestore> = None;
                 while let Ok(job) = restore_rx.recv() {
-                    let result = run_backup_restore_job(&job);
-                    queue_event(
-                        &job.proxy,
-                        NativeEvent::BackupRestoreReady {
-                            request_id: job.request_id,
-                            received_at: job.received_at,
-                            result,
-                        },
-                    );
+                    let request_id = job.request_id.clone();
+                    let received_at = job.received_at;
+                    let proxy = job.proxy.clone();
+                    match run_backup_restore_job(&job, &mut held) {
+                        BackupRestoreOutcome::Inspected(result) => {
+                            queue_event(
+                                &proxy,
+                                NativeEvent::BackupInspectReady {
+                                    request_id,
+                                    received_at,
+                                    result,
+                                },
+                            );
+                        }
+                        BackupRestoreOutcome::Committed(result) => {
+                            queue_event(
+                                &proxy,
+                                NativeEvent::BackupRestoreReady {
+                                    request_id,
+                                    received_at,
+                                    result,
+                                },
+                            );
+                        }
+                        BackupRestoreOutcome::Discarded(discarded) => {
+                            queue_event(
+                                &proxy,
+                                NativeEvent::BackupDiscardReady {
+                                    request_id,
+                                    received_at,
+                                    discarded,
+                                },
+                            );
+                        }
+                    }
                 }
                 if com_owned {
                     unsafe {
@@ -7311,51 +7509,64 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
-                        BridgeCommand::BackupRestore(_) => {
-                            // Import only: the renderer supplies NOTHING (the
-                            // empty payload is enforced by
-                            // `deny_unknown_fields` at parse). The modal open
-                            // dialog, the bounded archive read, full
-                            // validation, staging, and the commit with
-                            // rollback run on the dedicated STA restore
-                            // worker, and the bounded outcome comes back as
-                            // BackupRestoreReady. The renderer waits with the
-                            // long-operation timeout (the picker stays open
-                            // as long as the user needs).
-                            let restore_request_id = request.request_id.clone();
-                            let job = BackupRestoreJob {
-                                request_id: restore_request_id.clone(),
+                        BridgeCommand::BackupInspect(_) => {
+                            // Preview only: the renderer supplies NOTHING
+                            // (the empty payload is enforced by
+                            // `deny_unknown_fields` at parse). The modal
+                            // open dialog, the bounded archive read, full
+                            // validation, and staging run on the dedicated
+                            // STA restore worker; the staged bytes are HELD
+                            // worker-side and only the preview crosses back
+                            // as BackupInspectReady. The renderer waits with
+                            // the long-operation timeout (the picker stays
+                            // open as long as the user needs).
+                            send_backup_restore_job(
+                                &restore_tx,
+                                &webview,
+                                &mut request_tracker,
+                                &mut response_count,
+                                BackupRestoreKind::Inspect,
+                                request.request_id.clone(),
                                 received_at,
-                                profile: profile_path.clone(),
-                                proxy: proxy.clone(),
-                            };
-                            match restore_tx.send(job) {
-                                Ok(()) => {
-                                    println!("[Backup][Restore] restore request accepted");
-                                }
-                                Err(_) => {
-                                    eprintln!(
-                                        "[Backup][Restore:BACKUP_UNAVAILABLE] restore worker is unavailable"
-                                    );
-                                    let response = BridgeResponse {
-                                        version: PROTOCOL_VERSION,
-                                        request_id: restore_request_id.clone(),
-                                        ok: false,
-                                        payload: None,
-                                        error: Some(BridgeError {
-                                            code: "BACKUP_UNAVAILABLE",
-                                            message: "backup restore is unavailable".to_owned(),
-                                        }),
-                                    };
-                                    send_bridge_response(&webview, &response);
-                                    if let Err(error) =
-                                        request_tracker.complete(&restore_request_id)
-                                    {
-                                        eprintln!("[Bridge] correlation failure after response: {error}");
-                                    }
-                                    response_count += 1;
-                                }
-                            }
+                                &profile_path,
+                                &proxy,
+                                "inspect",
+                            );
+                        }
+                        BridgeCommand::BackupCommitRestore(_) => {
+                            // Commit the held staged restore: no parameters
+                            // by protocol, so the commit applies exactly the
+                            // bytes the preview described. Runs on the same
+                            // worker (which owns the hold) and comes back as
+                            // BackupRestoreReady.
+                            send_backup_restore_job(
+                                &restore_tx,
+                                &webview,
+                                &mut request_tracker,
+                                &mut response_count,
+                                BackupRestoreKind::Commit,
+                                request.request_id.clone(),
+                                received_at,
+                                &profile_path,
+                                &proxy,
+                                "commit",
+                            );
+                        }
+                        BridgeCommand::BackupDiscardRestore(_) => {
+                            // Drop the held staged restore without touching
+                            // the profile. Same worker, BackupDiscardReady.
+                            send_backup_restore_job(
+                                &restore_tx,
+                                &webview,
+                                &mut request_tracker,
+                                &mut response_count,
+                                BackupRestoreKind::Discard,
+                                request.request_id.clone(),
+                                received_at,
+                                &profile_path,
+                                &proxy,
+                                "discard",
+                            );
                         }
                         BridgeCommand::ModGetBundle(payload) => {                            let request_id = request.request_id;
                             if let Err(error) = validate_mod_bundle_id(&payload.mod_id) {                                eprintln!("[Mod:Registry][invalid_mod_id] {error}");
@@ -7823,6 +8034,126 @@ fn main() -> Result<(), Box<dyn Error>> {
                         response_count += 1;
                     }
                 }
+            }
+            Event::UserEvent(NativeEvent::BackupInspectReady {
+                request_id,
+                received_at,
+                result,
+            }) => {
+                // Preview delivery: `None` (dismissed picker) resolves the
+                // bounded canceled outcome, never a rejection. `Some` maps
+                // the held restore's preview (counts, flags, bounded display
+                // listing — never contents or paths) into the typed
+                // response. The staged bytes stay held worker-side for the
+                // explicit commit or discard.
+                match result {
+                    Ok(preview) => {
+                        let canceled = preview.is_none();
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: true,
+                            payload: Some(BridgeResponsePayload::BackupInspected(
+                                BackupInspectedResponse {
+                                    canceled,
+                                    includes: preview.as_ref().map(|preview| preview.includes).unwrap_or(
+                                        crate::backup::BackupIncludes {
+                                            remcord_config: false,
+                                            remcord_themes_and_quick_css: false,
+                                            remcord_extension_plugins: false,
+                                            vencord_mod_data: false,
+                                            equicord_mod_data: false,
+                                            shelter_mod_data: false,
+                                            mod_bundles: false,
+                                        },
+                                    ),
+                                    archive_bytes: preview.as_ref().map(|preview| preview.archive_bytes).unwrap_or(0),
+                                    uncompressed_bytes: preview
+                                        .as_ref()
+                                        .map(|preview| preview.uncompressed_bytes)
+                                        .unwrap_or(0),
+                                    entry_count: preview.as_ref().map(|preview| preview.entry_count).unwrap_or(0),
+                                    client_mods_bytes: preview
+                                        .as_ref()
+                                        .map(|preview| preview.client_mods_bytes)
+                                        .unwrap_or(0),
+                                    has_vencord_mod_data: preview
+                                        .as_ref()
+                                        .map(|preview| preview.has_vencord_mod_data)
+                                        .unwrap_or(false),
+                                    has_equicord_mod_data: preview
+                                        .as_ref()
+                                        .map(|preview| preview.has_equicord_mod_data)
+                                        .unwrap_or(false),
+                                    has_shelter_mod_data: preview
+                                        .as_ref()
+                                        .map(|preview| preview.has_shelter_mod_data)
+                                        .unwrap_or(false),
+                                    entries: preview.as_ref().map(|preview| preview.entry_names.clone()).unwrap_or_default(),
+                                    entries_truncated: preview
+                                        .as_ref()
+                                        .map(|preview| preview.entries_truncated)
+                                        .unwrap_or(false),
+                                },
+                            )),
+                            error: None,
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                        println!(
+                            "[Backup][Inspect] canceled={} entries={} request_latency_ms={:.3}",
+                            canceled,
+                            preview.map(|preview| preview.entry_count).unwrap_or(0),
+                            received_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    Err(failure) => {
+                        eprintln!("[Backup][Inspect:{}] {}", failure.code, failure.message);
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: false,
+                            payload: None,
+                            error: Some(BridgeError {
+                                code: failure.code,
+                                message: failure.message,
+                            }),
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::BackupDiscardReady {
+                request_id,
+                received_at,
+                discarded,
+            }) => {
+                let response = BridgeResponse {
+                    version: PROTOCOL_VERSION,
+                    request_id: request_id.clone(),
+                    ok: true,
+                    payload: Some(BridgeResponsePayload::BackupRestoreDiscarded(
+                        BackupRestoreDiscardedResponse { discarded },
+                    )),
+                    error: None,
+                };
+                send_bridge_response(&webview, &response);
+                if let Err(error) = request_tracker.complete(&request_id) {
+                    eprintln!("[Bridge] correlation failure after response: {error}");
+                }
+                response_count += 1;
+                println!(
+                    "[Backup][Discard] discarded={} request_latency_ms={:.3}",
+                    discarded,
+                    received_at.elapsed().as_secs_f64() * 1000.0
+                );
             }
             Event::UserEvent(NativeEvent::BridgeEvent(message)) => {
                 incoming_messages += 1;
@@ -9588,7 +9919,15 @@ mod tests {
         assert!(!script.contains("getCss"));
         assert!(!script.contains("addTheme"));
         assert!(!script.contains("removeTheme"));
-        assert!(!script.contains("quickCss"));
+        // The theme push stays push-only, but the QuickCSS editor pair is
+        // the deliberate exception (see
+        // `boot_snapshot_grants_exactly_the_quickcss_editor_capabilities`):
+        // exactly the fixed-file read/write, nothing else quickcss-shaped.
+        assert!(script.contains("quickcss.read"));
+        assert!(script.contains("quickcss.write"));
+        assert!(!script.contains("quickCss.get"));
+        assert!(!script.contains("quickcss.delete"));
+        assert!(!script.contains("quickcss.list"));
         assert!(!script.contains("remcord-native-theme"));
     }
 
@@ -9700,9 +10039,19 @@ mod tests {
             .capabilities
             .contains(&"backup.list_bundles"));
         assert!(super::BOOT_SNAPSHOT.capabilities.contains(&"backup.save"));
-        // Restore (D4-2): host-mediated open dialog plus bounded validate /
-        // stage / commit — the renderer supplies nothing.
+        // Restore is preview-then-commit: host-mediated open dialog plus
+        // bounded validate / stage (inspect), an explicit commit, and a
+        // discard — the renderer supplies nothing at any step.
         assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"backup.inspect"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"backup.commit_restore"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"backup.discard_restore"));
+        assert!(!super::BOOT_SNAPSHOT
             .capabilities
             .contains(&"backup.restore"));
         assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"backup"));
@@ -9734,14 +10083,24 @@ mod tests {
         assert!(script.contains("function saveBackup("));
         assert!(script.contains("backup_saved"));
         assert!(script.contains("120_000"));
-        // Restore (D4-2): the parameter-free restore with the long-operation
-        // timeout and the bounded clientMods outcome. No open-dialog send,
-        // no sync IPC, and no generic invocation may ride along.
-        assert!(script.contains("backup_restore"));
-        assert!(script.contains("backup.restore"));
-        assert!(script.contains("function restoreBackup("));
+        // Restore is preview-then-commit: the parameter-free inspect with
+        // the long-operation timeout and the bounded preview, the explicit
+        // commit with the bounded clientMods outcome, and the discard. No
+        // open-dialog send, no sync IPC, and no generic invocation may ride
+        // along. The single-call restore wire type is gone.
+        assert!(script.contains("backup_inspect"));
+        assert!(script.contains("backup.inspect"));
+        assert!(script.contains("function inspectBackup("));
+        assert!(script.contains("backup_inspected"));
+        assert!(script.contains("backup_commit_restore"));
+        assert!(script.contains("backup.commit_restore"));
+        assert!(script.contains("function commitRestore("));
         assert!(script.contains("backup_restored"));
-        assert!(!script.contains("backupRestore"));
+        assert!(script.contains("backup_discard_restore"));
+        assert!(script.contains("backup.discard_restore"));
+        assert!(script.contains("backup_restore_discarded"));
+        assert!(!script.contains("backup.restore"));
+        assert!(!script.contains("function restoreBackup("));
         assert!(!script.contains("showOpenDialog"));
         assert!(!script.contains("sendSync"));
     }
@@ -9793,11 +10152,16 @@ mod tests {
 
     #[test]
     fn backup_restore_smoke_probe_uses_only_the_restore_capability() {
-        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup.restore"));
+        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup.inspect"));
+        assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup.commitRestore"));
         assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup_restore_probe"));
         assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("CANCELLED"));
         assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("stage"));
         assert!(super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("client_mods_bytes"));
+        // The single-call restore is gone from the probe: preview first,
+        // then an explicit commit of exactly the held staged bytes.
+        assert!(!super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup.restore"));
+        assert!(!super::BACKUP_RESTORE_SMOKE_SCRIPT.contains("backup_restore\""));
         // Parameter-free by protocol: no archive path, filename, URL,
         // filter, or dialog option may appear. The host never applies
         // clientMods: no localStorage write, no remote-plugin fetch, no
