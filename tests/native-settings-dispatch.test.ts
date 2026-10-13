@@ -1053,3 +1053,163 @@ test("screenshare quality status reports the frozen document status natively", a
         restoreConsole();
     }
 });
+
+function setShelterFlux(flux: unknown) {
+    const shelter = Reflect.get(globalThis, "shelter") as Record<string, unknown>;
+    shelter.flux = flux;
+}
+
+function clearShelterFlux() {
+    const shelter = Reflect.get(globalThis, "shelter") as Record<string, unknown>;
+    delete shelter.flux;
+}
+
+function fakeSenderStats(reports: Array<Record<string, unknown>>) {
+    return {
+        values: () => reports.values(),
+    };
+}
+
+function installFluxWithSender(stats: unknown) {
+    setShelterFlux({
+        stores: {
+            UserStore: { getCurrentUser: () => ({ id: "user-1" }) },
+            MediaEngineStore: {
+                getMediaEngine: () => ({
+                    connections: [
+                        {
+                            streamUserId: "user-1",
+                            pc: {
+                                getSenders: () => [
+                                    { track: { kind: "video" }, getStats: () => Promise.resolve(stats) },
+                                ],
+                            },
+                        },
+                    ],
+                }),
+            },
+        },
+    });
+}
+
+test("encoder backend classification stays conservative", async () => {
+    installGlobals({ seed: {} });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.classifyEncoderBackend("H264_MediaFoundation"), "hardware");
+        assert.equal(helpers.classifyEncoderBackend("h264_videotoolbox"), "hardware");
+        assert.equal(helpers.classifyEncoderBackend("NVE518_H264_NVENC"), "hardware");
+        assert.equal(helpers.classifyEncoderBackend("OpenH264"), "software");
+        assert.equal(helpers.classifyEncoderBackend("libvpx"), "software");
+        // Anything else (including ambiguous short tags like H264_MF and
+        // software-or-hardware builds like VP9/AV1) is unclassified:
+        // reported, never claimed.
+        for (const raw of ["H264_MF", "VP9", "AV1", "", null, undefined, 42]) {
+            assert.equal(helpers.classifyEncoderBackend(raw), "unclassified");
+        }
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("encoder stats are unavailable without a local sender", async () => {
+    installGlobals({ seed: {} });
+    try {
+        const helpers = await loadHelpers();
+        // No flux stores in this harness: logged-out/idle equivalent.
+        const stats = await helpers.readScreenshareEncoderStats();
+        assert.equal(stats.status, "unavailable");
+        assert.equal(typeof stats.error, "string");
+        assert.equal(stats.backend, "unclassified");
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("encoder stats measure the live sender and copy honestly", async () => {
+    const written: string[] = [];
+    installGlobals({ seed: {} });
+    installFluxWithSender(
+        fakeSenderStats([
+            { type: "candidate-pair", nominated: true, availableOutgoingBitrate: 4_200_000 },
+            {
+                type: "outbound-rtp",
+                kind: "video",
+                encoderImplementation: "H264_MediaFoundation",
+                mimeType: "video/H264",
+                frameWidth: 1920,
+                frameHeight: 1080,
+                targetBitrate: 8_000_000,
+                qualityLimitationReason: "none",
+            },
+        ]),
+    );
+    Object.defineProperty(globalThis, "navigator", {
+        value: {
+            clipboard: {
+                writeText: (text: string) => {
+                    written.push(text);
+                    return Promise.resolve();
+                },
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        const stats = await helpers.readScreenshareEncoderStats();
+        assert.equal(stats.status, "measured");
+        assert.equal(stats.encoderImplementation, "H264_MediaFoundation");
+        assert.equal(stats.codec, "video/H264");
+        assert.equal(stats.frameWidth, 1920);
+        assert.equal(stats.frameHeight, 1080);
+        assert.equal(stats.targetBitrateBps, 8_000_000);
+        assert.equal(stats.availableOutgoingBitrateBps, 4_200_000);
+        assert.equal(stats.qualityLimitationReason, "none");
+        assert.equal(stats.backend, "hardware");
+        assert.equal(stats.error, null);
+        assert.equal(await helpers.copyScreenshareEncoderStats("balanced"), true);
+        assert.equal(written.length, 1);
+        assert.match(written[0], /H264_MediaFoundation/);
+        assert.match(written[0], /1920x1080/);
+        assert.match(written[0], /Backend: hardware/);
+        assert.match(written[0], /Selected capture mode: balanced \(request/);
+    } finally {
+        clearShelterFlux();
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});
+
+test("encoder stats stay unavailable on misshapen sender data", async () => {
+    const written: string[] = [];
+    installGlobals({ seed: {} });
+    installFluxWithSender({ notStats: true });
+    Object.defineProperty(globalThis, "navigator", {
+        value: {
+            clipboard: {
+                writeText: (text: string) => {
+                    written.push(text);
+                    return Promise.resolve();
+                },
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        const stats = await helpers.readScreenshareEncoderStats();
+        assert.equal(stats.status, "unavailable");
+        // The copy still succeeds but reports unavailability, never a guess.
+        assert.equal(await helpers.copyScreenshareEncoderStats("low"), true);
+        assert.match(written[0], /unavailable/);
+        assert.match(written[0], /Selected capture mode: low \(request/);
+        assert.doesNotMatch(written[0], /Backend: (hardware|software)/);
+    } finally {
+        clearShelterFlux();
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});

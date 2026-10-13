@@ -295,6 +295,7 @@
     "settings-screenshareQuality-default": "Default (Discord decides)",
     "settings-screenshareQuality-balanced": "Balanced (up to 720p30)",
     "settings-screenshareQuality-low": "Low resource (up to 540p15)",
+    "settings-screenshareQuality-copyStats": "Copy encoder stats",
     "settings-extendedPluginAbilities": "Extended plugin abilities",
     "settings-extendedPluginAbilities-desc": "Allows plugins to read and write files in a scoped folder on your computer (e.g. for caching deleted messages). Only enable for plugins you trust—they can store data locally. Data is stored per plugin in Remcord's plugin-storage folder.",
     "settings-audio-loopback": "Loopback",

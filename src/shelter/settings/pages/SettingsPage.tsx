@@ -19,6 +19,7 @@ import { TextBoxItem } from "../components/TextBoxItem.jsx";
 import {
     clearNativeModCache,
     copyNativeDiagnostics,
+    copyScreenshareEncoderStats,
     describeScreenshareQualityStatus,
     isMinWindowsVersion,
     isNativeSettingsSetAvailable,
@@ -542,9 +543,30 @@ export function SettingsPage() {
                             },
                         ]}
                         extraItems={
-                            <div style={{ opacity: "0.85", "font-size": "12px", margin: "4px 0 0 0" }}>
-                                {describeScreenshareQualityStatus(settings.screenshareQuality ?? "default")}
-                            </div>
+                            <>
+                                <div style={{ opacity: "0.85", "font-size": "12px", margin: "4px 0 8px 0" }}>
+                                    {describeScreenshareQualityStatus(settings.screenshareQuality ?? "default")}
+                                </div>
+                                <Button
+                                    size={ButtonSizes.MAX}
+                                    onClick={() => {
+                                        // Fully renderer-side WebRTC readout
+                                        // (no host call): measured live from
+                                        // the Go Live sender, unavailable
+                                        // when idle — never a guessed encoder.
+                                        void copyScreenshareEncoderStats(settings.screenshareQuality ?? "default").then(
+                                            (ok) => {
+                                                if (!ok)
+                                                    console.warn(
+                                                        "[Remcord] Could not copy encoder stats in this session.",
+                                                    );
+                                            },
+                                        );
+                                    }}
+                                >
+                                    {t["settings-screenshareQuality-copyStats"] ?? "Copy encoder stats"}
+                                </Button>
+                            </>
                         }
                     />
                 </SearchableSetting>
