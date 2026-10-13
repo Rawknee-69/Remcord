@@ -34,6 +34,7 @@ mod settings_plugin;
 mod theme_import;
 mod themes;
 mod titlebar_plugin;
+mod user_agent;
 mod webview_runtime;
 
 use std::{

@@ -189,6 +189,13 @@ pub fn main_webview_builder<'a>(
     {
         builder = builder.with_environment(environment);
     }
+    // TEMPORARY UA-spoof test hook (see `user_agent.rs`): env-gated, unset
+    // by default. Applies to the main WebView only (popup children keep
+    // the default UA).
+    if let Some(user_agent) = super::user_agent::resolve_user_agent_override() {
+        println!("[UserAgent] override active: {user_agent}");
+        builder = builder.with_user_agent(user_agent);
+    }
     // P0.5: host-owned downloads directory, no dialog, never overwrite.
     builder = super::apply_download_handlers(builder, downloads_dir.clone());
     // Two-phase boot: the initial document is the empty `about:blank`
