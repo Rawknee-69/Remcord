@@ -2205,6 +2205,14 @@ const TITLEBAR_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Remcord Titlebar Control
 /// host-fixed id/source/manifest, then start), and returns a plain status
 /// string the host logs — never plugin source, paths, or URLs.
 ///
+/// The same script also runs as the trusted-load settle pass, which races
+/// Shelter's asynchronous publish: when `window.shelter.plugins` is absent
+/// the script reports `titlebar-pending` (the marker-time start covers the
+/// real start once the marker lands), never `titlebar-failed`. A pending
+/// settle is therefore routine timing noise, not a defect; every other
+/// branch keeps the `titlebar-failed` prefix so genuine start failures stay
+/// loud.
+///
 /// Before registration it reproduces `src/discord/preload/newTitlebar.mts`
 /// for the overlay-chrome styles: the host platform comes from the
 /// facade-owned `window.remcord.platform` (never renderer input), the body
@@ -2224,7 +2232,7 @@ const TITLEBAR_PLUGIN_START_TEMPLATE: &str = r#"
   const ID = "remcord-titlebar";
   try {
     const plugins = window.shelter && window.shelter.plugins;
-    if (!plugins) return "titlebar-failed: shelter plugins unavailable";
+    if (!plugins) return "titlebar-pending: shelter plugins unavailable";
     for (const name of ["addLocalPlugin", "startPlugin", "removePlugin"]) {
       if (typeof plugins[name] !== "function") return "titlebar-failed: missing " + name;
     }
@@ -8458,6 +8466,7 @@ mod tests {
             "startPlugin",
             "titlebar-started:controls-",
             "titlebar-started:controls-missing",
+            "titlebar-pending: shelter plugins unavailable",
             "titlebar-failed",
             "remcord-platform",
             "data-remcord-titlebar-css",
