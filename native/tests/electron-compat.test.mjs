@@ -308,19 +308,27 @@ test("Electron keeps the Quick CSS enablement contract", () => {
     assert.match(themesPage, /setConfig\("quickCss", e\)/);
 });
 
-test("no renderer Quick CSS pull exists in Electron or native", () => {
+test("no renderer Quick CSS pull exists in Electron; native exposes only the editor pair", () => {
     // Quick CSS is a host -> renderer push with no pull-style reader: the
-    // bridge exposes only push-side members (open/import/enable/disable via
-    // fire-and-forget send), never a CSS-returning read. No quickCss.get()
-    // shape may be introduced on either side.
+    // Electron bridge exposes only push-side members (open/import/enable/
+    // disable via fire-and-forget send), never a CSS-returning read. No
+    // quickCss.get() shape may be introduced on either side.
     assert.doesNotMatch(bridge, /getQuickCss|readQuickCss|invoke\("getQuickCss"/);
     assert.doesNotMatch(types, /getQuickCss|readQuickCss/);
     assert.doesNotMatch(themesMain, /getQuickCss|quickCss\.get|getCSS/);
     // No quickCss.get() shape may be introduced on either side. The backup
     // include key `remcordThemesAndQuickCss` is Electron's exact save-shape
     // member (not a CSS reader), so the native assertion targets pull-side
-    // tokens instead of the bare substring.
-    assert.doesNotMatch(nativeFacade, /getQuickCss|quickCss\.get|readQuickCss|remcord-quick-css/);
+    // tokens instead of the bare substring. The native in-Discord editor is
+    // the deliberate exception: exactly the fixed-file `quickcss.read` /
+    // `quickcss.write` pair (capability-gated, bounded, no path), and no
+    // other pull-shaped member.
+    assert.doesNotMatch(nativeFacade, /getQuickCss|quickCss\.get|remcord-quick-css/);
+    assert.match(nativeFacade, /requireCapability\("quickcss\.read"\)/);
+    assert.match(nativeFacade, /requireCapability\("quickcss\.write"\)/);
+    for (const token of ["quickcss.delete", "quickcss.list", "quickcss.open", "quickcss.get"]) {
+        assert.doesNotMatch(nativeFacade, new RegExp(token.replace(".", "\\.")));
+    }
 });
 
 test("no src caller is migrated to a native Quick CSS path in this milestone", () => {

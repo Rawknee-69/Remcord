@@ -155,9 +155,18 @@ export function ThemesPage() {
             <SwitchItem
                 note={store.i18n["settings-quickCss-desc"]}
                 value={settings().quickCss}
-                disabled={nativeMode()}
                 onChange={(e: boolean) => {
                     console.log("Toggled quick CSS", e);
+                    // Native WebView2 persists through the closed async
+                    // allowlist and the host re-pushes the managed style
+                    // live (no restart needed); Electron keeps the original
+                    // enable/disable calls plus synchronous setConfig. The
+                    // native facade has no enableQuickCss/disableQuickCss,
+                    // so calling them first would throw before persisting.
+                    if (nativeMode()) {
+                        setConfig("quickCss", e);
+                        return;
+                    }
                     if (e) {
                         window.remcord.themes.enableQuickCss();
                     } else {

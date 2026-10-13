@@ -19,11 +19,12 @@
 //! reload   -> fresh document; did-finish-load re-pushes the file content
 //! ```
 //!
-//! Like themes, Quick CSS is a **host push only**: no renderer caller reads
-//! Quick CSS back, so there is deliberately NO `quickCss.get()` bridge, no
-//! new protocol command, and no new boot capability. The host reads the
-//! fixed file itself and injects it through the shared substrate builders
-//! ([`crate::mod_substrate::managed_css_script`]).
+//! Like themes, Quick CSS injection is a **host push**: the renderer never
+//! requests a push. Editing is a separate, narrow surface: the `quickcss.read`
+//! and `quickcss.write` capabilities below operate ONLY on the fixed file,
+//! with the same size bound the push enforces. There is deliberately no path,
+//! filename, URL, or enablement parameter: the host owns the file identity,
+//! and the enablement flag stays owned by `settings.set` (`quickCss`).
 //!
 //! Electron parity decisions (traced, not inferred):
 //! - File: `<profile>/quickCss.css`, UTF-8. A missing file is CREATED empty
@@ -49,9 +50,8 @@
 //!   closed to disabled — matching Electron, where a corrupt cache falls
 //!   back to `{}` and `getConfig("quickCss")` reads falsy `undefined`.
 //!
-//! Out of scope (deferred): live file watching (300 ms debounce
-//! remove/add), the CSS editor, folder opening, CSS import appending, and any
-//! renderer-facing Quick CSS API.
+//! Out of scope (deferred): folder opening, CSS import appending, and any
+//! renderer-facing Quick CSS API beyond the read/write editor pair.
 //!
 //! Logical resource owned by this module: exactly one fixed file —
 //! `<profile>/quickCss.css`. The renderer never receives the path.
@@ -196,9 +196,63 @@ pub fn load_quick_css(profile_dir: &Path) -> QuickCssReport {
     }
 }
 
+/// Read the fixed Quick CSS file for the editor (`quickcss.read`).
+///
+/// Returns the current text (possibly empty) plus its byte length. A missing
+/// file reads as empty (Electron creates it on enable; the editor must not
+/// fail on a fresh profile). Oversize and non-UTF-8 files are errors, never
+/// truncated content: the editor must show exactly what the push would
+/// inject. There is deliberately no path parameter: the file is fixed.
+pub fn read_quick_css_text(profile_dir: &Path) -> Result<(String, usize), String> {
+    let path = quick_css_path(profile_dir);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((String::new(), 0));
+        }
+        Err(error) => {
+            return Err(format!("Quick CSS file is unreadable: {error}"));
+        }
+    };
+    if bytes.len() > MAX_QUICK_CSS_BYTES {
+        return Err("Quick CSS file exceeds the size limit".to_owned());
+    }
+    let css = String::from_utf8(bytes).map_err(|_| "Quick CSS file is not UTF-8".to_owned())?;
+    let css_bytes = css.len();
+    Ok((css, css_bytes))
+}
+
+/// Replace the fixed Quick CSS file (`quickcss.write`).
+///
+/// The text is bounded by [`MAX_QUICK_CSS_BYTES`] (the same bound the push
+/// enforces) and persisted atomically (sibling temp file plus rename, so the
+/// live watcher never observes a truncated file). Returns the persisted byte
+/// length. The existing live watcher observes the replacement and drives the
+/// managed-CSS lifecycle; nothing here touches styles directly. There is
+/// deliberately no path parameter: the destination is always the fixed file.
+pub fn write_quick_css_text(profile_dir: &Path, css: &str) -> Result<usize, String> {
+    if css.len() > MAX_QUICK_CSS_BYTES {
+        return Err("Quick CSS exceeds the size limit".to_owned());
+    }
+    let path = quick_css_path(profile_dir);
+    let temp_path = path.with_extension("css.tmp");
+    if let Err(error) = std::fs::write(&temp_path, css.as_bytes()) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("Quick CSS file cannot be written: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("Quick CSS file cannot be written: {error}"));
+    }
+    Ok(css.len())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{load_quick_css, quick_css_path, QUICK_CSS_FILE, QUICK_CSS_STYLE_ID};
+    use super::{
+        load_quick_css, quick_css_path, read_quick_css_text, write_quick_css_text,
+        MAX_QUICK_CSS_BYTES, QUICK_CSS_FILE, QUICK_CSS_STYLE_ID,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -239,6 +293,54 @@ mod tests {
         assert_ne!(QUICK_CSS_STYLE_ID, "remcord-native-vencord-css");
         assert_ne!(QUICK_CSS_STYLE_ID, "remcord-native-prototype-css");
         assert!(!QUICK_CSS_STYLE_ID.starts_with("remcord-native-theme-"));
+    }
+
+    #[test]
+    fn editor_read_returns_exact_bytes_and_empty_for_missing() {
+        let profile = temp_profile();
+        // Missing file reads as empty (fresh profile, no failure).
+        let (css, bytes) = read_quick_css_text(&profile).expect("missing must read empty");
+        assert_eq!(css, "");
+        assert_eq!(bytes, 0);
+        // Present content round-trips byte-exact.
+        fs::write(quick_css_path(&profile), ":root{--q:1;}").expect("fixture");
+        let (css, bytes) = read_quick_css_text(&profile).expect("present must read");
+        assert_eq!(css, ":root{--q:1;}");
+        assert_eq!(bytes, ":root{--q:1;}".len());
+        // Oversize and non-UTF-8 files are errors, never truncation.
+        fs::write(
+            quick_css_path(&profile),
+            vec![b'x'; MAX_QUICK_CSS_BYTES + 1],
+        )
+        .expect("fixture");
+        assert!(read_quick_css_text(&profile).is_err());
+        fs::write(quick_css_path(&profile), [0x66, 0xFF, 0x66]).expect("fixture");
+        assert!(read_quick_css_text(&profile).is_err());
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn editor_write_persists_atomically_and_rejects_oversize() {
+        let profile = temp_profile();
+        let written =
+            write_quick_css_text(&profile, ":root{--w:2;}").expect("bounded write must persist");
+        assert_eq!(written, ":root{--w:2;}".len());
+        assert_eq!(
+            fs::read_to_string(quick_css_path(&profile)).expect("written file must read"),
+            ":root{--w:2;}"
+        );
+        // No temp file is left behind, and the push observes the bytes.
+        assert!(!quick_css_path(&profile).with_extension("css.tmp").exists());
+        let report = load_quick_css(&profile);
+        assert_eq!(report.css.as_deref(), Some(":root{--w:2;}"));
+        // Oversize writes are refused before touching the file.
+        let big = "x".repeat(MAX_QUICK_CSS_BYTES + 1);
+        assert!(write_quick_css_text(&profile, &big).is_err());
+        assert_eq!(
+            fs::read_to_string(quick_css_path(&profile)).expect("refused write must not alter"),
+            ":root{--w:2;}"
+        );
+        fs::remove_dir_all(&profile).ok();
     }
 
     #[test]

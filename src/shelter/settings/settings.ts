@@ -160,6 +160,7 @@ export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
     "extendedPluginAbilities",
     "blockPowerSavingInVoiceChat",
     "csp",
+    "quickCss",
 ];
 
 /** True when `key` has a native persistence path (closed allowlist). */
@@ -194,7 +195,8 @@ function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], s
         key === "supportBannerDismissed" ||
         key === "showExperimentalPluginMenu" ||
         key === "extendedPluginAbilities" ||
-        key === "csp"
+        key === "csp" ||
+        key === "quickCss"
     ) {
         const previous = store.settings[key];
         (store.settings as Record<string, unknown>)[key as string] = value;
@@ -259,7 +261,8 @@ export type NativeSettingsSetKey =
     | "supportBannerDismissed"
     | "showExperimentalPluginMenu"
     | "extendedPluginAbilities"
-    | "csp";
+    | "csp"
+    | "quickCss";
 
 /** Wire keys for the closed native `settings.set` capability. */
 const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
@@ -268,6 +271,7 @@ const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
     showExperimentalPluginMenu: "show_experimental_plugin_menu",
     extendedPluginAbilities: "extended_plugin_abilities",
     csp: "csp",
+    quickCss: "quick_css",
 };
 
 /** Minimal native `settings.set` shape (closed allowlist, key echo + value). */

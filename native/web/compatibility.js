@@ -610,6 +610,60 @@
         return request({ type: "bundles_list", payload: {} }, timeoutMs).then((payload) => payload.bundles);
     }
 
+    // Maximum Quick CSS editor buffer in UTF-8 bytes, mirroring the host
+    // bound. Larger buffers are rejected before dispatch.
+    const MAX_QUICK_CSS_BYTES = 1048576;
+
+    function readQuickCss(timeoutMs = 5000) {
+        requireCapability("quickcss.read");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host reads its own fixed file
+        // only. No path, filename, URL, or selector may be supplied. The
+        // host returns the text plus its byte length.
+        return request({ type: "quick_css_read", payload: {} }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                typeof payload.css !== "string" ||
+                textEncoder.encode(payload.css).length > MAX_QUICK_CSS_BYTES ||
+                !Number.isSafeInteger(payload.bytes) ||
+                payload.bytes < 0 ||
+                payload.bytes > MAX_QUICK_CSS_BYTES
+            ) {
+                throw new Error("Native Quick CSS read response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
+    function writeQuickCss(css, timeoutMs = 5000) {
+        requireCapability("quickcss.write");
+        if (typeof css !== "string" || textEncoder.encode(css).length > MAX_QUICK_CSS_BYTES) {
+            return Promise.reject(new TypeError("css must be a string of at most 1048576 UTF-8 bytes"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // CSS text only: the host always replaces its own fixed file
+        // atomically and re-pushes the managed style, so no reload or
+        // restart is needed. No path, filename, URL, or destination may be
+        // supplied. The host returns the persisted byte length.
+        return request({ type: "quick_css_write", payload: { css } }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                !Number.isSafeInteger(payload.bytes) ||
+                payload.bytes < 0 ||
+                payload.bytes > MAX_QUICK_CSS_BYTES
+            ) {
+                throw new Error("Native Quick CSS write response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
     function saveBackup(payloadString, timeoutMs = 120_000) {
         requireCapability("backup.save");
         if (typeof payloadString !== "string") {
@@ -1060,6 +1114,39 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "quick_css_read") {
+            const payload = response.payload.payload;
+            // Fixed-file text plus its byte length only. No path, flag, or
+            // filesystem error may ride along; bounds are re-checked here so
+            // a hostile host reply cannot widen the editor buffer.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                typeof payload.css !== "string" ||
+                textEncoder.encode(payload.css).length > MAX_QUICK_CSS_BYTES ||
+                !Number.isSafeInteger(payload.bytes) ||
+                payload.bytes < 0 ||
+                payload.bytes > MAX_QUICK_CSS_BYTES
+            ) {
+                request.reject(new Error("Native Quick CSS read response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "quick_css_written") {
+            const payload = response.payload.payload;
+            // Persisted byte length only. No path, text, or filesystem error
+            // may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                !Number.isSafeInteger(payload.bytes) ||
+                payload.bytes < 0 ||
+                payload.bytes > MAX_QUICK_CSS_BYTES
+            ) {
+                request.reject(new Error("Native Quick CSS write response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "window_ack") {
             const payload = response.payload.payload;
             // Command echo only: it must be one of the closed window wire
@@ -1385,6 +1472,13 @@
         listThemes,
         getThemes: getThemesSync,
     });
+    // Quick CSS editor pair: the fixed file only, bounded both ways. The
+    // host re-pushes the managed style on write, so the editor needs no
+    // reload or restart round trip of its own.
+    const quickcssShim = Object.freeze({
+        read: readQuickCss,
+        write: writeQuickCss,
+    });
 
     Object.defineProperty(window, "remcord", {
         configurable: false,
@@ -1416,6 +1510,7 @@
             backup,
             folders,
             themes: themesShim,
+            quickcss: quickcssShim,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,
             restart: bootRestart,

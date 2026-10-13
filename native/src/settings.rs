@@ -361,6 +361,10 @@ pub enum SettingsSetKey {
     /// `src/discord/extensions/csp.ts`, whose default is also `"none"`).
     /// Takes effect on next launch (restart-required model).
     Csp,
+    /// Quick CSS enablement flag. Native consumer: the trusted-load pipeline
+    /// pushes (or removes) the managed style from this flag, and a
+    /// post-mutation re-push applies the flip live, so no restart is needed.
+    QuickCss,
 }
 
 impl SettingsSetKey {
@@ -372,6 +376,7 @@ impl SettingsSetKey {
             SettingsSetKey::ShowExperimentalPluginMenu => "showExperimentalPluginMenu",
             SettingsSetKey::ExtendedPluginAbilities => "extendedPluginAbilities",
             SettingsSetKey::Csp => "csp",
+            SettingsSetKey::QuickCss => "quickCss",
         }
     }
 }
@@ -422,7 +427,8 @@ pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> R
         (
             SettingsSetKey::SupportBannerDismissed
             | SettingsSetKey::ShowExperimentalPluginMenu
-            | SettingsSetKey::ExtendedPluginAbilities,
+            | SettingsSetKey::ExtendedPluginAbilities
+            | SettingsSetKey::QuickCss,
             SettingsSetValue::Bool(_),
         ) => Ok(()),
         (SettingsSetKey::Csp, SettingsSetValue::Csp(mode)) => {
@@ -589,7 +595,8 @@ pub fn apply_settings_set(
         (
             SettingsSetKey::SupportBannerDismissed
             | SettingsSetKey::ShowExperimentalPluginMenu
-            | SettingsSetKey::ExtendedPluginAbilities,
+            | SettingsSetKey::ExtendedPluginAbilities
+            | SettingsSetKey::QuickCss,
             SettingsSetValue::Bool(flag),
         ) => serde_json::Value::Bool(*flag),
         _ => return Err("settings value does not match the allowlisted key".to_owned()),
@@ -898,6 +905,7 @@ mod tests {
                 SettingsSetKey::ExtendedPluginAbilities,
                 "extendedPluginAbilities",
             ),
+            (SettingsSetKey::QuickCss, "quickCss"),
         ] {
             let profile = unique_profile_dir("set-bool");
             std::fs::create_dir_all(profile.join("storage")).unwrap();

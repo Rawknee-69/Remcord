@@ -96,6 +96,7 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "extendedPluginAbilities",
             "blockPowerSavingInVoiceChat",
             "csp",
+            "quickCss",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), true, `${key} must be writable`);
         }
@@ -105,7 +106,6 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "audio",
             "proxyMode",
             "keybinds",
-            "quickCss",
             "minimizeToTray",
             "noBundleUpdates",
             "modCache",
@@ -273,6 +273,32 @@ test("native csp change persists through the closed allowlist", async () => {
     }
 });
 
+test("native quickCss toggle persists without requesting restart", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return Promise.resolve({ key, value });
+            },
+        },
+        seed: { quickCss: false },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // The toggle applies live host-side (managed style re-push), so no
+        // restart flag is requested, unlike the mod/csp controls.
+        helpers.setConfig("quickCss", true);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet, [["quick_css", true]]);
+        assert.equal(storeSettings().quickCss, true);
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
 test("Electron path keeps the synchronous setConfig contract", async () => {
     const calls = installGlobals({ seed: { windowStyle: "overlay" } });
     try {
@@ -432,11 +458,12 @@ test("unsupported settings stay disabled instead of rendering a broken control",
     installGlobals({});
     try {
         const helpers = await loadHelpers();
-        for (const key of ["quickCss", "windowStyle", "keybinds", "noBundleUpdates", "modCache"]) {
+        for (const key of ["windowStyle", "keybinds", "noBundleUpdates", "modCache"]) {
             assert.equal(helpers.isSettingWritableNatively(key), false, `${key} must be disabled natively`);
         }
         assert.equal(helpers.isSettingWritableNatively("mods"), true);
         assert.equal(helpers.isSettingWritableNatively("csp"), true);
+        assert.equal(helpers.isSettingWritableNatively("quickCss"), true);
         assert.equal(helpers.isNativeSettingsSetAvailable(), false);
     } finally {
         restoreConsole();

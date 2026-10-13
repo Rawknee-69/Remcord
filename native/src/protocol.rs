@@ -73,6 +73,8 @@ pub enum BridgeCommand {
     ThemeImportFiles(ThemeImportFilesRequest),
     ThemeSetEnabled(ThemeSetEnabledRequest),
     ThemesList(ThemesListRequest),
+    QuickCssRead(QuickCssReadRequest),
+    QuickCssWrite(QuickCssWriteRequest),
     BackupSave(BackupSaveRequest),
     BackupRestore(BackupRestoreRequest),
     WindowShow(WindowShowRequest),
@@ -280,6 +282,24 @@ pub struct ThemeSetEnabledRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThemesListRequest {}
+
+/// Empty request for the `quickcss.read` editor capability: returns the
+/// fixed Quick CSS file text. There is deliberately NO path, filename, URL,
+/// or selector: the host reads its own fixed file only. Any extra field is
+/// rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickCssReadRequest {}
+
+/// Write request for the `quickcss.write` editor capability: exactly one
+/// bounded CSS text. There is deliberately NO path, filename, URL, or
+/// destination: the host always replaces its own fixed file atomically.
+/// Length is checked here and re-enforced at dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickCssWriteRequest {
+    pub css: String,
+}
 
 /// Save request for the `backup.save` capability: exactly the include flags
 /// plus the bounded renderer-built client-mod envelope. There is deliberately
@@ -916,6 +936,8 @@ pub enum BridgeResponsePayload {
     ThemeImported(ThemeImportedResponse),
     ThemeEnabled(ThemeEnabledResponse),
     ThemesList(ThemesListResponse),
+    QuickCssRead(QuickCssReadResponse),
+    QuickCssWritten(QuickCssWrittenResponse),
     BackupSaved(BackupSavedResponse),
     BackupRestored(BackupRestoredResponse),
     WindowAck(WindowAckResponse),
@@ -1116,6 +1138,23 @@ pub struct ThemeEnabledResponse {
 #[derive(Serialize)]
 pub struct ThemesListResponse {
     pub themes: Vec<crate::themes::ThemeListEntry>,
+}
+
+/// Read response for the `quickcss.read` editor capability: the fixed file
+/// text plus its byte length. No path, no enablement flag, no filesystem
+/// error text.
+#[derive(Serialize)]
+pub struct QuickCssReadResponse {
+    pub css: String,
+    pub bytes: usize,
+}
+
+/// Write response for the `quickcss.write` editor capability: the persisted
+/// byte length. The envelope `ok` already signals success; no path or text
+/// is echoed back.
+#[derive(Serialize)]
+pub struct QuickCssWrittenResponse {
+    pub bytes: usize,
 }
 
 /// Bounded save response for the `backup.save` capability: cancellation plus
@@ -1366,6 +1405,16 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // is needed. Enumeration, bounds, and ordering live in
                 // `themes` and are enforced at dispatch.
                 BridgeCommand::ThemesList(_) => {}
+                // The read half carries no parameters by protocol. The write
+                // half carries exactly one CSS text, bounded here and
+                // re-enforced at dispatch; the destination is always the
+                // host-fixed file, so there is nothing else to shape-check.
+                BridgeCommand::QuickCssRead(_) => {}
+                BridgeCommand::QuickCssWrite(payload) => {
+                    if payload.css.len() > crate::quick_css::MAX_QUICK_CSS_BYTES {
+                        return Err("Quick CSS exceeds the size limit".to_owned());
+                    }
+                }
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
@@ -2795,6 +2844,75 @@ mod tests {
     }
 
     #[test]
+    fn accepts_quickcss_read_and_bounded_write() {
+        let read = r#"{"version":1,"request_id":"quickcss-1","command":{"type":"quick_css_read","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(read),
+            Ok(BridgeMessage::Request(_))
+        ));
+        // No path, filename, URL, or selector may ride along; the host owns
+        // the fixed file.
+        let with_path = r#"{"version":1,"request_id":"quickcss-2","command":{"type":"quick_css_read","payload":{"path":"C:\\x"}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+
+        let write = r#"{"version":1,"request_id":"quickcss-3","command":{"type":"quick_css_write","payload":{"css":":root{}"}}}"#;
+        assert!(matches!(
+            parse_bridge_message(write),
+            Ok(BridgeMessage::Request(_))
+        ));
+        // Exactly one CSS text: no path, id, URL, or destination.
+        let with_path = r#"{"version":1,"request_id":"quickcss-4","command":{"type":"quick_css_write","payload":{"css":":root{}","path":"C:\\x"}}}"#;
+        let missing_css = r#"{"version":1,"request_id":"quickcss-5","command":{"type":"quick_css_write","payload":{}}}"#;
+        let null_css = r#"{"version":1,"request_id":"quickcss-6","command":{"type":"quick_css_write","payload":{"css":null}}}"#;
+        assert!(parse_bridge_message(with_path).is_err());
+        assert!(parse_bridge_message(missing_css).is_err());
+        assert!(parse_bridge_message(null_css).is_err());
+        // An oversize body is refused at parse, before any filesystem work.
+        let big = "x".repeat(crate::quick_css::MAX_QUICK_CSS_BYTES + 1);
+        let oversized = format!(
+            "{{\"version\":1,\"request_id\":\"quickcss-7\",\"command\":{{\"type\":\"quick_css_write\",\"payload\":{{\"css\":\"{big}\"}}}}}}"
+        );
+        assert!(parse_bridge_message(&oversized).is_err());
+    }
+
+    #[test]
+    fn serializes_quickcss_read_and_written_responses() {
+        use super::{QuickCssReadResponse, QuickCssWrittenResponse};
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "quickcss-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::QuickCssRead(QuickCssReadResponse {
+                css: ":root{}".to_owned(),
+                bytes: 8,
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "quick_css_read");
+        assert_eq!(value["payload"]["payload"]["css"], ":root{}");
+        assert_eq!(value["payload"]["payload"]["bytes"], 8);
+        assert_eq!(
+            value["payload"]["payload"]
+                .as_object()
+                .map(|object| object.len()),
+            Some(2)
+        );
+        let written = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "quickcss-2".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::QuickCssWritten(
+                QuickCssWrittenResponse { bytes: 8 },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(written).unwrap();
+        assert_eq!(value["payload"]["type"], "quick_css_written");
+        assert_eq!(value["payload"]["payload"]["bytes"], 8);
+    }
+
+    #[test]
     fn serializes_a_bounded_themes_list_response() {
         use super::ThemesListResponse;
         use crate::themes::ThemeListEntry;
@@ -3097,6 +3215,7 @@ mod tests {
         let experimental = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set","payload":{"key":"show_experimental_plugin_menu","value":false}}}"#;
         let abilities = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set","payload":{"key":"extended_plugin_abilities","value":true}}}"#;
         let csp = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"csp","value":"strict"}}}"#;
+        let quick_css = r#"{"version":1,"request_id":"settings-5b","command":{"type":"settings_set","payload":{"key":"quick_css","value":true}}}"#;
         assert!(matches!(
             parse_bridge_message(mods),
             Ok(BridgeMessage::Request(_))
@@ -3115,6 +3234,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_bridge_message(csp),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(quick_css),
             Ok(BridgeMessage::Request(_))
         ));
 

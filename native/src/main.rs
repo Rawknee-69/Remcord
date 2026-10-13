@@ -71,17 +71,18 @@ use protocol::{
     BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest,
     BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
     FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse, PingResponse,
-    PluginStorageReadResponse, PluginStorageWriteResponse, RequestTracker, SettingsConfigResponse,
-    SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
-    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
-    WindowAckResponse, PROTOCOL_VERSION,
+    PluginStorageReadResponse, PluginStorageWriteResponse, QuickCssReadResponse,
+    QuickCssWrittenResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
+    SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
+    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
+    PROTOCOL_VERSION,
 };
-use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
+use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
 use remcord_protocol::scheme::create_environment as create_remcord_webview_environment;
 use remcord_protocol::{build_namespace_roots, register_remcord_protocol};
 use serde::Serialize;
-use settings::{apply_block_power_saving, apply_settings_set, load_settings};
+use settings::{apply_block_power_saving, apply_settings_set, load_settings, SettingsSetKey};
 use tao::{
     dpi::{LogicalSize, Size},
     event::{Event, WindowEvent},
@@ -313,6 +314,8 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "themes.import_files",
         "themes.set_enabled",
         "themes.list",
+        "quickcss.read",
+        "quickcss.write",
         "window.show",
         "window.hide",
         "window.minimize",
@@ -2997,6 +3000,80 @@ struct TrustedLoadContext<'a> {
     flags: TrustedLoadFlags,
 }
 
+/// Re-pushes the host-owned Quick CSS into the live document from the
+/// authoritative settings plus file.
+///
+/// The trusted-load pipeline and the post-mutation side effects (the
+/// `quickCss` settings toggle, the `quickcss.write` editor save) share this
+/// helper, so a toggle or a save applies to the running document without a
+/// reload. It updates the live watcher's last-known state exactly like the
+/// pipeline always has, so live diffing never mistakes the push for an
+/// external file change.
+fn repush_quick_css(
+    webview: &WebView,
+    profile_path: &std::path::Path,
+    last_injected: &mut bool,
+    last_css: &mut Option<String>,
+) {
+    // Host-pushed Quick CSS injection (Phase D): the renderer
+    // never requests a push, so there is no bridge
+    // round trip here. The host reads its own fixed
+    // quickCss.css when the authoritative settings flag
+    // is enabled and pushes it through the shared
+    // managed-CSS lifecycle BEFORE themes, preserving
+    // Electron's Vencord -> Quick CSS -> themes cascade.
+    let quickcss_report = load_quick_css(profile_path);
+    let mut quickcss_injected = false;
+    match &quickcss_report.css {
+        Some(css) => match managed_css_script(QUICK_CSS_STYLE_ID, css) {
+            Ok(script) => {
+                if let Err(error) = webview.evaluate_script(&script) {
+                    eprintln!("[QuickCss][css_injection] {error}");
+                } else {
+                    quickcss_injected = true;
+                }
+            }
+            Err(error) => {
+                eprintln!("[QuickCss][css_injection] {error}");
+            }
+        },
+        None => {
+            // Disabled (or unreadable) after a previous
+            // injection: remove the managed style so no
+            // stale Quick CSS survives the reset. On a
+            // fresh document this is a cheap no-op.
+            if *last_injected {
+                match managed_css_remove_script(QUICK_CSS_STYLE_ID) {
+                    Ok(script) => {
+                        if let Err(error) = webview.evaluate_script(&script) {
+                            eprintln!("[QuickCss][css_removal] {error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("[QuickCss][css_removal] {error}");
+                    }
+                }
+            }
+        }
+    }
+    *last_injected = quickcss_injected;
+    // Content snapshot for live diffing: `Some` exactly
+    // when the managed style is present in this document.
+    *last_css = if quickcss_injected {
+        quickcss_report.css.clone()
+    } else {
+        None
+    };
+    println!(
+        "[QuickCss][Metrics] enabled={} state={} injected={} css_bytes={} read_ms={:.3}",
+        quickcss_report.enabled,
+        quickcss_report.state,
+        quickcss_injected,
+        quickcss_report.css_bytes,
+        quickcss_report.read_ms,
+    );
+}
+
 /// The trusted Discord document pipeline: everything that assumes live
 /// Discord content is present (titlebar settle, health/CSS/bridge probes,
 /// host-pushed Quick CSS and themes, DEV smoke observations).
@@ -3043,62 +3120,14 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
         if let Err(error) = ctx.webview.evaluate_script(BRIDGE_PROBE_SCRIPT) {
             eprintln!("[Injection] Bridge probe failed: {error}");
         }
-        // Host-pushed Quick CSS injection (Phase D): the renderer
-        // never requests Quick CSS, so there is no bridge
-        // round trip here. The host reads its own fixed
-        // quickCss.css when the authoritative settings flag
-        // is enabled and pushes it through the shared
-        // managed-CSS lifecycle BEFORE themes, preserving
-        // Electron's Vencord -> Quick CSS -> themes cascade.
-        let quickcss_report = load_quick_css(ctx.profile_path);
-        let mut quickcss_injected = false;
-        match &quickcss_report.css {
-            Some(css) => match managed_css_script(QUICK_CSS_STYLE_ID, css) {
-                Ok(script) => {
-                    if let Err(error) = ctx.webview.evaluate_script(&script) {
-                        eprintln!("[QuickCss][css_injection] {error}");
-                    } else {
-                        quickcss_injected = true;
-                    }
-                }
-                Err(error) => {
-                    eprintln!("[QuickCss][css_injection] {error}");
-                }
-            },
-            None => {
-                // Disabled (or unreadable) after a previous
-                // injection: remove the managed style so no
-                // stale Quick CSS survives the reset. On a
-                // fresh document this is a cheap no-op.
-                if *ctx.last_quickcss_injected {
-                    match managed_css_remove_script(QUICK_CSS_STYLE_ID) {
-                        Ok(script) => {
-                            if let Err(error) = ctx.webview.evaluate_script(&script) {
-                                eprintln!("[QuickCss][css_removal] {error}");
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("[QuickCss][css_removal] {error}");
-                        }
-                    }
-                }
-            }
-        }
-        *ctx.last_quickcss_injected = quickcss_injected;
-        // Content snapshot for live diffing: `Some` exactly
-        // when the managed style is present in this document.
-        *ctx.last_quickcss_css = if quickcss_injected {
-            quickcss_report.css.clone()
-        } else {
-            None
-        };
-        println!(
-            "[QuickCss][Metrics] enabled={} state={} injected={} css_bytes={} read_ms={:.3}",
-            quickcss_report.enabled,
-            quickcss_report.state,
-            quickcss_injected,
-            quickcss_report.css_bytes,
-            quickcss_report.read_ms,
+        // Host-pushed Quick CSS injection (Phase D): shared with the
+        // post-mutation side effects so toggles and editor saves apply to
+        // the running document without a reload.
+        repush_quick_css(
+            ctx.webview,
+            ctx.profile_path,
+            ctx.last_quickcss_injected,
+            ctx.last_quickcss_css,
         );
         // Host-pushed theme injection (Phase D): the renderer
         // never requests theme CSS, so there is no bridge
@@ -6441,6 +6470,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     let payload_bytes = mutation.payload_bytes;
                                     let key = mutation.key;
                                     let value = mutation.value.clone();
+                                    // The Quick CSS toggle applies live: the
+                                    // flag flip alone would otherwise wait for
+                                    // the next trusted load, so re-push the
+                                    // managed style into the running document
+                                    // (enable injects, disable removes).
+                                    if key == SettingsSetKey::QuickCss {
+                                        repush_quick_css(
+                                            &webview,
+                                            &profile_path,
+                                            &mut last_quickcss_injected,
+                                            &mut last_quickcss_css,
+                                        );
+                                    }
                                     let response = BridgeResponse {
                                         version: PROTOCOL_VERSION,
                                         request_id: request_id.clone(),
@@ -7087,6 +7129,109 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 report.skipped.len(),
                                 received_at.elapsed().as_secs_f64() * 1000.0
                             );
+                        }
+                        BridgeCommand::QuickCssRead(_) => {
+                            // Editor read: the request carries no parameters
+                            // by protocol. The host reads its own fixed file
+                            // only; the renderer receives the text plus its
+                            // byte length.
+                            let request_id = request.request_id;
+                            match read_quick_css_text(&profile_path) {
+                                Ok((css, bytes)) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::QuickCssRead(
+                                            QuickCssReadResponse { css, bytes },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[QuickCss][Read] bytes={} request_latency_ms={:.3}",
+                                        bytes,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(message) => {
+                                    eprintln!("[QuickCss][Read:QUICKCSS_UNAVAILABLE] {message}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "QUICKCSS_UNAVAILABLE",
+                                            message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::QuickCssWrite(payload) => {
+                            // Editor save: exactly one bounded CSS text; the
+                            // destination is always the host-fixed file,
+                            // persisted atomically. The shared re-push
+                            // applies the save to the running document, so no
+                            // reload or restart is needed.
+                            let request_id = request.request_id;
+                            match write_quick_css_text(&profile_path, &payload.css) {
+                                Ok(bytes) => {
+                                    repush_quick_css(
+                                        &webview,
+                                        &profile_path,
+                                        &mut last_quickcss_injected,
+                                        &mut last_quickcss_css,
+                                    );
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::QuickCssWritten(
+                                            QuickCssWrittenResponse { bytes },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[QuickCss][Write] bytes={} request_latency_ms={:.3}",
+                                        bytes,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(message) => {
+                                    eprintln!("[QuickCss][Write:QUICKCSS_UNAVAILABLE] {message}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "QUICKCSS_UNAVAILABLE",
+                                            message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
                         }
                         BridgeCommand::BackupSave(payload) => {
                             // Export only: the renderer supplies the include
@@ -9464,10 +9609,18 @@ mod tests {
     }
 
     #[test]
-    fn boot_snapshot_grants_no_quickcss_capability() {
-        // Quick CSS is a host push like themes: the renderer never requests
-        // it, so no Quick CSS capability may exist anywhere near the bridge.
+    fn boot_snapshot_grants_exactly_the_quickcss_editor_capabilities() {
+        // Quick CSS stays a host push, but the in-Discord editor needs its
+        // narrow read/write pair: exactly these two capabilities may exist,
+        // and nothing else quickcss-shaped.
+        assert!(super::BOOT_SNAPSHOT.capabilities.contains(&"quickcss.read"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"quickcss.write"));
         for capability in super::BOOT_SNAPSHOT.capabilities {
+            if *capability == "quickcss.read" || *capability == "quickcss.write" {
+                continue;
+            }
             assert!(!capability.contains("quickcss"));
             assert!(!capability.contains("quick_css"));
             assert!(!capability.contains("quickCss"));
@@ -9477,18 +9630,20 @@ mod tests {
     }
 
     #[test]
-    fn initialization_script_exposes_no_quickcss_pull_surface() {
-        // The renderer pull stays rejected: no quickCss.get() shape may be
-        // introduced alongside the host push.
+    fn initialization_script_exposes_only_the_quickcss_editor_pair() {
+        // The editor pair is the only renderer-reachable Quick CSS surface:
+        // no generic pull, no path, no third operation.
         let script = initialization_script(
             &[],
             crate::settings_boot::test_fixture_json(),
             crate::app::test_fixture_json(),
         )
         .unwrap();
-        assert!(!script.contains("quickCss"));
-        assert!(!script.contains("quickcss"));
-        assert!(!script.contains("quick_css"));
+        assert!(script.contains("quickcss.read"));
+        assert!(script.contains("quickcss.write"));
+        assert!(!script.contains("quickCss.get"));
+        assert!(!script.contains("quickcss.delete"));
+        assert!(!script.contains("quickcss.list"));
     }
 
     #[test]
@@ -9501,7 +9656,10 @@ mod tests {
         for capability in super::BOOT_SNAPSHOT.capabilities {
             assert!(!capability.contains("watch"));
             assert!(!capability.contains("live"));
-            if *capability == "themes.write_css" {
+            if *capability == "themes.write_css"
+                || *capability == "quickcss.read"
+                || *capability == "quickcss.write"
+            {
                 continue;
             }
             assert!(!capability.contains("css"));

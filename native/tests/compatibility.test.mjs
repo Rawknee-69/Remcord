@@ -3357,11 +3357,14 @@ test("the facade exposes a parameter-free themes.list inventory", () => {
     const { window } = createListRuntime();
     assert.equal(typeof window.remcord.themes.listThemes, "function");
     assert.equal(window.remcord.native.supports("themes.list"), true);
-    // No CSS pull, filesystem, path, or URL surface may exist. getThemes is
+    // No filesystem, path, or URL surface may exist. getThemes is
     // the one closed synchronous exception (settings shim snapshot
-    // projection, not a host operation).
+    // projection, not a host operation). The Quick CSS editor pair lives
+    // under the separate `quickcss` namespace, never here.
     assert.equal(typeof window.remcord.themes.getThemes, "function");
     assert.equal(window.remcord.themes.getCSS, undefined);
+    assert.equal(window.remcord.themes.read, undefined);
+    assert.equal(window.remcord.themes.write, undefined);
     assert.equal(window.remcord.fs, undefined);
 });
 
@@ -3462,6 +3465,165 @@ test("a reloaded document gets a fresh theme list facade with no stale promises"
 
 test("theme list requests stay inert off the trusted origin", async () => {
     const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "themes.list"]);
+    assert.equal(window.remcord, undefined);
+});
+
+function createQuickCssRuntime(capabilities = ["bridge.ping", "quickcss.read", "quickcss.write"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondQuickCssRead(window, request, css = ":root{}") {
+    const bytes = new TextEncoder().encode(css).length;
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "quick_css_read", payload: { css, bytes } },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondQuickCssWrite(window, request, bytes = 8) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "quick_css_written", payload: { bytes } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a namespaced quickcss editor pair and no generic writer", () => {
+    const { window } = createQuickCssRuntime();
+    assert.equal(typeof window.remcord.quickcss.read, "function");
+    assert.equal(typeof window.remcord.quickcss.write, "function");
+    assert.equal(window.remcord.native.supports("quickcss.read"), true);
+    assert.equal(window.remcord.native.supports("quickcss.write"), true);
+    // Exactly the pair: no delete, list, open, or path-taking member.
+    assert.deepEqual(Object.keys(window.remcord.quickcss).sort(), ["read", "write"]);
+    assert.equal(window.remcord.fs, undefined);
+});
+
+test("quickcss.read sends an exact empty payload and resolves text plus bytes", async () => {
+    const { window } = createQuickCssRuntime();
+    const pending = window.remcord.quickcss.read();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "quick_css_read");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "quick_css_read", payload: {} });
+
+    respondQuickCssRead(window, message, ":root{--q:1;}");
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        css: ":root{--q:1;}",
+        bytes: ":root{--q:1;}".length,
+    });
+});
+
+test("quickcss.read throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createQuickCssRuntime(["bridge.ping", "quickcss.write"]);
+    assert.equal(window.remcord.native.supports("quickcss.read"), false);
+    assert.throws(
+        () => window.remcord.quickcss.read(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "quick_css_read"),
+        false,
+    );
+});
+
+test("quickcss.read rejects malformed read responses", async () => {
+    for (const payload of [
+        { css: ":root{}", bytes: "8" },
+        { css: ":root{}" },
+        { bytes: 8 },
+        { css: ":root{}", bytes: 8, path: "C:\\x" },
+        { css: 42, bytes: 8 },
+    ]) {
+        const runtime = createQuickCssRuntime();
+        const pending = runtime.window.remcord.quickcss.read();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "quick_css_read");
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: true,
+                    payload: { type: "quick_css_read", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /Quick CSS read response schema is invalid/);
+    }
+});
+
+test("quickcss.write sends CSS text only and resolves the byte length", async () => {
+    const { window } = createQuickCssRuntime();
+    const pending = window.remcord.quickcss.write(":root{--w:2;}");
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "quick_css_write");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "quick_css_write", payload: { css: ":root{--w:2;}" } });
+
+    respondQuickCssWrite(window, message, ":root{--w:2;}".length);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { bytes: ":root{--w:2;}".length });
+});
+
+test("quickcss.write throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createQuickCssRuntime(["bridge.ping", "quickcss.read"]);
+    assert.equal(window.remcord.native.supports("quickcss.write"), false);
+    assert.throws(
+        () => window.remcord.quickcss.write(":root{}"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "quick_css_write"),
+        false,
+    );
+});
+
+test("quickcss.write rejects non-string and oversized CSS without sending", async () => {
+    const { window } = createQuickCssRuntime();
+    await assert.rejects(window.remcord.quickcss.write(42), /string/);
+    await assert.rejects(window.remcord.quickcss.write(null), /string/);
+    await assert.rejects(window.remcord.quickcss.write("x".repeat(1048576 + 1)), /at most/);
+    // Empty string is a legal clear of the editor buffer.
+    const pending = window.remcord.quickcss.write("");
+    const message = window.messages.find((entry) => entry.command?.type === "quick_css_write");
+    assert.ok(message);
+    respondQuickCssWrite(window, message, 0);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { bytes: 0 });
+});
+
+test("quickcss.write rejects malformed write responses", async () => {
+    const { window } = createQuickCssRuntime();
+    const pending = window.remcord.quickcss.write(":root{}");
+    const message = window.messages.find((entry) => entry.command?.type === "quick_css_write");
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: true,
+                payload: { type: "quick_css_written", payload: { bytes: 8, path: "C:\\x" } },
+                error: null,
+            },
+        }),
+    );
+    await assert.rejects(pending, /Quick CSS write response schema is invalid/);
+});
+
+test("quickcss editor requests stay inert off the trusted origin", async () => {
+    const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "quickcss.read", "quickcss.write"]);
     assert.equal(window.remcord, undefined);
 });
 
