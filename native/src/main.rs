@@ -79,7 +79,7 @@ use protocol::{
 use quick_css::{load_quick_css, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
 use remcord_protocol::scheme::create_environment as create_remcord_webview_environment;
-use remcord_protocol::{build_namespace_roots, extend_csp_for_remcord, register_remcord_protocol};
+use remcord_protocol::{build_namespace_roots, register_remcord_protocol};
 use serde::Serialize;
 use settings::{apply_block_power_saving, apply_settings_set, load_settings};
 use tao::{

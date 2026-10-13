@@ -34,6 +34,68 @@ pub const REMCORD_CSP_DIRECTIVES: &[&str] = &[
     "connect-src",
 ];
 
+/// Electron's strict replacement policy (`src/discord/extensions/csp.ts`),
+/// byte-identical so the native `"strict"` mode enforces exactly what
+/// Electron enforces. The host still appends `remcord:` (via
+/// [`extend_csp_for_remcord`]) and the badges `connect-src` patch on top,
+/// because the native shell serves local-scheme subresources and donor
+/// badges exactly like the traced Electron consumers need.
+pub const REMCORD_STRICT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://*.discord.com https://discord.com https://*.githubusercontent.com https://*.github.com; style-src 'self' 'unsafe-inline' https://*.discord.com https://discord.com https://fonts.googleapis.com; img-src 'self' blob: data: https://*.discord.com https://discord.com https://*.discordapp.com https://cdn.discordapp.com https://*.githubusercontent.com https://*.github.com https://raw.githubusercontent.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' blob: https://*.discord.com https://discord.com wss://*.discord.com wss://gateway.discord.gg https://*.githubusercontent.com https://*.github.com https://api.github.com; media-src 'self' blob: https://*.discord.com https://discord.com; worker-src 'self' blob:; frame-src 'self' https://*.discord.com https://discord.com https://*.youtube.com https://youtube.com https://*.twitch.tv https://open.spotify.com";
+
+/// Outcome of applying one CSP mode to a document response: either a
+/// replacement policy or no policy at all (stripped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CspFilterOutcome {
+    /// Emit this policy as the document `content-security-policy`.
+    Policy(&'static str),
+    /// Emit Discord's own policy with the remcord/badges extensions.
+    PreserveDiscord,
+    /// Emit no `content-security-policy` at all (Electron `"none"` parity).
+    Strip,
+}
+
+/// Normalizes a persisted `csp` setting value to the mode the document
+/// filter implements. Missing values take the compiled default (Electron
+/// parity: `"none"`); present-but-unknown values fail closed to
+/// [`CspFilterOutcome::PreserveDiscord`] so a corrupt setting can never
+/// silently strip the document policy.
+pub fn normalize_csp_mode(persisted: Option<&str>) -> CspFilterOutcome {
+    match persisted {
+        None => CspFilterOutcome::Strip,
+        Some("none") => CspFilterOutcome::Strip,
+        Some("strict") => CspFilterOutcome::Policy(REMCORD_STRICT_CSP),
+        Some("vanilla") => CspFilterOutcome::PreserveDiscord,
+        Some(_) => CspFilterOutcome::PreserveDiscord,
+    }
+}
+
+/// Extends one document policy with the remcord-scheme allowances plus the
+/// traced badges `connect-src` patch. Shared by the vanilla-preservation and
+/// strict-replacement paths so both carry identical local-scheme and badges
+/// behavior; nothing is ever removed here.
+pub fn extend_document_csp(csp: &str) -> String {
+    let mut out = extend_csp_for_remcord(csp);
+    if !out.contains("badges.vencord.dev") {
+        out = if let Some(pos) = out.to_lowercase().find("connect-src") {
+            let after = &out[pos..];
+            let end = after.find(';').unwrap_or(after.len());
+            let directive = after[..end].trim().to_string();
+            if directive.contains("badges.vencord.dev") {
+                out
+            } else {
+                out.replacen(
+                    &directive,
+                    &format!("{directive} https://badges.vencord.dev"),
+                    1,
+                )
+            }
+        } else {
+            format!("{out}; connect-src https://badges.vencord.dev")
+        };
+    }
+    out
+}
+
 /// Appends `remcord:` to each present listed directive that lacks it.
 /// Directives absent from the policy are left absent (fallback semantics
 /// unchanged); existing sources are preserved byte-for-byte.
@@ -156,5 +218,67 @@ mod tests {
         let extended = extend_csp_for_remcord(csp);
         assert!(!extended.contains("script-src-elem 'self' remcord:"));
         assert!(extended.contains("script-src 'self' remcord:"));
+    }
+
+    #[test]
+    fn strict_policy_matches_the_electron_replacement() {
+        // Byte-parity with `src/discord/extensions/csp.ts` REMCORD_CSP: the
+        // native "strict" mode must enforce exactly what Electron enforces.
+        for directive in [
+            "default-src 'self'",
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
+            "style-src 'self' 'unsafe-inline' https://*.discord.com",
+            "img-src 'self' blob: data:",
+            "font-src 'self' data: https://fonts.gstatic.com",
+            "connect-src 'self' blob:",
+            "media-src 'self' blob:",
+            "worker-src 'self' blob:",
+            "frame-src 'self' https://*.discord.com",
+        ] {
+            assert!(
+                REMCORD_STRICT_CSP.contains(directive),
+                "strict policy must carry {directive}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_pins_each_persisted_mode() {
+        assert_eq!(normalize_csp_mode(None), CspFilterOutcome::Strip);
+        assert_eq!(normalize_csp_mode(Some("none")), CspFilterOutcome::Strip);
+        assert_eq!(
+            normalize_csp_mode(Some("strict")),
+            CspFilterOutcome::Policy(REMCORD_STRICT_CSP)
+        );
+        assert_eq!(
+            normalize_csp_mode(Some("vanilla")),
+            CspFilterOutcome::PreserveDiscord
+        );
+        // A corrupt/foreign value must fail closed to preserving Discord's
+        // policy — never to stripping it.
+        for hostile in ["", "NONE", "Strict", "none ", "strict;", "eval", "none\0"] {
+            assert_eq!(
+                normalize_csp_mode(Some(hostile)),
+                CspFilterOutcome::PreserveDiscord,
+                "{hostile:?} must preserve"
+            );
+        }
+    }
+
+    #[test]
+    fn document_extension_carries_badges_and_scheme_allowances() {
+        let extended = extend_document_csp("default-src 'self'; connect-src 'self'");
+        assert!(extended.contains("https://badges.vencord.dev"));
+        assert!(extended.contains("remcord:"));
+        // Idempotent across repeated application.
+        let again = extend_document_csp(&extended);
+        assert_eq!(again.matches("https://badges.vencord.dev").count(), 1);
+        // A policy without connect-src gains the badges directive.
+        let bare = extend_document_csp("script-src 'self'");
+        assert!(bare.contains("connect-src https://badges.vencord.dev"));
+        // The strict replacement extends the same way.
+        let strict = extend_document_csp(REMCORD_STRICT_CSP);
+        assert!(strict.contains("https://badges.vencord.dev"));
+        assert!(strict.contains("remcord:"));
     }
 }

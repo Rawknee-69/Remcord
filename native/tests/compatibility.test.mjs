@@ -700,6 +700,21 @@ test("settings.set sends key plus bounded value and resolves the key echo", asyn
     });
     respondSettingsSet(window, modsMessage, "mods", ["vencord"]);
     assert.deepEqual(JSON.parse(JSON.stringify(await modsPending)), { key: "mods", value: ["vencord"] });
+
+    const cspPending = window.remcord.settings.set("csp", "strict");
+    const cspMessage = window.messages.find(
+        (entry) =>
+            entry.command?.type === "settings_set" &&
+            entry.request_id !== message.request_id &&
+            entry.request_id !== modsMessage.request_id,
+    );
+    assert.ok(cspMessage);
+    assert.deepEqual(cspMessage.command, {
+        type: "settings_set",
+        payload: { key: "csp", value: "strict" },
+    });
+    respondSettingsSet(window, cspMessage, "csp", "strict");
+    assert.deepEqual(JSON.parse(JSON.stringify(await cspPending)), { key: "csp", value: "strict" });
 });
 
 test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
@@ -721,9 +736,16 @@ test("settings.set rejects unknown keys and mismatched types without sending", a
     await assert.rejects(window.remcord.settings.set("tray", true), /allowlisted/);
     await assert.rejects(window.remcord.settings.set("proxyRules", "http://127.0.0.1:8080"), /allowlisted/);
     await assert.rejects(window.remcord.settings.set("customIcon", "C:\\secret.png"), /allowlisted/);
-    // Key/variant mismatches: bool keys refuse arrays, mods refuses a bool.
+    // Key/variant mismatches: bool keys refuse arrays, mods refuses a bool,
+    // and csp refuses both (plus unknown modes).
     await assert.rejects(window.remcord.settings.set("support_banner_dismissed", ["vencord"]), /boolean/);
     await assert.rejects(window.remcord.settings.set("mods", true), /known mod ids/);
+    await assert.rejects(window.remcord.settings.set("csp", true), /CSP modes/);
+    await assert.rejects(window.remcord.settings.set("csp", ["none"]), /CSP modes/);
+    await assert.rejects(window.remcord.settings.set("csp", "permissive"), /CSP modes/);
+    await assert.rejects(window.remcord.settings.set("csp", "none; script-src *"), /CSP modes/);
+    await assert.rejects(window.remcord.settings.set("mods", "none"), /known mod ids/);
+    await assert.rejects(window.remcord.settings.set("support_banner_dismissed", "none"), /boolean/);
     // Strings are never valid values; unknown mod ids are refused.
     await assert.rejects(window.remcord.settings.set("support_banner_dismissed", "yes"), /boolean/);
     await assert.rejects(window.remcord.settings.set("mods", ["Vencord"]), /known mod ids/);

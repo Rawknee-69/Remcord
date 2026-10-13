@@ -355,6 +355,12 @@ pub enum SettingsSetKey {
     /// plugin-storage capabilities are already capability-gated, so this
     /// carries no host side effect beyond persistence.
     ExtendedPluginAbilities,
+    /// Content-Security-Policy mode (`"none"` | `"strict"` | `"vanilla"`).
+    /// Native consumer: the document CSP filter applies the selected mode to
+    /// every Discord document response (Electron parity with
+    /// `src/discord/extensions/csp.ts`, whose default is also `"none"`).
+    /// Takes effect on next launch (restart-required model).
+    Csp,
 }
 
 impl SettingsSetKey {
@@ -365,18 +371,21 @@ impl SettingsSetKey {
             SettingsSetKey::SupportBannerDismissed => "supportBannerDismissed",
             SettingsSetKey::ShowExperimentalPluginMenu => "showExperimentalPluginMenu",
             SettingsSetKey::ExtendedPluginAbilities => "extendedPluginAbilities",
+            SettingsSetKey::Csp => "csp",
         }
     }
 }
 
 /// Bounded value union for the allowlist. The key selects which variant is
-/// legal; anything else is a type error. There is deliberately no string,
-/// number, object, or null variant: no allowlisted key needs one.
+/// legal; anything else is a type error. There is deliberately no number,
+/// object, or null variant: no allowlisted key needs one. The single string
+/// variant serves exactly the `csp` mode; no other key accepts it.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SettingsSetValue {
     Bool(bool),
     Mods(Vec<String>),
+    Csp(String),
 }
 
 /// Maximum accepted mod-enablement entries. Electron's `ValidMods` has four
@@ -387,9 +396,16 @@ pub const MAX_MODS_ENTRIES: usize = 8;
 /// cannot invent a mod id through this capability.
 pub const VALID_MODS: &[&str] = &["vencord", "equicord", "custom", "shelter"];
 
+/// Exact CSP modes the native document filter implements, mirroring
+/// Electron's `src/discord/extensions/csp.ts` switch (`"none"` strips the
+/// main-frame policy, `"strict"` replaces it, anything else keeps Discord's
+/// vanilla policy). Bounded so the renderer cannot smuggle a policy string
+/// through this capability.
+pub const VALID_CSP_MODES: &[&str] = &["none", "strict", "vanilla"];
+
 /// Validate one allowlisted mutation before any filesystem work: the value
-/// variant must match the key, and `mods` entries must be exact `ValidMods`
-/// members within the length bound.
+/// variant must match the key, `mods` entries must be exact `ValidMods`
+/// members within the length bound, and `csp` must be an exact mode.
 pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> Result<(), String> {
     match (key, value) {
         (SettingsSetKey::Mods, SettingsSetValue::Mods(entries)) => {
@@ -409,6 +425,12 @@ pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> R
             | SettingsSetKey::ExtendedPluginAbilities,
             SettingsSetValue::Bool(_),
         ) => Ok(()),
+        (SettingsSetKey::Csp, SettingsSetValue::Csp(mode)) => {
+            if !VALID_CSP_MODES.contains(&mode.as_str()) {
+                return Err("csp mode is not a supported policy".to_owned());
+            }
+            Ok(())
+        }
         _ => Err("settings value does not match the allowlisted key".to_owned()),
     }
 }
@@ -550,6 +572,10 @@ pub fn apply_settings_set(
     let object = document
         .as_object_mut()
         .ok_or_else(|| "settings file is invalid: top-level JSON must be an object".to_owned())?;
+    // ONLY the allowlisted field is touched, with the value variant the
+    // key owns: a key/variant mismatch is refused here even if validation
+    // were ever bypassed, so a bool can never land in the `csp` document
+    // field (or vice versa).
     let stored = match (key, value) {
         (SettingsSetKey::Mods, SettingsSetValue::Mods(entries)) => serde_json::Value::Array(
             entries
@@ -557,7 +583,15 @@ pub fn apply_settings_set(
                 .map(|entry| serde_json::Value::String(entry.clone()))
                 .collect(),
         ),
-        (_, SettingsSetValue::Bool(flag)) => serde_json::Value::Bool(*flag),
+        (SettingsSetKey::Csp, SettingsSetValue::Csp(mode)) => {
+            serde_json::Value::String(mode.clone())
+        }
+        (
+            SettingsSetKey::SupportBannerDismissed
+            | SettingsSetKey::ShowExperimentalPluginMenu
+            | SettingsSetKey::ExtendedPluginAbilities,
+            SettingsSetValue::Bool(flag),
+        ) => serde_json::Value::Bool(*flag),
         _ => return Err("settings value does not match the allowlisted key".to_owned()),
     };
     // ONLY the allowlisted field is touched; every other key
@@ -944,7 +978,8 @@ mod tests {
 
     #[test]
     fn set_rejects_mismatched_value_types() {
-        // Bool keys refuse the mods array; the mods key refuses a bool.
+        // Bool keys refuse the mods array; the mods key refuses a bool; the
+        // csp key refuses both, and every other key refuses a csp string.
         assert!(validate_settings_set(
             SettingsSetKey::SupportBannerDismissed,
             &SettingsSetValue::Mods(vec!["vencord".to_owned()]),
@@ -953,6 +988,79 @@ mod tests {
         assert!(
             validate_settings_set(SettingsSetKey::Mods, &SettingsSetValue::Bool(true)).is_err()
         );
+        assert!(
+            validate_settings_set(SettingsSetKey::Csp, &SettingsSetValue::Bool(true),).is_err()
+        );
+        assert!(validate_settings_set(
+            SettingsSetKey::Csp,
+            &SettingsSetValue::Mods(vec!["vencord".to_owned()]),
+        )
+        .is_err());
+        assert!(validate_settings_set(
+            SettingsSetKey::Mods,
+            &SettingsSetValue::Csp("none".to_owned()),
+        )
+        .is_err());
+        assert!(validate_settings_set(
+            SettingsSetKey::SupportBannerDismissed,
+            &SettingsSetValue::Csp("none".to_owned()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn set_accepts_only_the_three_csp_modes() {
+        for mode in ["none", "strict", "vanilla"] {
+            assert!(
+                validate_settings_set(
+                    SettingsSetKey::Csp,
+                    &SettingsSetValue::Csp(mode.to_owned()),
+                )
+                .is_ok(),
+                "{mode} must validate"
+            );
+        }
+        for hostile in [
+            "",
+            "NONE",
+            "Strict",
+            "none ",
+            "strict;",
+            "unsafe-inline",
+            "none; script-src *",
+            "vanilla\0",
+        ] {
+            assert!(
+                validate_settings_set(
+                    SettingsSetKey::Csp,
+                    &SettingsSetValue::Csp(hostile.to_owned()),
+                )
+                .is_err(),
+                "{hostile:?} must be refused"
+            );
+        }
+        assert_eq!(SettingsSetKey::Csp.storage_key(), "csp");
+    }
+
+    #[test]
+    fn set_applies_csp_and_round_trips() {
+        let profile = unique_profile_dir("set-csp");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(&path, r#"{"csp":"none"}"#).unwrap();
+        let mutation = apply_settings_set(
+            &profile,
+            SettingsSetKey::Csp,
+            &SettingsSetValue::Csp("strict".to_owned()),
+        )
+        .expect("an allowlisted csp mutation must persist");
+        assert_eq!(mutation.key, SettingsSetKey::Csp);
+        assert_eq!(mutation.value, SettingsSetValue::Csp("strict".to_owned()));
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["csp"], "strict");
+        let reread = load_settings(&profile).expect("the mutated file must load");
+        assert_eq!(reread.snapshot.csp, "strict");
     }
 
     #[test]

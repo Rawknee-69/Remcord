@@ -265,6 +265,7 @@
         "support_banner_dismissed",
         "show_experimental_plugin_menu",
         "extended_plugin_abilities",
+        "csp",
     ];
     // Exact wire types the host echoes in `window_ack` responses. The echo
     // must be one of these; an acknowledgement for any other (or missing)
@@ -283,6 +284,9 @@
     // invent a mod id through this capability.
     const SETTINGS_VALID_MODS = ["vencord", "equicord", "custom", "shelter"];
     const MAX_SETTINGS_MODS_ENTRIES = 8;
+    // Exact CSP modes the host implements (Electron csp.ts parity). The
+    // renderer cannot invent a policy through this capability.
+    const SETTINGS_VALID_CSP_MODES = ["none", "strict", "vanilla"];
 
     function setSetting(key, value, timeoutMs = 5000) {
         requireCapability("settings.set");
@@ -296,6 +300,10 @@
                 !value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
             ) {
                 return Promise.reject(new TypeError("value must be an array of known mod ids"));
+            }
+        } else if (key === "csp") {
+            if (typeof value !== "string" || !SETTINGS_VALID_CSP_MODES.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported CSP modes"));
             }
         } else if (typeof value !== "boolean") {
             return Promise.reject(new TypeError("value must be a boolean for this key"));
@@ -314,9 +322,13 @@
                       payload.value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
                         ? payload.value
                         : undefined
-                    : typeof payload.value === "boolean"
-                      ? payload.value
-                      : undefined;
+                    : key === "csp"
+                      ? typeof payload.value === "string" && SETTINGS_VALID_CSP_MODES.includes(payload.value)
+                          ? payload.value
+                          : undefined
+                      : typeof payload.value === "boolean"
+                        ? payload.value
+                        : undefined;
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -818,7 +830,9 @@
                     ? Array.isArray(payload?.value) &&
                       payload.value.length <= MAX_SETTINGS_MODS_ENTRIES &&
                       payload.value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
-                    : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
+                    : payload?.key === "csp"
+                      ? typeof payload?.value === "string" && SETTINGS_VALID_CSP_MODES.includes(payload.value)
+                      : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||

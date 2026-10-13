@@ -95,6 +95,7 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "showExperimentalPluginMenu",
             "extendedPluginAbilities",
             "blockPowerSavingInVoiceChat",
+            "csp",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), true, `${key} must be writable`);
         }
@@ -105,7 +106,6 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "proxyMode",
             "keybinds",
             "quickCss",
-            "csp",
             "minimizeToTray",
             "noBundleUpdates",
             "modCache",
@@ -237,6 +237,32 @@ test("toggleMod never persists duplicate mod ids", async () => {
         await tick();
         await tick();
         assert.deepEqual(calls.nativeSet, [["mods", ["vencord"]]]);
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native csp change persists through the closed allowlist", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return Promise.resolve({ key, value });
+            },
+        },
+        seed: { csp: "none" },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // The CSP dropdown path: setConfig routes the string-valued key to
+        // the native allowlist (wire "csp"), never to Electron setConfig.
+        helpers.setConfig("csp", "strict", true);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet, [["csp", "strict"]]);
+        assert.equal(storeSettings().csp, "strict");
         assert.deepEqual(calls.electronSetConfig, []);
     } finally {
         restoreConsole();
@@ -402,10 +428,11 @@ test("unsupported settings stay disabled instead of rendering a broken control",
     installGlobals({});
     try {
         const helpers = await loadHelpers();
-        for (const key of ["csp", "quickCss", "windowStyle", "keybinds", "noBundleUpdates", "modCache"]) {
+        for (const key of ["quickCss", "windowStyle", "keybinds", "noBundleUpdates", "modCache"]) {
             assert.equal(helpers.isSettingWritableNatively(key), false, `${key} must be disabled natively`);
         }
         assert.equal(helpers.isSettingWritableNatively("mods"), true);
+        assert.equal(helpers.isSettingWritableNatively("csp"), true);
         assert.equal(helpers.isNativeSettingsSetAvailable(), false);
     } finally {
         restoreConsole();

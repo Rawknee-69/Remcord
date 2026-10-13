@@ -1273,8 +1273,8 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // The key is a closed enum (unknown keys fail deserialization
                 // before dispatch) and the value union is typed; the
                 // key↔variant pairing plus per-key rules (bool-only flags,
-                // ValidMods-only arrays) are re-enforced by the settings
-                // owner here (parse) and at dispatch.
+                // ValidMods-only arrays, exact csp modes) are re-enforced by
+                // the settings owner here (parse) and at dispatch.
                 BridgeCommand::SettingsSet(payload) => {
                     if crate::settings::validate_settings_set(payload.key, &payload.value).is_err()
                     {
@@ -3096,6 +3096,7 @@ mod tests {
         let dismissed = r#"{"version":1,"request_id":"settings-2","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":true}}}"#;
         let experimental = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set","payload":{"key":"show_experimental_plugin_menu","value":false}}}"#;
         let abilities = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set","payload":{"key":"extended_plugin_abilities","value":true}}}"#;
+        let csp = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"csp","value":"strict"}}}"#;
         assert!(matches!(
             parse_bridge_message(mods),
             Ok(BridgeMessage::Request(_))
@@ -3112,25 +3113,42 @@ mod tests {
             parse_bridge_message(abilities),
             Ok(BridgeMessage::Request(_))
         ));
+        assert!(matches!(
+            parse_bridge_message(csp),
+            Ok(BridgeMessage::Request(_))
+        ));
 
         // Unknown keys never parse: the allowlist is the enum.
-        let unknown = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"minimizeToTray","value":true}}}"#;
-        let tray = r#"{"version":1,"request_id":"settings-6","command":{"type":"settings_set","payload":{"key":"tray","value":"disabled"}}}"#;
-        let proxy = r#"{"version":1,"request_id":"settings-7","command":{"type":"settings_set","payload":{"key":"proxyRules","value":"http://127.0.0.1:8080"}}}"#;
-        let icon = r#"{"version":1,"request_id":"settings-8","command":{"type":"settings_set","payload":{"key":"customIcon","value":"C:\\secret.png"}}}"#;
+        let unknown = r#"{"version":1,"request_id":"settings-6","command":{"type":"settings_set","payload":{"key":"minimizeToTray","value":true}}}"#;
+        let tray = r#"{"version":1,"request_id":"settings-7","command":{"type":"settings_set","payload":{"key":"tray","value":"disabled"}}}"#;
+        let proxy = r#"{"version":1,"request_id":"settings-8","command":{"type":"settings_set","payload":{"key":"proxyRules","value":"http://127.0.0.1:8080"}}}"#;
+        let icon = r#"{"version":1,"request_id":"settings-9","command":{"type":"settings_set","payload":{"key":"customIcon","value":"C:\\secret.png"}}}"#;
+        // A policy string smuggled through another key never parses: the
+        // csp string variant pairs only with the csp key.
+        let smuggled = r#"{"version":1,"request_id":"settings-10","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":"none"}}}"#;
+        // An unknown csp mode parses the wire shape but fails validation.
+        let hostile_mode = r#"{"version":1,"request_id":"settings-11","command":{"type":"settings_set","payload":{"key":"csp","value":"none; script-src *"}}}"#;
         assert!(parse_bridge_message(unknown).is_err());
         assert!(parse_bridge_message(tray).is_err());
         assert!(parse_bridge_message(proxy).is_err());
         assert!(parse_bridge_message(icon).is_err());
+        assert!(parse_bridge_message(smuggled).is_err());
+        assert!(parse_bridge_message(hostile_mode).is_err());
     }
 
     #[test]
     fn rejects_mismatched_and_hostile_settings_set_values() {
-        // Bool keys refuse arrays; the mods key refuses a bool.
+        // Bool keys refuse arrays; the mods key refuses a bool; the csp key
+        // refuses bools and arrays, and bool/mods keys refuse csp strings.
         let mods_bool = r#"{"version":1,"request_id":"settings-1","command":{"type":"settings_set","payload":{"key":"mods","value":true}}}"#;
         let bool_mods = r#"{"version":1,"request_id":"settings-2","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":["vencord"]}}}"#;
-        // Strings, numbers, null, and objects are never valid values.
+        // Strings pair only with the csp key (and only exact modes there):
+        // a bool key with a string, a mods key with a string, the csp key
+        // with a bool, and an unknown csp mode are all refused.
         let string_value = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":"yes"}}}"#;
+        let csp_bool = r#"{"version":1,"request_id":"settings-3b","command":{"type":"settings_set","payload":{"key":"csp","value":true}}}"#;
+        let csp_mode_unknown = r#"{"version":1,"request_id":"settings-3c","command":{"type":"settings_set","payload":{"key":"csp","value":"permissive"}}}"#;
+        // Numbers, null, and objects are never valid values.
         let null_value = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set","payload":{"key":"mods","value":null}}}"#;
         let object_value = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"mods","value":{"vencord":true}}}}"#;
         // Unknown mod ids, traversal shapes, and oversized lists are refused.
@@ -3142,6 +3160,8 @@ mod tests {
         assert!(parse_bridge_message(mods_bool).is_err());
         assert!(parse_bridge_message(bool_mods).is_err());
         assert!(parse_bridge_message(string_value).is_err());
+        assert!(parse_bridge_message(csp_bool).is_err());
+        assert!(parse_bridge_message(csp_mode_unknown).is_err());
         assert!(parse_bridge_message(null_value).is_err());
         assert!(parse_bridge_message(object_value).is_err());
         assert!(parse_bridge_message(unknown_mod).is_err());

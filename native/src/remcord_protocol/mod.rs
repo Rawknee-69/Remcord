@@ -13,7 +13,10 @@ pub mod resolver;
 pub mod scheme;
 
 #[allow(unused_imports)]
-pub use csp::{extend_csp_for_remcord, REMCORD_CSP_DIRECTIVES};
+pub use csp::{
+    extend_csp_for_remcord, extend_document_csp, normalize_csp_mode, CspFilterOutcome,
+    REMCORD_CSP_DIRECTIVES, REMCORD_STRICT_CSP,
+};
 #[allow(unused_imports)]
 pub use handler::{build_namespace_roots, register_remcord_protocol, status_for_error};
 pub use resolver::NamespaceRoots;

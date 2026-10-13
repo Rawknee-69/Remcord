@@ -305,7 +305,6 @@ pub fn attach_main_content_filters(
         .join("..")
         .join("ts-out");
     let user_data_dir = user_data_dir.to_path_buf();
-    let _ = profile_path;
     let roots = super::build_namespace_roots(&bundle_dir, &user_data_dir);
     if let Err(e) = super::register_remcord_protocol(&core_webview2, roots.clone()) {
         eprintln!("[RemcordProtocol] Failed to register protocol handler: {e}");
@@ -325,18 +324,34 @@ pub fn attach_main_content_filters(
             "[Permissions] Permission handler registered (discord.com: mic/camera/notifications)"
         );
     }
-    register_csp_interception(&core_webview2);
+    register_csp_interception(&core_webview2, profile_path);
     roots
 }
 
-/// Registers the CSP request filter for one main WebView (P0.2 + Phase F).
-/// Moved verbatim from the boot path: adds the `discord.com` document
-/// filter, then forwards the document through `ureq` to extend the CSP
-/// with the badges host and the local-scheme allowances. Fail-closed:
-/// a forwarding failure leaves the original response untouched.
+/// Registers the CSP request filter for one main WebView (P0.2 + Phase F,
+/// plus the native `csp` setting).
+///
+/// The filter forwards the Discord document through `ureq`, then applies
+/// the persisted `csp` mode read from the profile at document time
+/// (Electron `src/discord/extensions/csp.ts` parity, whose default is also
+/// `"none"`):
+///
+/// - `"none"` (default): the main-frame `content-security-policy` is
+///   dropped entirely, so theme `@import` stylesheets, mod fetches, and
+///   other document-subresource loads behave exactly like Electron.
+/// - `"strict"`: the policy is replaced with Electron's strict policy plus
+///   the remcord-scheme allowances and the badges patch.
+/// - `"vanilla"`: Discord's own policy is preserved with only the
+///   remcord-scheme allowances and the badges patch (the pre-setting
+///   behavior).
+///
+/// A missing setting takes the default; an unreadable settings file fails
+/// closed to `"vanilla"` (never a silent strip). Fail-closed forwarding is
+/// unchanged: a forwarding failure leaves the original response untouched.
 #[cfg(target_os = "windows")]
 fn register_csp_interception(
     core_webview2: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    profile_path: &Path,
 ) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2, ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
@@ -367,6 +382,12 @@ fn register_csp_interception(
         eprintln!("[CSP] Failed to get ICoreWebView2_2 for environment");
         return;
     };
+    // The persisted `csp` mode travels with the filter (per-document read:
+    // Discord navigations are rare, and the file read keeps a settings
+    // change one relaunch away from the document, matching Electron's
+    // startup-registered handlers). An unreadable file fails closed to
+    // preserving Discord's policy.
+    let profile = profile_path.to_path_buf();
     // Register WebResourceRequested handler
     let handler = WebResourceRequestedEventHandler::create(Box::new(
         move |_sender: Option<ICoreWebView2>,
@@ -389,6 +410,19 @@ fn register_csp_interception(
             if !uri.starts_with("https://discord.com/app") {
                 return Ok(());
             }
+            // Resolve the persisted `csp` mode for this document. The read
+            // is per-document (not cached) so the value on disk always wins;
+            // the Settings UI marks the control restart-required, matching
+            // Electron's startup-registered webRequest handlers.
+            let csp_outcome = match crate::settings::load_settings(&profile) {
+                Ok(loaded) => {
+                    crate::remcord_protocol::normalize_csp_mode(Some(loaded.snapshot.csp.as_str()))
+                }
+                Err(error) => {
+                    eprintln!("[CSP] settings unreadable; preserving Discord policy ({error})");
+                    crate::remcord_protocol::CspFilterOutcome::PreserveDiscord
+                }
+            };
             // Get deferral to handle asynchronously
             let deferral = match unsafe { args.GetDeferral() } {
                 Ok(d) => d,
@@ -530,49 +564,57 @@ fn register_csp_interception(
             }
             for (name_str, val_str) in header_names {
                 if name_str.to_lowercase() == "content-security-policy" {
-                    let mut csp = val_str.to_string();
-                    // P0.2: WebView2 custom schemes participate in CSP (no
-                    // bypassCSP parity), so allow remcord: in exactly the
-                    // directives traced consumers need (default/script/
-                    // style/img/media/connect). Preservation + badges
-                    // patch below stay unchanged in behavior.
-                    csp = super::extend_csp_for_remcord(&csp);
-                    if !csp.contains("badges.vencord.dev") {
-                        csp = if let Some(pos) = csp.to_lowercase().find("connect-src") {
-                            let after = &csp[pos..];
-                            let end = after.find(';').unwrap_or(after.len());
-                            let directive = &after[..end].trim();
-                            if !directive.contains("badges.vencord.dev") {
-                                csp.replacen(
-                                    directive,
-                                    &format!("{} https://badges.vencord.dev", directive),
-                                    1,
-                                )
-                            } else {
-                                csp
-                            }
-                        } else {
-                            format!("{}; connect-src https://badges.vencord.dev", csp)
-                        };
+                    match csp_outcome {
+                        crate::remcord_protocol::CspFilterOutcome::Strip => {
+                            // Electron `"none"` parity: drop the main-frame
+                            // policy entirely. No log per document beyond the
+                            // mode line below.
+                        }
+                        crate::remcord_protocol::CspFilterOutcome::Policy(strict) => {
+                            let csp = crate::remcord_protocol::extend_document_csp(strict);
+                            csp_modified = true;
+                            let remcord_sources = csp.matches("remcord:").count();
+                            println!(
+                                "[CSP] document policy replaced mode=strict badges={} remcord_sources={remcord_sources}",
+                                csp.contains("badges.vencord.dev")
+                            );
+                            headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));
+                        }
+                        crate::remcord_protocol::CspFilterOutcome::PreserveDiscord => {
+                            let csp = crate::remcord_protocol::extend_document_csp(&val_str);
+                            // Any CSP-bearing Discord response is now modified
+                            // (badges and/or local schemes), never removed.
+                            csp_modified = true;
+                            let remcord_sources = csp.matches("remcord:").count();
+                            println!(
+                                "[CSP] document policy extended badges={} remcord_sources={remcord_sources}",
+                                csp.contains("badges.vencord.dev")
+                            );
+                            headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));
+                        }
                     }
-                    // Any CSP-bearing Discord response is now modified
-                    // (badges and/or local schemes), never removed.
-                    csp_modified = true;
-                    let remcord_sources = csp.matches("remcord:").count();
-                    println!(
-                        "[CSP] document policy extended badges={} remcord_sources={remcord_sources}",
-                        csp.contains("badges.vencord.dev")
-                    );
-                    headers_map.push_str(&format!("{}: {}\r\n", name_str, csp));
                 } else {
                     headers_map.push_str(&format!("{}: {}\r\n", name_str, val_str));
                 }
             }
-            // If no CSP header existed, add one
+            // If no CSP header existed, add one — unless the mode strips the
+            // policy (Electron `"none"` leaves the document unconstrained).
             if !csp_modified {
-                headers_map.push_str(
-                    "content-security-policy: connect-src https://badges.vencord.dev\r\n",
-                );
+                match csp_outcome {
+                    crate::remcord_protocol::CspFilterOutcome::Strip => {
+                        println!("[CSP] document policy stripped mode=none");
+                    }
+                    crate::remcord_protocol::CspFilterOutcome::Policy(strict) => {
+                        let csp = crate::remcord_protocol::extend_document_csp(strict);
+                        println!("[CSP] document policy added mode=strict");
+                        headers_map.push_str(&format!("content-security-policy: {csp}\r\n"));
+                    }
+                    crate::remcord_protocol::CspFilterOutcome::PreserveDiscord => {
+                        headers_map.push_str(
+                            "content-security-policy: connect-src https://badges.vencord.dev\r\n",
+                        );
+                    }
+                }
             }
             let status = response.status();
             // ureq 2.x: read body as string then convert to bytes

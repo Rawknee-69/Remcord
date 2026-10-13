@@ -144,6 +144,7 @@ export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
     "showExperimentalPluginMenu",
     "extendedPluginAbilities",
     "blockPowerSavingInVoiceChat",
+    "csp",
 ];
 
 /** True when `key` has a native persistence path (closed allowlist). */
@@ -177,7 +178,8 @@ function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], s
         key === "mods" ||
         key === "supportBannerDismissed" ||
         key === "showExperimentalPluginMenu" ||
-        key === "extendedPluginAbilities"
+        key === "extendedPluginAbilities" ||
+        key === "csp"
     ) {
         const previous = store.settings[key];
         (store.settings as Record<string, unknown>)[key as string] = value;
@@ -241,7 +243,8 @@ export type NativeSettingsSetKey =
     | "mods"
     | "supportBannerDismissed"
     | "showExperimentalPluginMenu"
-    | "extendedPluginAbilities";
+    | "extendedPluginAbilities"
+    | "csp";
 
 /** Wire keys for the closed native `settings.set` capability. */
 const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
@@ -249,11 +252,15 @@ const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
     supportBannerDismissed: "support_banner_dismissed",
     showExperimentalPluginMenu: "show_experimental_plugin_menu",
     extendedPluginAbilities: "extended_plugin_abilities",
+    csp: "csp",
 };
 
 /** Minimal native `settings.set` shape (closed allowlist, key echo + value). */
 interface NativeSettingsSet {
-    set: (key: string, value: boolean | string[]) => Promise<{ key: string; value: boolean | string[] }>;
+    set: (
+        key: string,
+        value: boolean | string[] | string,
+    ) => Promise<{ key: string; value: boolean | string[] | string }>;
 }
 
 /**
@@ -288,9 +295,9 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
         (store.settings as Record<string, unknown>)[key as string] = value;
     });
     const nativeSet = (window.remcord as unknown as { settings: NativeSettingsSet }).settings.set;
-    let applied: { key: string; value: boolean | string[] };
+    let applied: { key: string; value: boolean | string[] | string };
     try {
-        applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[]);
+        applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[] | string);
     } catch (error) {
         withPreservedSettingsScroll(() => {
             (store.settings as Record<string, unknown>)[key as string] = previous;
