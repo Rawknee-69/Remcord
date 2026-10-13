@@ -19,6 +19,7 @@ import { TextBoxItem } from "../components/TextBoxItem.jsx";
 import {
     clearNativeModCache,
     copyNativeDiagnostics,
+    describeScreenshareQualityStatus,
     isMinWindowsVersion,
     isNativeSettingsSetAvailable,
     isNativeWebView,
@@ -123,6 +124,8 @@ export function SettingsPage() {
             t["settings-category-behaviour"],
             t["settings-category-behaviour-desc"],
             t["settings-channel"],
+            t["settings-screenshareQuality"] ?? "Screenshare quality",
+            "screenshare",
             t["settings-MultiInstance"],
             t["settings-popoutPiP"],
             t["settings-useSystemCssEditor"],
@@ -503,6 +506,46 @@ export function SettingsPage() {
                             { label: t["settings-channel-canary"], value: "canary" },
                             { label: t["settings-channel-ptb"], value: "ptb" },
                         ]}
+                    />
+                </SearchableSetting>
+                <SearchableSetting
+                    keywords={[
+                        t["settings-screenshareQuality"] ?? "Screenshare quality",
+                        t["settings-screenshareQuality-desc"] ?? "capture target",
+                        "screenshare",
+                        "720p",
+                        "540p",
+                    ]}
+                >
+                    <DropdownItem
+                        value={settings.screenshareQuality ?? "default"}
+                        onChange={(v) => setConfig("screenshareQuality", v as Settings["screenshareQuality"], true)}
+                        title={t["settings-screenshareQuality"] ?? "Screenshare quality"}
+                        note={nativeNote(
+                            t["settings-screenshareQuality-desc"] ??
+                                "Caps Discord screen-share capture at a lower target to reduce CPU and memory use. Targets apply only where WebView2 honors them and need a restart; Default keeps existing behavior exactly. While Balanced or Low is active, Discord's own stream-quality options are disabled (clicking one explains how to revert); set back to Default and restart for Discord-only control. Native app only — Electron keeps its own share picker.",
+                            "screenshareQuality",
+                        )}
+                        disabled={nativeOff("screenshareQuality")}
+                        options={[
+                            {
+                                label: t["settings-screenshareQuality-default"] ?? "Default (Discord decides)",
+                                value: "default",
+                            },
+                            {
+                                label: t["settings-screenshareQuality-balanced"] ?? "Balanced (up to 720p30)",
+                                value: "balanced",
+                            },
+                            {
+                                label: t["settings-screenshareQuality-low"] ?? "Low resource (up to 540p15)",
+                                value: "low",
+                            },
+                        ]}
+                        extraItems={
+                            <div style={{ opacity: "0.85", "font-size": "12px", margin: "4px 0 0 0" }}>
+                                {describeScreenshareQualityStatus(settings.screenshareQuality ?? "default")}
+                            </div>
+                        }
                     />
                 </SearchableSetting>
                 <SearchableSetting keywords={[t["settings-MultiInstance"], t["settings-MultiInstance-desc"]]}>

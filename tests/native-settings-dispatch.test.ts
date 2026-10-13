@@ -98,6 +98,7 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "csp",
             "quickCss",
             "channel",
+            "screenshareQuality",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), true, `${key} must be writable`);
         }
@@ -493,6 +494,7 @@ test("unsupported settings stay disabled instead of rendering a broken control",
         assert.equal(helpers.isSettingWritableNatively("csp"), true);
         assert.equal(helpers.isSettingWritableNatively("quickCss"), true);
         assert.equal(helpers.isSettingWritableNatively("channel"), true);
+        assert.equal(helpers.isSettingWritableNatively("screenshareQuality"), true);
         assert.equal(helpers.isNativeSettingsSetAvailable(), false);
     } finally {
         restoreConsole();
@@ -541,6 +543,7 @@ test("native diagnostics copy writes the host readout to the clipboard", async (
                 profile_kind: "release",
                 channel: "canary",
                 csp: "strict",
+                screenshare_quality: "default",
                 mods: ["equicord"],
             }),
     };
@@ -566,6 +569,7 @@ test("native diagnostics copy writes the host readout to the clipboard", async (
         assert.match(written[0], /Remcord 1\.3\.0/);
         assert.match(written[0], /154\.0\.4258\.62/);
         assert.match(written[0], /canary/);
+        assert.match(written[0], /Screenshare quality: default/);
         assert.match(written[0], /equicord/);
         assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
         assert.equal(written.length, 2);
@@ -593,6 +597,7 @@ test("native graphics copy writes the measured CDP report to the clipboard", asy
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
+                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -682,6 +687,7 @@ test("native graphics copy includes the renderer-observed WebGL adapter", async 
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
+                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -774,6 +780,7 @@ test("native graphics copy falls back honestly when the probe is unavailable", a
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
+                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -823,6 +830,7 @@ test("native graphics report marks unavailable sections explicitly", async () =>
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
+                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -937,6 +945,110 @@ test("native mod cache wipe rejects a misshapen host outcome", async () => {
     try {
         const helpers = await loadHelpers();
         await assert.rejects(helpers.clearNativeModCache(), /Could not clear/);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native screenshare quality persists through the closed allowlist with restart", async () => {
+    const calls = installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            set: (key: string, value: unknown) => {
+                calls.nativeSet.push([key, value]);
+                return Promise.resolve({ key, value });
+            },
+        },
+        seed: { screenshareQuality: "default" },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // The quality dropdown path: setConfig routes the string-valued key
+        // to the native allowlist (wire "screenshare_quality") with restart
+        // requested — the host applies it to the next document-start script.
+        helpers.setConfig("screenshareQuality", "low", true);
+        await tick();
+        await tick();
+        assert.deepEqual(calls.nativeSet, [["screenshare_quality", "low"]]);
+        assert.equal(storeSettings().screenshareQuality, "low");
+        assert.equal(helpers.isRestartRequired, true);
+        assert.deepEqual(calls.electronSetConfig, []);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("screenshare quality mode normalizes unknown input to default", async () => {
+    installGlobals({ seed: {} });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.normalizeScreenshareQualityMode("balanced"), "balanced");
+        assert.equal(helpers.normalizeScreenshareQualityMode("low"), "low");
+        assert.equal(helpers.normalizeScreenshareQualityMode("default"), "default");
+        for (const raw of ["", "Balanced", "ultra", "720p", null, undefined, 720, ["low"]]) {
+            assert.equal(helpers.normalizeScreenshareQualityMode(raw), "default");
+        }
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("screenshare quality status stays honest about selection and document state", async () => {
+    installGlobals({ seed: {} });
+    try {
+        const helpers = await loadHelpers();
+        // Electron session: no document status exists; the line must say the
+        // control is native-only instead of claiming an achieved setting.
+        assert.equal(helpers.readScreenshareQualityStatus(), null);
+        assert.match(
+            helpers.describeScreenshareQualityStatus("low"),
+            /native Remcord app.*Electron session keeps its own share picker/,
+        );
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("screenshare quality status reports the frozen document status natively", async () => {
+    installGlobals({ runtime: "webview2", seed: { screenshareQuality: "low" } });
+    try {
+        const helpers = await loadHelpers();
+        const win = Reflect.get(globalThis, "window") as Record<string, unknown>;
+        // No status published yet (e.g. pre-restart document): report the
+        // absence instead of guessing.
+        assert.match(helpers.describeScreenshareQualityStatus("low"), /Status unavailable.*restart/);
+        // Active document: report the target, never as an achieved capture.
+        win.__remcordScreenshareQuality = Object.freeze({
+            mode: "low",
+            active: true,
+            width: 960,
+            height: 540,
+            fps: 15,
+        });
+        assert.deepEqual(helpers.readScreenshareQualityStatus(), {
+            mode: "low",
+            active: true,
+            width: 960,
+            height: 540,
+            fps: 15,
+        });
+        assert.match(
+            helpers.describeScreenshareQualityStatus("low"),
+            /targets up to 960x540 at 15 FPS.*actual captured size is logged/,
+        );
+        assert.match(helpers.describeScreenshareQualityStatus("low"), /Discord's stream-quality options are disabled/);
+        // Default document: no constraint in effect.
+        win.__remcordScreenshareQuality = Object.freeze({
+            mode: "default",
+            active: false,
+            width: null,
+            height: null,
+            fps: null,
+        });
+        assert.match(helpers.describeScreenshareQualityStatus("default"), /default behavior/);
+        // Misshapen globals are discarded, never rendered.
+        win.__remcordScreenshareQuality = { mode: "low", active: "yes" };
+        assert.equal(helpers.readScreenshareQualityStatus(), null);
     } finally {
         restoreConsole();
     }

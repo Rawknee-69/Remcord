@@ -162,6 +162,7 @@ export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
     "csp",
     "quickCss",
     "channel",
+    "screenshareQuality",
 ];
 
 /** True when `key` has a native persistence path (closed allowlist). */
@@ -198,7 +199,8 @@ function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], s
         key === "extendedPluginAbilities" ||
         key === "csp" ||
         key === "quickCss" ||
-        key === "channel"
+        key === "channel" ||
+        key === "screenshareQuality"
     ) {
         const previous = store.settings[key];
         (store.settings as Record<string, unknown>)[key as string] = value;
@@ -265,7 +267,8 @@ export type NativeSettingsSetKey =
     | "extendedPluginAbilities"
     | "csp"
     | "quickCss"
-    | "channel";
+    | "channel"
+    | "screenshareQuality";
 
 /** Wire keys for the closed native `settings.set` capability. */
 const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
@@ -276,6 +279,7 @@ const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
     csp: "csp",
     quickCss: "quick_css",
     channel: "channel",
+    screenshareQuality: "screenshare_quality",
 };
 
 /** Minimal native `settings.set` shape (closed allowlist, key echo + value). */
@@ -338,6 +342,75 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
     return applied.value as Settings[K];
 }
 
+/** Closed screenshare capture-quality vocabulary (native `screenshare_quality.rs` parity). */
+export type ScreenshareQualityMode = "default" | "balanced" | "low";
+
+const VALID_SCREENSHARE_QUALITY_MODES: ReadonlyArray<string> = ["default", "balanced", "low"];
+
+/** Normalize one raw mode to the closed vocabulary (fail-safe to `"default"`). */
+export function normalizeScreenshareQualityMode(raw: unknown): ScreenshareQualityMode {
+    return typeof raw === "string" && VALID_SCREENSHARE_QUALITY_MODES.includes(raw)
+        ? (raw as ScreenshareQualityMode)
+        : "default";
+}
+
+/** Document-start status published by the native capture script (`window.__remcordScreenshareQuality`). */
+export interface ScreenshareQualityStatus {
+    mode: string;
+    active: boolean;
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+}
+
+function isScreenshareQualityStatus(value: unknown): value is ScreenshareQualityStatus {
+    if (!isRecord(value)) return false;
+    if (typeof value.mode !== "string" || typeof value.active !== "boolean") return false;
+    for (const key of ["width", "height", "fps"]) {
+        const entry = value[key];
+        if (entry !== null && (typeof entry !== "number" || !Number.isSafeInteger(entry))) return false;
+    }
+    return true;
+}
+
+/**
+ * Reads the frozen document-start status the native capture script publishes.
+ * Returns `null` outside the native shell (or when the script has not run):
+ * the absence is reported, never a guessed mode. The `active` flag tells
+ * whether this document constrains capture; requested targets are never
+ * presented as achieved capture settings (actual `getSettings()` values are
+ * logged to the console during sharing — see `screenshare_quality.rs`).
+ */
+export function readScreenshareQualityStatus(): ScreenshareQualityStatus | null {
+    try {
+        const status = (window as unknown as Record<string, unknown>).__remcordScreenshareQuality;
+        if (status === undefined) return null;
+        return isScreenshareQualityStatus(status) ? status : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * One honest status line for the Settings control: the persisted selection
+ * plus what this document actually applies. Never claims an achieved capture
+ * setting — only the selected mode and whether constraining is active.
+ */
+export function describeScreenshareQualityStatus(selected: unknown): string {
+    const normalized = normalizeScreenshareQualityMode(selected);
+    const status = readScreenshareQualityStatus();
+    if (!isNativeWebView()) {
+        return `Selected: ${normalized}. The capture control applies in the native Remcord app (needs a restart); this Electron session keeps its own share picker.`;
+    }
+    if (!status) {
+        return `Selected: ${normalized}. Status unavailable in this document — restart the app to apply a changed mode.`;
+    }
+    if (!status.active) {
+        return `Selected: ${normalized}. This document captures with default behavior (no constraint).`;
+    }
+    return `Selected: ${normalized}. This document targets up to ${status.width ?? "?"}x${status.height ?? "?"} at ${status.fps ?? "?"} FPS when sharing; Discord's stream-quality options are disabled while this target caps capture (clicking one explains how to revert). The actual captured size is logged to the console during sharing and may differ when WebView2 rejects the target.`;
+}
+
 /** Closed folder locations the native `folders.open` capability reveals. */
 export type NativeFolderLocation = "storage" | "themes" | "plugins";
 
@@ -398,6 +471,7 @@ export interface NativeDiagnosticsInfo {
     profile_kind: string;
     channel: string;
     csp: string;
+    screenshare_quality: string;
     mods: string[];
 }
 
@@ -447,6 +521,7 @@ function isDiagnosticsInfo(value: unknown): value is NativeDiagnosticsInfo {
         typeof value.profile_kind === "string" &&
         typeof value.channel === "string" &&
         typeof value.csp === "string" &&
+        typeof value.screenshare_quality === "string" &&
         Array.isArray(value.mods) &&
         value.mods.every((entry) => typeof entry === "string")
     );
@@ -677,6 +752,7 @@ async function buildNativeDebugText(): Promise<string> {
         `Profile: ${info.profile_kind}`,
         `Channel: ${info.channel}`,
         `CSP: ${info.csp}`,
+        `Screenshare quality: ${info.screenshare_quality}`,
         `Mods: ${info.mods.length > 0 ? info.mods.join(", ") : "(none)"}`,
     ].join("\n");
 }

@@ -277,6 +277,7 @@
         "csp",
         "quick_css",
         "channel",
+        "screenshare_quality",
     ];
     // Exact wire types the host echoes in `window_ack` responses. The echo
     // must be one of these; an acknowledgement for any other (or missing)
@@ -302,6 +303,11 @@
     // The renderer cannot invent a channel or smuggle a URL through this
     // capability.
     const SETTINGS_VALID_CHANNELS = ["stable", "canary", "ptb"];
+    // Exact screenshare capture-quality modes the host implements
+    // (screenshare_quality.rs parity: default preserves behavior exactly,
+    // balanced/low constrain the display track). The renderer cannot invent
+    // a mode through this capability.
+    const SETTINGS_VALID_SCREENSHARE_QUALITY_MODES = ["default", "balanced", "low"];
 
     function setSetting(key, value, timeoutMs = 5000) {
         requireCapability("settings.set");
@@ -323,6 +329,10 @@
         } else if (key === "channel") {
             if (typeof value !== "string" || !SETTINGS_VALID_CHANNELS.includes(value)) {
                 return Promise.reject(new TypeError("value must be one of the supported release channels"));
+            }
+        } else if (key === "screenshare_quality") {
+            if (typeof value !== "string" || !SETTINGS_VALID_SCREENSHARE_QUALITY_MODES.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported screenshare quality modes"));
             }
         } else if (typeof value !== "boolean") {
             return Promise.reject(new TypeError("value must be a boolean for this key"));
@@ -349,9 +359,14 @@
                         ? typeof payload.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
                             ? payload.value
                             : undefined
-                        : typeof payload.value === "boolean"
-                          ? payload.value
-                          : undefined;
+                        : key === "screenshare_quality"
+                          ? typeof payload.value === "string" &&
+                            SETTINGS_VALID_SCREENSHARE_QUALITY_MODES.includes(payload.value)
+                              ? payload.value
+                              : undefined
+                          : typeof payload.value === "boolean"
+                            ? payload.value
+                            : undefined;
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -375,7 +390,8 @@
     }
 
     // Read-only host facts for the debug/GPU copy actions: app version,
-    // WebView2 Runtime version, profile-kind label, channel, csp, mod ids.
+    // WebView2 Runtime version, profile-kind label, channel, csp,
+    // screenshare quality mode, mod ids.
     // Fixed-vocabulary strings plus the filtered id list only — no paths,
     // tokens, or file contents. The caller performs the clipboard write
     // with `navigator.clipboard`; there is no host clipboard surface.
@@ -1154,7 +1170,10 @@
                       ? typeof payload?.value === "string" && SETTINGS_VALID_CSP_MODES.includes(payload.value)
                       : payload?.key === "channel"
                         ? typeof payload?.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
-                        : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
+                        : payload?.key === "screenshare_quality"
+                          ? typeof payload?.value === "string" &&
+                            SETTINGS_VALID_SCREENSHARE_QUALITY_MODES.includes(payload.value)
+                          : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -1204,7 +1223,7 @@
                 payload.mods.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry));
             if (
                 !payload ||
-                Object.keys(payload).length !== 6 ||
+                Object.keys(payload).length !== 7 ||
                 typeof payload.app_version !== "string" ||
                 payload.app_version.length === 0 ||
                 textEncoder.encode(payload.app_version).length > 64 ||
@@ -1217,6 +1236,8 @@
                 !SETTINGS_VALID_CHANNELS.includes(payload.channel) ||
                 typeof payload.csp !== "string" ||
                 !SETTINGS_VALID_CSP_MODES.includes(payload.csp) ||
+                typeof payload.screenshare_quality !== "string" ||
+                !SETTINGS_VALID_SCREENSHARE_QUALITY_MODES.includes(payload.screenshare_quality) ||
                 !modsValid
             ) {
                 request.reject(new Error("Native diagnostics response schema is invalid"));

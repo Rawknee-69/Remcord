@@ -40,20 +40,22 @@ pub struct DebugInfo {
     pub profile_kind: &'static str,
     pub channel: String,
     pub csp: String,
+    pub screenshare_quality: String,
     pub mods: Vec<String>,
 }
 
 /// Build the readout from host-known inputs. `webview2_runtime` is `None`
 /// when the loader reported no usable Runtime (fail-closed to `"unknown"`,
-/// never guessed). `channel`/`csp` fall back to their compiled defaults
-/// when the snapshot carries an unknown mode; `mods` keeps only exact
-/// `ValidMods` members in snapshot order, deduplicated.
+/// never guessed). `channel`/`csp`/`screenshare_quality` fall back to their
+/// compiled defaults when the snapshot carries an unknown mode; `mods` keeps
+/// only exact `ValidMods` members in snapshot order, deduplicated.
 pub fn collect_debug_info(
     app_version: &str,
     webview2_runtime: Option<&str>,
     profile_kind: &'static str,
     channel: &str,
     csp: &str,
+    screenshare_quality: &str,
     mods: &[String],
 ) -> DebugInfo {
     let channel = if crate::channel::VALID_CHANNELS.contains(&channel) {
@@ -65,6 +67,13 @@ pub fn collect_debug_info(
         csp.to_owned()
     } else {
         "none".to_owned()
+    };
+    let screenshare_quality = if crate::screenshare_quality::VALID_SCREENSHARE_QUALITY_MODES
+        .contains(&screenshare_quality)
+    {
+        screenshare_quality.to_owned()
+    } else {
+        crate::screenshare_quality::DEFAULT_MODE.to_owned()
     };
     let mut seen = std::collections::HashSet::new();
     let mut filtered = Vec::new();
@@ -85,6 +94,7 @@ pub fn collect_debug_info(
         profile_kind,
         channel,
         csp,
+        screenshare_quality,
         mods: filtered,
     }
 }
@@ -100,6 +110,7 @@ mod tests {
             "release",
             "canary",
             "strict",
+            "balanced",
             &mods
                 .iter()
                 .map(|entry| entry.to_string())
@@ -115,6 +126,7 @@ mod tests {
         assert_eq!(got.profile_kind, "release");
         assert_eq!(got.channel, "canary");
         assert_eq!(got.csp, "strict");
+        assert_eq!(got.screenshare_quality, "balanced");
         assert_eq!(got.mods, vec!["vencord".to_owned(), "shelter".to_owned()]);
     }
 
@@ -133,7 +145,15 @@ mod tests {
             "extra0".to_owned(),
             "extra1".to_owned(),
         ];
-        let got = collect_debug_info("1.3.0", Some("1.0"), "dev", "stable", "none", &hostile);
+        let got = collect_debug_info(
+            "1.3.0",
+            Some("1.0"),
+            "dev",
+            "stable",
+            "none",
+            "low",
+            &hostile,
+        );
         assert_eq!(
             got.mods,
             vec![
@@ -148,11 +168,28 @@ mod tests {
 
     #[test]
     fn unknown_modes_fall_back_and_absent_runtime_is_unknown() {
-        let got = collect_debug_info("1.3.0", None, "override", "beta", "none; script-src *", &[]);
+        let got = collect_debug_info(
+            "1.3.0",
+            None,
+            "override",
+            "beta",
+            "none; script-src *",
+            "ultra",
+            &[],
+        );
         assert_eq!(got.channel, "stable");
         assert_eq!(got.csp, "none");
+        assert_eq!(got.screenshare_quality, "default");
         assert_eq!(got.webview2_runtime, "unknown");
-        let blank = collect_debug_info("1.3.0", Some("   "), "dev", "stable", "none", &[]);
+        let blank = collect_debug_info(
+            "1.3.0",
+            Some("   "),
+            "dev",
+            "stable",
+            "none",
+            "default",
+            &[],
+        );
         assert_eq!(blank.webview2_runtime, "unknown");
     }
 

@@ -1301,6 +1301,7 @@ pub struct DiagnosticsInfoResponse {
     pub profile_kind: &'static str,
     pub channel: String,
     pub csp: String,
+    pub screenshare_quality: String,
     pub mods: Vec<String>,
 }
 
@@ -3520,6 +3521,7 @@ mod tests {
         let csp = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"csp","value":"strict"}}}"#;
         let quick_css = r#"{"version":1,"request_id":"settings-5b","command":{"type":"settings_set","payload":{"key":"quick_css","value":true}}}"#;
         let channel = r#"{"version":1,"request_id":"settings-5c","command":{"type":"settings_set","payload":{"key":"channel","value":"canary"}}}"#;
+        let quality = r#"{"version":1,"request_id":"settings-5d","command":{"type":"settings_set","payload":{"key":"screenshare_quality","value":"low"}}}"#;
         assert!(matches!(
             parse_bridge_message(mods),
             Ok(BridgeMessage::Request(_))
@@ -3548,6 +3550,10 @@ mod tests {
             parse_bridge_message(channel),
             Ok(BridgeMessage::Request(_))
         ));
+        assert!(matches!(
+            parse_bridge_message(quality),
+            Ok(BridgeMessage::Request(_))
+        ));
 
         // Unknown keys never parse: the allowlist is the enum.
         let unknown = r#"{"version":1,"request_id":"settings-6","command":{"type":"settings_set","payload":{"key":"minimizeToTray","value":true}}}"#;
@@ -3565,6 +3571,13 @@ mod tests {
         let hostile_channel = r#"{"version":1,"request_id":"settings-12","command":{"type":"settings_set","payload":{"key":"channel","value":"beta"}}}"#;
         let crossed_csp = r#"{"version":1,"request_id":"settings-13","command":{"type":"settings_set","payload":{"key":"channel","value":"strict"}}}"#;
         let crossed_channel = r#"{"version":1,"request_id":"settings-14","command":{"type":"settings_set","payload":{"key":"csp","value":"canary"}}}"#;
+        // An unknown quality mode parses the wire shape but fails
+        // validation; a quality string through the csp/channel keys (and
+        // vice versa) is refused by the key-owned variant pairing.
+        let hostile_quality = r#"{"version":1,"request_id":"settings-15","command":{"type":"settings_set","payload":{"key":"screenshare_quality","value":"ultra"}}}"#;
+        let crossed_quality_csp = r#"{"version":1,"request_id":"settings-16","command":{"type":"settings_set","payload":{"key":"screenshare_quality","value":"strict"}}}"#;
+        let crossed_csp_quality = r#"{"version":1,"request_id":"settings-17","command":{"type":"settings_set","payload":{"key":"csp","value":"low"}}}"#;
+        let crossed_channel_quality = r#"{"version":1,"request_id":"settings-18","command":{"type":"settings_set","payload":{"key":"channel","value":"low"}}}"#;
         assert!(parse_bridge_message(unknown).is_err());
         assert!(parse_bridge_message(tray).is_err());
         assert!(parse_bridge_message(proxy).is_err());
@@ -3574,6 +3587,10 @@ mod tests {
         assert!(parse_bridge_message(hostile_channel).is_err());
         assert!(parse_bridge_message(crossed_csp).is_err());
         assert!(parse_bridge_message(crossed_channel).is_err());
+        assert!(parse_bridge_message(hostile_quality).is_err());
+        assert!(parse_bridge_message(crossed_quality_csp).is_err());
+        assert!(parse_bridge_message(crossed_csp_quality).is_err());
+        assert!(parse_bridge_message(crossed_channel_quality).is_err());
     }
 
     #[test]
@@ -3638,6 +3655,9 @@ mod tests {
         let string_value = r#"{"version":1,"request_id":"settings-3","command":{"type":"settings_set","payload":{"key":"support_banner_dismissed","value":"yes"}}}"#;
         let csp_bool = r#"{"version":1,"request_id":"settings-3b","command":{"type":"settings_set","payload":{"key":"csp","value":true}}}"#;
         let csp_mode_unknown = r#"{"version":1,"request_id":"settings-3c","command":{"type":"settings_set","payload":{"key":"csp","value":"permissive"}}}"#;
+        // The quality key refuses bools and arrays like the other string key.
+        let quality_bool = r#"{"version":1,"request_id":"settings-3d","command":{"type":"settings_set","payload":{"key":"screenshare_quality","value":true}}}"#;
+        let quality_array = r#"{"version":1,"request_id":"settings-3e","command":{"type":"settings_set","payload":{"key":"screenshare_quality","value":["low"]}}}"#;
         // Numbers, null, and objects are never valid values.
         let null_value = r#"{"version":1,"request_id":"settings-4","command":{"type":"settings_set","payload":{"key":"mods","value":null}}}"#;
         let object_value = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"mods","value":{"vencord":true}}}}"#;
@@ -3652,6 +3672,8 @@ mod tests {
         assert!(parse_bridge_message(string_value).is_err());
         assert!(parse_bridge_message(csp_bool).is_err());
         assert!(parse_bridge_message(csp_mode_unknown).is_err());
+        assert!(parse_bridge_message(quality_bool).is_err());
+        assert!(parse_bridge_message(quality_array).is_err());
         assert!(parse_bridge_message(null_value).is_err());
         assert!(parse_bridge_message(object_value).is_err());
         assert!(parse_bridge_message(unknown_mod).is_err());

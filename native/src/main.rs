@@ -7629,6 +7629,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         resolved_profile.kind.as_str(),
                                         &loaded.snapshot.channel,
                                         &loaded.snapshot.csp,
+                                        &loaded.snapshot.screenshare_quality,
                                         &loaded.snapshot.mods,
                                     );
                                     let response = BridgeResponse {
@@ -7642,6 +7643,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                                 profile_kind: info.profile_kind,
                                                 channel: info.channel,
                                                 csp: info.csp,
+                                                screenshare_quality: info.screenshare_quality,
                                                 mods: info.mods,
                                             },
                                         )),
