@@ -1,5 +1,3 @@
-import type { QuickCssEditorMode } from "./quickCssEditorSource.js";
-
 /** Which CSS owner the editor modal edits. */
 export type QuickCssEditorMode = "vencord" | "equicord" | "remcord";
 

@@ -173,7 +173,7 @@
      */
     function overrideQuickCssEditor(mode) {
         try {
-            const api = window.VencordNative && window.VencordNative.quickCss;
+            const api = window.VencordNative?.quickCss;
             if (!api || typeof api.openEditor !== "function" || api.openEditor.__remcordNativePatched) {
                 return false;
             }

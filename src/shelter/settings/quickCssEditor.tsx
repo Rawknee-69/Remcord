@@ -1,5 +1,10 @@
-import { QuickCssEditorModal, type QuickCssEditorMode } from "./components/QuickCssEditorModal.jsx";
-import { editorTitle, loadQuickCssEditorSource } from "./quickCssEditorSource.js";
+import { QuickCssEditorModal } from "./components/QuickCssEditorModal.jsx";
+import {
+    editorTitle,
+    loadQuickCssEditorSource,
+    type QuickCssEditorMode,
+    type QuickCssEditorSource,
+} from "./quickCssEditorSource.js";
 
 const {
     ui: { openModal, showToast },
@@ -12,7 +17,7 @@ const {
  * which stays open.
  */
 export async function openQuickCssEditorModal(mode: QuickCssEditorMode): Promise<void> {
-    let source;
+    let source: QuickCssEditorSource;
     try {
         source = await loadQuickCssEditorSource(mode);
     } catch (failure) {
