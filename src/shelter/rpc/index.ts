@@ -35,8 +35,13 @@ async function listen(msg: {
     );
     rpc.onLastDetectedUpdate?.(rpc.lastDetectedGames);
 
-    const blacklist = window.remcord.rpc.getBlacklist();
-    if (blacklist.some((g) => g.id === Number(appId))) {
+    // The rpc facade is Electron-only: the native shell exposes no game
+    // detection or blacklist, so the lookup is optional. A missing facade
+    // (or a misshapen answer) means "not blacklisted" — the activity still
+    // shows — instead of throwing an uncaught TypeError that breaks the
+    // dispatch chain.
+    const blacklist = window.remcord.rpc?.getBlacklist?.() ?? [];
+    if (Array.isArray(blacklist) && blacklist.some((g) => g.id === Number(appId))) {
         // @ts-expect-error
         msg.activity = null; // clear activity to prevent blacklisted game from showing up in status
         FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", ...msg });

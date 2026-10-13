@@ -7,6 +7,7 @@ import { DetectableCard } from "../components/DetectableCard.jsx";
 import { Dropdown } from "../components/Dropdown.jsx";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
+import { isNativeWebView } from "../settings.js";
 import classes from "./RegisteredGames.module.css";
 
 const {
@@ -29,6 +30,11 @@ export function RegisteredGamesPage() {
     const [blacklistVersion, setBlacklistVersion] = createSignal(0);
 
     function refreshDetectables() {
+        // The native shell exposes no rpc capability (no process scanning,
+        // no detectables, no blacklist): every call below would throw on a
+        // missing facade member and leave the page blank. Native callers
+        // never reach here (guarded below); this stays the Electron path.
+        if (isNativeWebView()) return;
         window.remcord.rpc.refreshProcessList();
         setDetectables(window.remcord.rpc.getDetectables());
         sleep(500).then(() => {
@@ -37,16 +43,22 @@ export function RegisteredGamesPage() {
     }
 
     function getBlacklist(): DetectedGame[] {
+        // Native: no blacklist exists, so nothing is blacklisted. Returning
+        // the empty list (instead of throwing on the missing facade) keeps
+        // every consumer total.
+        if (isNativeWebView()) return [];
         return window.remcord.rpc.getBlacklist();
     }
 
     function blacklistGame(name: string, id: number) {
+        if (isNativeWebView()) return;
         window.remcord.rpc.blacklistGame(name, id);
         setBlacklistVersion((v) => v + 1);
         setLastDetected((list) => filterBlacklisted(list));
     }
 
     function unblacklistGame(id: number) {
+        if (isNativeWebView()) return;
         window.remcord.rpc.unblacklistGame(id);
         setBlacklistVersion((v) => v + 1);
     }
@@ -76,6 +88,10 @@ export function RegisteredGamesPage() {
     });
 
     function addNewGame() {
+        // Native: no rpc capability backs the detectable modal (its save
+        // path calls window.remcord.rpc.addDetectable), so the action stays
+        // inert instead of opening a modal whose save always throws.
+        if (isNativeWebView()) return;
         openModal(({ close }: { close: () => void }) => (
             <AddDetectableModal
                 close={() => {
@@ -96,100 +112,116 @@ export function RegisteredGamesPage() {
     return (
         <>
             <SettingsPageHeader title={t["games-registeredGames"]} description={t["games-pageDesc"]} />
-            <div class={classes.addBox}>
-                <Dropdown
-                    class={classes.dropdown}
-                    limitHeight
-                    maxHeight={300}
-                    value={selectedDetectable()}
-                    onChange={(v) => {
-                        if (v === "refresh") {
-                            refreshDetectables();
-                            setSelectedDetectable("");
-                        } else {
-                            setSelectedDetectable(formatProcessName(v));
-                        }
-                    }}
-                    options={[
-                        ...(processList()?.map((p) => {
-                            const processName = formatProcessName(p[1]);
+            <Show
+                when={!isNativeWebView()}
+                fallback={
+                    <EmptyState
+                        message={t["games-empty"]}
+                        description="Game detection runs through the desktop RPC bridge, which the native Remcord app does not provide: there is no process scanning, no detectable-games list, and no blacklist to manage here. Your Discord status and activity are unaffected."
+                    />
+                }
+            >
+                <div class={classes.addBox}>
+                    <Dropdown
+                        class={classes.dropdown}
+                        limitHeight
+                        maxHeight={300}
+                        value={selectedDetectable()}
+                        onChange={(v) => {
+                            if (v === "refresh") {
+                                refreshDetectables();
+                                setSelectedDetectable("");
+                            } else {
+                                setSelectedDetectable(formatProcessName(v));
+                            }
+                        }}
+                        options={[
+                            ...(processList()?.map((p) => {
+                                const processName = formatProcessName(p[1]);
 
-                            return { label: processName, value: processName };
-                        }) ?? []),
-                        { label: t["games-refreshList"], value: "refresh" },
-                    ]}
-                />
-                <Button
-                    size={ButtonSizes.MEDIUM}
-                    onClick={addNewGame}
-                    disabled={!selectedDetectable() || selectedDetectable() === "refresh"}
+                                return { label: processName, value: processName };
+                            }) ?? []),
+                            { label: t["games-refreshList"], value: "refresh" },
+                        ]}
+                    />
+                    <Button
+                        size={ButtonSizes.MEDIUM}
+                        onClick={addNewGame}
+                        disabled={!selectedDetectable() || selectedDetectable() === "refresh"}
+                    >
+                        {t["games-add"]}
+                    </Button>
+                </div>
+                <Show
+                    when={(detectables()?.length ?? 0) > 0}
+                    fallback={<EmptyState message={t["games-empty"]} description={t["games-emptyDesc"]} />}
                 >
-                    {t["games-add"]}
-                </Button>
-            </div>
-            <Show
-                when={(detectables()?.length ?? 0) > 0}
-                fallback={<EmptyState message={t["games-empty"]} description={t["games-emptyDesc"]} />}
-            >
-                <For each={detectables()}>
-                    {(detectable) => <DetectableCard detectable={detectable} onRemove={refreshDetectables} />}
-                </For>
-            </Show>
-
-            <Header tag={HeaderTags.HeadingLG} class={classes.sectionHeader}>
-                {t["games-lastDetected"]}
-            </Header>
-            <Divider mt mb />
-            <Show
-                when={lastDetected().length > 0}
-                fallback={
-                    <EmptyState message={t["games-lastDetectedEmpty"]} description={t["games-lastDetectedEmptyDesc"]} />
-                }
-            >
-                <ul class={classes.gameList}>
-                    <For each={lastDetected()}>
-                        {(game) => (
-                            <li class={classes.gameRow}>
-                                <span class={classes.gameName}>
-                                    {game.name} ({game.id})
-                                </span>
-                                <Button
-                                    size={ButtonSizes.SMALL}
-                                    onClick={() => blacklistGame(game.name, game.id)}
-                                    disabled={blacklisted().some((g) => g.id === game.id)}
-                                >
-                                    {t["games-blacklist"]}
-                                </Button>
-                            </li>
-                        )}
+                    <For each={detectables()}>
+                        {(detectable) => <DetectableCard detectable={detectable} onRemove={refreshDetectables} />}
                     </For>
-                </ul>
-            </Show>
+                </Show>
 
-            <Header tag={HeaderTags.HeadingLG} class={classes.sectionHeader}>
-                {t["games-blacklisted"]}
-            </Header>
-            <Divider mt mb />
-            <Show
-                when={blacklisted().length > 0}
-                fallback={
-                    <EmptyState message={t["games-blacklistedEmpty"]} description={t["games-blacklistedEmptyDesc"]} />
-                }
-            >
-                <ul class={classes.gameList}>
-                    <For each={blacklisted()}>
-                        {(game) => (
-                            <li class={classes.gameRow}>
-                                <span class={classes.gameName}>
-                                    {game.name} ({game.id})
-                                </span>
-                                <Button size={ButtonSizes.SMALL} onClick={() => unblacklistGame(game.id)}>
-                                    {t["games-removeFromBlacklist"]}
-                                </Button>
-                            </li>
-                        )}
-                    </For>
-                </ul>
+                <Header tag={HeaderTags.HeadingLG} class={classes.sectionHeader}>
+                    {t["games-lastDetected"]}
+                </Header>
+                <Divider mt mb />
+                <Show
+                    when={lastDetected().length > 0}
+                    fallback={
+                        <EmptyState
+                            message={t["games-lastDetectedEmpty"]}
+                            description={t["games-lastDetectedEmptyDesc"]}
+                        />
+                    }
+                >
+                    <ul class={classes.gameList}>
+                        <For each={lastDetected()}>
+                            {(game) => (
+                                <li class={classes.gameRow}>
+                                    <span class={classes.gameName}>
+                                        {game.name} ({game.id})
+                                    </span>
+                                    <Button
+                                        size={ButtonSizes.SMALL}
+                                        onClick={() => blacklistGame(game.name, game.id)}
+                                        disabled={blacklisted().some((g) => g.id === game.id)}
+                                    >
+                                        {t["games-blacklist"]}
+                                    </Button>
+                                </li>
+                            )}
+                        </For>
+                    </ul>
+                </Show>
+
+                <Header tag={HeaderTags.HeadingLG} class={classes.sectionHeader}>
+                    {t["games-blacklisted"]}
+                </Header>
+                <Divider mt mb />
+                <Show
+                    when={blacklisted().length > 0}
+                    fallback={
+                        <EmptyState
+                            message={t["games-blacklistedEmpty"]}
+                            description={t["games-blacklistedEmptyDesc"]}
+                        />
+                    }
+                >
+                    <ul class={classes.gameList}>
+                        <For each={blacklisted()}>
+                            {(game) => (
+                                <li class={classes.gameRow}>
+                                    <span class={classes.gameName}>
+                                        {game.name} ({game.id})
+                                    </span>
+                                    <Button size={ButtonSizes.SMALL} onClick={() => unblacklistGame(game.id)}>
+                                        {t["games-removeFromBlacklist"]}
+                                    </Button>
+                                </li>
+                            )}
+                        </For>
+                    </ul>
+                </Show>
             </Show>
         </>
     );
