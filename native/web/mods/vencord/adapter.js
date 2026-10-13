@@ -66,5 +66,13 @@
             retrievalMs: result.retrieval_ms,
             cssInjectionMs: result.css_injection_ms,
         }),
+        // After the bootstrap marker proves the bundle ran, replace
+        // Vencord's about:blank popup editor (dead under the native
+        // managed-child popup policy) with the handoff to the Remcord
+        // in-Discord editor. Runs at most once per document; a missing
+        // VencordNative simply leaves the hook a no-op.
+        onExecuted: () => {
+            substrate.overrideQuickCssEditor("vencord");
+        },
     });
 })();

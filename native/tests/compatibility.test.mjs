@@ -1308,10 +1308,125 @@ test("the substrate factory is idempotent and shared by every adapter", () => {
     const factory = window.__remcordNativeModSubstrate;
     assert.ok(factory);
     assert.equal(typeof factory.createModAdapter, "function");
+    assert.equal(typeof factory.overrideQuickCssEditor, "function");
     assert.equal(Object.isFrozen(factory), true);
     vm.runInContext(modSubstrate, context);
     assert.equal(window.__remcordNativeModSubstrate, factory);
 });
+
+function installVencordNative(window, calls) {
+    window.VencordNative = {
+        quickCss: {
+            get: () => Promise.resolve(":root{}"),
+            set: (css) => {
+                calls.set.push(css);
+                return Promise.resolve();
+            },
+            openEditor() {
+                calls.original += 1;
+            },
+        },
+    };
+}
+
+test("overrideQuickCssEditor leaves a missing bundle alone and never throws", () => {
+    const { window } = createRuntime();
+    const substrate = window.__remcordNativeModSubstrate;
+    assert.equal(substrate.overrideQuickCssEditor("vencord"), false);
+    window.VencordNative = {};
+    assert.equal(substrate.overrideQuickCssEditor("vencord"), false);
+    window.VencordNative = { quickCss: {} };
+    assert.equal(substrate.overrideQuickCssEditor("vencord"), false);
+});
+
+test("overrideQuickCssEditor is idempotent and patches exactly once", () => {
+    const { window } = createRuntime();
+    const calls = { set: [], original: 0 };
+    installVencordNative(window, calls);
+    const substrate = window.__remcordNativeModSubstrate;
+    assert.equal(substrate.overrideQuickCssEditor("vencord"), true);
+    const patched = window.VencordNative.quickCss.openEditor;
+    assert.equal(patched.__remcordNativePatched, true);
+    assert.equal(substrate.overrideQuickCssEditor("vencord"), false);
+    assert.equal(window.VencordNative.quickCss.openEditor, patched);
+});
+
+test("patched openEditor hands off to the Remcord editor when handled", () => {
+    const { window } = createRuntime();
+    const calls = { set: [], original: 0 };
+    installVencordNative(window, calls);
+    window.__remcordNativeModSubstrate.overrideQuickCssEditor("vencord");
+    // The Remcord settings plugin takes the handoff by canceling the event.
+    const originalDispatch = window.dispatchEvent.bind(window);
+    let handoff = null;
+    window.dispatchEvent = (event) => {
+        if (event.type === "remcord-native:open-quickcss-editor") {
+            handoff = event;
+            return false;
+        }
+        return originalDispatch(event);
+    };
+    window.VencordNative.quickCss.openEditor();
+    assert.ok(handoff);
+    assert.equal(handoff.detail.mode, "vencord");
+    assert.equal(calls.original, 0);
+});
+
+test("patched openEditor reports honestly when nothing handles the handoff", () => {
+    const { window, context } = createRuntime();
+    const calls = { set: [], original: 0 };
+    installVencordNative(window, calls);
+    window.__remcordNativeModSubstrate.overrideQuickCssEditor("equicord");
+    const alerts = [];
+    context.alert = (message) => alerts.push(message);
+    // No listener cancels: dispatchEvent reports unhandled.
+    window.VencordNative.quickCss.openEditor();
+    assert.equal(calls.original, 0);
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0], /Remcord settings plugin is not running/);
+});
+
+for (const [modId, adapter, markerEvent] of [
+    ["vencord", vencordAdapter, "remcord-native:vencord-bootstrap"],
+    ["equicord", equicordAdapter, "remcord-native:equicord-bootstrap"],
+]) {
+    test(`${modId} adapter hands its QuickCSS editor to Remcord after bootstrap`, async () => {
+        const { window, context } = createRuntime();
+        const calls = { set: [], original: 0 };
+        installVencordNative(window, calls);
+        vm.runInContext(adapter, context);
+        const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+        assert.ok(request);
+        window.dispatchEvent(
+            new FakeCustomEvent(markerEvent, {
+                detail: {
+                    request_id: request.request_id,
+                    ok: true,
+                    marker: modId === "vencord" ? "vencord-bootstrap-executed" : "equicord-bootstrap-executed",
+                    execution_ms: 3,
+                    local_storage_api: "available",
+                    settings_state: "missing",
+                },
+            }),
+        );
+        const patched = window.VencordNative.quickCss.openEditor;
+        assert.equal(patched.__remcordNativePatched, true);
+        // The handoff carries the owning mod so the editor titles itself.
+        const originalDispatch = window.dispatchEvent.bind(window);
+        let handoff = null;
+        window.dispatchEvent = (event) => {
+            if (event.type === "remcord-native:open-quickcss-editor") {
+                handoff = event;
+                return false;
+            }
+            return originalDispatch(event);
+        };
+        window.VencordNative.quickCss.openEditor();
+        assert.equal(handoff.detail.mode, modId);
+        assert.equal(calls.original, 0);
+        window.dispatchEvent(new FakeCustomEvent("pagehide"));
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Registered mod consumers (Shelter, Equicord) share this lifecycle verbatim.

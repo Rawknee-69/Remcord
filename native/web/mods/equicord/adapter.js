@@ -77,5 +77,12 @@
             requestLatencyMs: result.request_latency_ms,
             retrievalMs: result.retrieval_ms,
         }),
+        // Same Vencord-family popup editor as Vencord (Equicord is a fork
+        // with the identical openEditor shape): hand it to the Remcord
+        // in-Discord editor once the bootstrap marker proves the bundle
+        // ran.
+        onExecuted: () => {
+            substrate.overrideQuickCssEditor("equicord");
+        },
     });
 })();

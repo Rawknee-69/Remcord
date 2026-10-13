@@ -30,6 +30,10 @@
      *   validateResponse    (payload) => void, throws on invalid host metadata
      *   resultExtra         (detail) => object merged into the result payload
      *   responseExtra       (payload) => object merged into adapter state
+     *   onExecuted          () => void, optional post-bootstrap hook ran once
+     *                       the execution marker verifies (after state update,
+     *                       before the result post; failures are logged, never
+     *                       thrown, so the result always reports)
      */
     function createModAdapter(config) {
         let state;
@@ -83,6 +87,13 @@
                 state.marker = result.marker;
                 state.executionCount = 1;
                 Object.assign(state, config.resultExtra ? config.resultExtra(result) : null);
+                if (typeof config.onExecuted === "function") {
+                    try {
+                        config.onExecuted();
+                    } catch (error) {
+                        console.error(`${config.logTag}[adapter_initialization] post-bootstrap hook failed`, error);
+                    }
+                }
             } else {
                 state.status = "failed";
                 state.error = String(result.error ?? "Mod bootstrap marker was not observed");
@@ -139,9 +150,68 @@
         };
     }
 
+    /**
+     * Replaces a Vencord-family `VencordNative.quickCss.openEditor` popup
+     * flow with a handoff to the Remcord in-Discord editor.
+     *
+     * The upstream `openEditor` calls `open("about:blank", ...)` and then
+     * `document.write`s the editor into the child. The native host denies
+     * the popup at the WebView2 layer and manages its own single-slot
+     * child, so the opener's window proxy is dead: the call alerts about
+     * popups and strands a blank orphan window. This override dispatches a
+     * cancelable `remcord-native:open-quickcss-editor` DOM event carrying
+     * the mod mode instead; the Remcord settings plugin (which owns the
+     * editor modal) takes the handoff and calls `preventDefault` to signal
+     * it. When nothing takes the handoff, an honest error names the real
+     * cause instead of falling through to the dead popup path.
+     *
+     * `mode` is the owning mod ("vencord" | "equicord"); the settings
+     * plugin titles the editor and resolves storage from it. Returns true
+     * when the override installed, false when there was nothing to patch
+     * (bundle absent or already patched). Never throws, never opens a
+     * window, never touches the network or the host.
+     */
+    function overrideQuickCssEditor(mode) {
+        try {
+            const api = window.VencordNative && window.VencordNative.quickCss;
+            if (!api || typeof api.openEditor !== "function" || api.openEditor.__remcordNativePatched) {
+                return false;
+            }
+            const patched = () => {
+                let handled = false;
+                try {
+                    handled =
+                        window.dispatchEvent(
+                            new CustomEvent("remcord-native:open-quickcss-editor", {
+                                cancelable: true,
+                                detail: { mode },
+                            }),
+                        ) === false;
+                } catch {
+                    handled = false;
+                }
+                if (handled) return;
+                try {
+                    alert("Could not open the QuickCSS editor: the Remcord settings plugin is not running.");
+                } catch {
+                    console.error("[Remcord native][quickcss] editor handoff was not handled");
+                }
+            };
+            try {
+                patched.__remcordNativePatched = true;
+            } catch {
+                return false;
+            }
+            api.openEditor = patched;
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     Object.defineProperty(window, "__remcordNativeModSubstrate", {
         configurable: false,
         enumerable: false,
-        value: Object.freeze({ createModAdapter }),
+        value: Object.freeze({ createModAdapter, overrideQuickCssEditor }),
     });
 })();

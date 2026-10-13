@@ -12,7 +12,8 @@ import { PluginsPage } from "./pages/PluginsPage.jsx";
 import { RegisteredGamesPage } from "./pages/RegisteredGamesPage.jsx";
 import { SettingsPage } from "./pages/SettingsPage.jsx";
 import { ThemesPage } from "./pages/ThemesPage.jsx";
-
+import { openQuickCssEditorModal } from "./quickCssEditor.jsx";
+import type { QuickCssEditorMode } from "./quickCssEditorSource.js";
 import {
     disposeSettingsScrollRestoration,
     isRestartRequired,
@@ -96,11 +97,25 @@ export function onLoad() {
     window.remcord.settings.setLang(storesFlat.LocaleStore.locale);
     settingsCleanups = registerSections();
     dispatcher.subscribe("TRACK", restartRequired);
+    // Takes the QuickCSS editor handoff dispatched by the native mod
+    // adapters (Vencord/Equicord openEditor override): preventDefault
+    // signals "handled" back to the opener so it never falls through to
+    // the dead popup path.
+    window.addEventListener("remcord-native:open-quickcss-editor", quickCssEditorHandoff);
 }
 export function onUnload() {
     settingsCleanups.forEach((e) => {
         e();
     });
     dispatcher.unsubscribe("TRACK", restartRequired);
+    window.removeEventListener("remcord-native:open-quickcss-editor", quickCssEditorHandoff);
     disposeSettingsScrollRestoration();
+}
+
+function quickCssEditorHandoff(event: Event) {
+    const detail = (event as CustomEvent).detail as { mode?: unknown } | undefined;
+    const mode = detail?.mode;
+    if (mode !== "vencord" && mode !== "equicord" && mode !== "remcord") return;
+    event.preventDefault();
+    void openQuickCssEditorModal(mode as QuickCssEditorMode);
 }
