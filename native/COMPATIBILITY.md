@@ -750,6 +750,71 @@ No other existing Electron-facing `window.remcord` methods are implemented by th
 
 No other existing Electron-facing `window.remcord` methods are implemented by this facade. Boot snapshot values are native runtime metadata only; they do not impersonate Remcord config, Remcord version, OS release, translations, or Electron version.
 
+## Graphics diagnostics capability (GPU audit)
+
+Audit conclusion (verified against the shipped code, not assumed): the host
+passes exactly one additional-browser-arguments string at WebView2
+environment creation — the wry-parity
+`--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`
+(`remcord_protocol::scheme::ADDITIONAL_BROWSER_ARGUMENTS`, shared verbatim
+with the diagnostics report so the copy states exactly what was requested).
+No `--disable-gpu`, ANGLE, SwiftShader, or software-rendering override
+exists anywhere in the tree; no `WEBVIEW2_*` environment override is read;
+no application-compatibility setting is applied. WebView2 defaults therefore
+stand, and hardware acceleration is enabled by default. No flag, setting, or
+GPU-preference change was made: the audit found no Remcord-caused rendering
+defect, and integrated graphics stay preferred by default (no discrete-GPU
+forcing on any system).
+
+The native Copy GPU Info path reports the real available diagnostic report
+instead of the former static three-line graphics-stack text. Renderer
+`await window.remcord.graphics.getInfo()` →
+`requireCapability("graphics.get_info")` → parameter-free `graphics_get_info`
+(any method/target/session member rejected by `deny_unknown_fields`) → the
+host issues the two fixed CDP probes (`System.getInfo`,
+`Browser.getVersion`, empty parameters) via
+`ICoreWebView2::CallDevToolsProtocolMethod` on the event-loop thread; each
+one-shot completion forwards one bounded `GraphicsCdpPart` event and the
+report answers only when both arrive, so the UI thread never blocks →
+validated `graphics_info` response (fixed keys, at most 16 devices, at most
+64 feature entries, driver strings at most 512 chars, errors at most 512
+chars) → resolved report. Each section is marked `measured`, `unsupported`
+(JSON-RPC `-32601`), or `unavailable` (call failure or unparsable answer) —
+never invented. The raw Chromium command line never crosses the bridge:
+only the presence of a fixed GPU-relevant token list plus the path-free
+`--enable-features=`/`--disable-features=` values is reported, matched on
+exact tokens (never substrings). The renderer appends its own synchronously
+observed WebGL renderer string (`UNMASKED_RENDERER_WEBGL` when available),
+labeled `renderer-observed`; when the probe or its namespace is unavailable
+the click still copies the legacy static text. No `version` field,
+`sendSync`, generic CDP invoke, clipboard host surface, or filesystem
+capability exists on the native facade. A DEV-only
+`REMCORD_NATIVE_GRAPHICS_SMOKE=1` probe exercises the exact public contract
+and logs per-section outcomes plus bounded device/feature/WebGL summaries.
+
+Measured on WebView2 Runtime 155.0.4283.45 (Intel Iris Xe + NVIDIA RTX 3050
+laptop, Balanced power, 16 logical CPUs, disposable profiles): the
+`Browser.getVersion` probe measures in ~3 ms; the `System.getInfo` probe is
+unavailable on the page target (the runtime rejects the call with
+`E_INVALIDARG`), reported explicitly with its reason; the renderer-observed
+WebGL string measures `ANGLE (Intel, Intel(R) Iris(R) Xe Graphics
+(0x000046A6) Direct3D11 vs_5_0 ps_5_0, D3D11)` — hardware acceleration
+active on the integrated adapter, no software fallback. Idle-login-screen
+medians (60 s, new binary): host 31 MB, WebView2 browser 145 MB, gpu-process
+195 MB, renderer 464 MB at <1% CPU; GPU 3D engine 0% idle, up to ~23% during
+login-page activity on the baseline binary (same build lineage, no render
+path changed). User-driven logged-in session (180 s, scrolling and channel
+switching): renderer CPU 2.5–9% at ~1 GB, gpu-process CPU up to 4%.
+Ordinary video playback (60 s, continuous per-engine recording): the
+WebView2 gpu-process drives the Intel 3D engine at up to 18.9% (36 of 37
+samples active) and the Intel VideoDecode engine at up to 15.3% (30 of 37
+samples active) — hardware video decoding on the integrated GPU — while the
+discrete NVIDIA GPU sits fully idle (sm/dec/enc 0% across 19 samples), which
+is the desired efficiency outcome with no GPU forcing anywhere.
+Screensharing remains unverified (needs a live call peer); low idle GPU
+activity is the expected lightweight-workload signature, not evidence of
+disabled acceleration.
+
 ### Classification of the existing renderer contract
 
 The table lists the exposed `RemcordWindow` groups from `src/@types/remcordWindow.d.ts` and the behavior actually wired by `src/discord/preload/bridge.ts`. Existing API calls must not be redirected to an untyped generic bridge.
@@ -760,7 +825,7 @@ The table lists the exposed `RemcordWindow` groups from `src/@types/remcordWindo
 | `settings.getConfig()` — Shelter settings/power/titlebar | Synchronous; no arguments; full `Settings` object | Reads mutable app settings; not needed for bare Discord, but current UI assumes synchronous state | Populate an initial documented config snapshot only if native settings support is added; migrate updates to async |
 | `settings.setConfig(key,value)` — Shelter settings | Synchronous; key/value; handler returns `undefined` after persisting | Mutates config; not boot-critical | Phase C-3 ports exactly one mutation (`blockPowerSavingInVoiceChat` via the bool-only `settings_set_block_power_saving` command and `settings.set_block_power_saving_in_voice_chat` capability, atomic host-controlled persist, host-confirmed value back). The closed `settings.set` allowlist (`settings_set` command, `settings.set` capability) covers the six REQUIRED keys (`mods`, `supportBannerDismissed`, `showExperimentalPluginMenu`, `extendedPluginAbilities`, `csp`, `quickCss`) with per-key typed values, key echo, and the same atomicity/confirmed-value contract. All other keys keep the sync Electron implementation; no generic native writer exists |
 | `settings.addKeybind(keybind)`, `toggleKeybind(id)`, `removeKeybind(id)` | Fire-and-forget; typed keybind or ID; `void` | Mutate settings and refresh global keybinds | Deferred |
-| `settings.openStorageFolder/openThemesFolder/openCustomIconDialog/copyDebugInfo/copyGPUInfo/openWebRTCInternals/openGPUInfo` | Fire-and-forget; no args; `void` | Opens filesystem locations/dialogs/internal pages or writes clipboard | Deferred; host-owned dialogs/paths only |
+| `settings.openStorageFolder/openThemesFolder/openCustomIconDialog/copyDebugInfo/copyGPUInfo/openWebRTCInternals/openGPUInfo` | Fire-and-forget; no args; `void` | Opens filesystem locations/dialogs/internal pages or writes clipboard | Copy actions read the native diagnostics/graphics capabilities in the WebView2 shell (clipboard via `navigator.clipboard`, CDP-backed report with explicit unavailable fields for Copy GPU Info); dialogs and internal pages deferred; host-owned paths only |
 | `settings.setLang(lang)` | Fire-and-forget; language string; `void` (type declaration says `() => void`, implementation sends without returning) | Changes app language | Deferred async request |
 | `settings.dumpFlags()` | Synchronous; no args; applied flags object | Logs and returns runtime flags; not boot-critical | Async diagnostics request or native-local equivalent |
 | `touchbar.setVoiceTouchbar(state)`, `setVoiceState(mute,deafen)`, `importGuilds(guilds)` — Shelter touchbar | Fire-and-forget; boolean(s) / string array; `void` | Mutates Touch Bar or voice state / imports guilds | Deferred; Touch Bar is platform-specific |
