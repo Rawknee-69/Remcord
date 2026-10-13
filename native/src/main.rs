@@ -27,6 +27,7 @@ mod protocol;
 mod quick_css;
 mod recovery;
 mod remcord_protocol;
+mod screenshare_quality;
 mod settings;
 mod settings_boot;
 mod settings_plugin;
@@ -3000,6 +3001,26 @@ fn initialization_script(
     Ok(script)
 }
 
+/// Full document-start script: the base [`initialization_script`] plus the
+/// host-selected screenshare capture-quality script, appended AFTER the mod
+/// adapters so capture constraining is the last document-start layer and can
+/// never precede (or perturb) the settings boot snapshot or mod bootstrap.
+/// `raw_mode` is normalized by the module (unknown values fail safe to
+/// `"default"`, which preserves existing behavior exactly).
+fn document_start_script(
+    active_mods: &[&'static ModDescriptor],
+    settings_boot_json: &str,
+    host_platform_json: &str,
+    raw_mode: &str,
+) -> Result<String, serde_json::Error> {
+    let mut script = initialization_script(active_mods, settings_boot_json, host_platform_json)?;
+    let quality = screenshare_quality::screenshare_quality_script(raw_mode)
+        .map_err(serde::de::Error::custom)?;
+    script.push('\n');
+    script.push_str(&quality);
+    Ok(script)
+}
+
 fn queue_event<T>(proxy: &EventLoopProxy<T>, event: T)
 where
     T: 'static,
@@ -5042,15 +5063,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
-    let (settings_mods, discord_channel) = match load_settings(&profile_path) {
-        Ok(loaded) => (loaded.snapshot.mods, loaded.snapshot.channel),
+    let (settings_mods, discord_channel, screenshare_quality) = match load_settings(&profile_path) {
+        Ok(loaded) => (
+            loaded.snapshot.mods,
+            loaded.snapshot.channel,
+            loaded.snapshot.screenshare_quality,
+        ),
         Err(error) => {
             // Corrupt/unreadable settings fail closed to "no extra mods", the
             // same parity the Quick CSS enablement already uses.
             eprintln!(
                 "[Mod:Registry] mod enablement could not be resolved from settings; treating as none ({error})"
             );
-            (Vec::new(), "stable".to_owned())
+            (Vec::new(), "stable".to_owned(), "default".to_owned())
         }
     };
     // Release-channel entry URL, resolved once per process from the same
@@ -5292,7 +5317,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
     } else {
-        initialization_script(&active_mods, &settings_boot_json, &host_platform_json)?
+        // The capture-quality mode is host-resolved once per process from the
+        // same authoritative snapshot (restart-required model, like `channel`):
+        // unknown values fail safe to `"default"` inside the module.
+        println!(
+            "[ScreenshareQuality] mode={}",
+            screenshare_quality::normalize_mode(&screenshare_quality)
+        );
+        document_start_script(
+            &active_mods,
+            &settings_boot_json,
+            &host_platform_json,
+            &screenshare_quality,
+        )?
     };
     println!(
         "[Native] Document-start script: {} bytes",
@@ -9173,13 +9210,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        initialization_script, is_allowed_navigation, is_trusted_bridge_origin,
-        lookup_mod_descriptor, mod_adapter_script, relaunch_command, resolve_active_mods,
-        settings_plugin_start_due, settings_plugin_start_script, settings_ui_probe_script,
-        startup_visibility, titlebar_plugin_start_script, StartupVisibility, EQUICORD_MOD,
-        KNOWN_MODS, PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
-        SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
-        TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
+        document_start_script, initialization_script, is_allowed_navigation,
+        is_trusted_bridge_origin, lookup_mod_descriptor, mod_adapter_script, relaunch_command,
+        resolve_active_mods, settings_plugin_start_due, settings_plugin_start_script,
+        settings_ui_probe_script, startup_visibility, titlebar_plugin_start_script,
+        StartupVisibility, EQUICORD_MOD, KNOWN_MODS, PERMISSIONS_SMOKE_SCRIPT,
+        REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE,
+        SHELTER_MOD, TITLEBAR_PLUGIN_ID, TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
@@ -9438,6 +9475,65 @@ mod tests {
             initialization_script(&[], crate::settings_boot::test_fixture_json(), "{not json")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn document_start_script_appends_quality_after_adapters() {
+        // Ordering: the boot snapshot precedes adapters, and the capture
+        // script is the last layer — it can never perturb snapshot/mod boot.
+        let boot = crate::settings_boot::test_fixture_json();
+        let platform = crate::app::test_fixture_json();
+        let script = document_start_script(&adapters_for(&["shelter"]), boot, platform, "balanced")
+            .expect("must build");
+        let snapshot_at = script
+            .find("\"settingsSource\"")
+            .expect("snapshot embedded");
+        let adapter_at = script.find("createModAdapter").expect("adapter present");
+        let quality_at = script
+            .find("__remcordScreenshareQuality")
+            .expect("quality status present");
+        assert!(snapshot_at < adapter_at);
+        assert!(adapter_at < quality_at);
+        assert!(!script.contains("__REMCORD_SCREENSHARE_QUALITY_MODE__"));
+        assert!(script.contains("\"balanced\""));
+    }
+
+    #[test]
+    fn document_start_script_default_mode_is_capture_inert() {
+        // Default preserves existing behavior exactly: no capture wrapping.
+        let boot = crate::settings_boot::test_fixture_json();
+        let platform = crate::app::test_fixture_json();
+        let script = document_start_script(&[], boot, platform, "default").expect("must build");
+        assert!(script.contains("__remcordScreenshareQuality"));
+        assert!(!script.contains("getDisplayMedia"));
+        assert!(!script.contains("applyConstraints"));
+    }
+
+    #[test]
+    fn document_start_script_unknown_mode_fails_safe_to_default() {
+        let boot = crate::settings_boot::test_fixture_json();
+        let platform = crate::app::test_fixture_json();
+        let script = document_start_script(&[], boot, platform, "ultra-hd").expect("must build");
+        assert!(script.contains("\"default\""));
+        assert!(!script.contains("applyConstraints"));
+    }
+
+    #[test]
+    fn document_start_script_rejects_malformed_snapshots_like_base() {
+        assert!(document_start_script(
+            &[],
+            "{not json",
+            crate::app::test_fixture_json(),
+            "default"
+        )
+        .is_err());
+        assert!(document_start_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            "{not json",
+            "balanced"
+        )
+        .is_err());
     }
 
     #[test]

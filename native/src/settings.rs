@@ -121,6 +121,8 @@ pub struct SettingsSnapshot {
     pub audio: AudioSettings,
     #[serde(default = "default_csp")]
     pub csp: String,
+    #[serde(default = "default_screenshare_quality")]
+    pub screenshare_quality: String,
     #[serde(default = "bool_true")]
     pub minimize_to_tray: bool,
     #[serde(default)]
@@ -238,6 +240,10 @@ fn default_window_material() -> String {
 
 fn default_csp() -> String {
     "none".to_owned()
+}
+
+fn default_screenshare_quality() -> String {
+    crate::screenshare_quality::DEFAULT_MODE.to_owned()
 }
 
 fn default_performance_mode() -> String {
@@ -373,6 +379,13 @@ pub enum SettingsSetKey {
     /// (`src/splash/redirect.html` parity, whose default is also stable).
     /// Takes effect on next launch (restart-required model).
     Channel,
+    /// Screenshare capture-quality mode (`"default"` | `"balanced"` | `"low"`).
+    /// Native consumer: the document-start capture script constrains the
+    /// display track only when the mode is not `"default"` (Electron
+    /// `ScreensharePicker` parity for the active modes; `"default"`
+    /// preserves existing behavior exactly). Takes effect on next launch
+    /// (restart-required model, like `channel`).
+    ScreenshareQuality,
 }
 
 impl SettingsSetKey {
@@ -386,15 +399,17 @@ impl SettingsSetKey {
             SettingsSetKey::Csp => "csp",
             SettingsSetKey::QuickCss => "quickCss",
             SettingsSetKey::Channel => "channel",
+            SettingsSetKey::ScreenshareQuality => "screenshareQuality",
         }
     }
 }
 
 /// Bounded value union for the allowlist. The key selects which variant is
 /// legal; anything else is a type error. There is deliberately no number,
-/// object, or null variant: no allowlisted key needs one. The two string
-/// variants serve exactly one key each (`csp` mode, `channel` id), so a
-/// value for one can never land in the other's document field.
+/// object, or null variant: no allowlisted key needs one. The three string
+/// variants serve exactly one key each (`csp` mode, `channel` id,
+/// `screenshareQuality` mode), so a value for one can never land in another's
+/// document field.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SettingsSetValue {
@@ -402,6 +417,7 @@ pub enum SettingsSetValue {
     Mods(Vec<String>),
     Csp(String),
     Channel(String),
+    ScreenshareQuality(String),
 }
 
 /// Maximum accepted mod-enablement entries. Electron's `ValidMods` has four
@@ -451,6 +467,13 @@ pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> R
         (SettingsSetKey::Channel, SettingsSetValue::Channel(channel)) => {
             if !crate::channel::VALID_CHANNELS.contains(&channel.as_str()) {
                 return Err("channel is not a supported release channel".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::ScreenshareQuality, SettingsSetValue::ScreenshareQuality(mode)) => {
+            if !crate::screenshare_quality::VALID_SCREENSHARE_QUALITY_MODES.contains(&mode.as_str())
+            {
+                return Err("screenshare quality is not a supported mode".to_owned());
             }
             Ok(())
         }
@@ -611,6 +634,9 @@ pub fn apply_settings_set(
         }
         (SettingsSetKey::Channel, SettingsSetValue::Channel(channel)) => {
             serde_json::Value::String(channel.clone())
+        }
+        (SettingsSetKey::ScreenshareQuality, SettingsSetValue::ScreenshareQuality(mode)) => {
+            serde_json::Value::String(mode.clone())
         }
         (
             SettingsSetKey::SupportBannerDismissed
@@ -1157,6 +1183,95 @@ mod tests {
             &SettingsSetValue::Mods(vec!["vencord".to_owned()]),
         )
         .is_err());
+    }
+
+    #[test]
+    fn set_accepts_only_the_three_screenshare_quality_modes() {
+        for mode in ["default", "balanced", "low"] {
+            assert!(
+                validate_settings_set(
+                    SettingsSetKey::ScreenshareQuality,
+                    &SettingsSetValue::ScreenshareQuality(mode.to_owned()),
+                )
+                .is_ok(),
+                "{mode} must validate"
+            );
+        }
+        for hostile in [
+            "",
+            "DEFAULT",
+            "Balanced",
+            "balanced ",
+            "720p",
+            "low;evil",
+            "low\0",
+        ] {
+            assert!(
+                validate_settings_set(
+                    SettingsSetKey::ScreenshareQuality,
+                    &SettingsSetValue::ScreenshareQuality(hostile.to_owned()),
+                )
+                .is_err(),
+                "{hostile:?} must be refused"
+            );
+        }
+        assert_eq!(
+            SettingsSetKey::ScreenshareQuality.storage_key(),
+            "screenshareQuality"
+        );
+        // A quality string can never validate as another string key (or vice
+        // versa): the key owns its variant, so values cannot cross fields.
+        assert!(validate_settings_set(
+            SettingsSetKey::ScreenshareQuality,
+            &SettingsSetValue::Csp("none".to_owned()),
+        )
+        .is_err());
+        assert!(validate_settings_set(
+            SettingsSetKey::Csp,
+            &SettingsSetValue::ScreenshareQuality("low".to_owned()),
+        )
+        .is_err());
+        assert!(validate_settings_set(
+            SettingsSetKey::ScreenshareQuality,
+            &SettingsSetValue::Bool(true),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn set_applies_screenshare_quality_and_round_trips() {
+        for mode in ["default", "balanced", "low"] {
+            let profile = unique_profile_dir("set-quality");
+            std::fs::create_dir_all(profile.join("storage")).unwrap();
+            let path = profile.join("storage").join("settings.json");
+            std::fs::write(&path, r#"{"screenshareQuality":"default"}"#).unwrap();
+            let mutation = apply_settings_set(
+                &profile,
+                SettingsSetKey::ScreenshareQuality,
+                &SettingsSetValue::ScreenshareQuality(mode.to_owned()),
+            )
+            .expect("an allowlisted quality mutation must persist");
+            assert_eq!(mutation.key, SettingsSetKey::ScreenshareQuality);
+            assert_eq!(
+                mutation.value,
+                SettingsSetValue::ScreenshareQuality(mode.to_owned())
+            );
+            let document: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(document["screenshareQuality"], mode);
+            let reread = load_settings(&profile).expect("the mutated file must load");
+            assert_eq!(reread.snapshot.screenshare_quality, mode);
+        }
+    }
+
+    #[test]
+    fn missing_screenshare_quality_defaults_to_default() {
+        // Older settings files carry no `screenshareQuality`: deserialization
+        // must yield `"default"` (existing behavior preserved exactly).
+        let snapshot: SettingsSnapshot = serde_json::from_str(r#"{"csp":"none"}"#).unwrap();
+        assert_eq!(snapshot.screenshare_quality, "default");
+        let defaults = SettingsSnapshot::default();
+        assert_eq!(defaults.screenshare_quality, "default");
     }
 
     #[test]

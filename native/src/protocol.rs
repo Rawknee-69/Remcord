@@ -203,6 +203,9 @@ impl<'de> serde::Deserialize<'de> for SettingsSetRequest {
             SettingsSetKey::Channel => SettingsSetValue::Channel(
                 serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
             ),
+            SettingsSetKey::ScreenshareQuality => SettingsSetValue::ScreenshareQuality(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
             SettingsSetKey::SupportBannerDismissed
             | SettingsSetKey::ShowExperimentalPluginMenu
             | SettingsSetKey::ExtendedPluginAbilities
