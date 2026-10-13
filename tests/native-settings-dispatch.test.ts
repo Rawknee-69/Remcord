@@ -577,6 +577,308 @@ test("native diagnostics copy writes the host readout to the clipboard", async (
     }
 });
 
+test("native graphics copy writes the measured CDP report to the clipboard", async () => {
+    const written: string[] = [];
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {},
+        seed: {},
+    });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    win.remcord.diagnostics = {
+        getInfo: () =>
+            Promise.resolve({
+                app_version: "1.3.0",
+                webview2_runtime: "155.0.4283.45",
+                profile_kind: "release",
+                channel: "stable",
+                csp: "none",
+                mods: [],
+            }),
+    };
+    win.remcord.graphics = {
+        getInfo: () =>
+            Promise.resolve({
+                webview2_runtime: "155.0.4283.45",
+                additional_browser_arguments: "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+                environment: "remcord-pre-registered (wry parity + remcord scheme)",
+                browser: {
+                    status: "measured",
+                    method: "Browser.getVersion",
+                    product: "Chrome/155.0.4283.45",
+                    revision: "@abcdef",
+                    user_agent: "Mozilla/5.0",
+                    js_version: "15.5.1",
+                    protocol_version: "1.3",
+                    error: null,
+                },
+                system: {
+                    status: "measured",
+                    method: "System.getInfo",
+                    model_name: null,
+                    devices: [
+                        {
+                            vendor_id: "4318",
+                            device_id: "1234",
+                            vendor_string: "Google Inc. (Intel)",
+                            device_string: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11)",
+                            driver_version: "31.0.101.4502",
+                        },
+                    ],
+                    feature_status: [
+                        { name: "webgl", status: "hardware_accelerated" },
+                        { name: "gpu_compositing", status: "hardware_accelerated" },
+                    ],
+                    command_line_flags: ["--disable-features"],
+                    disable_features: "msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+                    enable_features: null,
+                    error: null,
+                },
+            }),
+    };
+    Object.defineProperty(globalThis, "navigator", {
+        value: {
+            clipboard: {
+                writeText: (text: string) => {
+                    written.push(text);
+                    return Promise.resolve();
+                },
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeGraphicsAvailable(), true);
+        assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
+        assert.equal(written.length, 1);
+        assert.match(written[0], /Graphics report \(Remcord 1\.3\.0, WebView2 Runtime 155\.0\.4283\.45\)/);
+        assert.match(written[0], /ANGLE \(Intel, Intel\(R\) Iris\(R\) Xe Graphics/);
+        assert.match(written[0], /webgl=hardware_accelerated/);
+        assert.match(written[0], /disable-features: msWebOOUI/);
+        assert.match(written[0], /not active utilization/);
+        assert.match(written[0], /WebGL renderer: unavailable \(observation failed\)/);
+        assert.doesNotMatch(written[0], /token|cookie/i);
+    } finally {
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});
+
+test("native graphics copy includes the renderer-observed WebGL adapter", async () => {
+    const written: string[] = [];
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {},
+        seed: {},
+    });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    win.remcord.diagnostics = {
+        getInfo: () =>
+            Promise.resolve({
+                app_version: "1.3.0",
+                webview2_runtime: "155.0.4283.45",
+                profile_kind: "release",
+                channel: "stable",
+                csp: "none",
+                mods: [],
+            }),
+    };
+    win.remcord.graphics = {
+        getInfo: () =>
+            Promise.resolve({
+                webview2_runtime: "155.0.4283.45",
+                additional_browser_arguments: "--disable-features=msWebOOUI",
+                environment: "remcord-pre-registered (wry parity + remcord scheme)",
+                browser: {
+                    status: "measured",
+                    method: "Browser.getVersion",
+                    product: "Chrome/155.0.4283.45",
+                    revision: null,
+                    user_agent: null,
+                    js_version: null,
+                    protocol_version: null,
+                    error: null,
+                },
+                system: {
+                    status: "unavailable",
+                    method: "System.getInfo",
+                    model_name: null,
+                    devices: [],
+                    feature_status: [],
+                    command_line_flags: [],
+                    disable_features: null,
+                    enable_features: null,
+                    error: "the probe could not start",
+                },
+            }),
+    };
+    const UNMASKED_RENDERER_WEBGL = 37446;
+    const RENDERER = 7937;
+    Object.defineProperty(globalThis, "document", {
+        value: {
+            createElement: () => ({
+                getContext: () => ({
+                    getParameter: (name: number) =>
+                        name === UNMASKED_RENDERER_WEBGL
+                            ? "ANGLE (NVIDIA, NVIDIA GeForce RTX 3050 Laptop GPU Direct3D11)"
+                            : "WebKit WebGL",
+                    getExtension: () => ({ UNMASKED_RENDERER_WEBGL }),
+                    RENDERER,
+                }),
+            }),
+        },
+        configurable: true,
+        writable: true,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+        value: {
+            clipboard: {
+                writeText: (text: string) => {
+                    written.push(text);
+                    return Promise.resolve();
+                },
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
+        assert.match(
+            written[0],
+            /WebGL renderer \(renderer-observed\): ANGLE \(NVIDIA, NVIDIA GeForce RTX 3050 Laptop GPU/,
+        );
+        assert.match(written[0], /GPU details: unavailable/);
+    } finally {
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});
+
+test("native graphics copy falls back honestly when the probe is unavailable", async () => {
+    const written: string[] = [];
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {},
+        seed: {},
+    });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    win.remcord.diagnostics = {
+        getInfo: () =>
+            Promise.resolve({
+                app_version: "1.3.0",
+                webview2_runtime: "155.0.4283.45",
+                profile_kind: "release",
+                channel: "stable",
+                csp: "none",
+                mods: [],
+            }),
+    };
+    // No graphics namespace: the click still copies the legacy static text.
+    win.remcord.graphics = { getInfo: () => Promise.reject(new Error("bridge down")) };
+    Object.defineProperty(globalThis, "navigator", {
+        value: {
+            clipboard: {
+                writeText: (text: string) => {
+                    written.push(text);
+                    return Promise.resolve();
+                },
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
+        assert.equal(written.length, 1);
+        assert.match(written[0], /Graphics stack: WebView2 Runtime 155\.0\.4283\.45/);
+        // A misshapen probe payload also falls back instead of failing.
+        win.remcord.graphics = { getInfo: () => Promise.resolve({ bogus: true }) };
+        assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
+        assert.equal(written.length, 2);
+        assert.match(written[1], /Graphics stack: WebView2 Runtime 155\.0\.4283\.45/);
+    } finally {
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});
+
+test("native graphics report marks unavailable sections explicitly", async () => {
+    const written: string[] = [];
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {},
+        seed: {},
+    });
+    const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };
+    win.remcord.diagnostics = {
+        getInfo: () =>
+            Promise.resolve({
+                app_version: "1.3.0",
+                webview2_runtime: "unknown",
+                profile_kind: "release",
+                channel: "stable",
+                csp: "none",
+                mods: [],
+            }),
+    };
+    win.remcord.graphics = {
+        getInfo: () =>
+            Promise.resolve({
+                webview2_runtime: "unknown",
+                additional_browser_arguments: "--disable-features=msWebOOUI",
+                environment: "remcord-pre-registered (wry parity + remcord scheme)",
+                browser: {
+                    status: "unavailable",
+                    method: "Browser.getVersion",
+                    product: null,
+                    revision: null,
+                    user_agent: null,
+                    js_version: null,
+                    protocol_version: null,
+                    error: "the probe could not start",
+                },
+                system: {
+                    status: "unsupported",
+                    method: "System.getInfo",
+                    model_name: null,
+                    devices: [],
+                    feature_status: [],
+                    command_line_flags: [],
+                    disable_features: null,
+                    enable_features: null,
+                    error: "the runtime does not support this method",
+                },
+            }),
+    };
+    Object.defineProperty(globalThis, "navigator", {
+        value: {
+            clipboard: {
+                writeText: (text: string) => {
+                    written.push(text);
+                    return Promise.resolve();
+                },
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
+        assert.match(written[0], /Browser details: unavailable/);
+        assert.match(written[0], /GPU details: unsupported/);
+        assert.doesNotMatch(written[0], /GPU 0:/);
+    } finally {
+        Reflect.deleteProperty(globalThis, "navigator");
+        restoreConsole();
+    }
+});
+
 test("native diagnostics copy fails honestly when the host readout fails", async () => {
     installGlobals({ runtime: "webview2", settingsImpl: {}, seed: {} });
     const win = Reflect.get(globalThis, "window") as { remcord: Record<string, unknown> };

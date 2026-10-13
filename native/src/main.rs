@@ -10,6 +10,7 @@ mod diagnostics;
 mod downloads;
 mod environment_observer;
 mod folders;
+mod graphics;
 mod localization;
 mod main_webview;
 mod mod_cache;
@@ -270,6 +271,7 @@ const SETTINGS_MUTATION_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_MUTATION_SMOK
 const SETTINGS_SET_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_SET_SMOKE";
 const GETLANG_SMOKE_ENV: &str = "REMCORD_NATIVE_GETLANG_SMOKE";
 const APP_VERSION_SMOKE_ENV: &str = "REMCORD_NATIVE_APP_VERSION_SMOKE";
+const GRAPHICS_SMOKE_ENV: &str = "REMCORD_NATIVE_GRAPHICS_SMOKE";
 const PLUGIN_STORAGE_SMOKE_ENV: &str = "REMCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
 const THEME_INSTALL_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_INSTALL_SMOKE";
 const THEME_WRITE_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_WRITE_SMOKE";
@@ -323,6 +325,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "quickcss.read",
         "quickcss.write",
         "diagnostics.get_info",
+        "graphics.get_info",
         "mod.clear_cache",
         "window.show",
         "window.hide",
@@ -736,6 +739,91 @@ const APP_VERSION_SMOKE_SCRIPT: &str = r#"
   } catch (error) {
     fail(error);
   }
+})();
+"#;
+
+/// DEV-only graphics smoke probe (`REMCORD_NATIVE_GRAPHICS_SMOKE=1`).
+/// Exercises the real `graphics.get_info` capability from the live document:
+/// the two fixed CDP probes run through the host async assembly and the
+/// bounded measured-or-explicitly-missing report resolves the facade call.
+/// Reported as one typed `graphics_probe` event per document with
+/// `stage: "report"`. `ok` is true exactly when the facade call resolved
+/// with a shape-valid report (sections may still be `unsupported` or
+/// `unavailable` — that is the measured runtime behavior, not a probe
+/// failure). Device/feature summaries carry parsed GPU facts only — never
+/// the raw command line, paths, or file contents.
+const GRAPHICS_SMOKE_SCRIPT: &str = r#"
+(() => {
+  const probe = (payload) => window.ipc.postMessage(
+    JSON.stringify({ version: 1, event: { type: "graphics_probe", payload } })
+  );
+  const fail = (error) => probe({
+    ok: false, stage: "report",
+    browser_status: "unavailable", system_status: "unavailable",
+    device_count: 0, feature_count: 0,
+    device_summary: "", feature_summary: "",
+    webgl_status: "unavailable", webgl_summary: "",
+    error: String(error?.message ?? error).slice(0, 256),
+  });
+  const validStatus = (status) =>
+    status === "measured" || status === "unsupported" || status === "unavailable";
+  const bounded = (value, max) => String(value ?? "").slice(0, max);
+  const observeWebGL = () => {
+    try {
+      const canvas = document.createElement("canvas");
+      const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+      if (!gl) return { status: "unavailable", summary: "" };
+      const debug = gl.getExtension("WEBGL_debug_renderer_info");
+      const value =
+        (debug && gl.getParameter(debug.UNMASKED_RENDERER_WEBGL)) || gl.getParameter(gl.RENDERER);
+      if (typeof value !== "string" || value.length === 0) {
+        return { status: "unavailable", summary: "" };
+      }
+      return { status: "measured", summary: value.slice(0, 512) };
+    } catch {
+      return { status: "unavailable", summary: "" };
+    }
+  };
+  (async () => {
+    try {
+      const graphics = window.remcord?.graphics;
+      if (typeof graphics?.getInfo !== "function") {
+        fail("graphics facade missing");
+        return;
+      }
+      const report = await graphics.getInfo();
+      if (
+        !report || typeof report !== "object" ||
+        !validStatus(report.browser?.status) || !validStatus(report.system?.status) ||
+        !Array.isArray(report.system?.devices) || !Array.isArray(report.system?.feature_status)
+      ) {
+        fail("graphics report shape is invalid");
+        return;
+      }
+      const devices = report.system.devices
+        .map((device) => device?.device_string ?? device?.vendor_string ?? "(unnamed)")
+        .join(" | ");
+      const features = report.system.feature_status
+        .slice(0, 8)
+        .map((entry) => `${entry?.name}=${entry?.status}`)
+        .join(", ");
+      const webgl = observeWebGL();
+      probe({
+        ok: true, stage: "report",
+        browser_status: report.browser.status,
+        system_status: report.system.status,
+        device_count: report.system.devices.length,
+        feature_count: report.system.feature_status.length,
+        device_summary: bounded(devices, 1024),
+        feature_summary: bounded(features, 1024),
+        webgl_status: webgl.status,
+        webgl_summary: webgl.summary,
+        error: null,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  })();
 })();
 "#;
 
@@ -2674,6 +2762,18 @@ enum NativeEvent {
         retrieval_ms: f64,
         result: Result<mod_substrate::ModBundle, String>,
     },
+    /// One fixed CDP graphics probe completion (`System.getInfo` or
+    /// `Browser.getVersion`). The one-shot COM handler owns only the bounded
+    /// answer (or the bounded failure reason) plus the request id and probe
+    /// kind — never COM objects. The event loop records the part in the
+    /// matching `PendingGraphics` and answers the bridge call only when both
+    /// parts arrived; unknown ids are late renderer timeouts, logged and
+    /// dropped.
+    GraphicsCdpPart {
+        request_id: String,
+        method: graphics::CdpMethod,
+        outcome: Result<String, String>,
+    },
     /// Completed theme file import from the dedicated STA picker worker.
     /// The worker owns the modal dialog plus the sequential bounded
     /// ingestion, so the WebView/UI thread never blocks; the response is
@@ -3008,6 +3108,7 @@ struct TrustedLoadFlags {
     settings_set_smoke: bool,
     getlang_smoke: bool,
     app_version_smoke: bool,
+    graphics_smoke: bool,
     plugin_storage_smoke: bool,
     theme_install_smoke: bool,
     theme_write_smoke: bool,
@@ -3333,6 +3434,11 @@ fn run_trusted_load_pipeline(ctx: TrustedLoadContext<'_>) {
         if ctx.flags.app_version_smoke {
             if let Err(error) = ctx.webview.evaluate_script(APP_VERSION_SMOKE_SCRIPT) {
                 eprintln!("[App][Smoke] probe failed: {error}");
+            }
+        }
+        if ctx.flags.graphics_smoke {
+            if let Err(error) = ctx.webview.evaluate_script(GRAPHICS_SMOKE_SCRIPT) {
+                eprintln!("[Graphics][Smoke] probe failed: {error}");
             }
         }
         if ctx.flags.plugin_storage_smoke {
@@ -5011,6 +5117,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_app_version_smoke {
         println!("[App][Smoke] app version capability smoke probe enabled");
     }
+    let diagnostic_graphics_smoke =
+        std::env::var(GRAPHICS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_graphics_smoke {
+        println!("[Graphics][Smoke] graphics capability smoke probe enabled");
+    }
     let diagnostic_plugin_storage_smoke =
         std::env::var(PLUGIN_STORAGE_SMOKE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_plugin_storage_smoke {
@@ -5264,6 +5375,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut request_tracker = RequestTracker::default();
     let mut document_lifecycle = DocumentModLifecycle::default();
     let mut pending_mods = HashMap::<String, PendingModBootstrap>::new();
+    // In-flight CDP graphics probes by bridge request id. Answered (and
+    // removed) when both probe parts arrive; cleared with the bridge
+    // tracker on document/WebView resets so no stale probe can answer a
+    // later document.
+    let mut pending_graphics = HashMap::<String, graphics::PendingGraphics>::new();
     // Whether the Quick CSS managed style was injected into the latest
     // trusted document, so the next document reset can remove it when the
     // flag flips to disabled. The DOM itself is fresh per document; this
@@ -5773,6 +5889,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     document_lifecycle = DocumentModLifecycle::default();
                     request_tracker.clear();
                     pending_mods.clear();
+                    pending_graphics.clear();
                     main_process_failed_counters = process_failure::ProcessFailedCounters::default();
                     main_navigation_counters = navigation_completed::NavigationCompletedCounters::default();
                     main_recovery = MainRendererRecovery::new(main_instance_id);
@@ -5911,6 +6028,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     settings_set_smoke: diagnostic_settings_set_smoke,
                                     getlang_smoke: diagnostic_getlang_smoke,
                                     app_version_smoke: diagnostic_app_version_smoke,
+                                    graphics_smoke: diagnostic_graphics_smoke,
                                     plugin_storage_smoke: diagnostic_plugin_storage_smoke,
                                     theme_install_smoke: diagnostic_theme_install_smoke,
                                     theme_write_smoke: diagnostic_theme_write_smoke,
@@ -5948,6 +6066,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 document_lifecycle.begin_document();
                 request_tracker.clear();
                 pending_mods.clear();
+                pending_graphics.clear();
                 // Phase 2C: the new navigation attempt supersedes every
                 // pending finish and stored outcome — a previous
                 // navigation's verdict can never decide this document. A
@@ -6049,6 +6168,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     settings_set_smoke: diagnostic_settings_set_smoke,
                                     getlang_smoke: diagnostic_getlang_smoke,
                                     app_version_smoke: diagnostic_app_version_smoke,
+                                    graphics_smoke: diagnostic_graphics_smoke,
                                     plugin_storage_smoke: diagnostic_plugin_storage_smoke,
                                     theme_install_smoke: diagnostic_theme_install_smoke,
                                     theme_write_smoke: diagnostic_theme_write_smoke,
@@ -7520,6 +7640,115 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::GraphicsGetInfo(_) => {
+                            // CDP-backed graphics report: the two fixed probes
+                            // (`System.getInfo`, `Browser.getVersion`) are
+                            // issued on this thread and each completion
+                            // forwards one `GraphicsCdpPart` event; the report
+                            // goes out only when both parts arrive. The UI
+                            // thread never blocks, and sections the runtime
+                            // withholds report as `unsupported`/`unavailable`
+                            // — never invented.
+                            let request_id = request.request_id;
+                            let runtime = runtime_version.clone();
+                            let browser_args =
+                                crate::remcord_protocol::scheme::ADDITIONAL_BROWSER_ARGUMENTS;
+                            #[cfg(target_os = "windows")]
+                            {
+                                if pending_graphics.len() >= graphics::MAX_PENDING_GRAPHICS {
+                                    eprintln!(
+                                        "[Graphics][GRAPHICS_BUSY] too many in-flight probes"
+                                    );
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "GRAPHICS_BUSY",
+                                            message: "too many in-flight graphics probes"
+                                                .to_owned(),
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                } else {
+                                    let core = webview.webview();
+                                    let (system_issued, browser_issued) =
+                                        graphics::issue_cdp_calls(&core, &proxy, &request_id);
+                                    let pending = graphics::PendingGraphics::new(
+                                        runtime,
+                                        browser_args,
+                                        if system_issued {
+                                            None
+                                        } else {
+                                            Some(Err("the System.getInfo probe could not start"
+                                                .to_owned()))
+                                        },
+                                        if browser_issued {
+                                            None
+                                        } else {
+                                            Some(Err(
+                                                "the Browser.getVersion probe could not start"
+                                                    .to_owned(),
+                                            ))
+                                        },
+                                    );
+                                    if pending.is_complete() {
+                                        let report = pending.build_response();
+                                        let response = BridgeResponse {
+                                            version: PROTOCOL_VERSION,
+                                            request_id: request_id.clone(),
+                                            ok: true,
+                                            payload: Some(
+                                                BridgeResponsePayload::GraphicsInfo(Box::new(report)),
+                                            ),
+                                            error: None,
+                                        };
+                                        send_bridge_response(&webview, &response);
+                                        if let Err(error) =
+                                            request_tracker.complete(&request_id)
+                                        {
+                                            eprintln!("[Bridge] correlation failure after response: {error}");
+                                        }
+                                        response_count += 1;
+                                        println!(
+                                            "[Graphics][Metrics] probes_refused_at_issue request_latency_ms={:.3}",
+                                            received_at.elapsed().as_secs_f64() * 1000.0
+                                        );
+                                    } else {
+                                        pending_graphics.insert(request_id, pending);
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                // No WebView2 shell exists here: answer with
+                                // both sections unavailable, never invented.
+                                let unavailable = "the WebView2 graphics probe is unavailable on this platform".to_owned();
+                                let report = graphics::assemble_report(
+                                    None,
+                                    browser_args,
+                                    &Err(unavailable.clone()),
+                                    &Err(unavailable),
+                                );
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: request_id.clone(),
+                                    ok: true,
+                                    payload: Some(BridgeResponsePayload::GraphicsInfo(Box::new(report))),
+                                    error: None,
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
+                            }
+                        }
                         BridgeCommand::ModClearCache(_) => {
                             // Client-mod cache wipe: the five host-managed
                             // downloaded bundle caches plus the stored
@@ -7844,6 +8073,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                     },
                 }
             },
+            Event::UserEvent(NativeEvent::GraphicsCdpPart {
+                request_id,
+                method,
+                outcome,
+            }) => {
+                // One fixed CDP probe completed: record its bounded outcome
+                // and answer only when both parts arrived. Unknown ids are
+                // late renderer timeouts — logged, never answered twice.
+                let Some(mut pending) = pending_graphics.remove(&request_id) else {
+                    eprintln!("[Graphics] late CDP part for unknown request");
+                    return;
+                };
+                pending.record(method, outcome);
+                if !pending.is_complete() {
+                    pending_graphics.insert(request_id, pending);
+                    return;
+                }
+                let system_status = pending.system_status();
+                let browser_status = pending.browser_status();
+                let elapsed_ms = pending.elapsed_ms();
+                let report = pending.build_response();
+                let system_error = report.system.error.clone().unwrap_or_default();
+                let browser_error = report.browser.error.clone().unwrap_or_default();
+                let response = BridgeResponse {
+                    version: PROTOCOL_VERSION,
+                    request_id: request_id.clone(),
+                    ok: true,
+                    payload: Some(BridgeResponsePayload::GraphicsInfo(Box::new(report))),
+                    error: None,
+                };
+                send_bridge_response(&webview, &response);
+                if let Err(error) = request_tracker.complete(&request_id) {
+                    eprintln!("[Bridge] correlation failure after response: {error}");
+                }
+                response_count += 1;
+                println!(
+                    "[Graphics][Metrics] system={system_status} browser={browser_status} request_latency_ms={elapsed_ms:.3} system_error={system_error:?} browser_error={browser_error:?}"
+                );
+            }
             Event::UserEvent(NativeEvent::ModBundleReady {
                 mod_id,
                 generation,
@@ -8618,6 +8886,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             eprintln!(
                                 "[App][Smoke] ok=false error={}",
+                                payload.error.unwrap_or_else(|| "unknown".to_owned())
+                            );
+                        }
+                    }
+                    BridgeEvent::GraphicsProbe(payload) => {
+                        if payload.ok {
+                            println!(
+                                "[Graphics][Smoke] ok=true stage={} browser={} system={} devices={} features={} webgl={} device_summary={:?} feature_summary={:?} webgl_summary={:?}",
+                                payload.stage,
+                                payload.browser_status,
+                                payload.system_status,
+                                payload.device_count,
+                                payload.feature_count,
+                                payload.webgl_status,
+                                payload.device_summary,
+                                payload.feature_summary,
+                                payload.webgl_summary
+                            );
+                        } else {
+                            eprintln!(
+                                "[Graphics][Smoke] ok=false stage={} error={}",
+                                payload.stage,
                                 payload.error.unwrap_or_else(|| "unknown".to_owned())
                             );
                         }
@@ -9872,12 +10162,18 @@ mod tests {
             .contains(&"diagnostics.get_info"));
         assert!(super::BOOT_SNAPSHOT
             .capabilities
+            .contains(&"graphics.get_info"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
             .contains(&"mod.clear_cache"));
         // No generic surface may exist alongside them: no clipboard handle,
-        // no file deletion selector, no bundle-reader, no eval.
+        // no file deletion selector, no bundle-reader, no eval, and no
+        // renderer-selected CDP method (the two probed methods are fixed).
         for capability in [
             "diagnostics.set",
             "diagnostics.get_all",
+            "graphics.call_method",
+            "graphics.get_all",
             "mod.delete_bundle",
             "mod.get_bundle_source",
             "clipboard",
@@ -10044,6 +10340,17 @@ mod tests {
         assert!(super::APP_VERSION_SMOKE_SCRIPT.contains("app_version_probe"));
         assert!(!super::APP_VERSION_SMOKE_SCRIPT.contains("sendSync"));
         assert!(!super::APP_VERSION_SMOKE_SCRIPT.contains("remcord.version"));
+    }
+
+    #[test]
+    fn graphics_smoke_probe_uses_only_the_typed_capability() {
+        assert!(super::GRAPHICS_SMOKE_SCRIPT.contains("graphics?.getInfo"));
+        assert!(super::GRAPHICS_SMOKE_SCRIPT.contains("graphics_probe"));
+        assert!(super::GRAPHICS_SMOKE_SCRIPT.contains("device_summary"));
+        assert!(super::GRAPHICS_SMOKE_SCRIPT.contains("UNMASKED_RENDERER_WEBGL"));
+        assert!(!super::GRAPHICS_SMOKE_SCRIPT.contains("sendSync"));
+        assert!(!super::GRAPHICS_SMOKE_SCRIPT.contains("commandLine"));
+        assert!(!super::GRAPHICS_SMOKE_SCRIPT.contains("user-data-dir"));
     }
 
     #[test]

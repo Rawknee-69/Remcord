@@ -387,6 +387,22 @@
         return request({ type: "diagnostics_get_info", payload: {} }, timeoutMs);
     }
 
+    // CDP-backed graphics report: WebView2 Runtime version, the exact
+    // additional browser arguments, the environment label, plus the
+    // Browser.getVersion / System.getInfo sections (each marked measured,
+    // unsupported, or unavailable — never invented). Parameter-free by
+    // protocol: the two probed methods and their empty parameters are fixed
+    // host-side. The caller performs the clipboard write with
+    // `navigator.clipboard`; there is no host clipboard surface. The longer
+    // timeout covers two async runtime round trips.
+    function getGraphicsInfo(timeoutMs = 15000) {
+        requireCapability("graphics.get_info");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "graphics_get_info", payload: {} }, timeoutMs);
+    }
+
     // Client-mod cache wipe: the five host-managed downloaded bundle
     // caches plus the stored `modCache` map reset. Parameter-free by
     // protocol — user-owned custom bundles can never be selected.
@@ -940,6 +956,109 @@
         });
     }
 
+    // Bounds mirroring the host graphics report. Kept strings are
+    // identifiers and driver text only — never paths (the host never sends
+    // the raw Chromium command line).
+    const GRAPHICS_STATUSES = ["measured", "unsupported", "unavailable"];
+    const MAX_GRAPHICS_DEVICES = 16;
+    const MAX_GRAPHICS_FEATURES = 64;
+    const MAX_GRAPHICS_STRING_BYTES = 512;
+    const MAX_GRAPHICS_FEATURE_STRING_BYTES = 128;
+    const MAX_GRAPHICS_FLAGS = 12;
+    const MAX_GRAPHICS_FLAG_BYTES = 64;
+    const MAX_GRAPHICS_FEATURE_LIST_BYTES = 1024;
+
+    function isGraphicsStringOrNull(value, maxBytes) {
+        return value === null || (typeof value === "string" && textEncoder.encode(value).length <= maxBytes);
+    }
+
+    function isGraphicsDevice(entry) {
+        return (
+            entry &&
+            typeof entry === "object" &&
+            Object.keys(entry).length === 5 &&
+            isGraphicsStringOrNull(entry.vendor_id, MAX_GRAPHICS_STRING_BYTES) &&
+            isGraphicsStringOrNull(entry.device_id, MAX_GRAPHICS_STRING_BYTES) &&
+            isGraphicsStringOrNull(entry.vendor_string, MAX_GRAPHICS_STRING_BYTES) &&
+            isGraphicsStringOrNull(entry.device_string, MAX_GRAPHICS_STRING_BYTES) &&
+            isGraphicsStringOrNull(entry.driver_version, MAX_GRAPHICS_STRING_BYTES)
+        );
+    }
+
+    function isGraphicsFeature(entry) {
+        return (
+            entry &&
+            typeof entry === "object" &&
+            Object.keys(entry).length === 2 &&
+            typeof entry.name === "string" &&
+            textEncoder.encode(entry.name).length <= MAX_GRAPHICS_FEATURE_STRING_BYTES &&
+            typeof entry.status === "string" &&
+            textEncoder.encode(entry.status).length <= MAX_GRAPHICS_FEATURE_STRING_BYTES
+        );
+    }
+
+    function isGraphicsInfo(payload) {
+        if (!payload || typeof payload !== "object") return false;
+        if (Object.keys(payload).length !== 5) return false;
+        if (
+            typeof payload.webview2_runtime !== "string" ||
+            payload.webview2_runtime.length === 0 ||
+            textEncoder.encode(payload.webview2_runtime).length > 64 ||
+            typeof payload.additional_browser_arguments !== "string" ||
+            textEncoder.encode(payload.additional_browser_arguments).length > 512 ||
+            typeof payload.environment !== "string" ||
+            payload.environment.length === 0 ||
+            textEncoder.encode(payload.environment).length > 128
+        ) {
+            return false;
+        }
+        const browser = payload.browser;
+        if (
+            !browser ||
+            typeof browser !== "object" ||
+            Object.keys(browser).length !== 8 ||
+            !GRAPHICS_STATUSES.includes(browser.status) ||
+            browser.method !== "Browser.getVersion" ||
+            !isGraphicsStringOrNull(browser.product, MAX_GRAPHICS_STRING_BYTES) ||
+            !isGraphicsStringOrNull(browser.revision, MAX_GRAPHICS_STRING_BYTES) ||
+            !isGraphicsStringOrNull(browser.user_agent, MAX_GRAPHICS_STRING_BYTES) ||
+            !isGraphicsStringOrNull(browser.js_version, MAX_GRAPHICS_STRING_BYTES) ||
+            !isGraphicsStringOrNull(browser.protocol_version, MAX_GRAPHICS_STRING_BYTES) ||
+            !isGraphicsStringOrNull(browser.error, MAX_GRAPHICS_STRING_BYTES)
+        ) {
+            return false;
+        }
+        const system = payload.system;
+        if (
+            !system ||
+            typeof system !== "object" ||
+            Object.keys(system).length !== 9 ||
+            !GRAPHICS_STATUSES.includes(system.status) ||
+            system.method !== "System.getInfo" ||
+            !isGraphicsStringOrNull(system.model_name, MAX_GRAPHICS_STRING_BYTES) ||
+            !Array.isArray(system.devices) ||
+            system.devices.length > MAX_GRAPHICS_DEVICES ||
+            !system.devices.every(isGraphicsDevice) ||
+            !Array.isArray(system.feature_status) ||
+            system.feature_status.length > MAX_GRAPHICS_FEATURES ||
+            !system.feature_status.every(isGraphicsFeature) ||
+            !Array.isArray(system.command_line_flags) ||
+            system.command_line_flags.length > MAX_GRAPHICS_FLAGS ||
+            !system.command_line_flags.every(
+                (flag) =>
+                    typeof flag === "string" &&
+                    flag.length > 0 &&
+                    textEncoder.encode(flag).length <= MAX_GRAPHICS_FLAG_BYTES,
+            ) ||
+            !isGraphicsStringOrNull(system.disable_features, MAX_GRAPHICS_FEATURE_LIST_BYTES) ||
+            !isGraphicsStringOrNull(system.enable_features, MAX_GRAPHICS_FEATURE_LIST_BYTES) ||
+            !isGraphicsStringOrNull(system.error, MAX_GRAPHICS_STRING_BYTES)
+        ) {
+            return false;
+        }
+        return true;
+    }
+
     window.addEventListener("remcord-native:response", (event) => {
         const response = event.detail;
         if (!response || response.version !== protocolVersion || typeof response.request_id !== "string") {
@@ -1101,6 +1220,16 @@
                 !modsValid
             ) {
                 request.reject(new Error("Native diagnostics response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "graphics_info") {
+            const payload = response.payload.payload;
+            // CDP-backed graphics report: fixed keys, bounded strings, and
+            // explicit measured/unsupported/unavailable sections. No paths,
+            // command lines, or file contents may ride along.
+            if (!isGraphicsInfo(payload)) {
+                request.reject(new Error("Native graphics response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -1730,6 +1859,10 @@
     // Diagnostics readout only: host-owned facts in, no parameters out.
     // The caller performs the clipboard write with `navigator.clipboard`.
     const diagnostics = Object.freeze({ getInfo: getDiagnosticsInfo });
+    // CDP-backed graphics report only: the two fixed probes in, the bounded
+    // measured-or-explicitly-missing report out. The caller performs the
+    // clipboard write with `navigator.clipboard`.
+    const graphics = Object.freeze({ getInfo: getGraphicsInfo });
     // Client-mod cache wipe only: an exact empty payload in, the fixed
     // allowlist outcome out. User-owned bundles can never be selected.
     const mod = Object.freeze({ clearCache: clearModCache });
@@ -1766,6 +1899,7 @@
             themes: themesShim,
             quickcss: quickcssShim,
             diagnostics,
+            graphics,
             mod,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,

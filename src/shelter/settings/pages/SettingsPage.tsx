@@ -1187,10 +1187,14 @@ export function SettingsPage() {
                         <Button
                             size={ButtonSizes.MAX}
                             onClick={() => {
-                                // Native WebView2 reports the graphics stack
-                                // (WebView2 Runtime version — WebView2 exposes
-                                // no device inventory to copy); Electron keeps
-                                // the complete GPU dump.
+                                // Native WebView2 copies the CDP-backed
+                                // graphics report (measured adapters, feature
+                                // status, and active flags, with explicitly
+                                // marked unavailable fields) via
+                                // navigator.clipboard, falling back to the
+                                // static graphics-stack text when the probe is
+                                // unavailable; Electron keeps the complete GPU
+                                // dump.
                                 if (isNativeWebView()) {
                                     void copyNativeDiagnostics("gpu").then((ok) => {
                                         if (!ok) console.warn("[Remcord] Could not copy GPU info in the native shell.");

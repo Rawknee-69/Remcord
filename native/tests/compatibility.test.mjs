@@ -4119,6 +4119,133 @@ test("diagnostics.getInfo rejects malformed readouts", async () => {
     }
 });
 
+function createGraphicsRuntime(capabilities = ["bridge.ping", "diagnostics.get_info", "graphics.get_info"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const GRAPHICS_FIXTURE = {
+    webview2_runtime: "155.0.4283.45",
+    additional_browser_arguments: "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+    environment: "remcord-pre-registered (wry parity + remcord scheme)",
+    browser: {
+        status: "measured",
+        method: "Browser.getVersion",
+        product: "Chrome/155.0.4283.45",
+        revision: "@abcdef",
+        user_agent: "Mozilla/5.0",
+        js_version: "15.5.1",
+        protocol_version: "1.3",
+        error: null,
+    },
+    system: {
+        status: "unavailable",
+        method: "System.getInfo",
+        model_name: null,
+        devices: [],
+        feature_status: [],
+        command_line_flags: [],
+        disable_features: null,
+        enable_features: null,
+        error: "the probe could not start",
+    },
+};
+
+function respondGraphics(window, request, payload = GRAPHICS_FIXTURE) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "graphics_info", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a namespaced graphics capability and no generic surface", () => {
+    const { window } = createGraphicsRuntime();
+    assert.equal(typeof window.remcord.graphics.getInfo, "function");
+    assert.equal(Object.isFrozen(window.remcord.graphics), true);
+    assert.equal(window.remcord.native.supports("graphics.get_info"), true);
+    // Exactly one member: no method/target selector surface.
+    assert.deepEqual(Object.keys(window.remcord.graphics).sort(), ["getInfo"]);
+});
+
+test("graphics.getInfo sends an exact empty payload and resolves the report", async () => {
+    const { window } = createGraphicsRuntime();
+    const pending = window.remcord.graphics.getInfo();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "graphics_get_info");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "graphics_get_info", payload: {} });
+    respondGraphics(window, message);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), GRAPHICS_FIXTURE);
+});
+
+test("graphics.getInfo throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createGraphicsRuntime(["bridge.ping", "diagnostics.get_info"]);
+    assert.equal(window.remcord.native.supports("graphics.get_info"), false);
+    assert.throws(
+        () => window.remcord.graphics.getInfo(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "graphics_get_info"),
+        false,
+    );
+});
+
+test("graphics.getInfo rejects malformed reports", async () => {
+    const measuredSystem = {
+        status: "measured",
+        method: "System.getInfo",
+        model_name: "Laptop",
+        devices: [
+            {
+                vendor_id: "4318",
+                device_id: null,
+                vendor_string: "Google Inc. (Intel)",
+                device_string: "ANGLE (Intel)",
+                driver_version: "31.0.101.4502",
+            },
+        ],
+        feature_status: [{ name: "webgl", status: "hardware_accelerated" }],
+        command_line_flags: ["--disable-features"],
+        disable_features: "msWebOOUI",
+        enable_features: null,
+        error: null,
+    };
+    for (const payload of [
+        { ...GRAPHICS_FIXTURE, webview2_runtime: "" },
+        { ...GRAPHICS_FIXTURE, additional_browser_arguments: "x".repeat(513) },
+        { ...GRAPHICS_FIXTURE, browser: { ...GRAPHICS_FIXTURE.browser, status: "turbo" } },
+        { ...GRAPHICS_FIXTURE, browser: { ...GRAPHICS_FIXTURE.browser, method: "Target.attach" } },
+        { ...GRAPHICS_FIXTURE, system: { ...measuredSystem, devices: new Array(17).fill(measuredSystem.devices[0]) } },
+        { ...GRAPHICS_FIXTURE, system: { ...measuredSystem, commandLine: "C:\\secret" } },
+        { ...GRAPHICS_FIXTURE, system: { ...measuredSystem, error: "x".repeat(513) } },
+        { ...GRAPHICS_FIXTURE, token: "abc" },
+        { webview2_runtime: "155.0.4283.45" },
+    ]) {
+        const runtime = createGraphicsRuntime();
+        const pending = runtime.window.remcord.graphics.getInfo();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "graphics_get_info");
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: true,
+                    payload: { type: "graphics_info", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /graphics response schema is invalid/);
+    }
+});
+
 test("mod.clearCache sends an exact empty payload and resolves the outcome", async () => {
     const { window } = createDiagnosticsRuntime();
     const pending = window.remcord.mod.clearCache();

@@ -35,6 +35,10 @@ pub const MAX_BRIDGE_MESSAGE_BYTES: usize =
     };
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_ERROR_BYTES: usize = 2 * 1024;
+/// Maximum bytes per graphics-probe summary string (device/feature facts
+/// reflected from the bounded host report; sized above the smoke script's
+/// 1024-character slice so multi-byte text never trips the bound).
+pub const MAX_GRAPHICS_PROBE_SUMMARY_BYTES: usize = 2048;
 pub const MAX_TRACKED_REQUEST_IDS: usize = 4096;
 /// Maximum logical mod bundle id length in UTF-8 bytes. Registry ids are
 /// short lowercase names (`"vencord"`); the bound mirrors the theme id cap.
@@ -76,6 +80,7 @@ pub enum BridgeCommand {
     QuickCssRead(QuickCssReadRequest),
     QuickCssWrite(QuickCssWriteRequest),
     DiagnosticsGetInfo(DiagnosticsGetInfoRequest),
+    GraphicsGetInfo(GraphicsGetInfoRequest),
     ModClearCache(ModClearCacheRequest),
     BackupSave(BackupSaveRequest),
     BackupInspect(BackupInspectRequest),
@@ -355,6 +360,18 @@ pub struct QuickCssWriteRequest {
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsGetInfoRequest {}
 
+/// Empty request for the `graphics.get_info` capability. Returns the
+/// CDP-backed graphics report from `crate::graphics` (WebView2 Runtime
+/// version, the exact additional browser arguments, the environment label,
+/// plus the `Browser.getVersion` / `System.getInfo` sections, each marked
+/// `measured`, `unsupported`, or `unavailable`). There are no
+/// renderer-supplied parameters by design: no method name, target, session,
+/// or detail flag — the two probed methods and their empty parameters are
+/// fixed at compile time. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphicsGetInfoRequest {}
+
 /// Empty request for the `mod.clear_cache` capability. Deletes the five
 /// host-managed downloaded bundle caches and resets the stored `modCache`
 /// map (`crate::mod_cache`). There are no renderer-supplied parameters by
@@ -518,6 +535,9 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the app-version smoke probe
     /// (`REMCORD_NATIVE_APP_VERSION_SMOKE=1`). Never sent by shipped code.
     AppVersionProbe(AppVersionProbe),
+    /// DEV-only diagnostic posted by the graphics smoke probe
+    /// (`REMCORD_NATIVE_GRAPHICS_SMOKE=1`). Never sent by shipped code.
+    GraphicsProbe(GraphicsProbe),
     /// DEV-only diagnostic posted by the plugin-storage smoke probe
     /// (`REMCORD_NATIVE_PLUGIN_STORAGE_SMOKE=1`). Never sent by shipped
     /// code.
@@ -756,6 +776,32 @@ pub struct GetLangProbe {
 pub struct AppVersionProbe {
     pub ok: bool,
     pub version: String,
+    pub error: Option<String>,
+}
+
+/// DEV-only report for the graphics smoke probe. `stage` is `"report"`
+/// (run the real `graphics.get_info` capability from the live document and
+/// reflect the bounded report back). `browser_status`/`system_status` carry
+/// the measured section outcomes (`measured`, `unsupported`, or
+/// `unavailable` — unsupported/unavailable sections are still a successful
+/// probe of runtime behavior); `device_count`/`feature_count` count the
+/// reported inventory; `device_summary`/`feature_summary` carry bounded
+/// parsed GPU facts only (never the raw command line, paths, or file
+/// contents). `ok` is true exactly when the facade call resolved with a
+/// shape-valid report.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphicsProbe {
+    pub ok: bool,
+    pub stage: String,
+    pub browser_status: String,
+    pub system_status: String,
+    pub device_count: usize,
+    pub feature_count: usize,
+    pub device_summary: String,
+    pub feature_summary: String,
+    pub webgl_status: String,
+    pub webgl_summary: String,
     pub error: Option<String>,
 }
 
@@ -1018,6 +1064,7 @@ pub enum BridgeResponsePayload {
     QuickCssRead(QuickCssReadResponse),
     QuickCssWritten(QuickCssWrittenResponse),
     DiagnosticsInfo(DiagnosticsInfoResponse),
+    GraphicsInfo(Box<crate::graphics::GraphicsInfoResponse>),
     ModCacheCleared(ModCacheClearedResponse),
     BackupSaved(BackupSavedResponse),
     BackupInspected(BackupInspectedResponse),
@@ -1563,10 +1610,14 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The facts live in `diagnostics` (host-owned
-                // version/runtime/profile/mode/mod facts); the cache roots
-                // and file allowlist live in `mod_cache`. Neither takes a
-                // selector, so there is nothing to validate.
-                BridgeCommand::DiagnosticsGetInfo(_) | BridgeCommand::ModClearCache(_) => {}
+                // version/runtime/profile/mode/mod facts); the graphics
+                // report lives in `graphics` (fixed CDP probes only, no
+                // renderer-selected method); the cache roots and file
+                // allowlist live in `mod_cache`. None takes a selector, so
+                // there is nothing to validate.
+                BridgeCommand::DiagnosticsGetInfo(_)
+                | BridgeCommand::GraphicsGetInfo(_)
+                | BridgeCommand::ModClearCache(_) => {}
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
@@ -1854,6 +1905,31 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         || payload.ok == payload.error.is_some()
                     {
                         return Err("invalid app version probe result".to_owned());
+                    }
+                }
+                BridgeEvent::GraphicsProbe(payload) => {
+                    if !matches!(payload.stage.as_str(), "report")
+                        || !matches!(
+                            payload.browser_status.as_str(),
+                            "measured" | "unsupported" | "unavailable"
+                        )
+                        || !matches!(
+                            payload.system_status.as_str(),
+                            "measured" | "unsupported" | "unavailable"
+                        )
+                        || payload.device_count > crate::graphics::MAX_GPU_DEVICES
+                        || payload.feature_count > crate::graphics::MAX_FEATURE_ENTRIES
+                        || payload.device_summary.len() > MAX_GRAPHICS_PROBE_SUMMARY_BYTES
+                        || payload.feature_summary.len() > MAX_GRAPHICS_PROBE_SUMMARY_BYTES
+                        || !matches!(payload.webgl_status.as_str(), "measured" | "unavailable")
+                        || payload.webgl_summary.len() > MAX_GRAPHICS_PROBE_SUMMARY_BYTES
+                        || payload
+                            .error
+                            .as_ref()
+                            .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid graphics probe result".to_owned());
                     }
                 }
                 BridgeEvent::PluginStorageProbe(payload) => {
@@ -3503,6 +3579,7 @@ mod tests {
         // host-owned state: any renderer-supplied member is rejected.
         for (wire, request_id) in [
             ("diagnostics_get_info", "diag-1"),
+            ("graphics_get_info", "gfx-1"),
             ("mod_clear_cache", "modcache-1"),
         ] {
             let message = format!(
@@ -3516,6 +3593,7 @@ mod tests {
             };
             let expected = match wire {
                 "diagnostics_get_info" => matches!(command, BridgeCommand::DiagnosticsGetInfo(_)),
+                "graphics_get_info" => matches!(command, BridgeCommand::GraphicsGetInfo(_)),
                 "mod_clear_cache" => matches!(command, BridgeCommand::ModClearCache(_)),
                 _ => unreachable!(),
             };
@@ -3527,8 +3605,13 @@ mod tests {
             r#"{"path":"C:\\secret"}"#,
             r#"{"detail":"full"}"#,
             r#"{"targets":["vencord.js"]}"#,
+            r#"{"method":"System.getInfo"}"#,
         ] {
-            for wire in ["diagnostics_get_info", "mod_clear_cache"] {
+            for wire in [
+                "diagnostics_get_info",
+                "graphics_get_info",
+                "mod_clear_cache",
+            ] {
                 let message = format!(
                     "{{\"version\":1,\"request_id\":\"x\",\"command\":{{\"type\":\"{wire}\",\"payload\":{payload}}}}}"
                 );
@@ -3940,6 +4023,38 @@ mod tests {
         assert!(parse_bridge_message(failed).is_ok());
         assert!(parse_bridge_message(&oversized).is_err());
         assert!(parse_bridge_message(inconsistent).is_err());
+    }
+
+    #[test]
+    fn validates_graphics_probe_diagnostics() {
+        let ok = r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":true,"stage":"report","browser_status":"measured","system_status":"measured","device_count":2,"feature_count":12,"device_summary":"ANGLE (Intel)","feature_summary":"webgl=hardware_accelerated","webgl_status":"measured","webgl_summary":"ANGLE (Intel)","error":null}}}"#;
+        let degraded = r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":true,"stage":"report","browser_status":"unavailable","system_status":"unsupported","device_count":0,"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":null}}}"#;
+        let failed = r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":false,"stage":"report","browser_status":"unavailable","system_status":"unavailable","device_count":0,"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":"timeout"}}}"#;
+        assert!(parse_bridge_message(ok).is_ok());
+        assert!(parse_bridge_message(degraded).is_ok());
+        assert!(parse_bridge_message(failed).is_ok());
+        // Unknown statuses, wrong stages, over-cap counts, oversized
+        // summaries, and ok/error inconsistency are all rejected.
+        for hostile in [
+            r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":true,"stage":"report","browser_status":"turbo","system_status":"measured","device_count":0,"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":null}}}"#.to_owned(),
+            r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":true,"stage":"begin","browser_status":"measured","system_status":"measured","device_count":0,"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":null}}}"#.to_owned(),
+            r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":true,"stage":"report","browser_status":"measured","system_status":"measured","device_count":0,"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"turbo","webgl_summary":"","error":null}}}"#.to_owned(),
+            format!(
+                r#"{{"version":1,"event":{{"type":"graphics_probe","payload":{{"ok":true,"stage":"report","browser_status":"measured","system_status":"measured","device_count":{},"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":null}}}}}}"#,
+                crate::graphics::MAX_GPU_DEVICES + 1
+            ),
+            format!(
+                r#"{{"version":1,"event":{{"type":"graphics_probe","payload":{{"ok":true,"stage":"report","browser_status":"measured","system_status":"measured","device_count":0,"feature_count":0,"device_summary":"{}","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":null}}}}}}"#,
+                "d".repeat(super::MAX_GRAPHICS_PROBE_SUMMARY_BYTES + 1)
+            ),
+            r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":true,"stage":"report","browser_status":"measured","system_status":"measured","device_count":0,"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":"extra"}}}"#.to_owned(),
+            r#"{"version":1,"event":{"type":"graphics_probe","payload":{"ok":false,"stage":"report","browser_status":"measured","system_status":"measured","device_count":0,"feature_count":0,"device_summary":"","feature_summary":"","webgl_status":"unavailable","webgl_summary":"","error":null}}}"#.to_owned(),
+        ] {
+            assert!(
+                parse_bridge_message(&hostile).is_err(),
+                "hostile probe must be rejected: {hostile}"
+            );
+        }
     }
 
     #[test]

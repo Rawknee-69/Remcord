@@ -54,6 +54,13 @@ pub const REMCORD_SCHEME_NAME: &str = "remcord";
 /// with a traced consumer behind the addition.
 pub const REMCORD_ALLOWED_ORIGINS: &[&str] = &["https://discord.com"];
 
+/// The exact additional browser arguments the host passes at environment
+/// creation (wry 0.57 parity: disables three Microsoft WebView2 UI features,
+/// nothing GPU-related). Shared with the graphics diagnostics report so the
+/// copied report states exactly what was requested — never a guess.
+pub const ADDITIONAL_BROWSER_ARGUMENTS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+
 /// Builds the `remcord` scheme registration with the fixed options above.
 pub fn build_scheme_registration() -> CoreWebView2CustomSchemeRegistration {
     let registration = CoreWebView2CustomSchemeRegistration::new(REMCORD_SCHEME_NAME.to_owned());
@@ -76,9 +83,7 @@ pub fn build_environment_options() -> CoreWebView2EnvironmentOptions {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
         // wry parity: the exact default additional-args string wry uses.
-        options.set_additional_browser_arguments(
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection".to_owned(),
-        );
+        options.set_additional_browser_arguments(ADDITIONAL_BROWSER_ARGUMENTS.to_owned());
         // wry parity: the user's system language.
         let lcid = GetUserDefaultUILanguage();
         let mut lang = [0; MAX_LOCALE_NAME as usize];

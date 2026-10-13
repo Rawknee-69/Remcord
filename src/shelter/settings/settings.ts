@@ -470,6 +470,182 @@ export async function getNativeDiagnosticsInfo(): Promise<NativeDiagnosticsInfo>
     return raw;
 }
 
+/** One GPU device from the host CDP report (`null` = not reported). */
+export interface NativeGraphicsDevice {
+    vendor_id: string | null;
+    device_id: string | null;
+    vendor_string: string | null;
+    device_string: string | null;
+    driver_version: string | null;
+}
+
+export interface NativeGraphicsFeature {
+    name: string;
+    status: string;
+}
+
+export interface NativeGraphicsBrowser {
+    status: "measured" | "unsupported" | "unavailable";
+    method: string;
+    product: string | null;
+    revision: string | null;
+    user_agent: string | null;
+    js_version: string | null;
+    protocol_version: string | null;
+    error: string | null;
+}
+
+export interface NativeGraphicsSystem {
+    status: "measured" | "unsupported" | "unavailable";
+    method: string;
+    model_name: string | null;
+    devices: NativeGraphicsDevice[];
+    feature_status: NativeGraphicsFeature[];
+    command_line_flags: string[];
+    disable_features: string | null;
+    enable_features: string | null;
+    error: string | null;
+}
+
+/** CDP-backed graphics report (read-only `graphics.get_info` contract). */
+export interface NativeGraphicsInfo {
+    webview2_runtime: string;
+    additional_browser_arguments: string;
+    environment: string;
+    browser: NativeGraphicsBrowser;
+    system: NativeGraphicsSystem;
+}
+
+interface NativeGraphicsNamespace {
+    getInfo: () => Promise<NativeGraphicsInfo>;
+}
+
+function nativeGraphics(): NativeGraphicsNamespace | undefined {
+    if (!isNativeWebView()) return undefined;
+    const graphics = (window.remcord as unknown as { graphics?: NativeGraphicsNamespace }).graphics;
+    if (!graphics || typeof graphics.getInfo !== "function") return undefined;
+    return graphics;
+}
+
+/** True when the CDP-backed native graphics report is the active path. */
+export function isNativeGraphicsAvailable(): boolean {
+    return nativeGraphics() !== undefined;
+}
+
+function isGraphicsStatus(value: unknown): value is NativeGraphicsBrowser["status"] {
+    return value === "measured" || value === "unsupported" || value === "unavailable";
+}
+
+function isGraphicsDevice(value: unknown): value is NativeGraphicsDevice {
+    if (!isRecord(value)) return false;
+    for (const key of ["vendor_id", "device_id", "vendor_string", "device_string", "driver_version"]) {
+        const entry = value[key];
+        if (entry !== null && typeof entry !== "string") return false;
+    }
+    return true;
+}
+
+function isGraphicsInfo(value: unknown): value is NativeGraphicsInfo {
+    if (!isRecord(value)) return false;
+    if (
+        typeof value.webview2_runtime !== "string" ||
+        typeof value.additional_browser_arguments !== "string" ||
+        typeof value.environment !== "string"
+    ) {
+        return false;
+    }
+    const browser = value.browser;
+    const system = value.system;
+    if (!isRecord(browser) || !isRecord(system)) return false;
+    if (!isGraphicsStatus(browser.status) || !isGraphicsStatus(system.status)) return false;
+    for (const key of ["product", "revision", "user_agent", "js_version", "protocol_version", "error"]) {
+        if (browser[key] !== null && typeof browser[key] !== "string") return false;
+    }
+    if (system.model_name !== null && typeof system.model_name !== "string") return false;
+    if (
+        !Array.isArray(system.devices) ||
+        !system.devices.every(isGraphicsDevice) ||
+        !Array.isArray(system.feature_status) ||
+        !system.feature_status.every(
+            (entry) => isRecord(entry) && typeof entry.name === "string" && typeof entry.status === "string",
+        ) ||
+        !Array.isArray(system.command_line_flags) ||
+        !system.command_line_flags.every((flag) => typeof flag === "string")
+    ) {
+        return false;
+    }
+    for (const key of ["disable_features", "enable_features", "error"]) {
+        if (system[key] !== null && typeof system[key] !== "string") return false;
+    }
+    return true;
+}
+
+/**
+ * Native CDP-backed graphics report. Shape-checked renderer-side (the host
+ * owns value validation; this only guards the UI against malformed bridge
+ * data). Rejects with a path-free Error on host failure or misshapen data.
+ */
+export async function getNativeGraphicsInfo(): Promise<NativeGraphicsInfo> {
+    const namespace = nativeGraphics();
+    if (!namespace) throw new Error("[Remcord] Native graphics diagnostics are unavailable.");
+    let raw: unknown;
+    try {
+        raw = await namespace.getInfo();
+    } catch {
+        throw new Error("[Remcord] Could not load graphics diagnostics in the native shell.");
+    }
+    if (!isGraphicsInfo(raw)) throw new Error("[Remcord] Could not load graphics diagnostics in the native shell.");
+    return raw;
+}
+
+/** Renderer-observed WebGL adapter string (`null` = unobservable). */
+export interface NativeWebGLObservation {
+    status: "measured" | "unavailable";
+    renderer: string | null;
+    error: string | null;
+}
+
+interface WebGLProbeContext {
+    getParameter: (name: number) => unknown;
+    getExtension: (name: string) => { UNMASKED_RENDERER_WEBGL: number } | null;
+    RENDERER: number;
+}
+
+/**
+ * Observes the active WebGL renderer string locally (no host call, no
+ * permissions): the UNMASKED_RENDERER_WEBGL adapter name when the debug
+ * extension is available, else the masked RENDERER value. An ANGLE string
+ * names the active adapter; a SwiftShader/software string would mean
+ * software rendering. Never throws: failures report as unavailable.
+ */
+export function observeWebGLRenderer(): NativeWebGLObservation {
+    try {
+        const canvas = document.createElement("canvas");
+        let context: WebGLProbeContext | null = null;
+        for (const kind of ["webgl2", "webgl", "experimental-webgl"] as const) {
+            const candidate = canvas.getContext(kind) as unknown as WebGLProbeContext | null;
+            if (candidate && typeof candidate.getParameter === "function") {
+                context = candidate;
+                break;
+            }
+        }
+        if (!context) return { status: "unavailable", renderer: null, error: "no WebGL context" };
+        const debugInfo = context.getExtension("WEBGL_debug_renderer_info");
+        const unmasked = debugInfo ? context.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : null;
+        const masked = context.getParameter(context.RENDERER);
+        const renderer =
+            typeof unmasked === "string" && unmasked.length > 0
+                ? unmasked
+                : typeof masked === "string" && masked.length > 0
+                  ? masked
+                  : null;
+        if (!renderer) return { status: "unavailable", renderer: null, error: "renderer string not reported" };
+        return { status: "measured", renderer: renderer.slice(0, 512), error: null };
+    } catch {
+        return { status: "unavailable", renderer: null, error: "observation failed" };
+    }
+}
+
 /**
  * Copies host diagnostics text to the clipboard through
  * `navigator.clipboard` (renderer-side write — no host clipboard surface).
@@ -479,22 +655,7 @@ export async function getNativeDiagnosticsInfo(): Promise<NativeDiagnosticsInfo>
 export async function copyNativeDiagnostics(kind: "debug" | "gpu"): Promise<boolean> {
     let text: string;
     try {
-        const info = await getNativeDiagnosticsInfo();
-        text =
-            kind === "gpu"
-                ? [
-                      `Graphics stack: WebView2 Runtime ${info.webview2_runtime}`,
-                      `Renderer: WebView2 (Chromium, system default settings)`,
-                      `App: Remcord ${info.app_version} (profile: ${info.profile_kind}, channel: ${info.channel})`,
-                  ].join("\n")
-                : [
-                      `Remcord ${info.app_version} (native WebView2 app)`,
-                      `WebView2 Runtime: ${info.webview2_runtime}`,
-                      `Profile: ${info.profile_kind}`,
-                      `Channel: ${info.channel}`,
-                      `CSP: ${info.csp}`,
-                      `Mods: ${info.mods.length > 0 ? info.mods.join(", ") : "(none)"}`,
-                  ].join("\n");
+        text = kind === "gpu" ? await buildNativeGraphicsText() : await buildNativeDebugText();
     } catch {
         console.warn("[Remcord] Could not load diagnostics in the native shell.");
         return false;
@@ -506,6 +667,105 @@ export async function copyNativeDiagnostics(kind: "debug" | "gpu"): Promise<bool
         console.warn("[Remcord] Could not write diagnostics to the clipboard.");
         return false;
     }
+}
+
+async function buildNativeDebugText(): Promise<string> {
+    const info = await getNativeDiagnosticsInfo();
+    return [
+        `Remcord ${info.app_version} (native WebView2 app)`,
+        `WebView2 Runtime: ${info.webview2_runtime}`,
+        `Profile: ${info.profile_kind}`,
+        `Channel: ${info.channel}`,
+        `CSP: ${info.csp}`,
+        `Mods: ${info.mods.length > 0 ? info.mods.join(", ") : "(none)"}`,
+    ].join("\n");
+}
+
+/** Static graphics text: used only when the CDP-backed probe is unavailable. */
+function legacyGraphicsText(info: NativeDiagnosticsInfo): string {
+    return [
+        `Graphics stack: WebView2 Runtime ${info.webview2_runtime}`,
+        `Renderer: WebView2 (Chromium, system default settings)`,
+        `App: Remcord ${info.app_version} (profile: ${info.profile_kind}, channel: ${info.channel})`,
+    ].join("\n");
+}
+
+/**
+ *Unavailable details for one probe section (`measured` sections never call
+ * this): the explicit status plus the bounded host reason when present.
+ */
+function graphicsSectionStatus(status: string, error: string | null): string {
+    return error ? `${status} (${error})` : status;
+}
+
+function formatNativeGraphicsText(
+    appVersion: string,
+    graphics: NativeGraphicsInfo,
+    webgl: NativeWebGLObservation,
+): string {
+    const lines = [
+        `Graphics report (Remcord ${appVersion}, WebView2 Runtime ${graphics.webview2_runtime})`,
+        `Environment: ${graphics.environment}`,
+        `Additional browser arguments: ${graphics.additional_browser_arguments || "(WebView2 defaults)"}`,
+    ];
+    const browser = graphics.browser;
+    if (browser.status === "measured") {
+        lines.push(`Browser (measured via Browser.getVersion): ${browser.product ?? "(product not reported)"}`);
+        if (browser.js_version) lines.push(`JS version: ${browser.js_version}`);
+    } else {
+        lines.push(`Browser details: ${graphicsSectionStatus(browser.status, browser.error)}`);
+    }
+    const system = graphics.system;
+    if (system.status === "measured") {
+        if (system.devices.length === 0) {
+            lines.push("GPUs (measured via System.getInfo): (no devices reported)");
+        } else {
+            system.devices.forEach((device, index) => {
+                const label = device.device_string ?? device.vendor_string ?? "(unnamed adapter)";
+                const ids = [device.vendor_id, device.device_id].filter((id) => id !== null).join(":");
+                lines.push(
+                    `GPU ${index}: ${label}${ids ? ` [${ids}]` : ""}${device.driver_version ? ` (driver ${device.driver_version})` : ""}`,
+                );
+            });
+        }
+        lines.push(
+            system.feature_status.length > 0
+                ? `Feature status: ${system.feature_status.map((entry) => `${entry.name}=${entry.status}`).join(", ")}`
+                : "Feature status: (not reported)",
+        );
+        lines.push(
+            `Active command-line flags: ${system.command_line_flags.length > 0 ? system.command_line_flags.join(", ") : "(none of the tracked GPU flags present)"}`,
+        );
+        if (system.disable_features) lines.push(`disable-features: ${system.disable_features}`);
+        if (system.enable_features) lines.push(`enable-features: ${system.enable_features}`);
+        lines.push("Note: adapter availability is not active utilization; light workloads need little GPU time.");
+    } else {
+        lines.push(`GPU details: ${graphicsSectionStatus(system.status, system.error)}`);
+    }
+    lines.push(
+        webgl.status === "measured"
+            ? `WebGL renderer (renderer-observed): ${webgl.renderer}`
+            : `WebGL renderer: unavailable (${webgl.error ?? "unknown"})`,
+    );
+    return lines.join("\n");
+}
+
+/**
+ * CDP-backed GPU copy text: the measured graphics report when the probe
+ * succeeds, the legacy static text when the probe or its namespace is
+ * unavailable. Never rejects for a probe failure — the click still copies
+ * the honest fallback.
+ */
+async function buildNativeGraphicsText(): Promise<string> {
+    const info = await getNativeDiagnosticsInfo();
+    const webgl = observeWebGLRenderer();
+    let graphics: NativeGraphicsInfo;
+    try {
+        graphics = await getNativeGraphicsInfo();
+    } catch {
+        return `${legacyGraphicsText(info)}\n${webgl.status === "measured" ? `WebGL renderer (renderer-observed): ${webgl.renderer}` : `WebGL renderer: unavailable (${webgl.error ?? "unknown"})`}`;
+    }
+    return formatNativeGraphicsText(info.app_version, graphics, webgl);
 }
 
 /**
