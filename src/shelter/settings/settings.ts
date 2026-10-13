@@ -408,7 +408,7 @@ export function describeScreenshareQualityStatus(selected: unknown): string {
     if (!status.active) {
         return `Selected: ${normalized}. This document captures with default behavior (no constraint).`;
     }
-    return `Selected: ${normalized}. This document targets up to ${status.width ?? "?"}x${status.height ?? "?"} at ${status.fps ?? "?"} FPS when sharing; Discord's stream-quality options are disabled while this target caps capture (clicking one explains how to revert). The actual captured size is logged to the console during sharing and may differ when WebView2 rejects the target.`;
+    return `Selected: ${normalized}. This document caps the sent Go Live stream at up to ${status.width ?? "?"}x${status.height ?? "?"} at ${status.fps ?? "?"} FPS (bitrate ceiling included) once sharing starts; Discord adapts below these maxima — Copy encoder stats shows the measured values. Discord's stream-quality options are disabled while this target is active (clicking one explains how to revert).`;
 }
 
 /** Measured-or-unavailable encoder readout for one local Go Live sender. */

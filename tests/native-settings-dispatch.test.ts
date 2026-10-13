@@ -1034,7 +1034,7 @@ test("screenshare quality status reports the frozen document status natively", a
         });
         assert.match(
             helpers.describeScreenshareQualityStatus("low"),
-            /targets up to 960x540 at 15 FPS.*actual captured size is logged/,
+            /caps the sent Go Live stream at up to 960x540 at 15 FPS/,
         );
         assert.match(helpers.describeScreenshareQualityStatus("low"), /Discord's stream-quality options are disabled/);
         // Default document: no constraint in effect.

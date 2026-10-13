@@ -524,7 +524,7 @@ export function SettingsPage() {
                         title={t["settings-screenshareQuality"] ?? "Screenshare quality"}
                         note={nativeNote(
                             t["settings-screenshareQuality-desc"] ??
-                                "Caps Discord screen-share capture at a lower target to reduce CPU and memory use. Targets apply only where WebView2 honors them and need a restart; Default keeps existing behavior exactly. While Balanced or Low is active, Discord's own stream-quality options are disabled (clicking one explains how to revert); set back to Default and restart for Discord-only control. Native app only — Electron keeps its own share picker.",
+                                "Caps the sent Go Live stream at a lower target (resolution, frame rate, bitrate ceiling) to reduce CPU and memory use. Applies at share start after a restart; Default leaves Discord fully in charge. Discord adapts below these maxima (e.g. on low bandwidth), so the sent size may be smaller — Copy encoder stats shows the measured values. While Balanced or Low is active, Discord's own stream-quality options are disabled where present. Native app only — Electron keeps its own share picker.",
                             "screenshareQuality",
                         )}
                         disabled={nativeOff("screenshareQuality")}
