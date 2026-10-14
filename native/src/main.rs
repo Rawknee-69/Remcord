@@ -1,4 +1,5 @@
 mod app;
+mod app_icon;
 mod arrpc;
 mod aux_windows;
 mod backup;
@@ -5986,6 +5987,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     // context menu ever stops suppressing.
     menus::validate_menu_contract()
         .map_err(|error| format!("menu contract is invalid: {error}"))?;
+    // F29: app icon rebrand — build/icon.{ico,png} carry the Remcord artwork
+    // shared by the exe embed, the Inno Setup icon, and the Linux packaging.
+    // Fail fast if the compiled-in copies are corrupt/reverted, and if the
+    // consumer inventory below drifts from the pinned table.
+    let icon_report = app_icon::validate_embedded_icons()
+        .map_err(|error| format!("app icon assets are invalid: {error}"))?;
+    println!(
+        "[Icon] rebranded assets ok: icon.ico {} bytes/{} images, icon.png {} bytes/{}x{}",
+        icon_report.ico_bytes,
+        icon_report.ico_images,
+        icon_report.png_bytes,
+        icon_report.png_width,
+        icon_report.png_height
+    );
+    app_icon::validate_icon_contract(
+        app_icon::ICON_ICO_REL_PATH,
+        app_icon::ICON_PNG_REL_PATH,
+        app_icon::ICON_CONSUMERS,
+    )
+    .map_err(|error| format!("app icon contract is invalid: {error}"))?;
     let mut web_context = WebContext::new(Some(profile_path.clone()));
     // Release blocker 4: Evergreen WebView2 Runtime prerequisite check,
     // before any WebView initialization. Supported loader lookup (default
