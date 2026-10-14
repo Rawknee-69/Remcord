@@ -89,6 +89,8 @@ pub enum BridgeCommand {
     DiagnosticsGetInfo(DiagnosticsGetInfoRequest),
     GraphicsGetInfo(GraphicsGetInfoRequest),
     ClipboardCopyImage(ClipboardCopyImageRequest),
+    DiagnosticsOpenWebrtcInternals(DiagnosticsOpenWebrtcInternalsRequest),
+    DiagnosticsOpenGpuPage(DiagnosticsOpenGpuPageRequest),
     ModClearCache(ModClearCacheRequest),
     SpellcheckGetState(SpellcheckGetStateRequest),
     BackupSave(BackupSaveRequest),
@@ -797,6 +799,21 @@ pub struct GraphicsGetInfoRequest {}
 pub struct ClipboardCopyImageRequest {
     pub url: String,
 }
+/// Empty request for the `diagnostics.open_webrtc_internals` capability.
+/// Opens (or focuses the live singleton of) the host-owned WebRTC internals
+/// diagnostics window (`crate::diagnostics_windows`). There are no
+/// renderer-supplied parameters by design: no page id, URL, size, or flag —
+/// the page is named by the wire type itself. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsOpenWebrtcInternalsRequest {}
+
+/// Empty request for the `diagnostics.open_gpu_page` capability. Opens (or
+/// focuses the live singleton of) the host-owned GPU diagnostics window.
+/// Same no-parameter contract as the WebRTC request above.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsOpenGpuPageRequest {}
 
 /// Empty request for the `mod.clear_cache` capability. Deletes the five
 /// host-managed downloaded bundle caches and resets the stored `modCache`
@@ -1608,6 +1625,7 @@ pub enum BridgeResponsePayload {
     RpcBlacklist(RpcBlacklistResponse),
     MenusTemplate(MenusTemplateResponse),
     BadgeState(BadgeStateResponse),
+    DiagnosticsWindowOpened(DiagnosticsWindowOpenedResponse),
     WindowAck(WindowAckResponse),
     WindowState(WindowStateResponse),
     TrayState(TrayGetStateResponse),
@@ -2286,6 +2304,16 @@ pub struct TrayGetStateResponse {
     pub available: bool,
     pub minimize_to_tray: bool,
     pub should_hide: bool,
+/// Acknowledgement for opening (or focusing) one diagnostics window
+/// (F25: WebRTC internals / GPU page). `page` echoes the closed page id
+/// (`webrtc-internals` / `gpu`) so one page's acknowledgement can never
+/// resolve the other page's call; `opened` vs `focused_existing` reports
+/// which singleton path was taken. No handle, URL, or geometry crosses.
+#[derive(Serialize)]
+pub struct DiagnosticsWindowOpenedResponse {
+    pub page: &'static str,
+    pub opened: bool,
+    pub focused_existing: bool,
 }
 
 /// Typed host-to-renderer window state event. Replaces Electron's
@@ -2619,6 +2647,9 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid clipboard image url".to_owned());
                     }
                 }
+                | BridgeCommand::DiagnosticsOpenWebrtcInternals(_)
+                | BridgeCommand::DiagnosticsOpenGpuPage(_)
+                | BridgeCommand::ModClearCache(_) => {}
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,

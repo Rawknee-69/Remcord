@@ -298,6 +298,10 @@
         "window_toggle_fullscreen",
         "window_quit",
     ];
+    // Exact diagnostics window pages the host can open (F25). The renderer
+    // cannot invent a page: each open wire type below names its page at the
+    // host, and the acknowledgement must echo one of these two ids.
+    const DIAGNOSTICS_WINDOW_PAGES = ["webrtc-internals", "gpu"];
     // Exact ValidMods union (src/@types/settings.d.ts). The renderer cannot
     // invent a mod id through this capability.
     const SETTINGS_VALID_MODS = ["vencord", "equicord", "custom", "shelter"];
@@ -915,6 +919,39 @@
             return Promise.reject(new TypeError("timeout must be a positive finite number"));
         }
         return request({ type: "tray_get_state", payload: {} }, timeoutMs);
+    }
+    // WebRTC internals window (Electron `settings.openWebRTCInternals`
+    // parity): fire-and-forget open-or-focus of the host-owned singleton.
+    // Exact empty payload in, the page ack out. The host owns geometry,
+    // title, URL, and lifecycle — no page, URL, size, or flag crosses.
+    function openWebRTCInternals(timeoutMs = 5000) {
+        requireCapability("diagnostics.open_webrtc_internals");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "diagnostics_open_webrtc_internals", payload: {} }, timeoutMs).then((payload) => {
+            // Page echo must name this call's page: one page's ack can never
+            // resolve the other page's call.
+            if (payload.page !== "webrtc-internals") {
+                throw new Error("Native diagnostics window response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
+    // GPU info window (Electron `settings.openGPUInfo` parity): same
+    // fire-and-forget singleton contract as the WebRTC page above.
+    function openGPUInfo(timeoutMs = 5000) {
+        requireCapability("diagnostics.open_gpu_page");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "diagnostics_open_gpu_page", payload: {} }, timeoutMs).then((payload) => {
+            if (payload.page !== "gpu") {
+                throw new Error("Native diagnostics window response schema is invalid");
+            }
+            return payload;
+        });
     }
 
     // Client-mod cache wipe: the five host-managed downloaded bundle
@@ -3184,6 +3221,23 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "diagnostics_window_opened") {
+            const payload = response.payload.payload;
+            // Page echo plus the singleton path flags only: exactly one of
+            // opened / focused_existing is true, and the page is one of the
+            // two closed ids. No handle, URL, or geometry may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                !DIAGNOSTICS_WINDOW_PAGES.includes(payload.page) ||
+                typeof payload.opened !== "boolean" ||
+                typeof payload.focused_existing !== "boolean" ||
+                payload.opened === payload.focused_existing
+            ) {
+                request.reject(new Error("Native diagnostics window response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "backup_saved") {
             const payload = response.payload.payload;
             // Bounded save outcome only: cancellation plus the final archive
@@ -3625,6 +3679,8 @@
         toggleKeybind,
         removeKeybind,
         listKeybinds,
+        openWebRTCInternals,
+        openGPUInfo,
     });
     const themesShim = Object.freeze({
         installFromCode: installThemeFromCode,

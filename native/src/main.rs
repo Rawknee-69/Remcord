@@ -12,6 +12,7 @@ mod close_behavior;
 mod css_watch;
 mod custom_bundle;
 mod diagnostics;
+mod diagnostics_windows;
 mod discord_protocol;
 mod download_manager;
 mod downloads;
@@ -100,8 +101,9 @@ use protocol::{
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse,
     BadgeStateResponse, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage,
     BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
-    ClipboardImageCopiedResponse, DiagnosticsInfoResponse, DownloadsFolderOpenedResponse,
-    DownloadsListResponse, DownloadsRevealedResponse, FoldersOpenedResponse, GalleryAddResponse,
+    ClipboardImageCopiedResponse, DiagnosticsInfoResponse, DiagnosticsWindowOpenedResponse,
+    DownloadsFolderOpenedResponse, DownloadsListResponse, DownloadsRevealedResponse,
+    FoldersOpenedResponse, GalleryAddResponse,
     GalleryBulkRemoveResponse, GalleryCategoriesResponse, GalleryCategoryAddResponse,
     GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse, GalleryFileResponse,
     GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse, GalleryUpdateResponse,
@@ -671,6 +673,8 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "quickcss.read",
         "quickcss.write",
         "diagnostics.get_info",
+        "diagnostics.open_webrtc_internals",
+        "diagnostics.open_gpu_page",
         "graphics.get_info",
         "clipboard.copy_image",
         "mod.clear_cache",
@@ -4287,6 +4291,77 @@ fn create_popup_child(
     })
 }
 
+/// One host-owned diagnostics window (F25). At most one per page lives at
+/// a time (Electron's `chromeInternalsWindows` map parity): reopening a
+/// live page focuses it, closing it drops the slot entry. The `WebView`
+/// field is never read — it exists to keep the child alive exactly as long
+/// as the slot; dropping the slot destroys the window.
+struct DiagnosticsWindow {
+    window: Arc<tao::window::Window>,
+    #[allow(dead_code)]
+    webview: WebView,
+    page: diagnostics_windows::DiagnosticPage,
+}
+
+/// Builds one diagnostics child window for `page`. Every option is
+/// host-owned: Electron-identical 1100x800 size with a 640x480 minimum,
+/// the Electron-identical title, and the page's primary internal URL.
+/// Deliberate leaf-surface simplifications vs the popup child (documented
+/// in `diagnostics_windows`): no facade/bridge script, no IPC handler, no
+/// download handlers, no process-failure/navigation observers, and a
+/// navigation allowlist limited to the two internal schemes plus
+/// `about:blank` (nested popups deny unconditionally). The child shares the
+/// main profile/session (same `WebContext` plus the same adopted
+/// `ICoreWebView2Environment`).
+fn create_diagnostics_window(
+    target: &tao::event_loop::EventLoopWindowTarget<NativeEvent>,
+    page: diagnostics_windows::DiagnosticPage,
+    web_context: &mut WebContext,
+    #[cfg(target_os = "windows")] environment: ICoreWebView2Environment,
+) -> Result<DiagnosticsWindow, String> {
+    let window = WindowBuilder::new()
+        .with_title(page.title())
+        .with_inner_size(Size::Logical(LogicalSize::new(
+            diagnostics_windows::WINDOW_WIDTH,
+            diagnostics_windows::WINDOW_HEIGHT,
+        )))
+        .with_min_inner_size(Size::Logical(LogicalSize::new(
+            diagnostics_windows::WINDOW_MIN_WIDTH,
+            diagnostics_windows::WINDOW_MIN_HEIGHT,
+        )))
+        .with_visible(false)
+        .build(target)
+        .map_err(|error| format!("diagnostics window failed: {error}"))?;
+    let window = Arc::new(window);
+    let mut builder = WebViewBuilder::new_with_web_context(web_context);
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.with_environment(environment);
+    }
+    let builder = builder
+        .with_url(page.primary_url())
+        .with_navigation_handler(|navigation_url| {
+            if diagnostics_windows::is_allowed_navigation(&navigation_url) {
+                return true;
+            }
+            println!("[Diagnostics][Navigation] block {navigation_url}");
+            false
+        })
+        .with_new_window_req_handler(|nested_url, _features| {
+            println!("[Diagnostics][Navigation] blocked nested popup: {nested_url}");
+            NewWindowResponse::Deny
+        });
+    let child_webview = builder
+        .build(&window)
+        .map_err(|error| format!("diagnostics webview failed: {error}"))?;
+    window.set_visible(true);
+    Ok(DiagnosticsWindow {
+        window,
+        webview: child_webview,
+        page,
+    })
+}
+
 /// Name of the dedicated STA worker thread that owns the theme import
 /// picker dialog plus the sequential bounded ingestion. The modal dialog
 /// must never run on the WebView/UI thread: COM is initialized exactly once
@@ -6790,6 +6865,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // about:blank / hidden ICS). Repeated requests focus the live child;
     // child close clears the slot; parent shutdown drops it via RAII.
     let mut popup_child: Option<PopupChild> = None;
+    // F25 diagnostics window slots: at most one live window per page
+    // (WebRTC internals + GPU), mirroring Electron's `chromeInternalsWindows`
+    // map. Reopening a live page focuses it; child close drops its entry;
+    // parent shutdown drops the slots via RAII.
+    let mut diagnostics_windows: Vec<DiagnosticsWindow> = Vec::new();
     // True once the main shutdown path has started (main-window
     // `CloseRequested` or renderer-initiated `window.quit`). Late
     // `ProcessFailed` records must not tear anything down afterwards.
@@ -6883,6 +6963,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     return;
                 }
+                // Diagnostics close drops that page's slot entry (Electron's
+                // map-delete on `closed` parity); the window destroys with it.
+                if let Some(index) = diagnostics_windows
+                    .iter()
+                    .position(|entry| entry.window.id() == window_id)
+                {
+                    let entry = diagnostics_windows.remove(index);
+                    println!(
+                        "[Diagnostics] window closed page={}; dropping slot entry",
+                        entry.page.id()
+                    );
+                    return;
+                }
                 println!("[Native] Close requested; shutting down WebView");
                 shutdown_started = true;
                 // F16: a debounced capture still inside its window must land
@@ -6956,6 +7049,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(token) = env_browser_exited_token.take() {
                         environment_observer::unregister(&webview_env, token);
                     }
+                }
+                // Diagnostics windows die with the application: drop the
+                // slots (destroying the windows) after the observers above.
+                if !diagnostics_windows.is_empty() {
+                    println!(
+                        "[Diagnostics] shutdown; dropping {} window(s)",
+                        diagnostics_windows.len()
+                    );
+                    diagnostics_windows.clear();
                 }
                 *control_flow = ControlFlow::Exit;
             }
@@ -10699,6 +10801,162 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 response_count += 1;
                             }
                         }
+                        BridgeCommand::DiagnosticsOpenWebrtcInternals(_) => {
+                            // Singleton open-or-focus for the WebRTC internals
+                            // window (Electron's map-focus path parity). The
+                            // request is parameter-free: the page is named by
+                            // the wire type, so there is nothing to validate.
+                            let request_id = request.request_id;
+                            let page = diagnostics_windows::DiagnosticPage::WebrtcInternals;
+                            if let Some(entry) =
+                                diagnostics_windows.iter().find(|entry| entry.page == page)
+                            {
+                                entry.window.set_visible(true);
+                                if entry.window.is_minimized() {
+                                    entry.window.set_minimized(false);
+                                }
+                                entry.window.set_focus();
+                                println!(
+                                    "[Diagnostics] page={} already open; focused live window",
+                                    page.id()
+                                );
+                                respond_diagnostics_window_opened(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &request_id,
+                                    diagnostics_windows::ack_for(page, false),
+                                    &received_at,
+                                );
+                                response_count += 1;
+                            } else {
+                                #[cfg(target_os = "windows")]
+                                let environment = popup_environment.clone();
+                                match create_diagnostics_window(
+                                    target,
+                                    page,
+                                    &mut web_context,
+                                    #[cfg(target_os = "windows")]
+                                    environment,
+                                ) {
+                                    Ok(child) => {
+                                        println!(
+                                            "[Diagnostics] page={} opened: {}",
+                                            page.id(),
+                                            page.primary_url()
+                                        );
+                                        diagnostics_windows.push(child);
+                                        respond_diagnostics_window_opened(
+                                            &webview,
+                                            &mut request_tracker,
+                                            &request_id,
+                                            diagnostics_windows::ack_for(page, true),
+                                            &received_at,
+                                        );
+                                        response_count += 1;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "[Diagnostics][DIAGNOSTICS_WINDOW_UNAVAILABLE] {error}"
+                                        );
+                                        let response = BridgeResponse {
+                                            version: PROTOCOL_VERSION,
+                                            request_id: request_id.clone(),
+                                            ok: false,
+                                            payload: None,
+                                            error: Some(BridgeError {
+                                                code: "DIAGNOSTICS_WINDOW_UNAVAILABLE",
+                                                message: "the diagnostics window could not be opened"
+                                                    .to_owned(),
+                                            }),
+                                        };
+                                        send_bridge_response(&webview, &response);
+                                        if let Err(error) = request_tracker.complete(&request_id) {
+                                            eprintln!(
+                                                "[Bridge] correlation failure after response: {error}"
+                                            );
+                                        }
+                                        response_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                        BridgeCommand::DiagnosticsOpenGpuPage(_) => {
+                            // Singleton open-or-focus for the GPU page window.
+                            // Same parameter-free contract as the WebRTC arm.
+                            let request_id = request.request_id;
+                            let page = diagnostics_windows::DiagnosticPage::Gpu;
+                            if let Some(entry) =
+                                diagnostics_windows.iter().find(|entry| entry.page == page)
+                            {
+                                entry.window.set_visible(true);
+                                if entry.window.is_minimized() {
+                                    entry.window.set_minimized(false);
+                                }
+                                entry.window.set_focus();
+                                println!(
+                                    "[Diagnostics] page={} already open; focused live window",
+                                    page.id()
+                                );
+                                respond_diagnostics_window_opened(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &request_id,
+                                    diagnostics_windows::ack_for(page, false),
+                                    &received_at,
+                                );
+                                response_count += 1;
+                            } else {
+                                #[cfg(target_os = "windows")]
+                                let environment = popup_environment.clone();
+                                match create_diagnostics_window(
+                                    target,
+                                    page,
+                                    &mut web_context,
+                                    #[cfg(target_os = "windows")]
+                                    environment,
+                                ) {
+                                    Ok(child) => {
+                                        println!(
+                                            "[Diagnostics] page={} opened: {}",
+                                            page.id(),
+                                            page.primary_url()
+                                        );
+                                        diagnostics_windows.push(child);
+                                        respond_diagnostics_window_opened(
+                                            &webview,
+                                            &mut request_tracker,
+                                            &request_id,
+                                            diagnostics_windows::ack_for(page, true),
+                                            &received_at,
+                                        );
+                                        response_count += 1;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "[Diagnostics][DIAGNOSTICS_WINDOW_UNAVAILABLE] {error}"
+                                        );
+                                        let response = BridgeResponse {
+                                            version: PROTOCOL_VERSION,
+                                            request_id: request_id.clone(),
+                                            ok: false,
+                                            payload: None,
+                                            error: Some(BridgeError {
+                                                code: "DIAGNOSTICS_WINDOW_UNAVAILABLE",
+                                                message: "the diagnostics window could not be opened"
+                                                    .to_owned(),
+                                            }),
+                                        };
+                                        send_bridge_response(&webview, &response);
+                                        if let Err(error) = request_tracker.complete(&request_id) {
+                                            eprintln!(
+                                                "[Bridge] correlation failure after response: {error}"
+                                            );
+                                        }
+                                        response_count += 1;
+                                    }
+                                }
+                            }
+                        }
                         BridgeCommand::ModClearCache(_) => {
                             // Client-mod cache wipe: the five host-managed
                             // downloaded bundle caches plus the stored
@@ -13270,6 +13528,42 @@ mod tests {
             Some("badge-10.ico")
         );
         assert_eq!(crate::badge::parse_title("Discord").asset, None);
+    }
+
+    #[test]
+    fn f25_diagnostics_windows_register_fire_and_forget_capabilities() {
+        // Both Electron-parity open actions exist in the boot snapshot; the
+        // renderer supplies nothing (parameter-free wire types named by the
+        // command itself), and the settings shim exposes Electron's exact
+        // member names (`bridge.ts` parity) for the existing buttons.
+        for capability in [
+            "diagnostics.open_webrtc_internals",
+            "diagnostics.open_gpu_page",
+        ] {
+            assert!(super::BOOT_SNAPSHOT.capabilities.contains(&capability));
+        }
+        assert!(super::COMPATIBILITY_SCRIPT.contains("openWebRTCInternals"));
+        assert!(super::COMPATIBILITY_SCRIPT.contains("openGPUInfo"));
+        assert!(super::COMPATIBILITY_SCRIPT.contains("diagnostics_open_webrtc_internals"));
+        assert!(super::COMPATIBILITY_SCRIPT.contains("diagnostics_open_gpu_page"));
+        // The closed page set mirrors Electron's two-entry map exactly: no
+        // generic window-open capability rides alongside.
+        assert_eq!(
+            super::BOOT_SNAPSHOT
+                .capabilities
+                .iter()
+                .filter(|capability| capability.starts_with("diagnostics.open_"))
+                .count(),
+            2
+        );
+        // Geometry stays Electron-identical at the source of truth.
+        assert_eq!(
+            (
+                crate::diagnostics_windows::WINDOW_WIDTH,
+                crate::diagnostics_windows::WINDOW_HEIGHT
+            ),
+            (1100.0, 800.0)
+        );
     }
 
     #[test]

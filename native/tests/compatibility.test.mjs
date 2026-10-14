@@ -8153,3 +8153,119 @@ test("the badge observer never breaks page scripting", () => {
     runtime.fireMutations();
     assert.deepEqual(badgeTitles(runtime.window), [""]);
 });
+
+test("F25 exposes the two diagnostics window openers on settings with Electron member names", () => {
+    const { window } = createRuntime("https://discord.com", [
+        "bridge.ping",
+        "diagnostics.open_webrtc_internals",
+        "diagnostics.open_gpu_page",
+    ]);
+    assert.equal(typeof window.remcord.settings.openWebRTCInternals, "function");
+    assert.equal(typeof window.remcord.settings.openGPUInfo, "function");
+    assert.equal(Object.isFrozen(window.remcord.settings), true);
+    assert.equal(window.remcord.native.supports("diagnostics.open_webrtc_internals"), true);
+    assert.equal(window.remcord.native.supports("diagnostics.open_gpu_page"), true);
+    // No generic window-open surface: exactly the two closed pages.
+    assert.equal(window.remcord.settings.openWindow, undefined);
+    assert.equal(window.remcord.settings.openUrl, undefined);
+    assert.equal(window.remcord.settings.openDiagnostics, undefined);
+});
+
+function respondDiagnosticsWindow(window, request, page) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "diagnostics_window_opened",
+                    payload: { page, opened: true, focused_existing: false },
+                },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("F25 openers send exact empty payloads and resolve the page ack", async () => {
+    const { window } = createRuntime("https://discord.com", [
+        "bridge.ping",
+        "diagnostics.open_webrtc_internals",
+        "diagnostics.open_gpu_page",
+    ]);
+    const webrtc = window.remcord.settings.openWebRTCInternals();
+    const gpu = window.remcord.settings.openGPUInfo();
+    assert.ok(webrtc instanceof Promise);
+    assert.ok(gpu instanceof Promise);
+    const commands = window.messages.filter((message) => message.command).map((message) => message.command);
+    assert.deepEqual(commands, [
+        { type: "diagnostics_open_webrtc_internals", payload: {} },
+        { type: "diagnostics_open_gpu_page", payload: {} },
+    ]);
+    const requests = window.messages.filter((message) => message.command);
+    respondDiagnosticsWindow(window, requests[0], "webrtc-internals");
+    respondDiagnosticsWindow(window, requests[1], "gpu");
+    assert.deepEqual(await webrtc, { page: "webrtc-internals", opened: true, focused_existing: false });
+    assert.deepEqual(await gpu, { page: "gpu", opened: true, focused_existing: false });
+});
+
+test("F25 openers throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "diagnostics.open_gpu_page"]);
+    assert.equal(window.remcord.native.supports("diagnostics.open_webrtc_internals"), false);
+    assert.throws(
+        () => window.remcord.settings.openWebRTCInternals(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "diagnostics_open_webrtc_internals"),
+        false,
+    );
+});
+
+test("F25 openers reject malformed or cross-page acknowledgements", async () => {
+    for (const payload of [
+        { page: "webrtc-internals", opened: true, focused_existing: true },
+        { page: "webrtc-internals", opened: false, focused_existing: false },
+        { page: "gpu", opened: "yes", focused_existing: false },
+        { page: "GPU", opened: true, focused_existing: false },
+        { page: "edge://gpu/", opened: true, focused_existing: false },
+        { page: "webrtc-internals", opened: true },
+        { opened: true, focused_existing: false },
+        { page: "webrtc-internals", opened: true, focused_existing: false, url: "edge://gpu/" },
+        { page: "webrtc-internals", opened: true, focused_existing: false, handle: 1234 },
+    ]) {
+        const runtime = createRuntime("https://discord.com", ["bridge.ping", "diagnostics.open_webrtc_internals"]);
+        const pending = runtime.window.remcord.settings.openWebRTCInternals();
+        const message = runtime.window.messages.find(
+            (entry) => entry.command?.type === "diagnostics_open_webrtc_internals",
+        );
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: true,
+                    payload: { type: "diagnostics_window_opened", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /diagnostics window response schema is invalid/);
+    }
+    // A cross-page ack never resolves the other page's call.
+    const runtime = createRuntime("https://discord.com", ["bridge.ping", "diagnostics.open_gpu_page"]);
+    const pending = runtime.window.remcord.settings.openGPUInfo();
+    const message = runtime.window.messages.find((entry) => entry.command?.type === "diagnostics_open_gpu_page");
+    respondDiagnosticsWindow(runtime.window, message, "webrtc-internals");
+    await assert.rejects(pending, /diagnostics window response schema is invalid/);
+});
+
+test("F25 openers stay inert off the trusted origin", () => {
+    const { window } = createRuntime("https://attacker.invalid", [
+        "bridge.ping",
+        "diagnostics.open_webrtc_internals",
+        "diagnostics.open_gpu_page",
+    ]);
+    assert.equal(window.remcord, undefined);
+});
