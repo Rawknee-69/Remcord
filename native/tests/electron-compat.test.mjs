@@ -1819,3 +1819,37 @@ test("F4 in-mod settings UI stays Electron-owned with no native src branch", () 
     assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
     assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
 });
+
+test("F25 keeps the Electron chrome-internals owners and mirrors them natively", () => {
+    // Electron owns the windows: the singleton map, the two internal URLs,
+    // geometry, and titles all live in `src/discord/ipc.ts`, triggered by
+    // the fire-and-forget preload members the Settings page buttons call.
+    assert.match(ipc, /chromeInternalsWindows/);
+    assert.match(ipc, /chrome:\/\/webrtc-internals\//);
+    assert.match(ipc, /chrome:\/\/gpu\//);
+    assert.match(ipc, /openChromeInternalsPage\("chrome:\/\/webrtc-internals\/", "WebRTC Internals"\)/);
+    assert.match(ipc, /openChromeInternalsPage\("chrome:\/\/gpu\/", "GPU"\)/);
+    assert.match(bridge, /openWebRTCInternals: \(\) => ipcRenderer\.send\("openWebRTCInternals"\)/);
+    assert.match(bridge, /openGPUInfo: \(\) => ipcRenderer\.send\("openGPUInfo"\)/);
+    assert.match(settingsPage, /onClick=\{window\.remcord\.settings\.openWebRTCInternals\}/);
+    assert.match(settingsPage, /onClick=\{window\.remcord\.settings\.openGPUInfo\}/);
+    // No native diagnostics-window branch may appear in the Electron sources.
+    for (const source of [ipc, bridge, settingsPage]) {
+        assert.doesNotMatch(source, /diagnostics_windows|diagnostics_open_|edge:\/\//);
+    }
+    // The native contract mirrors the same surface from the host side:
+    // closed page ids, Electron-identical geometry/titles, internal-only
+    // start URLs, singleton open-or-focus, and the two typed capabilities
+    // behind the renderer's existing member names.
+    const diagnosticsWindows = readFileSync(new URL("../src/diagnostics_windows.rs", import.meta.url), "utf8");
+    assert.match(diagnosticsWindows, /WEBRTC_PAGE_ID: &str = "webrtc-internals"/);
+    assert.match(diagnosticsWindows, /GPU_PAGE_ID: &str = "gpu"/);
+    assert.match(diagnosticsWindows, /WINDOW_WIDTH: f64 = 1100\.0/);
+    assert.match(diagnosticsWindows, /WINDOW_HEIGHT: f64 = 800\.0/);
+    assert.match(diagnosticsWindows, /WINDOW_MIN_WIDTH: f64 = 640\.0/);
+    assert.match(diagnosticsWindows, /WINDOW_MIN_HEIGHT: f64 = 480\.0/);
+    assert.match(diagnosticsWindows, /WEBRTC_TITLE: &str = "WebRTC Internals"/);
+    assert.match(diagnosticsWindows, /GPU_TITLE: &str = "GPU"/);
+    assert.match(diagnosticsWindows, /WEBRTC_URL: &str = "edge:\/\/webrtc-internals\/"/);
+    assert.match(diagnosticsWindows, /GPU_URL: &str = "edge:\/\/gpu\/"/);
+});
