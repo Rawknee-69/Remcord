@@ -118,8 +118,8 @@ test("the closed settings.set allowlist is a deliberate separate path", () => {
     // The gate reuses the existing environment check plus function presence.
     assert.match(shelterSettings, /export function isNativeSettingsSetAvailable/);
     assert.match(shelterSettings, /export async function setNativeSetting/);
-    // Eight wire keys: mods, three side-effect-free flags, csp, quickCss,
-    // channel, and screenshare_quality (each with a traced native consumer).
+    // Seven wire keys: mods, three side-effect-free flags, csp, quickCss,
+    // and channel (each with a traced native consumer).
     assert.match(shelterSettings, /mods: "mods"/);
     assert.match(shelterSettings, /supportBannerDismissed: "support_banner_dismissed"/);
     assert.match(shelterSettings, /showExperimentalPluginMenu: "show_experimental_plugin_menu"/);
@@ -127,7 +127,6 @@ test("the closed settings.set allowlist is a deliberate separate path", () => {
     assert.match(shelterSettings, /csp: "csp"/);
     assert.match(shelterSettings, /quickCss: "quick_css"/);
     assert.match(shelterSettings, /channel: "channel"/);
-    assert.match(shelterSettings, /screenshareQuality: "screenshare_quality"/);
     // No Electron-only or unsafe key may enter the map.
     assert.doesNotMatch(shelterSettings, /minimizeToTray|proxyRules|customIcon|additionalArguments|keybinds/);
     // toggleMod keeps the mutual-exclusion shape and branches per shell.

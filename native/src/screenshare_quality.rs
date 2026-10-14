@@ -19,23 +19,6 @@
 //!   without touching `getDisplayMedia`.
 //! - **Balanced** (`"balanced"`): targets up to 1280x720 at 30 FPS.
 //! - **Low resource** (`"low"`): targets up to 960x540 at 15 FPS.
-//! - **Ultra low** (`"ultra-low"`): targets up to 256x144 at 15 FPS.
-//! - **Full HD** (`"full-hd"`): targets up to 1920x1080 at 30 FPS.
-//! - **Quad HD** (`"quad-hd"`): targets up to 2560x1440 at 30 FPS.
-//! - **Ultra HD** (`"ultra-hd"`): targets up to 3840x2160 at 30 FPS.
-//!
-//! Ceilings above the shared source change nothing (Discord adapts below
-//! maxima anyway); they exist so high-end setups can pin a ceiling instead
-//! of leaving the choice fully to Discord. All presets above Low are 30
-//! FPS; the two low tiers are 15 FPS to cut capture/encode cost harder.
-//!
-//! Active modes also carry a Discord-picker guard: Discord keeps its own
-//! stream-quality picker, which the capture target would silently cap, so
-//! quality-looking controls inside overlay dialogs are visibly disabled and
-//! attempting one shows a toast naming the remedy (Settings → Screenshare
-//! quality → Default + restart). The guard is best-effort and fail-open:
-//! unknown Discord markup simply never matches, and any error drops our
-//! marks and stops — sharing itself is never affected.
 //!
 //! Safety properties (all pinned by tests):
 //!
@@ -51,11 +34,8 @@
 //!   original stream — sharing never breaks because the mode is on.
 //! - Installation is idempotent per document (a `Symbol.for` registry entry,
 //!   mirroring `displayMediaPatch.ts`): repeated shares never stack wrappers.
-//! - `"default"` carries no capture, DOM, timer, observer, or listener code
-//!   at all (structurally inert, not just branched off). Active modes add
-//!   exactly one delegated capture-phase click listener, one
-//!   `MutationObserver` over overlay dialogs, and one toast-dismiss timer —
-//!   still no intervals, network, storage, bridge, or eval surface. Nothing
+//! - No timers, intervals, observers, event subscriptions, network, storage,
+//!   bridge, or eval surface. The constraints promise settles once; nothing
 //!   is retained across share/stop cycles beyond the idempotent wrapper.
 //! - The frozen `window.__remcordScreenshareQuality` status global
 //!   (`{ mode, active, width, height, fps }`) states the actual mode and
@@ -64,62 +44,29 @@
 //! - Requested constraints are NOT reported as achieved: the script logs the
 //!   observed `getSettings()` values (actual width/height/frameRate) and
 //!   warns when capture remains larger than 1.25x the target.
-//! - The guard never invents UI text from page content: the toast is a fixed
-//!   host string with `textContent` only (no `innerHTML`), and locked
-//!   controls are marked with an explicit `data-` attribute plus
-//!   `aria-disabled`, so unrelated Discord UI is never touched.
 
 /// Closed mode vocabulary. The renderer can never invent a mode: unknown
-/// input normalizes to [`DEFAULT_MODE`]. `low`/`balanced` keep their exact
-/// ids so existing profiles survive the preset expansion.
-pub const VALID_SCREENSHARE_QUALITY_MODES: &[&str] = &[
-    "default",
-    "ultra-low",
-    "low",
-    "balanced",
-    "full-hd",
-    "quad-hd",
-    "ultra-hd",
-];
+/// input normalizes to [`DEFAULT_MODE`].
+pub const VALID_SCREENSHARE_QUALITY_MODES: &[&str] = &["default", "balanced", "low"];
 /// Preserves the existing Discord/WebView2 capture behavior. No wrapping.
 pub const DEFAULT_MODE: &str = "default";
-/// Targets up to 256x144 at 15 FPS through the existing capture path.
-pub const ULTRA_LOW_MODE: &str = "ultra-low";
 /// Targets up to 1280x720 at 30 FPS through the existing capture path.
 pub const BALANCED_MODE: &str = "balanced";
 /// Targets up to 960x540 at 15 FPS through the existing capture path.
 pub const LOW_MODE: &str = "low";
-/// Targets up to 1920x1080 at 30 FPS through the existing capture path.
-pub const FULL_HD_MODE: &str = "full-hd";
-/// Targets up to 2560x1440 at 30 FPS through the existing capture path.
-pub const QUAD_HD_MODE: &str = "quad-hd";
-/// Targets up to 3840x2160 at 30 FPS through the existing capture path.
-pub const ULTRA_HD_MODE: &str = "ultra-hd";
 
-/// Ultra-low target: 256x144 at 15 FPS.
-pub const ULTRA_LOW_TARGET: (u32, u32, u32) = (256, 144, 15);
 /// Balanced target: 1280x720 at 30 FPS.
 pub const BALANCED_TARGET: (u32, u32, u32) = (1280, 720, 30);
 /// Low-resource target: 960x540 at 15 FPS.
 pub const LOW_TARGET: (u32, u32, u32) = (960, 540, 15);
-/// Full-HD target: 1920x1080 at 30 FPS.
-pub const FULL_HD_TARGET: (u32, u32, u32) = (1920, 1080, 30);
-/// Quad-HD target: 2560x1440 at 30 FPS.
-pub const QUAD_HD_TARGET: (u32, u32, u32) = (2560, 1440, 30);
-/// Ultra-HD target: 3840x2160 at 30 FPS.
-pub const ULTRA_HD_TARGET: (u32, u32, u32) = (3840, 2160, 30);
 
 /// Normalize one raw mode string to the closed vocabulary. Empty, unknown,
 /// or differently-cased input fails safe to [`DEFAULT_MODE`]: an unrecognized
 /// value must never alter capture behavior.
 pub fn normalize_mode(raw: &str) -> &'static str {
     match raw {
-        "ultra-low" => ULTRA_LOW_MODE,
         "balanced" => BALANCED_MODE,
         "low" => LOW_MODE,
-        "full-hd" => FULL_HD_MODE,
-        "quad-hd" => QUAD_HD_MODE,
-        "ultra-hd" => ULTRA_HD_MODE,
         _ => DEFAULT_MODE,
     }
 }
@@ -128,12 +75,8 @@ pub fn normalize_mode(raw: &str) -> &'static str {
 /// `None` for [`DEFAULT_MODE`] (no constraining).
 pub fn constraint_target(mode: &str) -> Option<(u32, u32, u32)> {
     match normalize_mode(mode) {
-        ULTRA_LOW_MODE => Some(ULTRA_LOW_TARGET),
         BALANCED_MODE => Some(BALANCED_TARGET),
         LOW_MODE => Some(LOW_TARGET),
-        FULL_HD_MODE => Some(FULL_HD_TARGET),
-        QUAD_HD_MODE => Some(QUAD_HD_TARGET),
-        ULTRA_HD_MODE => Some(ULTRA_HD_TARGET),
         _ => None,
     }
 }
@@ -144,10 +87,6 @@ const MODE_PLACEHOLDER: &str = "__REMCORD_SCREENSHARE_QUALITY_MODE__";
 /// the empty string (`"default"`: the script then carries no capture code at
 /// all, so existing behavior is preserved structurally, not just by branch).
 const WRAPPER_PLACEHOLDER: &str = "__REMCORD_SCREENSHARE_QUALITY_WRAPPER__";
-/// Placeholder the host replaces with the Discord-picker guard (active
-/// modes) or the empty string (`"default"`: the script then carries no DOM,
-/// timer, observer, or listener code at all).
-const GUARD_PLACEHOLDER: &str = "__REMCORD_SCREENSHARE_QUALITY_GUARD__";
 
 /// Fixed document-start script. The ONLY host-supplied value is the mode
 /// (spliced as JSON, so it is always a quoted string literal).
@@ -156,12 +95,8 @@ const SCREENSHARE_QUALITY_SCRIPT_TEMPLATE: &str = r#"(() => {
   const mode = __REMCORD_SCREENSHARE_QUALITY_MODE__;
   const ENTRY_ORIGINS = ["https://discord.com", "https://canary.discord.com", "https://ptb.discord.com"];
   const TARGETS = {
-    "ultra-low": { width: 256, height: 144, fps: 15 },
     balanced: { width: 1280, height: 720, fps: 30 },
-    low: { width: 960, height: 540, fps: 15 },
-    "full-hd": { width: 1920, height: 1080, fps: 30 },
-    "quad-hd": { width: 2560, height: 1440, fps: 30 },
-    "ultra-hd": { width: 3840, height: 2160, fps: 30 }
+    low: { width: 960, height: 540, fps: 15 }
   };
   const publishStatus = (active, target) => {
     try {
@@ -187,7 +122,7 @@ const SCREENSHARE_QUALITY_SCRIPT_TEMPLATE: &str = r#"(() => {
     return;
   }
   publishStatus(true, target);
-__REMCORD_SCREENSHARE_QUALITY_WRAPPER____REMCORD_SCREENSHARE_QUALITY_GUARD__})();"#;
+__REMCORD_SCREENSHARE_QUALITY_WRAPPER__})();"#;
 
 /// Capture wrapper appended only for active modes. Calls the ORIGINAL
 /// `getDisplayMedia` first (picker/consent untouched), then constrains the
@@ -248,169 +183,23 @@ const SCREENSHARE_QUALITY_WRAPPER: &str = r#"  const mediaDevices = navigator.me
   mediaDevices.getDisplayMedia = wrapper;
 "#;
 
-/// Discord-picker guard appended only for active modes. Discord keeps its
-/// own stream-quality picker, which the capture target above would silently
-/// cap, so quality-looking controls inside overlay dialogs are visibly
-/// disabled (`data-` marker + `aria-disabled` + dimming + explanatory title;
-/// native controls additionally get `disabled`). One delegated
-/// capture-phase click listener intercepts attempts on marked controls and
-/// shows a fixed-text toast (`textContent` only, auto-dismissed) naming the
-/// remedy; one `MutationObserver` watches for overlay dialogs because the
-/// Go Live modal opens long after document-start. Best-effort and fail-open
-/// throughout: unknown Discord markup never matches, and every block is
-/// wrapped so an error drops our marks and stops without affecting sharing.
-const SCREENSHARE_QUALITY_GUARD: &str = r#"  const LOCK_ATTR = "data-remcord-quality-locked";
-  const TOAST_ATTR = "data-remcord-quality-toast";
-  const OVERLAY_SELECTOR = '[role="dialog"], [role="alertdialog"], [aria-modal="true"]';
-  const QUALITY_LABEL = /resolution|frame rate|frame-rate|\bfps\b|stream quality|video quality/i;
-  const QUALITY_OPTION = /^\d{3,4}p(\s+\d{1,3}\s?fps)?$|^source$|^\d{1,3}\s?fps$/i;
-  const lockToastText = function (reason) {
-    return "Remcord '" + mode + "' screen-share capture is on (target " +
-      target.width + "x" + target.height + "@" + target.fps + "): " +
-      "Discord's stream quality options are disabled while this target caps capture. " +
-      "Set Remcord Settings to Screenshare quality Default and restart " +
-      "to use Discord's quality options. (" + reason + ")";
-  };
-  const showLockToast = function (reason) {
-    try {
-      const old = document.querySelector("[" + TOAST_ATTR + "]");
-      if (old && old.remove) old.remove();
-      const toast = document.createElement("div");
-      toast.setAttribute(TOAST_ATTR, "1");
-      toast.setAttribute("role", "status");
-      toast.textContent = lockToastText(reason);
-      try {
-        toast.style.cssText = "position:fixed;left:50%;bottom:48px;transform:translateX(-50%);max-width:520px;background:#1e1f22;color:#dbdee1;border:1px solid #4e5058;border-radius:8px;padding:12px 16px;font-size:14px;z-index:9999;";
-      } catch {
-      }
-      (document.body || document.documentElement).appendChild(toast);
-      setTimeout(function () {
-        try {
-          if (toast.remove) toast.remove();
-        } catch {
-        }
-      }, 6000);
-    } catch {
-    }
-  };
-  const lockControl = function (el) {
-    try {
-      if (!el || el.nodeType !== 1 || el.hasAttribute(LOCK_ATTR)) return;
-      el.setAttribute(LOCK_ATTR, "1");
-      el.setAttribute("aria-disabled", "true");
-      try {
-        el.style.opacity = "0.5";
-      } catch {
-      }
-      try {
-        el.title = "Disabled by Remcord '" + mode + "' capture target; set Screenshare quality to Default and restart to re-enable.";
-      } catch {
-      }
-      if (typeof el.disabled === "boolean") {
-        try {
-          el.disabled = true;
-        } catch {
-        }
-      }
-    } catch {
-    }
-  };
-  const scanOverlay = function (root) {
-    try {
-      if (!root || root.nodeType !== 1) return;
-      const text = (root.textContent || "").slice(0, 4000);
-      if (!QUALITY_LABEL.test(text)) return;
-      const controls = root.querySelectorAll('select, [role="combobox"], [role="listbox"], [role="option"], button, [role="button"]');
-      for (const el of controls) {
-        const label = (el.textContent || "").trim().slice(0, 64);
-        if (QUALITY_OPTION.test(label) || QUALITY_LABEL.test(label)) lockControl(el);
-      }
-    } catch {
-    }
-  };
-  try {
-    document.addEventListener("click", function (event) {
-      try {
-        const origin = event && event.target;
-        const locked = origin && origin.closest ? origin.closest("[" + LOCK_ATTR + "]") : null;
-        if (!locked || !locked.isConnected) return;
-        event.preventDefault();
-        if (event.stopPropagation) event.stopPropagation();
-        showLockToast("quality option selected");
-      } catch {
-      }
-    }, true);
-  } catch {
-  }
-  try {
-    const seen = new Set();
-    const scanNode = function (node) {
-      if (!node || node.nodeType !== 1) return;
-      if (node.matches && node.matches(OVERLAY_SELECTOR)) {
-        if (!seen.has(node)) {
-          seen.add(node);
-          scanOverlay(node);
-        }
-        return;
-      }
-      if (!node.querySelectorAll) return;
-      const overlays = node.querySelectorAll(OVERLAY_SELECTOR);
-      for (const overlay of overlays) {
-        if (!seen.has(overlay)) {
-          seen.add(overlay);
-          scanOverlay(overlay);
-        }
-      }
-    };
-    const observer = new MutationObserver(function (mutations) {
-      try {
-        for (const mutation of mutations) {
-          const added = mutation.addedNodes;
-          if (!added) continue;
-          for (const node of added) scanNode(node);
-        }
-      } catch {
-      }
-    });
-    observer.observe(document, { childList: true, subtree: true });
-    if (document.querySelectorAll) {
-      const existing = document.querySelectorAll(OVERLAY_SELECTOR);
-      for (const overlay of existing) {
-        seen.add(overlay);
-        scanOverlay(overlay);
-      }
-    }
-  } catch {
-  }
-"#;
-
 /// Build the document-start script for one raw mode string. The mode is
 /// normalized first, so hand-edited or forward-compat values fail safe to
-/// `"default"` (status-only script with no capture/DOM code). The returned
-/// text contains no unspliced placeholder.
+/// `"default"` (status-only script with no capture code). The returned text
+/// contains no unspliced placeholder.
 pub fn screenshare_quality_script(raw_mode: &str) -> Result<String, String> {
     let mode = normalize_mode(raw_mode);
     let encoded =
         serde_json::to_string(mode).map_err(|error| format!("mode must serialize: {error}"))?;
-    let active = constraint_target(mode).is_some();
-    let wrapper = if active {
+    let wrapper = if constraint_target(mode).is_some() {
         SCREENSHARE_QUALITY_WRAPPER
-    } else {
-        ""
-    };
-    let guard = if active {
-        SCREENSHARE_QUALITY_GUARD
     } else {
         ""
     };
     let script = SCREENSHARE_QUALITY_SCRIPT_TEMPLATE
         .replace(MODE_PLACEHOLDER, &encoded)
-        .replace(WRAPPER_PLACEHOLDER, wrapper)
-        .replace(GUARD_PLACEHOLDER, guard);
-    if script.contains(MODE_PLACEHOLDER)
-        || script.contains(WRAPPER_PLACEHOLDER)
-        || script.contains(GUARD_PLACEHOLDER)
-    {
+        .replace(WRAPPER_PLACEHOLDER, wrapper);
+    if script.contains(MODE_PLACEHOLDER) || script.contains(WRAPPER_PLACEHOLDER) {
         return Err("screenshare quality script is missing a splice".to_owned());
     }
     Ok(script)
@@ -427,37 +216,24 @@ mod tests {
             "DEFAULT",
             "Balanced",
             "ultra",
-            "ultrahd",
-            "4k",
-            "1080p",
             "720p",
             "none",
             "  balanced  ",
-            "full_hd",
         ] {
             assert_eq!(normalize_mode(raw), DEFAULT_MODE, "{raw:?} must fail safe");
         }
-        assert_eq!(normalize_mode("ultra-low"), ULTRA_LOW_MODE);
         assert_eq!(normalize_mode("balanced"), BALANCED_MODE);
         assert_eq!(normalize_mode("low"), LOW_MODE);
-        assert_eq!(normalize_mode("full-hd"), FULL_HD_MODE);
-        assert_eq!(normalize_mode("quad-hd"), QUAD_HD_MODE);
-        assert_eq!(normalize_mode("ultra-hd"), ULTRA_HD_MODE);
         assert_eq!(normalize_mode("default"), DEFAULT_MODE);
     }
 
     #[test]
     fn targets_match_the_candidate_presets() {
         assert_eq!(constraint_target("default"), None);
-        assert_eq!(constraint_target("ultra-low"), Some((256, 144, 15)));
         assert_eq!(constraint_target("balanced"), Some((1280, 720, 30)));
         assert_eq!(constraint_target("low"), Some((960, 540, 15)));
-        assert_eq!(constraint_target("full-hd"), Some((1920, 1080, 30)));
-        assert_eq!(constraint_target("quad-hd"), Some((2560, 1440, 30)));
-        assert_eq!(constraint_target("ultra-hd"), Some((3840, 2160, 30)));
         // Unknown input constrains nothing.
         assert_eq!(constraint_target("ultra"), None);
-        assert_eq!(constraint_target("4k"), None);
         assert_eq!(constraint_target(""), None);
     }
 
@@ -472,35 +248,11 @@ mod tests {
         // Default never touches capture: no wrapping, no constraints.
         assert!(!script.contains("getDisplayMedia"));
         assert!(!script.contains("applyConstraints"));
-        // Default carries no DOM/timer/observer/listener code either:
-        // structurally inert, not just branched off.
-        for absent in [
-            "MutationObserver",
-            "addEventListener",
-            "setTimeout",
-            "setInterval",
-            "createElement",
-            "querySelector",
-            "data-remcord-quality-locked",
-            "data-remcord-quality-toast",
-        ] {
-            assert!(
-                !script.contains(absent),
-                "default script must not contain {absent}"
-            );
-        }
     }
 
     #[test]
     fn active_modes_constrain_through_the_existing_capture_path() {
-        for (mode, dims) in [
-            ("ultra-low", "256"),
-            ("balanced", "1280"),
-            ("low", "960"),
-            ("full-hd", "1920"),
-            ("quad-hd", "2560"),
-            ("ultra-hd", "3840"),
-        ] {
+        for (mode, dims) in [("balanced", "1280"), ("low", "960")] {
             let script = screenshare_quality_script(mode).expect("must build");
             assert!(
                 script.contains(&format!("\"{mode}\"")),
@@ -549,120 +301,11 @@ mod tests {
         assert!(low.contains("width: 960"));
         assert!(low.contains("height: 540"));
         assert!(low.contains("fps: 15"));
-        let ultra_low = screenshare_quality_script("ultra-low").expect("must build");
-        assert!(ultra_low.contains("width: 256"));
-        assert!(ultra_low.contains("height: 144"));
-        assert!(ultra_low.contains("fps: 15"));
-        let full_hd = screenshare_quality_script("full-hd").expect("must build");
-        assert!(full_hd.contains("width: 1920"));
-        assert!(full_hd.contains("height: 1080"));
-        assert!(full_hd.contains("fps: 30"));
-        let ultra_hd = screenshare_quality_script("ultra-hd").expect("must build");
-        assert!(ultra_hd.contains("width: 3840"));
-        assert!(ultra_hd.contains("height: 2160"));
-        assert!(ultra_hd.contains("fps: 30"));
-    }
-
-    #[test]
-    fn active_modes_guard_discords_picker_and_fail_open() {
-        for mode in [
-            "ultra-low",
-            "balanced",
-            "low",
-            "full-hd",
-            "quad-hd",
-            "ultra-hd",
-        ] {
-            let script = screenshare_quality_script(mode).expect("must build");
-            // Discord keeps its own quality picker: quality-looking controls
-            // in overlay dialogs are disabled, attempts show a toast naming
-            // the remedy (Default + restart).
-            assert!(
-                script.contains("data-remcord-quality-locked"),
-                "{mode} must mark locked controls"
-            );
-            assert!(
-                script.contains("data-remcord-quality-toast"),
-                "{mode} must carry the toast"
-            );
-            assert!(
-                script.contains("MutationObserver"),
-                "{mode} must watch for the picker dialog"
-            );
-            assert!(
-                script.contains("addEventListener"),
-                "{mode} must intercept locked clicks"
-            );
-            assert!(
-                script.contains("aria-disabled"),
-                "{mode} must expose the disabled state"
-            );
-            assert!(
-                script.contains("Screenshare quality Default"),
-                "{mode} toast must name the remedy"
-            );
-            // Toast text is fixed host text via textContent: never innerHTML.
-            assert!(
-                script.contains("textContent"),
-                "{mode} toast must use textContent"
-            );
-            assert!(
-                !script.contains("innerHTML"),
-                "{mode} toast must not use innerHTML"
-            );
-            // Exactly one delegated listener and one observer: no intervals,
-            // no per-control listeners.
-            assert!(!script.contains("setInterval"), "{mode} must not poll");
-            // The guard only matches quality controls inside overlay dialogs;
-            // unrelated Discord UI is never touched.
-            assert!(
-                script.contains("[role=\"dialog\"]"),
-                "{mode} must scope to dialogs"
-            );
-        }
     }
 
     #[test]
     fn script_has_no_forbidden_surfaces() {
-        // `"default"` is fully inert: none of these may appear.
-        let default_script = screenshare_quality_script("default").expect("must build");
-        for forbidden in [
-            "fetch(",
-            "XMLHttpRequest",
-            "eval(",
-            "new Function",
-            "postMessage",
-            "localStorage",
-            "indexedDB",
-            "remcord://",
-            "http://",
-            "wss://",
-            "require(",
-            "setInterval",
-            "setTimeout",
-            "MutationObserver",
-            "addEventListener",
-        ] {
-            assert!(
-                !default_script.contains(forbidden),
-                "default: script must not contain {forbidden}"
-            );
-        }
-        assert!(
-            !default_script.contains(GUARD_PLACEHOLDER),
-            "default: guard placeholder must be spliced"
-        );
-        // Active modes add exactly one delegated click listener, one
-        // MutationObserver, and one toast-dismiss timer — everything else
-        // stays forbidden.
-        for mode in [
-            "ultra-low",
-            "balanced",
-            "low",
-            "full-hd",
-            "quad-hd",
-            "ultra-hd",
-        ] {
+        for mode in ["default", "balanced", "low"] {
             let script = screenshare_quality_script(mode).expect("must build");
             assert!(
                 !script.contains(MODE_PLACEHOLDER),
@@ -671,10 +314,6 @@ mod tests {
             assert!(
                 !script.contains(WRAPPER_PLACEHOLDER),
                 "{mode}: wrapper placeholder must be spliced"
-            );
-            assert!(
-                !script.contains(GUARD_PLACEHOLDER),
-                "{mode}: guard placeholder must be spliced"
             );
             for forbidden in [
                 "fetch(",
@@ -689,6 +328,9 @@ mod tests {
                 "wss://",
                 "require(",
                 "setInterval",
+                "setTimeout",
+                "MutationObserver",
+                "addEventListener",
             ] {
                 assert!(
                     !script.contains(forbidden),
@@ -700,11 +342,8 @@ mod tests {
 
     #[test]
     fn unknown_raw_mode_builds_the_inert_default_script() {
-        let script = screenshare_quality_script("ultra").expect("must build");
+        let script = screenshare_quality_script("ultra-hd").expect("must build");
         assert!(script.contains("\"default\""));
         assert!(!script.contains("applyConstraints"));
-        assert!(!script.contains("MutationObserver"));
-        assert!(!script.contains("addEventListener"));
-        assert!(!script.contains("data-remcord-quality-locked"));
     }
 }

@@ -742,31 +742,6 @@ test("settings.set carries the channel and quick_css keys end to end", async () 
     assert.deepEqual(JSON.parse(JSON.stringify(await quickCssPending)), { key: "quick_css", value: false });
 });
 
-test("settings.set carries the screenshare_quality key end to end", async () => {
-    const { window } = createSettingsSetRuntime();
-    const pending = window.remcord.settings.set("screenshare_quality", "low");
-    const message = window.messages.find((entry) => entry.command?.type === "settings_set");
-    assert.ok(message);
-    assert.deepEqual(message.command, {
-        type: "settings_set",
-        payload: { key: "screenshare_quality", value: "low" },
-    });
-    respondSettingsSet(window, message, "screenshare_quality", "low");
-    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { key: "screenshare_quality", value: "low" });
-
-    const hdPending = window.remcord.settings.set("screenshare_quality", "ultra-hd");
-    const hdMessage = window.messages.find(
-        (entry) => entry.command?.type === "settings_set" && entry.request_id !== message.request_id,
-    );
-    assert.ok(hdMessage);
-    assert.deepEqual(hdMessage.command, {
-        type: "settings_set",
-        payload: { key: "screenshare_quality", value: "ultra-hd" },
-    });
-    respondSettingsSet(window, hdMessage, "screenshare_quality", "ultra-hd");
-    assert.deepEqual(JSON.parse(JSON.stringify(await hdPending)), { key: "screenshare_quality", value: "ultra-hd" });
-});
-
 test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
     const { window } = createSettingsSetRuntime(["bridge.ping", "settings.get_config"]);
     assert.equal(window.remcord.native.supports("settings.set"), false);
@@ -803,19 +778,6 @@ test("settings.set rejects unknown keys and mismatched types without sending", a
     await assert.rejects(window.remcord.settings.set("channel", ["stable"]), /release channels/);
     await assert.rejects(window.remcord.settings.set("csp", "canary"), /CSP modes/);
     await assert.rejects(window.remcord.settings.set("channel", "strict"), /release channels/);
-    // Screenshare quality pairs only with its own key (closed 3-value
-    // vocabulary); neighbouring string values are refused on both sides.
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", "ultra"), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", "720p"), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", "Balanced"), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", "4k"), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", "1080p"), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", "full_hd"), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", true), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("screenshare_quality", ["low"]), /screenshare quality/);
-    await assert.rejects(window.remcord.settings.set("csp", "low"), /CSP modes/);
-    await assert.rejects(window.remcord.settings.set("channel", "low"), /release channels/);
-    await assert.rejects(window.remcord.settings.set("mods", "low"), /known mod ids/);
     await assert.rejects(window.remcord.settings.set("mods", "canary"), /known mod ids/);
     await assert.rejects(window.remcord.settings.set("support_banner_dismissed", "stable"), /boolean/);
     await assert.rejects(window.remcord.settings.set("mods", "none"), /known mod ids/);
@@ -850,13 +812,6 @@ test("settings.set rejects malformed set responses", async () => {
     const message3 = third.window.messages.find((entry) => entry.command?.type === "settings_set");
     respondSettingsSet(third.window, message3, "mods", ["vencord"], { leaked: "path" });
     await assert.rejects(pending3, /settings set response schema is invalid/);
-
-    // A quality string echoed for another key (or vice versa) never resolves.
-    const fourth = createSettingsSetRuntime();
-    const pending4 = fourth.window.remcord.settings.set("screenshare_quality", "balanced");
-    const message4 = fourth.window.messages.find((entry) => entry.command?.type === "settings_set");
-    respondSettingsSet(fourth.window, message4, "csp", "balanced");
-    await assert.rejects(pending4, /settings set response schema is invalid/);
 });
 
 test("initializes a frozen compatibility facade with the boot snapshot", () => {
@@ -4063,7 +4018,6 @@ const DIAGNOSTICS_FIXTURE = {
     profile_kind: "release",
     channel: "stable",
     csp: "none",
-    screenshare_quality: "default",
     mods: ["vencord"],
 };
 
@@ -4141,8 +4095,6 @@ test("diagnostics.getInfo rejects malformed readouts", async () => {
         { ...DIAGNOSTICS_FIXTURE, profile_kind: "roaming" },
         { ...DIAGNOSTICS_FIXTURE, channel: "beta" },
         { ...DIAGNOSTICS_FIXTURE, csp: "permissive" },
-        { ...DIAGNOSTICS_FIXTURE, screenshare_quality: "ultra" },
-        { ...DIAGNOSTICS_FIXTURE, screenshare_quality: ["low"] },
         { ...DIAGNOSTICS_FIXTURE, mods: ["Vencord"] },
         { ...DIAGNOSTICS_FIXTURE, mods: ["vencord", "vencord", "shelter", "equicord", "custom", "x", "y", "z", "w"] },
         { ...DIAGNOSTICS_FIXTURE, profile_path: "C:\\secret" },

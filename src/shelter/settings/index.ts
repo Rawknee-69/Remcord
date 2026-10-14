@@ -14,7 +14,6 @@ import { SettingsPage } from "./pages/SettingsPage.jsx";
 import { ThemesPage } from "./pages/ThemesPage.jsx";
 import { openQuickCssEditorModal } from "./quickCssEditor.jsx";
 import type { QuickCssEditorMode } from "./quickCssEditorSource.js";
-import { installScreenshareStreamControl, uninstallScreenshareStreamControl } from "./screenshareStream.js";
 import {
     disposeSettingsScrollRestoration,
     isRestartRequired,
@@ -103,13 +102,8 @@ export function onLoad() {
     // signals "handled" back to the opener so it never falls through to
     // the dead popup path.
     window.addEventListener("remcord-native:open-quickcss-editor", quickCssEditorHandoff);
-    // Sender-level Go Live caps for an active screenshare-quality mode
-    // (restart-required, so the launch-time mode decides). Fail-open:
-    // default mode or missing flux installs nothing.
-    installScreenshareStreamControl();
 }
 export function onUnload() {
-    uninstallScreenshareStreamControl();
     settingsCleanups.forEach((e) => {
         e();
     });

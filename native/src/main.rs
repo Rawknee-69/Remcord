@@ -7630,7 +7630,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         resolved_profile.kind.as_str(),
                                         &loaded.snapshot.channel,
                                         &loaded.snapshot.csp,
-                                        &loaded.snapshot.screenshare_quality,
                                         &loaded.snapshot.mods,
                                     );
                                     let response = BridgeResponse {
@@ -7644,7 +7643,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                                 profile_kind: info.profile_kind,
                                                 channel: info.channel,
                                                 csp: info.csp,
-                                                screenshare_quality: info.screenshare_quality,
                                                 mods: info.mods,
                                             },
                                         )),
@@ -9516,7 +9514,7 @@ mod tests {
     fn document_start_script_unknown_mode_fails_safe_to_default() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "8k").expect("must build");
+        let script = document_start_script(&[], boot, platform, "ultra-hd").expect("must build");
         assert!(script.contains("\"default\""));
         assert!(!script.contains("applyConstraints"));
     }

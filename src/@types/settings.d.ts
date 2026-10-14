@@ -36,8 +36,6 @@ export interface Settings {
     customIcon: string;
     windowStyle: "default" | "native" | "overlay" | "transparent" | "legacy" | "rebrand";
     channel: "stable" | "ptb" | "canary";
-    /** Native screenshare capture-quality target (restart-required, native shell only). */
-    screenshareQuality: "default" | "ultra-low" | "low" | "balanced" | "full-hd" | "quad-hd" | "ultra-hd";
     transparency: "universal" | "modern" | "none";
     windowMaterial: "mica" | "tabbed" | "acrylic" | "none";
     audio: AudioSettings;

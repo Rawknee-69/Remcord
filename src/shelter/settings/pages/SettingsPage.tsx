@@ -19,8 +19,6 @@ import { TextBoxItem } from "../components/TextBoxItem.jsx";
 import {
     clearNativeModCache,
     copyNativeDiagnostics,
-    copyScreenshareEncoderStats,
-    describeScreenshareQualityStatus,
     isMinWindowsVersion,
     isNativeSettingsSetAvailable,
     isNativeWebView,
@@ -125,8 +123,6 @@ export function SettingsPage() {
             t["settings-category-behaviour"],
             t["settings-category-behaviour-desc"],
             t["settings-channel"],
-            t["settings-screenshareQuality"] ?? "Screenshare quality",
-            "screenshare",
             t["settings-MultiInstance"],
             t["settings-popoutPiP"],
             t["settings-useSystemCssEditor"],
@@ -507,87 +503,6 @@ export function SettingsPage() {
                             { label: t["settings-channel-canary"], value: "canary" },
                             { label: t["settings-channel-ptb"], value: "ptb" },
                         ]}
-                    />
-                </SearchableSetting>
-                <SearchableSetting
-                    keywords={[
-                        t["settings-screenshareQuality"] ?? "Screenshare quality",
-                        t["settings-screenshareQuality-desc"] ?? "capture target",
-                        "screenshare",
-                        "144p",
-                        "540p",
-                        "720p",
-                        "1080p",
-                        "1440p",
-                        "4K",
-                    ]}
-                >
-                    <DropdownItem
-                        value={settings.screenshareQuality ?? "default"}
-                        onChange={(v) => setConfig("screenshareQuality", v as Settings["screenshareQuality"], true)}
-                        title={t["settings-screenshareQuality"] ?? "Screenshare quality"}
-                        note={nativeNote(
-                            t["settings-screenshareQuality-desc"] ??
-                                "Caps the sent Go Live stream at a lower target (resolution, frame rate, bitrate ceiling) to reduce CPU and memory use. Applies at share start after a restart; Default leaves Discord fully in charge. Discord adapts below these maxima (e.g. on low bandwidth), so the sent size may be smaller — Copy encoder stats shows the measured values. While Balanced or Low is active, Discord's own stream-quality options are disabled where present. Native app only — Electron keeps its own share picker.",
-                            "screenshareQuality",
-                        )}
-                        disabled={nativeOff("screenshareQuality")}
-                        options={[
-                            {
-                                label: t["settings-screenshareQuality-default"] ?? "Default (Discord decides)",
-                                value: "default",
-                            },
-                            {
-                                label: t["settings-screenshareQuality-ultraLow"] ?? "Ultra low (up to 144p15)",
-                                value: "ultra-low",
-                            },
-                            {
-                                label: t["settings-screenshareQuality-low"] ?? "Low resource (up to 540p15)",
-                                value: "low",
-                            },
-                            {
-                                label: t["settings-screenshareQuality-balanced"] ?? "Balanced (up to 720p30)",
-                                value: "balanced",
-                            },
-                            {
-                                label: t["settings-screenshareQuality-fullHd"] ?? "Full HD (up to 1080p30)",
-                                value: "full-hd",
-                            },
-                            {
-                                label: t["settings-screenshareQuality-quadHd"] ?? "Quad HD (up to 1440p30)",
-                                value: "quad-hd",
-                            },
-                            {
-                                label: t["settings-screenshareQuality-ultraHd"] ?? "Ultra HD (up to 4K30)",
-                                value: "ultra-hd",
-                            },
-                        ]}
-                        extraItems={
-                            <>
-                                <div style={{ opacity: "0.85", "font-size": "12px", margin: "4px 0 8px 0" }}>
-                                    {describeScreenshareQualityStatus(settings.screenshareQuality ?? "default")}
-                                </div>
-                                <Button
-                                    size={ButtonSizes.MAX}
-                                    onClick={() => {
-                                        // Fully renderer-side WebRTC readout
-                                        // (no host call): measured live from
-                                        // the Go Live sender, unavailable
-                                        // when idle — never a guessed encoder.
-                                        void copyScreenshareEncoderStats(settings.screenshareQuality ?? "default").then(
-                                            (ok) => {
-                                                if (!ok)
-                                                    console.warn(
-                                                        "[Remcord] Could not copy encoder stats in this session.",
-                                                    );
-                                            },
-                                        );
-                                    }}
-                                >
-                                    {t["settings-screenshareQuality-copyStats"] ?? "Copy encoder stats"}
-                                </Button>
-                            </>
-                        }
                     />
                 </SearchableSetting>
                 <SearchableSetting keywords={[t["settings-MultiInstance"], t["settings-MultiInstance-desc"]]}>

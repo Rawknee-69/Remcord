@@ -24,7 +24,6 @@ function ensureConfigCache(): Settings {
 const defaults: Settings = {
     windowStyle: "overlay",
     channel: "stable",
-    screenshareQuality: "default",
     bounceOnPing: false,
     csp: "none",
     minimizeToTray: true,

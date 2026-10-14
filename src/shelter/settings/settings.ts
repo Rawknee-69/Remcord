@@ -162,7 +162,6 @@ export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
     "csp",
     "quickCss",
     "channel",
-    "screenshareQuality",
 ];
 
 /** True when `key` has a native persistence path (closed allowlist). */
@@ -199,8 +198,7 @@ function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], s
         key === "extendedPluginAbilities" ||
         key === "csp" ||
         key === "quickCss" ||
-        key === "channel" ||
-        key === "screenshareQuality"
+        key === "channel"
     ) {
         const previous = store.settings[key];
         (store.settings as Record<string, unknown>)[key as string] = value;
@@ -267,8 +265,7 @@ export type NativeSettingsSetKey =
     | "extendedPluginAbilities"
     | "csp"
     | "quickCss"
-    | "channel"
-    | "screenshareQuality";
+    | "channel";
 
 /** Wire keys for the closed native `settings.set` capability. */
 const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
@@ -279,7 +276,6 @@ const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
     csp: "csp",
     quickCss: "quick_css",
     channel: "channel",
-    screenshareQuality: "screenshare_quality",
 };
 
 /** Minimal native `settings.set` shape (closed allowlist, key echo + value). */
@@ -342,279 +338,6 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
     return applied.value as Settings[K];
 }
 
-/** Closed screenshare capture-quality vocabulary (native `screenshare_quality.rs` parity). */
-export type ScreenshareQualityMode = "default" | "ultra-low" | "low" | "balanced" | "full-hd" | "quad-hd" | "ultra-hd";
-
-const VALID_SCREENSHARE_QUALITY_MODES: ReadonlyArray<string> = [
-    "default",
-    "ultra-low",
-    "low",
-    "balanced",
-    "full-hd",
-    "quad-hd",
-    "ultra-hd",
-];
-
-/** Normalize one raw mode to the closed vocabulary (fail-safe to `"default"`). */
-export function normalizeScreenshareQualityMode(raw: unknown): ScreenshareQualityMode {
-    return typeof raw === "string" && VALID_SCREENSHARE_QUALITY_MODES.includes(raw)
-        ? (raw as ScreenshareQualityMode)
-        : "default";
-}
-
-/** Document-start status published by the native capture script (`window.__remcordScreenshareQuality`). */
-export interface ScreenshareQualityStatus {
-    mode: string;
-    active: boolean;
-    width: number | null;
-    height: number | null;
-    fps: number | null;
-}
-
-function isScreenshareQualityStatus(value: unknown): value is ScreenshareQualityStatus {
-    if (!isRecord(value)) return false;
-    if (typeof value.mode !== "string" || typeof value.active !== "boolean") return false;
-    for (const key of ["width", "height", "fps"]) {
-        const entry = value[key];
-        if (entry !== null && (typeof entry !== "number" || !Number.isSafeInteger(entry))) return false;
-    }
-    return true;
-}
-
-/**
- * Reads the frozen document-start status the native capture script publishes.
- * Returns `null` outside the native shell (or when the script has not run):
- * the absence is reported, never a guessed mode. The `active` flag tells
- * whether this document constrains capture; requested targets are never
- * presented as achieved capture settings (actual `getSettings()` values are
- * logged to the console during sharing — see `screenshare_quality.rs`).
- */
-export function readScreenshareQualityStatus(): ScreenshareQualityStatus | null {
-    try {
-        const status = (window as unknown as Record<string, unknown>).__remcordScreenshareQuality;
-        if (status === undefined) return null;
-        return isScreenshareQualityStatus(status) ? status : null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * One honest status line for the Settings control: the persisted selection
- * plus what this document actually applies. Never claims an achieved capture
- * setting — only the selected mode and whether constraining is active.
- */
-export function describeScreenshareQualityStatus(selected: unknown): string {
-    const normalized = normalizeScreenshareQualityMode(selected);
-    const status = readScreenshareQualityStatus();
-    if (!isNativeWebView()) {
-        return `Selected: ${normalized}. The capture control applies in the native Remcord app (needs a restart); this Electron session keeps its own share picker.`;
-    }
-    if (!status) {
-        return `Selected: ${normalized}. Status unavailable in this document — restart the app to apply a changed mode.`;
-    }
-    if (!status.active) {
-        return `Selected: ${normalized}. This document captures with default behavior (no constraint).`;
-    }
-    return `Selected: ${normalized}. This document caps the sent Go Live stream at up to ${status.width ?? "?"}x${status.height ?? "?"} at ${status.fps ?? "?"} FPS (bitrate ceiling included) once sharing starts; Discord adapts below these maxima — Copy encoder stats shows the measured values. Discord's stream-quality options are disabled while this target is active (clicking one explains how to revert).`;
-}
-
-/** Measured-or-unavailable encoder readout for one local Go Live sender. */
-export interface ScreenshareEncoderStats {
-    status: "measured" | "unavailable";
-    /** Raw `encoderImplementation` string (verbatim, sliced) — never invented. */
-    encoderImplementation: string | null;
-    /** Outbound codec MIME type (verbatim, sliced) or null. */
-    codec: string | null;
-    /** Encoded frame dimensions (finite integers) or null. */
-    frameWidth: number | null;
-    frameHeight: number | null;
-    /** Target bitrate in bits/s (finite) or null. */
-    targetBitrateBps: number | null;
-    /** Available outgoing bitrate in bits/s (finite) or null. */
-    availableOutgoingBitrateBps: number | null;
-    /** `qualityLimitationReason` (verbatim, sliced) or null. */
-    qualityLimitationReason: string | null;
-    /** Conservative backend classification (see `classifyEncoderBackend`). */
-    backend: "hardware" | "software" | "unclassified";
-    /** Non-empty only when `status` is `"unavailable"`. */
-    error: string | null;
-}
-
-function boundedText(value: unknown, max = 128): string | null {
-    return typeof value === "string" && value.length > 0 ? value.slice(0, max) : null;
-}
-
-function finiteNumber(value: unknown): number | null {
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function safeInteger(value: unknown): number | null {
-    return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
-}
-
-/**
- * Conservative backend classification from the raw implementation string.
- * `VideoToolbox`/`MediaFoundation`/`NVENC`/`QuickSync`/`VAAPI` name platform
- * hardware paths; `OpenH264`/`libvpx`/`libaom` name bundled software codec
- * libraries. Anything else is `"unclassified"` — reported, never claimed.
- */
-export function classifyEncoderBackend(implementation: string | null): ScreenshareEncoderStats["backend"] {
-    if (typeof implementation !== "string" || implementation.length === 0) return "unclassified";
-    const name = implementation.toLowerCase();
-    if (
-        name.includes("videotoolbox") ||
-        name.includes("mediatoolbox") ||
-        name.includes("mediafoundation") ||
-        name.includes("nvenc") ||
-        name.includes("quicksync") ||
-        name.includes("vaapi")
-    ) {
-        return "hardware";
-    }
-    if (name.includes("openh264") || name.includes("libvpx") || name.includes("libaom")) return "software";
-    return "unclassified";
-}
-
-function unavailableEncoderStats(error: string): ScreenshareEncoderStats {
-    return {
-        status: "unavailable",
-        encoderImplementation: null,
-        codec: null,
-        frameWidth: null,
-        frameHeight: null,
-        targetBitrateBps: null,
-        availableOutgoingBitrateBps: null,
-        qualityLimitationReason: null,
-        backend: "unclassified",
-        error,
-    };
-}
-
-/**
- * Reads the live outbound-rtp video stats for the current user's Go Live
- * sender through Shelter's flux stores — the same technique the Electron
- * screenshare plugin's encoder log uses. Fully renderer-side: no host call,
- * no bridge, no new permission. Never throws: anything missing, logged-out,
- * or misshapen reports as `"unavailable"` with a path-free reason, so the
- * UI can say so instead of guessing hardware vs software encode.
- */
-export async function readScreenshareEncoderStats(): Promise<ScreenshareEncoderStats> {
-    try {
-        const flux = (globalThis as unknown as { shelter?: unknown }).shelter as
-            | {
-                  flux?: {
-                      stores?: {
-                          UserStore?: { getCurrentUser?: () => { id?: unknown } };
-                          MediaEngineStore?: { getMediaEngine?: () => { connections?: unknown } };
-                      };
-                  };
-              }
-            | undefined;
-        const stores = flux?.flux?.stores;
-        const currentUserId = stores?.UserStore?.getCurrentUser?.()?.id;
-        const connections = stores?.MediaEngineStore?.getMediaEngine?.()?.connections;
-        if (typeof currentUserId !== "string" || currentUserId.length === 0 || !connections) {
-            return unavailableEncoderStats("no active local stream connection");
-        }
-        const list = Array.isArray(connections) ? connections : [...(connections as Iterable<unknown>)];
-        const local = (list as Array<Record<string, unknown>>).find(
-            (entry) => entry && typeof entry === "object" && entry.streamUserId === currentUserId,
-        );
-        const pc = (local?.pc ?? local?.peerConnection ?? local?._pc) as
-            | { getSenders?: () => Array<{ track?: { kind?: unknown }; getStats?: () => Promise<unknown> }> }
-            | undefined;
-        const sender = pc?.getSenders?.().find((entry) => entry?.track?.kind === "video");
-        const stats = await sender?.getStats?.();
-        if (!stats || typeof (stats as { values?: unknown }).values !== "function") {
-            return unavailableEncoderStats("sender stats unavailable");
-        }
-        let availableOutgoingBitrate: number | null = null;
-        for (const report of (stats as { values(): Iterable<Record<string, unknown>> }).values()) {
-            if (report?.type === "candidate-pair" && "availableOutgoingBitrate" in report) {
-                const nominated = "nominated" in report ? Boolean(report.nominated) : false;
-                const state = "state" in report ? String(report.state) : "";
-                if (nominated || state === "succeeded") {
-                    availableOutgoingBitrate = finiteNumber(report.availableOutgoingBitrate);
-                    if (nominated) break;
-                }
-            }
-        }
-        for (const report of (stats as { values(): Iterable<Record<string, unknown>> }).values()) {
-            if (report?.type !== "outbound-rtp" || (report as { kind?: unknown }).kind !== "video") continue;
-            const implementation = boundedText(report.encoderImplementation);
-            return {
-                status: "measured",
-                encoderImplementation: implementation,
-                codec: boundedText(report.mimeType),
-                frameWidth: safeInteger(report.frameWidth),
-                frameHeight: safeInteger(report.frameHeight),
-                targetBitrateBps: finiteNumber(report.targetBitrate),
-                availableOutgoingBitrateBps: availableOutgoingBitrate,
-                qualityLimitationReason: boundedText(report.qualityLimitationReason),
-                backend: classifyEncoderBackend(implementation),
-                error: null,
-            };
-        }
-        return unavailableEncoderStats("no outbound-rtp video stats yet");
-    } catch {
-        return unavailableEncoderStats("observation failed");
-    }
-}
-
-function formatBitrate(bps: number | null): string {
-    if (bps === null) return "unknown";
-    return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-}
-
-function formatDimension(value: number | null): string {
-    return value === null ? "?" : String(value);
-}
-
-/**
- * Copies the measured encoder readout to the clipboard through
- * `navigator.clipboard` (renderer-side write — no host clipboard surface).
- * Resolves `true` on success, `false` when the clipboard write fails. The
- * text reports raw observed values plus the conservative backend label; an
- * `"unclassified"` backend is stated as such, never upgraded to a claim.
- * The selected capture mode rides along for correlation, labeled as the
- * request — not as the achieved capture.
- */
-export async function copyScreenshareEncoderStats(selectedQuality: unknown): Promise<boolean> {
-    const selected = normalizeScreenshareQualityMode(selectedQuality);
-    let stats: ScreenshareEncoderStats;
-    try {
-        stats = await readScreenshareEncoderStats();
-    } catch {
-        console.warn("[Remcord] Could not read encoder stats in this session.");
-        return false;
-    }
-    const lines =
-        stats.status === "measured"
-            ? [
-                  `Screenshare encoder (measured live): ${stats.encoderImplementation ?? "unknown implementation"}`,
-                  `Codec: ${stats.codec ?? "unknown"}`,
-                  `Encoded frame: ${formatDimension(stats.frameWidth)}x${formatDimension(stats.frameHeight)}`,
-                  `Target bitrate: ${formatBitrate(stats.targetBitrateBps)}`,
-                  `Available outgoing bitrate: ${formatBitrate(stats.availableOutgoingBitrateBps)}`,
-                  `Quality limitation: ${stats.qualityLimitationReason ?? "unknown"}`,
-                  `Backend: ${stats.backend} (conservative: VideoToolbox/MediaFoundation/NVENC/QuickSync/VAAPI = platform hardware, OpenH264/libvpx/libaom = software, anything else unclassified)`,
-                  `Selected capture mode: ${selected} (request, not necessarily the achieved capture)`,
-              ]
-            : [
-                  `Screenshare encoder: unavailable (${stats.error ?? "unknown"})`,
-                  `Selected capture mode: ${selected} (request, not necessarily the achieved capture)`,
-                  `Read while a Go Live share is active; idle or logged-out sessions have no sender to observe.`,
-              ];
-    try {
-        await navigator.clipboard.writeText(lines.join("\n"));
-        return true;
-    } catch {
-        console.warn("[Remcord] Could not write encoder stats to the clipboard.");
-        return false;
-    }
-}
-
 /** Closed folder locations the native `folders.open` capability reveals. */
 export type NativeFolderLocation = "storage" | "themes" | "plugins";
 
@@ -675,7 +398,6 @@ export interface NativeDiagnosticsInfo {
     profile_kind: string;
     channel: string;
     csp: string;
-    screenshare_quality: string;
     mods: string[];
 }
 
@@ -725,7 +447,6 @@ function isDiagnosticsInfo(value: unknown): value is NativeDiagnosticsInfo {
         typeof value.profile_kind === "string" &&
         typeof value.channel === "string" &&
         typeof value.csp === "string" &&
-        typeof value.screenshare_quality === "string" &&
         Array.isArray(value.mods) &&
         value.mods.every((entry) => typeof entry === "string")
     );
@@ -956,7 +677,6 @@ async function buildNativeDebugText(): Promise<string> {
         `Profile: ${info.profile_kind}`,
         `Channel: ${info.channel}`,
         `CSP: ${info.csp}`,
-        `Screenshare quality: ${info.screenshare_quality}`,
         `Mods: ${info.mods.length > 0 ? info.mods.join(", ") : "(none)"}`,
     ].join("\n");
 }

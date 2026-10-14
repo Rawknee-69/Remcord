@@ -98,7 +98,6 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "csp",
             "quickCss",
             "channel",
-            "screenshareQuality",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), true, `${key} must be writable`);
         }
@@ -494,7 +493,6 @@ test("unsupported settings stay disabled instead of rendering a broken control",
         assert.equal(helpers.isSettingWritableNatively("csp"), true);
         assert.equal(helpers.isSettingWritableNatively("quickCss"), true);
         assert.equal(helpers.isSettingWritableNatively("channel"), true);
-        assert.equal(helpers.isSettingWritableNatively("screenshareQuality"), true);
         assert.equal(helpers.isNativeSettingsSetAvailable(), false);
     } finally {
         restoreConsole();
@@ -543,7 +541,6 @@ test("native diagnostics copy writes the host readout to the clipboard", async (
                 profile_kind: "release",
                 channel: "canary",
                 csp: "strict",
-                screenshare_quality: "default",
                 mods: ["equicord"],
             }),
     };
@@ -569,7 +566,6 @@ test("native diagnostics copy writes the host readout to the clipboard", async (
         assert.match(written[0], /Remcord 1\.3\.0/);
         assert.match(written[0], /154\.0\.4258\.62/);
         assert.match(written[0], /canary/);
-        assert.match(written[0], /Screenshare quality: default/);
         assert.match(written[0], /equicord/);
         assert.equal(await helpers.copyNativeDiagnostics("gpu"), true);
         assert.equal(written.length, 2);
@@ -597,7 +593,6 @@ test("native graphics copy writes the measured CDP report to the clipboard", asy
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
-                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -687,7 +682,6 @@ test("native graphics copy includes the renderer-observed WebGL adapter", async 
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
-                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -780,7 +774,6 @@ test("native graphics copy falls back honestly when the probe is unavailable", a
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
-                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -830,7 +823,6 @@ test("native graphics report marks unavailable sections explicitly", async () =>
                 profile_kind: "release",
                 channel: "stable",
                 csp: "none",
-                screenshare_quality: "default",
                 mods: [],
             }),
     };
@@ -946,274 +938,6 @@ test("native mod cache wipe rejects a misshapen host outcome", async () => {
         const helpers = await loadHelpers();
         await assert.rejects(helpers.clearNativeModCache(), /Could not clear/);
     } finally {
-        restoreConsole();
-    }
-});
-
-test("native screenshare quality persists through the closed allowlist with restart", async () => {
-    const calls = installGlobals({
-        runtime: "webview2",
-        settingsImpl: {
-            set: (key: string, value: unknown) => {
-                calls.nativeSet.push([key, value]);
-                return Promise.resolve({ key, value });
-            },
-        },
-        seed: { screenshareQuality: "default" },
-    });
-    try {
-        const helpers = await loadHelpers();
-        // The quality dropdown path: setConfig routes the string-valued key
-        // to the native allowlist (wire "screenshare_quality") with restart
-        // requested — the host applies it to the next document-start script.
-        helpers.setConfig("screenshareQuality", "low", true);
-        await tick();
-        await tick();
-        assert.deepEqual(calls.nativeSet, [["screenshare_quality", "low"]]);
-        assert.equal(storeSettings().screenshareQuality, "low");
-        assert.equal(helpers.isRestartRequired, true);
-        assert.deepEqual(calls.electronSetConfig, []);
-    } finally {
-        restoreConsole();
-    }
-});
-
-test("screenshare quality mode normalizes unknown input to default", async () => {
-    installGlobals({ seed: {} });
-    try {
-        const helpers = await loadHelpers();
-        assert.equal(helpers.normalizeScreenshareQualityMode("balanced"), "balanced");
-        assert.equal(helpers.normalizeScreenshareQualityMode("low"), "low");
-        assert.equal(helpers.normalizeScreenshareQualityMode("default"), "default");
-        assert.equal(helpers.normalizeScreenshareQualityMode("ultra-low"), "ultra-low");
-        assert.equal(helpers.normalizeScreenshareQualityMode("full-hd"), "full-hd");
-        assert.equal(helpers.normalizeScreenshareQualityMode("quad-hd"), "quad-hd");
-        assert.equal(helpers.normalizeScreenshareQualityMode("ultra-hd"), "ultra-hd");
-        for (const raw of ["", "Balanced", "ultra", "4k", "1080p", "720p", null, undefined, 720, ["low"]]) {
-            assert.equal(helpers.normalizeScreenshareQualityMode(raw), "default");
-        }
-    } finally {
-        restoreConsole();
-    }
-});
-
-test("screenshare quality status stays honest about selection and document state", async () => {
-    installGlobals({ seed: {} });
-    try {
-        const helpers = await loadHelpers();
-        // Electron session: no document status exists; the line must say the
-        // control is native-only instead of claiming an achieved setting.
-        assert.equal(helpers.readScreenshareQualityStatus(), null);
-        assert.match(
-            helpers.describeScreenshareQualityStatus("low"),
-            /native Remcord app.*Electron session keeps its own share picker/,
-        );
-    } finally {
-        restoreConsole();
-    }
-});
-
-test("screenshare quality status reports the frozen document status natively", async () => {
-    installGlobals({ runtime: "webview2", seed: { screenshareQuality: "low" } });
-    try {
-        const helpers = await loadHelpers();
-        const win = Reflect.get(globalThis, "window") as Record<string, unknown>;
-        // No status published yet (e.g. pre-restart document): report the
-        // absence instead of guessing.
-        assert.match(helpers.describeScreenshareQualityStatus("low"), /Status unavailable.*restart/);
-        // Active document: report the target, never as an achieved capture.
-        win.__remcordScreenshareQuality = Object.freeze({
-            mode: "low",
-            active: true,
-            width: 960,
-            height: 540,
-            fps: 15,
-        });
-        assert.deepEqual(helpers.readScreenshareQualityStatus(), {
-            mode: "low",
-            active: true,
-            width: 960,
-            height: 540,
-            fps: 15,
-        });
-        assert.match(
-            helpers.describeScreenshareQualityStatus("low"),
-            /caps the sent Go Live stream at up to 960x540 at 15 FPS/,
-        );
-        assert.match(helpers.describeScreenshareQualityStatus("low"), /Discord's stream-quality options are disabled/);
-        // Default document: no constraint in effect.
-        win.__remcordScreenshareQuality = Object.freeze({
-            mode: "default",
-            active: false,
-            width: null,
-            height: null,
-            fps: null,
-        });
-        assert.match(helpers.describeScreenshareQualityStatus("default"), /default behavior/);
-        // Misshapen globals are discarded, never rendered.
-        win.__remcordScreenshareQuality = { mode: "low", active: "yes" };
-        assert.equal(helpers.readScreenshareQualityStatus(), null);
-    } finally {
-        restoreConsole();
-    }
-});
-
-function setShelterFlux(flux: unknown) {
-    const shelter = Reflect.get(globalThis, "shelter") as Record<string, unknown>;
-    shelter.flux = flux;
-}
-
-function clearShelterFlux() {
-    const shelter = Reflect.get(globalThis, "shelter") as Record<string, unknown>;
-    delete shelter.flux;
-}
-
-function fakeSenderStats(reports: Array<Record<string, unknown>>) {
-    return {
-        values: () => reports.values(),
-    };
-}
-
-function installFluxWithSender(stats: unknown) {
-    setShelterFlux({
-        stores: {
-            UserStore: { getCurrentUser: () => ({ id: "user-1" }) },
-            MediaEngineStore: {
-                getMediaEngine: () => ({
-                    connections: [
-                        {
-                            streamUserId: "user-1",
-                            pc: {
-                                getSenders: () => [
-                                    { track: { kind: "video" }, getStats: () => Promise.resolve(stats) },
-                                ],
-                            },
-                        },
-                    ],
-                }),
-            },
-        },
-    });
-}
-
-test("encoder backend classification stays conservative", async () => {
-    installGlobals({ seed: {} });
-    try {
-        const helpers = await loadHelpers();
-        assert.equal(helpers.classifyEncoderBackend("H264_MediaFoundation"), "hardware");
-        assert.equal(helpers.classifyEncoderBackend("h264_videotoolbox"), "hardware");
-        assert.equal(helpers.classifyEncoderBackend("NVE518_H264_NVENC"), "hardware");
-        assert.equal(helpers.classifyEncoderBackend("OpenH264"), "software");
-        assert.equal(helpers.classifyEncoderBackend("libvpx"), "software");
-        // Anything else (including ambiguous short tags like H264_MF and
-        // software-or-hardware builds like VP9/AV1) is unclassified:
-        // reported, never claimed.
-        for (const raw of ["H264_MF", "VP9", "AV1", "", null, undefined, 42]) {
-            assert.equal(helpers.classifyEncoderBackend(raw), "unclassified");
-        }
-    } finally {
-        restoreConsole();
-    }
-});
-
-test("encoder stats are unavailable without a local sender", async () => {
-    installGlobals({ seed: {} });
-    try {
-        const helpers = await loadHelpers();
-        // No flux stores in this harness: logged-out/idle equivalent.
-        const stats = await helpers.readScreenshareEncoderStats();
-        assert.equal(stats.status, "unavailable");
-        assert.equal(typeof stats.error, "string");
-        assert.equal(stats.backend, "unclassified");
-    } finally {
-        restoreConsole();
-    }
-});
-
-test("encoder stats measure the live sender and copy honestly", async () => {
-    const written: string[] = [];
-    installGlobals({ seed: {} });
-    installFluxWithSender(
-        fakeSenderStats([
-            { type: "candidate-pair", nominated: true, availableOutgoingBitrate: 4_200_000 },
-            {
-                type: "outbound-rtp",
-                kind: "video",
-                encoderImplementation: "H264_MediaFoundation",
-                mimeType: "video/H264",
-                frameWidth: 1920,
-                frameHeight: 1080,
-                targetBitrate: 8_000_000,
-                qualityLimitationReason: "none",
-            },
-        ]),
-    );
-    Object.defineProperty(globalThis, "navigator", {
-        value: {
-            clipboard: {
-                writeText: (text: string) => {
-                    written.push(text);
-                    return Promise.resolve();
-                },
-            },
-        },
-        configurable: true,
-        writable: true,
-    });
-    try {
-        const helpers = await loadHelpers();
-        const stats = await helpers.readScreenshareEncoderStats();
-        assert.equal(stats.status, "measured");
-        assert.equal(stats.encoderImplementation, "H264_MediaFoundation");
-        assert.equal(stats.codec, "video/H264");
-        assert.equal(stats.frameWidth, 1920);
-        assert.equal(stats.frameHeight, 1080);
-        assert.equal(stats.targetBitrateBps, 8_000_000);
-        assert.equal(stats.availableOutgoingBitrateBps, 4_200_000);
-        assert.equal(stats.qualityLimitationReason, "none");
-        assert.equal(stats.backend, "hardware");
-        assert.equal(stats.error, null);
-        assert.equal(await helpers.copyScreenshareEncoderStats("balanced"), true);
-        assert.equal(written.length, 1);
-        assert.match(written[0], /H264_MediaFoundation/);
-        assert.match(written[0], /1920x1080/);
-        assert.match(written[0], /Backend: hardware/);
-        assert.match(written[0], /Selected capture mode: balanced \(request/);
-    } finally {
-        clearShelterFlux();
-        Reflect.deleteProperty(globalThis, "navigator");
-        restoreConsole();
-    }
-});
-
-test("encoder stats stay unavailable on misshapen sender data", async () => {
-    const written: string[] = [];
-    installGlobals({ seed: {} });
-    installFluxWithSender({ notStats: true });
-    Object.defineProperty(globalThis, "navigator", {
-        value: {
-            clipboard: {
-                writeText: (text: string) => {
-                    written.push(text);
-                    return Promise.resolve();
-                },
-            },
-        },
-        configurable: true,
-        writable: true,
-    });
-    try {
-        const helpers = await loadHelpers();
-        const stats = await helpers.readScreenshareEncoderStats();
-        assert.equal(stats.status, "unavailable");
-        // The copy still succeeds but reports unavailability, never a guess.
-        assert.equal(await helpers.copyScreenshareEncoderStats("low"), true);
-        assert.match(written[0], /unavailable/);
-        assert.match(written[0], /Selected capture mode: low \(request/);
-        assert.doesNotMatch(written[0], /Backend: (hardware|software)/);
-    } finally {
-        clearShelterFlux();
-        Reflect.deleteProperty(globalThis, "navigator");
         restoreConsole();
     }
 });
