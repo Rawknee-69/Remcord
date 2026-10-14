@@ -7,6 +7,7 @@ mod child_recovery;
 mod close_behavior;
 mod css_watch;
 mod custom_bundle;
+mod dev_hooks;
 mod diagnostics;
 mod downloads;
 mod environment_observer;
@@ -554,37 +555,9 @@ fn execution_script_for(
 /// retrieval (`custom_bundle.rs`) instead of a fixed upstream download.
 const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD, SHELTER_MOD, EQUICORD_MOD, CUSTOM_MOD];
 
-/// DEV diagnostic: force a mod's adapter OFF regardless of `settings.mods`, so
-/// a "native without <mod>" control run needs no profile edit.
-const MOD_ADAPTER_OVERRIDE_ENV: &str = "REMCORD_NATIVE_DIAGNOSTIC_MODS";
-/// DEV-only: enable the post-load mod runtime observation.
-const MOD_SMOKE_ENV: &str = "REMCORD_NATIVE_MOD_SMOKE";
-const SETTINGS_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_SMOKE";
-const SETTINGS_MUTATION_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_MUTATION_SMOKE";
-const SETTINGS_SET_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_SET_SMOKE";
-const GETLANG_SMOKE_ENV: &str = "REMCORD_NATIVE_GETLANG_SMOKE";
-const APP_VERSION_SMOKE_ENV: &str = "REMCORD_NATIVE_APP_VERSION_SMOKE";
-const GRAPHICS_SMOKE_ENV: &str = "REMCORD_NATIVE_GRAPHICS_SMOKE";
-const PLUGIN_STORAGE_SMOKE_ENV: &str = "REMCORD_NATIVE_PLUGIN_STORAGE_SMOKE";
-const THEME_INSTALL_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_INSTALL_SMOKE";
-const THEME_WRITE_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_WRITE_SMOKE";
-const THEME_IMPORT_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_IMPORT_SMOKE";
-const THEME_SET_ENABLED_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_SET_ENABLED_SMOKE";
-const THEME_LIST_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_LIST_SMOKE";
-const BACKUP_SAVE_SMOKE_ENV: &str = "REMCORD_NATIVE_BACKUP_SAVE_SMOKE";
-const BACKUP_RESTORE_SMOKE_ENV: &str = "REMCORD_NATIVE_BACKUP_RESTORE_SMOKE";
-const SHELTER_LOADER_PROBE_ENV: &str = "REMCORD_NATIVE_LOADER_PROBE";
-/// DEV-only: enable the post-marker Shelter injector observation.
-const INJECTOR_PROBE_ENV: &str = "REMCORD_NATIVE_INJECTOR_PROBE";
-const SETTINGS_BOOT_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_BOOT_SMOKE";
-const SETTINGS_UI_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_UI_SMOKE";
-const FOLDERS_SMOKE_ENV: &str = "REMCORD_NATIVE_FOLDERS_SMOKE";
-const REMCORD_PROTOCOL_SMOKE_ENV: &str = "REMCORD_NATIVE_PROTOCOL_SMOKE";
-const PERMISSIONS_SMOKE_ENV: &str = "REMCORD_NATIVE_PERMISSIONS_SMOKE";
-const THEMES_SMOKE_ENV: &str = "REMCORD_NATIVE_THEMES_SMOKE";
-const QUICKCSS_SMOKE_ENV: &str = "REMCORD_NATIVE_QUICKCSS_SMOKE";
-const BARE_PAGE_ENV: &str = "REMCORD_NATIVE_DIAGNOSTIC_BARE_PAGE";
-const INTERACTION_DIAGNOSTIC_ENV: &str = "REMCORD_NATIVE_DIAGNOSTIC_INTERACTION";
+/// F28: the `REMCORD_NATIVE_*` DEV-hook names live in [`dev_hooks`] (single
+/// source of truth + compile-time release gate); startup reads them only
+/// through `dev_hooks::hook_enabled` / `override_value` / `smoke_reload_count`.
 const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
     runtime: "webview2",
     platform: "win32",
@@ -5331,7 +5304,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `%LOCALAPPDATA%\Remcord`; an explicit absolute
     // `REMCORD_NATIVE_PROFILE_DIR` wins in both. Any failure fails startup
     // — never a silent fallback to another product's data.
-    let override_raw = std::env::var(profile::PROFILE_OVERRIDE_ENV).ok();
+    let override_raw = dev_hooks::override_value(profile::PROFILE_OVERRIDE_ENV);
     let resolved_profile = profile::resolve_for_build(
         cfg!(debug_assertions),
         override_raw.as_deref(),
@@ -5799,7 +5772,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Hand-edited or forward-compat values fail safe to stable.
     let discord_url = channel::resolve_channel_url(&discord_channel);
     println!("[Channel] channel={discord_channel} url={discord_url}");
-    let mod_override = std::env::var(MOD_ADAPTER_OVERRIDE_ENV).ok();
+    let mod_override = dev_hooks::override_value(dev_hooks::MOD_ADAPTER_OVERRIDE_ENV);
     let active_mods = resolve_active_mods(&settings_mods, mod_override.as_deref());
     for descriptor in KNOWN_MODS {
         let enabled = active_mods.iter().any(|active| active.id == descriptor.id);
@@ -5864,95 +5837,84 @@ fn main() -> Result<(), Box<dyn Error>> {
         shelter_injector_decl.len(),
         shelter_injector::INJECTOR_PLUGIN_IDS
     );
-    let diagnostic_bare_page = std::env::var(BARE_PAGE_ENV).is_ok_and(|value| value == "1");
-    let diagnostic_interaction =
-        std::env::var(INTERACTION_DIAGNOSTIC_ENV).is_ok_and(|value| value == "1");
-    let diagnostic_settings_smoke =
-        std::env::var(SETTINGS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_bare_page = dev_hooks::hook_enabled(dev_hooks::BARE_PAGE_ENV);
+    let diagnostic_interaction = dev_hooks::hook_enabled(dev_hooks::INTERACTION_DIAGNOSTIC_ENV);
+    let diagnostic_settings_smoke = dev_hooks::hook_enabled(dev_hooks::SETTINGS_SMOKE_ENV);
     if diagnostic_settings_smoke {
         println!("[Settings][Smoke] settings capability smoke probe enabled");
     }
     let diagnostic_settings_mutation_smoke =
-        std::env::var(SETTINGS_MUTATION_SMOKE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::SETTINGS_MUTATION_SMOKE_ENV);
     if diagnostic_settings_mutation_smoke {
         println!("[Settings][MutationSmoke] settings mutation smoke probe enabled");
     }
-    let diagnostic_settings_set_smoke =
-        std::env::var(SETTINGS_SET_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_settings_set_smoke = dev_hooks::hook_enabled(dev_hooks::SETTINGS_SET_SMOKE_ENV);
     if diagnostic_settings_set_smoke {
         println!("[Settings][SetSmoke] settings set smoke probe enabled");
     }
-    let diagnostic_getlang_smoke = std::env::var(GETLANG_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_getlang_smoke = dev_hooks::hook_enabled(dev_hooks::GETLANG_SMOKE_ENV);
     if diagnostic_getlang_smoke {
         println!("[Localization][Smoke] localization capability smoke probe enabled");
     }
-    let diagnostic_app_version_smoke =
-        std::env::var(APP_VERSION_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_app_version_smoke = dev_hooks::hook_enabled(dev_hooks::APP_VERSION_SMOKE_ENV);
     if diagnostic_app_version_smoke {
         println!("[App][Smoke] app version capability smoke probe enabled");
     }
-    let diagnostic_graphics_smoke =
-        std::env::var(GRAPHICS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_graphics_smoke = dev_hooks::hook_enabled(dev_hooks::GRAPHICS_SMOKE_ENV);
     if diagnostic_graphics_smoke {
         println!("[Graphics][Smoke] graphics capability smoke probe enabled");
     }
     let diagnostic_plugin_storage_smoke =
-        std::env::var(PLUGIN_STORAGE_SMOKE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::PLUGIN_STORAGE_SMOKE_ENV);
     if diagnostic_plugin_storage_smoke {
         println!("[PluginStorage][Smoke] plugin storage capability smoke probe enabled");
     }
     let diagnostic_theme_install_smoke =
-        std::env::var(THEME_INSTALL_SMOKE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::THEME_INSTALL_SMOKE_ENV);
     if diagnostic_theme_install_smoke {
         println!("[Themes][InstallSmoke] theme install smoke probe enabled");
     }
-    let diagnostic_theme_write_smoke =
-        std::env::var(THEME_WRITE_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_theme_write_smoke = dev_hooks::hook_enabled(dev_hooks::THEME_WRITE_SMOKE_ENV);
     if diagnostic_theme_write_smoke {
         println!("[Themes][WriteSmoke] theme write smoke probe enabled");
     }
-    let diagnostic_theme_import_smoke =
-        std::env::var(THEME_IMPORT_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_theme_import_smoke = dev_hooks::hook_enabled(dev_hooks::THEME_IMPORT_SMOKE_ENV);
     if diagnostic_theme_import_smoke {
         println!("[Themes][ImportSmoke] theme import smoke probe enabled");
     }
     let diagnostic_theme_set_enabled_smoke =
-        std::env::var(THEME_SET_ENABLED_SMOKE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::THEME_SET_ENABLED_SMOKE_ENV);
     if diagnostic_theme_set_enabled_smoke {
         println!("[Themes][SetEnabledSmoke] theme enable smoke probe enabled");
     }
-    let diagnostic_theme_list_smoke =
-        std::env::var(THEME_LIST_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_theme_list_smoke = dev_hooks::hook_enabled(dev_hooks::THEME_LIST_SMOKE_ENV);
     if diagnostic_theme_list_smoke {
         println!("[Themes][ListSmoke] theme list smoke probe enabled");
     }
-    let diagnostic_backup_save_smoke =
-        std::env::var(BACKUP_SAVE_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_backup_save_smoke = dev_hooks::hook_enabled(dev_hooks::BACKUP_SAVE_SMOKE_ENV);
     if diagnostic_backup_save_smoke {
         println!("[Backup][SaveSmoke] backup save smoke probe enabled");
     }
     let diagnostic_backup_restore_smoke =
-        std::env::var(BACKUP_RESTORE_SMOKE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::BACKUP_RESTORE_SMOKE_ENV);
     if diagnostic_backup_restore_smoke {
         println!("[Backup][RestoreSmoke] backup restore smoke probe enabled");
     }
     let diagnostic_shelter_loader_probe =
-        std::env::var(SHELTER_LOADER_PROBE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::SHELTER_LOADER_PROBE_ENV);
     if diagnostic_shelter_loader_probe {
         println!("[ShelterLoader][Probe] shelter loader probe enabled");
     }
-    let diagnostic_injector_probe =
-        std::env::var(INJECTOR_PROBE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_injector_probe = dev_hooks::hook_enabled(dev_hooks::INJECTOR_PROBE_ENV);
     if diagnostic_injector_probe {
         println!("[Injector][Probe] shelter injector observation enabled");
     }
     let diagnostic_settings_boot_smoke =
-        std::env::var(SETTINGS_BOOT_SMOKE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::SETTINGS_BOOT_SMOKE_ENV);
     if diagnostic_settings_boot_smoke {
         println!("[SettingsBoot][Smoke] settings boot snapshot smoke probe enabled");
     }
-    let diagnostic_settings_ui_smoke =
-        std::env::var(SETTINGS_UI_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_settings_ui_smoke = dev_hooks::hook_enabled(dev_hooks::SETTINGS_UI_SMOKE_ENV);
     if diagnostic_settings_ui_smoke {
         println!("[SettingsUi][Smoke] settings UI workflow probe enabled");
     }
@@ -5967,7 +5929,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if diagnostic_settings_ui_smoke {
         println!("[SettingsUi][Smoke] run nonce={settings_ui_run_nonce}");
     }
-    let diagnostic_folders_smoke = std::env::var(FOLDERS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_folders_smoke = dev_hooks::hook_enabled(dev_hooks::FOLDERS_SMOKE_ENV);
     if diagnostic_folders_smoke {
         println!("[Folders][Smoke] folder opening smoke probe enabled");
         // Host-side only: no renderer surface, no bridge traffic. Reveals
@@ -5999,29 +5961,30 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(_) => eprintln!("[Folders][Smoke] unknown theme unexpectedly resolved"),
         }
     }
-    let diagnostic_themes_smoke = std::env::var(THEMES_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_themes_smoke = dev_hooks::hook_enabled(dev_hooks::THEMES_SMOKE_ENV);
     if diagnostic_themes_smoke {
         println!("[Themes][Smoke] native theme injection smoke observation enabled");
     }
-    let diagnostic_quickcss_smoke =
-        std::env::var(QUICKCSS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_quickcss_smoke = dev_hooks::hook_enabled(dev_hooks::QUICKCSS_SMOKE_ENV);
     if diagnostic_quickcss_smoke {
         println!("[QuickCss][Smoke] native Quick CSS smoke observation enabled");
     }
     let diagnostic_remcord_protocol_smoke =
-        std::env::var(REMCORD_PROTOCOL_SMOKE_ENV).is_ok_and(|value| value == "1");
+        dev_hooks::hook_enabled(dev_hooks::REMCORD_PROTOCOL_SMOKE_ENV);
     if diagnostic_remcord_protocol_smoke {
         println!("[RemcordProtocol][Smoke] remcord:// protocol smoke probe enabled");
     }
-    let diagnostic_permissions_smoke =
-        std::env::var(PERMISSIONS_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_permissions_smoke = dev_hooks::hook_enabled(dev_hooks::PERMISSIONS_SMOKE_ENV);
     if diagnostic_permissions_smoke {
         println!("[Permissions][Smoke] permission smoke probe enabled");
     }
-    let diagnostic_mod_smoke = std::env::var(MOD_SMOKE_ENV).is_ok_and(|value| value == "1");
+    let diagnostic_mod_smoke = dev_hooks::hook_enabled(dev_hooks::MOD_SMOKE_ENV);
     if diagnostic_mod_smoke {
         println!("[Mods][Smoke] native mod runtime observation enabled");
     }
+    // F28: one line stating the hook posture (stripped in plain release
+    // builds; names only, never override values).
+    dev_hooks::log_startup_summary();
     // The observation spec is built from the SAME descriptors the pipeline
     // uses, so it can only ever read host-managed identities.
     let mod_smoke_specs = serde_json::to_string(
@@ -6161,10 +6124,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(error.into());
     }
     println!("[Native] Initial navigation: {discord_url}");
-    let mut smoke_reloads_remaining: u32 = std::env::var("REMCORD_NATIVE_SMOKE_RELOAD")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
+    let mut smoke_reloads_remaining: u32 = dev_hooks::smoke_reload_count();
     let mut smoke_reload_request_id = None::<String>;
     let mut request_tracker = RequestTracker::default();
     let mut document_lifecycle = DocumentModLifecycle::default();
@@ -12304,7 +12264,10 @@ mod tests {
         assert!(!super::INJECTOR_PROBE_SCRIPT.contains("addLocalPlugin"));
         assert!(!super::INJECTOR_PROBE_SCRIPT.contains("startPlugin"));
         assert!(!super::INJECTOR_PROBE_SCRIPT.contains("fetch("));
-        assert_eq!(super::INJECTOR_PROBE_ENV, "REMCORD_NATIVE_INJECTOR_PROBE");
+        assert_eq!(
+            super::dev_hooks::INJECTOR_PROBE_ENV,
+            "REMCORD_NATIVE_INJECTOR_PROBE"
+        );
     }
 
     #[test]
@@ -13276,7 +13239,10 @@ mod tests {
     fn folders_smoke_probe_is_env_gated_like_other_probes() {
         // The DEV-only probe must stay behind its documented env flag and
         // must never run unconditionally.
-        assert_eq!(super::FOLDERS_SMOKE_ENV, "REMCORD_NATIVE_FOLDERS_SMOKE");
+        assert_eq!(
+            super::dev_hooks::FOLDERS_SMOKE_ENV,
+            "REMCORD_NATIVE_FOLDERS_SMOKE"
+        );
     }
 
     #[test]
@@ -13320,7 +13286,7 @@ mod tests {
     #[test]
     fn theme_install_smoke_probe_reports_through_the_typed_probe_event() {
         assert_eq!(
-            super::THEME_INSTALL_SMOKE_ENV,
+            super::dev_hooks::THEME_INSTALL_SMOKE_ENV,
             "REMCORD_NATIVE_THEME_INSTALL_SMOKE"
         );
         assert!(super::THEME_INSTALL_SMOKE_SCRIPT.contains("installFromCode"));
@@ -13374,7 +13340,7 @@ mod tests {
     #[test]
     fn theme_write_smoke_probe_reports_reflection_through_the_typed_probe_event() {
         assert_eq!(
-            super::THEME_WRITE_SMOKE_ENV,
+            super::dev_hooks::THEME_WRITE_SMOKE_ENV,
             "REMCORD_NATIVE_THEME_WRITE_SMOKE"
         );
         assert!(super::THEME_WRITE_SMOKE_SCRIPT.contains("writeCss"));
@@ -13442,7 +13408,7 @@ mod tests {
     #[test]
     fn theme_import_smoke_probe_opens_the_real_picker_through_the_capability() {
         assert_eq!(
-            super::THEME_IMPORT_SMOKE_ENV,
+            super::dev_hooks::THEME_IMPORT_SMOKE_ENV,
             "REMCORD_NATIVE_THEME_IMPORT_SMOKE"
         );
         assert!(super::THEME_IMPORT_SMOKE_SCRIPT.contains("importFiles"));
@@ -13502,7 +13468,7 @@ mod tests {
     #[test]
     fn theme_set_enabled_smoke_probe_flips_through_the_capability() {
         assert_eq!(
-            super::THEME_SET_ENABLED_SMOKE_ENV,
+            super::dev_hooks::THEME_SET_ENABLED_SMOKE_ENV,
             "REMCORD_NATIVE_THEME_SET_ENABLED_SMOKE"
         );
         assert!(super::THEME_SET_ENABLED_SMOKE_SCRIPT.contains("setEnabled"));
@@ -13558,7 +13524,7 @@ mod tests {
     #[test]
     fn theme_list_smoke_probe_inventories_through_the_capability() {
         assert_eq!(
-            super::THEME_LIST_SMOKE_ENV,
+            super::dev_hooks::THEME_LIST_SMOKE_ENV,
             "REMCORD_NATIVE_THEME_LIST_SMOKE"
         );
         assert!(super::THEME_LIST_SMOKE_SCRIPT.contains("listThemes"));
@@ -13576,7 +13542,7 @@ mod tests {
     #[test]
     fn shelter_loader_probe_covers_only_the_public_loader_surface() {
         assert_eq!(
-            super::SHELTER_LOADER_PROBE_ENV,
+            super::dev_hooks::SHELTER_LOADER_PROBE_ENV,
             "REMCORD_NATIVE_LOADER_PROBE"
         );
         assert!(super::SHELTER_LOADER_PROBE_SCRIPT.contains("shelter_loader_probe"));

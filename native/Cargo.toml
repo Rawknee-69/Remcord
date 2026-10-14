@@ -60,6 +60,12 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 tempfile = "3"
 
+[features]
+# F28: DEV smoke/probe hooks. Debug builds (and `cargo test`) always keep
+# them; plain release builds strip every `REMCORD_NATIVE_*` hook unless
+# built with `--features dev-hooks` (see `native/src/dev_hooks.rs`).
+dev-hooks = []
+
 [build-dependencies]
 serde_json = "1.0.151"
 # Content identity for the embedded settings plugin artifact (same version

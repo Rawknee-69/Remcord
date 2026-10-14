@@ -37,7 +37,7 @@ pub fn validate_user_agent_override(raw: &str) -> Option<String> {
 /// current behavior (unset, blank, or invalid — the last case logs once
 /// to stderr so a typo is visible instead of silent).
 pub fn resolve_user_agent_override() -> Option<String> {
-    let raw = std::env::var(USER_AGENT_OVERRIDE_ENV).ok()?;
+    let raw = crate::dev_hooks::override_value(USER_AGENT_OVERRIDE_ENV)?;
     match validate_user_agent_override(&raw) {
         Some(value) => Some(value),
         None => {
