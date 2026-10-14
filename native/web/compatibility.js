@@ -928,6 +928,35 @@
         return request({ type: "mod_clear_cache", payload: {} }, timeoutMs);
     }
 
+    // Spellcheck state readout (F18): Electron `webPreferences.spellcheck`
+    // + `session.setSpellCheckerLanguages` parity. Parameter-free by
+    // protocol: the host validates the authoritative settings pair
+    // (`settings.spellcheck`, `settings.spellcheckLanguage`) and returns
+    // the closed { enabled, languages, primary_language } shape. The
+    // response echoes fixed-vocabulary BCP-47 tags only — no paths, no raw
+    // settings text, no renderer echo.
+    function getSpellcheckState(timeoutMs = 5000) {
+        requireCapability("spellcheck.get_state");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "spellcheck_get_state", payload: {} }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                typeof payload.enabled !== "boolean" ||
+                !Array.isArray(payload.languages) ||
+                typeof payload.primary_language !== "string"
+            ) {
+                throw new Error("Native spellcheck state response schema is invalid");
+            }
+            return {
+                enabled: payload.enabled,
+                languages: [...payload.languages],
+                primaryLanguage: payload.primary_language,
+            };
+        });
+    }
+
     const PLUGIN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
     const MAX_PLUGIN_STORAGE_BYTES = 1048576;
 
@@ -2419,6 +2448,33 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "spellcheck_state") {
+            const payload = response.payload.payload;
+            // Validated spellcheck state only: the closed enabled flag, the
+            // normalized BCP-47 language list, and the primary tag. No
+            // paths, raw settings text, or renderer echo may ride along.
+            const languagesValid =
+                Array.isArray(payload?.languages) &&
+                payload.languages.length <= 16 &&
+                payload.languages.every(
+                    (entry) =>
+                        typeof entry === "string" &&
+                        entry.length > 0 &&
+                        textEncoder.encode(entry).length <= 35,
+                );
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                typeof payload.enabled !== "boolean" ||
+                !languagesValid ||
+                typeof payload.primary_language !== "string" ||
+                payload.primary_language.length === 0 ||
+                textEncoder.encode(payload.primary_language).length > 35
+            ) {
+                request.reject(new Error("Native spellcheck state response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "plugin_storage_read") {
             const payload = response.payload.payload;
             if (
@@ -3433,10 +3489,6 @@
     // Electron-mirrored template out. No menu bar is installed (frameless
     // window, no tao menu API); labels resolve through getLang.
     const menus = Object.freeze({ getTemplate: getMenuTemplate });
-    // arRPC game state only: live process inventory, custom detectables,
-    // and the blacklist over host-owned stores. `getBlacklist` is the
-    // synchronous seeded-cache read (Electron parity for Shelter's hot
-    // presence path); every other member is async with typed outcomes.
     const rpc = Object.freeze({
         getProcessList,
         refreshProcessList,
@@ -3447,6 +3499,10 @@
         blacklistGame,
         unblacklistGame,
     });
+    // Spellcheck state readout only: the validated enabled flag plus the
+    // normalized language list and primary tag in, nothing out. Languages
+    // resolve host-side; the renderer never supplies a tag or flag.
+    const spellcheck = Object.freeze({ getState: getSpellcheckState });
     // Runtime plugin management only: bounded inventory in, id+boolean
     // flips and id-only reloads with Electron-parity { ok } outcomes out.
     // Folder opening reuses the typed folders.open capability on the fixed
@@ -3499,6 +3555,7 @@
             mod,
             menus,
             rpc,
+            spellcheck,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,
             restart: bootRestart,

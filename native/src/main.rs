@@ -44,6 +44,7 @@ mod settings_boot;
 mod settings_import;
 mod settings_plugin;
 mod shelter_injector;
+mod spellcheck;
 mod theme_import;
 mod themes;
 mod titlebar_plugin;
@@ -107,9 +108,9 @@ use protocol::{
     RpcBlacklistResponse, RpcDetectableAddResponse, RpcDetectableRemoveResponse,
     RpcDetectablesResponse, RpcProcessListResponse, RpcProcessRefreshResponse,
     SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
-    SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
-    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, TrayGetStateResponse,
-    WindowAckResponse, WindowStateResponse, PROTOCOL_VERSION,
+    SettingsSetResponse, SpellcheckStateResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
+    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
+    TrayGetStateResponse, WindowAckResponse, WindowStateResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -664,6 +665,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "graphics.get_info",
         "clipboard.copy_image",
         "mod.clear_cache",
+        "spellcheck.get_state",
         "window.show",
         "window.hide",
         "window.minimize",
@@ -3408,19 +3410,26 @@ fn initialization_script(
 /// before any page script can bind `RTCPeerConnection` or call
 /// `getUserMedia`, then the base [`initialization_script`] (facade, boot
 /// snapshot, mod adapters, plugin loader, keybind matcher), then the
+/// spellcheck enforcement layer ([`spellcheck`], F18) so editable roots
+/// carry the host language before the user types, then the
 /// host-selected screenshare capture-quality script, appended AFTER the mod
 /// adapters so capture constraining is never before (and can never perturb)
 /// the settings boot snapshot or mod bootstrap — plus the Remcord stream
 /// setup popup ([`screenshare_picker`]), appended last so it wraps outermost
 /// and its modal is the first thing a `getDisplayMedia` call reaches.
 /// `raw_mode` is normalized by the quality module (unknown values fail safe
-/// to `"default"`, which preserves existing behavior exactly);
+/// to `"default"`, which preserves existing behavior exactly); the
+/// spellcheck pair is normalized by the spellcheck module (F18: Electron
+/// `webPreferences.spellcheck` plus the session language-list parity — a
+/// hostile/empty language falls back to `"en-US"`, never an empty tag).
 fn document_start_script(
     active_mods: &[&'static ModDescriptor],
     settings_boot_json: &str,
     host_platform_json: &str,
     raw_mode: &str,
     prefer_hw_h264: bool,
+    spellcheck_enabled: bool,
+    spellcheck_lang: &str,
 ) -> Result<String, serde_json::Error> {
     let media = screenshare_media::screenshare_media_script(prefer_hw_h264)
         .map_err(serde::de::Error::custom)?;
@@ -3432,6 +3441,10 @@ fn document_start_script(
         settings_boot_json,
         host_platform_json,
     )?);
+    let spell = spellcheck::spellcheck_script(spellcheck_enabled, spellcheck_lang)
+        .map_err(serde::de::Error::custom)?;
+    script.push('\n');
+    script.push_str(&spell);
     let quality = screenshare_quality::screenshare_quality_script(raw_mode)
         .map_err(serde::de::Error::custom)?;
     script.push('\n');
@@ -6161,14 +6174,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
-    let (settings_mods, discord_channel, screenshare_quality, prefer_hw_h264) = match load_settings(
-        &profile_path,
-    ) {
+    let (
+        settings_mods,
+        discord_channel,
+        screenshare_quality,
+        prefer_hw_h264,
+        spellcheck_enabled,
+        spellcheck_languages,
+    ) = match load_settings(&profile_path) {
         Ok(loaded) => (
             loaded.snapshot.mods,
             loaded.snapshot.channel,
             loaded.snapshot.screenshare_quality,
             loaded.snapshot.sdp_h264_baseline_rewrite,
+            loaded.snapshot.spellcheck,
+            loaded.snapshot.spellcheck_language,
         ),
         Err(error) => {
             // Corrupt/unreadable settings fail closed to "no extra mods", the
@@ -6176,7 +6196,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!(
                     "[Mod:Registry] mod enablement could not be resolved from settings; treating as none ({error})"
                 );
-            (Vec::new(), "stable".to_owned(), "default".to_owned(), true)
+            (
+                Vec::new(),
+                "stable".to_owned(),
+                "default".to_owned(),
+                true,
+                true,
+                vec!["en-US".to_owned()],
+            )
         }
     };
     // Release-channel entry URL, resolved once per process from the same
@@ -6487,12 +6514,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             screenshare_quality::normalize_mode(&screenshare_quality)
         );
         println!("[ScreenshareMedia] prefer_hw_h264={prefer_hw_h264}");
+        let spellcheck_state = spellcheck::resolve_state(spellcheck_enabled, &spellcheck_languages);
+        println!(
+            "[Spellcheck] enabled={} lang={}",
+            spellcheck_state.enabled, spellcheck_state.primary_language
+        );
         document_start_script(
             &active_mods,
             &settings_boot_json,
             &host_platform_json,
             &screenshare_quality,
             prefer_hw_h264,
+            spellcheck_state.enabled,
+            &spellcheck_state.primary_language,
         )?
     };
     println!(
@@ -10500,6 +10534,64 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::SpellcheckGetState(_) => {
+                            // Read-only validated spellcheck state (F18):
+                            // the closed enabled flag plus the normalized
+                            // language list and primary tag from the
+                            // authoritative snapshot (Electron
+                            // `webPreferences.spellcheck` plus the session
+                            // language list parity). A corrupt
+                            // snapshot fails closed like every other reader.
+                            let request_id = request.request_id;
+                            match load_settings(&profile_path) {
+                                Ok(loaded) => {
+                                    let state = spellcheck::resolve_state(
+                                        loaded.snapshot.spellcheck,
+                                        &loaded.snapshot.spellcheck_language,
+                                    );
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::SpellcheckState(
+                                            SpellcheckStateResponse {
+                                                enabled: state.enabled,
+                                                languages: state.languages,
+                                                primary_language: state.primary_language,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Spellcheck][Metrics] request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("[Spellcheck][SPELLCHECK_UNAVAILABLE] {error}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "SPELLCHECK_UNAVAILABLE",
+                                            message: error,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::BackupSave(payload) => {
                             // Export only: the renderer supplies the include
                             // flags plus the bounded clientMods envelope (no
@@ -12221,9 +12313,10 @@ mod tests {
     fn document_start_script_appends_quality_after_adapters() {
         // Ordering: the media-hardening layer runs first (SDP/camera wrappers
         // must exist before any page script binds RTCPeerConnection), then
-        // the boot snapshot precedes adapters, the capture script follows
-        // them, and the stream setup popup is the last layer — it can never
-        // perturb snapshot/mod boot.
+        // the boot snapshot precedes adapters, the spellcheck layer follows
+        // the adapters (editable roots carry the host language before the
+        // user types), the capture script follows it, and the stream setup
+        // popup is the last layer — it can never perturb snapshot/mod boot.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
         let script = document_start_script(
@@ -12232,6 +12325,8 @@ mod tests {
             platform,
             "balanced",
             true,
+            true,
+            "en-US",
         )
         .expect("must build");
         let media_at = script
@@ -12241,6 +12336,9 @@ mod tests {
             .find("\"settingsSource\"")
             .expect("snapshot embedded");
         let adapter_at = script.find("createModAdapter").expect("adapter present");
+        let spell_at = script
+            .find("__remcordSpellcheck")
+            .expect("spellcheck status present");
         let quality_at = script
             .find("__remcordScreenshareQuality")
             .expect("quality status present");
@@ -12249,22 +12347,49 @@ mod tests {
             .expect("picker status present");
         assert!(media_at < snapshot_at);
         assert!(snapshot_at < adapter_at);
-        assert!(adapter_at < quality_at);
+        assert!(adapter_at < spell_at);
+        assert!(spell_at < quality_at);
         assert!(quality_at < picker_at);
         assert!(!script.contains("__REMCORD_SCREENSHARE_QUALITY_MODE__"));
         assert!(!script.contains("__REMCORD_SCREENSHARE_PREFER_HW_H264__"));
+        assert!(!script.contains("__REMCORD_SPELLCHECK_ENABLED__"));
+        assert!(!script.contains("__REMCORD_SPELLCHECK_LANG__"));
         assert!(script.contains("\"balanced\""));
         assert!(script.contains("const preferHwH264 = true"));
+        assert!(script.contains("const spellcheckEnabled = true"));
+        assert!(script.contains("const spellcheckLang = \"en-US\""));
     }
 
     #[test]
     fn document_start_script_sdp_toggle_splices_the_closed_boolean() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let on = document_start_script(&[], boot, platform, "default", true).expect("must build");
+        let on = document_start_script(&[], boot, platform, "default", true, true, "en-US")
+            .expect("must build");
         assert!(on.contains("const preferHwH264 = true"));
-        let off = document_start_script(&[], boot, platform, "default", false).expect("must build");
+        let off = document_start_script(&[], boot, platform, "default", false, true, "en-US")
+            .expect("must build");
         assert!(off.contains("const preferHwH264 = false"));
+    }
+
+    #[test]
+    fn document_start_script_spellcheck_toggle_splices_the_closed_pair() {
+        // F18: the validated spellcheck pair splices as JSON literals; a
+        // hostile language falls back to en-US and can never cross raw.
+        let boot = crate::settings_boot::test_fixture_json();
+        let platform = crate::app::test_fixture_json();
+        let on = document_start_script(&[], boot, platform, "default", true, true, "fr-FR")
+            .expect("must build");
+        assert!(on.contains("const spellcheckEnabled = true"));
+        assert!(on.contains("const spellcheckLang = \"fr-FR\""));
+        let off = document_start_script(&[], boot, platform, "default", true, false, "en-US")
+            .expect("must build");
+        assert!(off.contains("const spellcheckEnabled = false"));
+        let hostile =
+            document_start_script(&[], boot, platform, "default", true, true, "../escape")
+                .expect("must build");
+        assert!(hostile.contains("const spellcheckLang = \"en-US\""));
+        assert!(!hostile.contains("../escape"));
     }
 
     #[test]
@@ -12274,9 +12399,10 @@ mod tests {
         // stream setup popup is a separate layer and is always present.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script =
-            document_start_script(&[], boot, platform, "default", true).expect("must build");
+        let script = document_start_script(&[], boot, platform, "default", true, true, "en-US")
+            .expect("must build");
         assert!(script.contains("__remcordScreenshareMedia"));
+        assert!(script.contains("__remcordSpellcheck"));
         assert!(script.contains("__remcordScreenshareQuality"));
         assert!(script.contains("__remcordStreamPicker"));
         // Picker contract anchors: last-choice record and idempotence key.
@@ -12292,8 +12418,8 @@ mod tests {
     fn document_start_script_unknown_mode_fails_safe_to_default() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script =
-            document_start_script(&[], boot, platform, "ultra-hd", true).expect("must build");
+        let script = document_start_script(&[], boot, platform, "ultra-hd", true, true, "en-US")
+            .expect("must build");
         assert!(script.contains("\"default\""));
         assert!(script.contains("__remcordStreamPicker"));
         assert!(
@@ -12309,7 +12435,9 @@ mod tests {
             "{not json",
             crate::app::test_fixture_json(),
             "default",
-            true
+            true,
+            true,
+            "en-US"
         )
         .is_err());
         assert!(document_start_script(
@@ -12317,7 +12445,9 @@ mod tests {
             crate::settings_boot::test_fixture_json(),
             "{not json",
             "balanced",
-            false
+            false,
+            true,
+            "en-US"
         )
         .is_err());
     }
@@ -13692,6 +13822,25 @@ mod tests {
             "filesystem",
             "invoke",
             "eval",
+        ] {
+            assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&capability));
+        }
+    }
+
+    #[test]
+    fn boot_snapshot_grants_spellcheck_capability() {
+        // F18: exactly the read-only state capability. No setter, no
+        // language-list writer, no session handle may exist alongside it:
+        // languages resolve host-side from the authoritative snapshot.
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"spellcheck.get_state"));
+        for capability in [
+            "spellcheck.set",
+            "spellcheck.set_enabled",
+            "spellcheck.set_languages",
+            "spellcheck.get_all",
+            "session.set_languages",
         ] {
             assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&capability));
         }
