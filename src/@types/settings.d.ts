@@ -102,4 +102,6 @@ export interface Settings {
     pluginStates?: Record<string, boolean>;
     // Remove below once the plugin system is fully implemented.
     showExperimentalPluginMenu: boolean;
+    /** Custom gallery storage root. Empty = default userData/gallery. */
+    galleryRoot: string;
 }

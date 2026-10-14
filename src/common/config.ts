@@ -84,6 +84,7 @@ const defaults: Settings = {
     supportBannerDismissed: false,
     showExperimentalPluginMenu: false,
     pluginStates: {},
+    galleryRoot: "",
 };
 
 const safeMode: Settings = {

@@ -76,7 +76,7 @@ export const AboutPopup = (props: { close: () => void }) => {
                             <button
                                 type="button"
                                 class={classes.quickActionButton}
-                                onClick={() => window.open("https://github.com/sponsors/smartfrigde", "_blank")}
+                                onClick={() => window.open("https://github.com/sponsors/rawknee-69", "_blank")}
                             >
                                 <span class={classes.quickActionButtonIcon}>
                                     <svg

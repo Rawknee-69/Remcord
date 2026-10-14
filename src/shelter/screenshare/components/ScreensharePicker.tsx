@@ -35,7 +35,23 @@ async function getVirtmic() {
 function createDisplayMediaInterceptor(requestAudio: boolean): DisplayMediaInterceptor {
     return async (original, thisArg, opts) => {
         if (requestAudio) opts.audio = true;
-        const stream = await original.call(thisArg, opts);
+        let stream: MediaStream;
+        try {
+            stream = await original.call(thisArg, opts);
+        } catch (error) {
+            // Surface the real capture failure (NotAllowedError, NotReadableError,
+            // OverconstrainedError, …) instead of failing silently: without this
+            // the only trace is Chromium's internal capturer log in main.
+            const name = error instanceof DOMException ? error.name : "Error";
+            const message = error instanceof Error && error.message ? `: ${error.message}` : "";
+            console.error(`[Screenshare] getDisplayMedia failed (${name})${message}`);
+            showToast({
+                title: "Screen share failed",
+                content: `${name}${message} — try again without audio, or pick a different source.`,
+                duration: 6000,
+            });
+            throw error;
+        }
         const video = stream.getVideoTracks()[0];
 
         const width = Math.round(store.resolution * (16 / 9));
@@ -81,7 +97,8 @@ function createDisplayMediaInterceptor(requestAudio: boolean): DisplayMediaInter
                     }
                 })
                 .catch((error) => {
-                    console.error("Failed to apply video constraints:", error);
+                    const name = error instanceof DOMException ? error.name : "Error";
+                    console.error(`[Screenshare] Failed to apply video constraints (${name}):`, error);
                 });
         }
 

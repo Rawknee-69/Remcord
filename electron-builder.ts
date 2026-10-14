@@ -80,10 +80,10 @@ export const config: Configuration = {
     },
 
     appx: {
-        applicationId: "smartfrigde.Remcord",
-        identityName: "53758smartfrigde.Remcord",
+        applicationId: "rawknee-69.Remcord",
+        identityName: "rawknee-69.Remcord",
         publisher: "CN=EAB3A6D3-7145-4623-8176-D579F573F339",
-        publisherDisplayName: "smartfrigde",
+        publisherDisplayName: "rawknee-69",
         backgroundColor: "white",
         showNameOnTiles: true,
     },

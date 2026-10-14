@@ -299,7 +299,12 @@ function onStreamEnd(dispatch: StreamDispatch) {
     // @ts-expect-error Discord UserStore typings
     const currentUserId = UserStore.getCurrentUser().id as string;
     if (dispatch.reason === "user_requested" && owner === currentUserId) {
-        window.remcord.screenshare.venmicStop();
+        // venmic exists on Linux only: the main process registers no venmic
+        // handlers elsewhere, so an unguarded call rejects with
+        // "No handler registered" on every stream end.
+        if (window.remcord.platform === "linux") {
+            void window.remcord.screenshare.venmicStop().catch(() => {});
+        }
     }
     if (owner === currentUserId) {
         loggedEncoderForCurrentStream = false;

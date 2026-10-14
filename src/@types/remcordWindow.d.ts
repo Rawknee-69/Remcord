@@ -115,6 +115,27 @@ export interface RemcordWindow {
         save(data: string): Promise<{ ok: true } | { ok: false; error: string }>;
         restore(): Promise<string>;
     };
+    gallery: {
+        list: () => Promise<{ items: Array<Record<string, unknown>>; categories: Array<Record<string, unknown>> }>;
+        addUrl: (url: string, meta?: Record<string, unknown>) => Promise<Record<string, unknown>>;
+        addLink: (url: string, meta?: Record<string, unknown>) => Promise<Record<string, unknown>>;
+        importDialog: (meta?: Record<string, unknown>) => Promise<Record<string, unknown>>;
+        remove: (id: string) => Promise<{ ok: boolean }>;
+        bulkRemove: (ids: string[]) => Promise<{ removed: number }>;
+        update: (id: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
+        categories: () => Promise<Array<Record<string, unknown>>>;
+        categoryAdd: (name: string) => Promise<Record<string, unknown>>;
+        categoryRename: (oldName: string, newName: string) => Promise<Record<string, unknown>>;
+        categoryRemove: (name: string) => Promise<unknown>;
+        usage: () => Promise<{ bytes: number; files: number; items: number }>;
+        root: () => Promise<{ root: string }>;
+        pickRoot: () => Promise<Record<string, unknown>>;
+        openRoot: () => void;
+        exportItems: (ids: string[]) => Promise<Record<string, unknown>>;
+        getFile: (
+            id: string,
+        ) => Promise<{ ok: true; base64: string; mime: string; fileName: string } | { ok: false; error: string }>;
+    };
     plugins: {
         list: () => Promise<RemcordPluginInfo[]>;
         setEnabled: (id: string, enabled: boolean) => Promise<{ ok: boolean }>;

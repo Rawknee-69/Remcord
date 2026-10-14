@@ -9,7 +9,9 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # Windows-only for now. Re-enable macOS/Linux by uncommenting below.
+        os: [windows-latest]
+        # os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{matrix.os}}
     env:
       SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_TOKEN }}
@@ -34,14 +36,21 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm i
+        run: pnpm i --frozen-lockfile
+
+      # Fail fast before the expensive multi-arch Electron build.
+      # Covers the Gallery (tests/gallery.test.ts) plus all other suites.
+      - name: Run tests
+        run: pnpm test
 
       - name: Build TypeScript
         run: pnpm build
 
-      - name: Install SnapCraft
-        if: matrix.os == 'macos-latest'
-        uses: samuelmeuli/action-snapcraft@v3
+      # Windows-only for now: SnapCraft install + macOS signing check +
+      # macOS/Linux builds are commented out. Uncomment to re-enable.
+      # - name: Install SnapCraft
+      #   if: matrix.os == 'macos-latest'
+      #   uses: samuelmeuli/action-snapcraft@v3
 
       - name: Load Electron cache
         uses: actions/cache/restore@v5
@@ -54,37 +63,40 @@ jobs:
       # (`pnpm packageQuick` / `electron-builder --dir`) always works without
       # any certificate. Never download or trust a certificate URL from
       # another product's domain.
-      - name: Verify macOS signing configuration
-        if: matrix.os == 'macos-latest'
-        run: |
-          if [ -n "${{ secrets.MACOS_SIGN_PASS }}" ] && [ -z "${{ secrets.MACOS_CSC_LINK }}" ]; then
-            echo "macOS signing was requested (MACOS_SIGN_PASS is set) but no signing certificate is configured (MACOS_CSC_LINK is empty)." >&2
-            echo "Provide a properly obtained certificate via the MACOS_CSC_LINK secret with secure secret management; refusing to sign." >&2
-            exit 1
-          fi
-          if [ -z "${{ secrets.MACOS_CSC_LINK }}" ]; then
-            echo "No signing certificate configured; macOS build will proceed unsigned."
-          fi
-        shell: bash
+      # Windows-only for now: macOS signing check commented out.
+      # - name: Verify macOS signing configuration
+      #   if: matrix.os == 'macos-latest'
+      #   run: |
+      #     if [ -n "${{ secrets.MACOS_SIGN_PASS }}" ] && [ -z "${{ secrets.MACOS_CSC_LINK }}" ]; then
+      #       echo "macOS signing was requested (MACOS_SIGN_PASS is set) but no signing certificate is configured (MACOS_CSC_LINK is empty)." >&2
+      #       echo "Provide a properly obtained certificate via the MACOS_CSC_LINK secret with secure secret management; refusing to sign." >&2
+      #       exit 1
+      #     fi
+      #     if [ -z "${{ secrets.MACOS_CSC_LINK }}" ]; then
+      #       echo "No signing certificate configured; macOS build will proceed unsigned."
+      #     fi
+      #   shell: bash
 
       # Sadly, it makes more sense to separate builds per platform
-      - name: Build Electron for macOS (DMG & ZIP)
-        if: matrix.os == 'macos-latest'
-        run: pnpm electron-builder --universal -m zip dmg
-        env:
-          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MACOS_SIGN_PASS }}
-          APPLE_ID: ${{secrets.APPLE_ID}}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{secrets.APPLE_ID_PASSWORD}}
-          APPLE_TEAM_ID: ${{secrets.APPLE_TEAM_ID}}
+      # Windows-only for now: macOS build commented out.
+      # - name: Build Electron for macOS (DMG & ZIP)
+      #   if: matrix.os == 'macos-latest'
+      #   run: pnpm electron-builder --universal -m zip dmg
+      #   env:
+      #     CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+      #     CSC_KEY_PASSWORD: ${{ secrets.MACOS_SIGN_PASS }}
+      #     APPLE_ID: ${{secrets.APPLE_ID}}
+      #     APPLE_APP_SPECIFIC_PASSWORD: ${{secrets.APPLE_ID_PASSWORD}}
+      #     APPLE_TEAM_ID: ${{secrets.APPLE_TEAM_ID}}
 
       - name: Build Electron for Windows (NSIS, AppX, & ZIP)
         if: matrix.os == 'windows-latest'
         run: pnpm electron-builder --ia32 --arm64 --x64 -w nsis appx zip
 
-      - name: Build Electron for Linux (RPM, DEB, AppImage & ZIP)
-        if: matrix.os == 'ubuntu-latest'
-        run: pnpm electron-builder --armv7l --arm64 --x64 -l rpm deb appimage zip tar.gz
+      # Windows-only for now: Linux build commented out.
+      # - name: Build Electron for Linux (RPM, DEB, AppImage & ZIP)
+      #   if: matrix.os == 'ubuntu-latest'
+      #   run: pnpm electron-builder --armv7l --arm64 --x64 -l rpm deb appimage zip tar.gz
 
       - name: Save Electron Cache
         uses: actions/cache/save@v5
@@ -93,18 +105,20 @@ jobs:
           key: electron-zips.${{matrix.os}}
 
       - name: Collect artifacts
-        run: mkdir artifacts |
+        run: |
+          mkdir -p artifacts
           find dist/. -maxdepth 1 -type f -exec mv {} artifacts \;
         shell: bash
 
-      - name: Upload artifactsstable
+      - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
           name: ${{matrix.os}}-artifacts
           path: artifacts/*
 
   release:
-    runs-on: ubuntu-latest
+    # Windows-only for now: release publishing runs on Windows too (no Linux/macOS runners).
+    runs-on: windows-latest
     needs:
       - package
     env:

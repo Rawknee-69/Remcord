@@ -5,15 +5,12 @@ import {
     app,
     BrowserWindow,
     type BrowserWindowConstructorOptions,
-    clipboard,
     dialog,
     type MessageBoxOptions,
     nativeImage,
-    net,
     screen,
     shell,
 } from "electron";
-import contextMenu from "electron-context-menu";
 import { firstRun, getConfig, isBackgroundStart, setConfig } from "../common/config.js";
 import { navigateTo } from "../common/dom.js";
 import { forceQuit, setForceQuit } from "../common/forceQuit.js";
@@ -93,62 +90,14 @@ function saveWindowState(win: BrowserWindow): void {
     }
 }
 
-async function copyImageFromContext(
-    parameters: { srcURL: string; x: number; y: number },
-    win?: BrowserWindow,
-): Promise<void> {
-    if (parameters.srcURL) {
-        try {
-            const response = await net.fetch(parameters.srcURL);
-            if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-
-            const image = nativeImage.createFromBuffer(Buffer.from(await response.arrayBuffer()));
-            if (!image.isEmpty()) {
-                clipboard.writeImage(image);
-                return;
-            }
-        } catch (error) {
-            console.warn("[ContextMenu] Failed to copy image from URL, falling back to copyImageAt:", error);
-        }
-    }
-
-    win?.webContents.copyImageAt(parameters.x, parameters.y);
-}
-
-contextMenu({
-    showSaveImageAs: true,
-    showCopyImage: false,
-    showCopyImageAddress: true,
-    showSearchWithGoogle: false,
-    append: (_defaultActions, parameters, win) => [
-        {
-            label: "Copy Image",
-            visible: parameters.mediaType === "image",
-            click: () => {
-                void copyImageFromContext(parameters, win as BrowserWindow | undefined);
-            },
-        },
-    ],
-    prepend: (_defaultActions, parameters) => [
-        {
-            label: getLang("contextMenu-searchGoogle"),
-            // Only show it when right-clicking text
-            visible: parameters.selectionText.trim().length > 0,
-            click: () => {
-                void shell.openExternal(`https://google.com/search?q=${encodeURIComponent(parameters.selectionText)}`);
-            },
-        },
-        {
-            label: getLang("contextMenu-searchDuckDuckGo"),
-            // Only show it when right-clicking text
-            visible: parameters.selectionText.trim().length > 0,
-            click: () => {
-                void shell.openExternal(`https://duckduckgo.com/?q=${encodeURIComponent(parameters.selectionText)}`);
-            },
-        },
-    ],
-});
 function doAfterDefiningTheWindow(passedWindow: BrowserWindow): void {
+    // The native Chromium context menu is fully suppressed: Discord renders
+    // its own in-app menus (where "Save to Gallery" now lives via the
+    // Gallery shelter plugin), so the webview menu would only duplicate
+    // entries and expose devtools/Inspect to users.
+    passedWindow.webContents.on("context-menu", (event) => {
+        event.preventDefault();
+    });
     createTray();
     if (getWindowState("isMaximized") ?? false) {
         passedWindow.setSize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT); //just so the whole thing doesn't cover whole screen

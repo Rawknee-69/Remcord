@@ -47,7 +47,7 @@ export function SupportBanner() {
                 <button
                     type="button"
                     class={classes.donateButton}
-                    onClick={() => window.open("https://github.com/sponsors/smartfrigde", "_blank")}
+                    onClick={() => window.open("https://github.com/sponsors/rawknee-69", "_blank")}
                 >
                     <DonateIcon /> {store.i18n["supportBanner-donate"]}
                 </button>

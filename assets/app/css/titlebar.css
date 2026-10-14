@@ -38,7 +38,7 @@
     height: 100%;
     width: 33.3%;
     text-align: center;
-    color: var(--interactive-icon-default);
+    color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     cursor: default;
 }
 .titlebar #window-controls-container #spacer {
@@ -59,7 +59,7 @@
     transform: translateY(-8px);
 }
 [remcord-platform="linux"] .titlebar #window-controls-container #minimize-icon {
-    background-color: var(--interactive-icon-default);
+    background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
     -webkit-mask: url("data:image/svg+xml;charset=utf-8,<svg width='9' height='9' viewBox='0 0 11 11' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M11 4.399V5.5H0V4.399h11z' fill='%23000'/></svg>")
         no-repeat 50% 50%;
@@ -67,7 +67,7 @@
         no-repeat 50% 50%;
 }
 [remcord-platform="linux"] .titlebar #window-controls-container #maximize-icon {
-    background-color: var(--interactive-icon-default);
+    background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
     -webkit-mask: url("data:image/svg+xml;charset=utf-8,<svg width='9' height='9' viewBox='0 0 11 11' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M11 0v11H0V0h11zM9.899 1.101H1.1V9.9h8.8V1.1z' fill='%23000'/></svg>")
         no-repeat 50% 50%;
@@ -105,7 +105,7 @@
 }
 
 [remcord-platform="linux"][isMaximized] .titlebar #window-controls-container #maximize-icon {
-    background-color: var(--interactive-icon-default);
+    background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
     -webkit-mask: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30' width='9' height='9'><style></style><path fill-rule='evenodd' d='m6 0h24v24h-6v6h-24v-24h6zm3 6h15v15h3v-18h-18zm-6 21h18v-18h-18z'/></svg>")
         no-repeat 50% 50%;
@@ -167,7 +167,7 @@
 }
 /* biome-ignore lint/style/noDescendingSpecificity: cross-platform, linux [remcord-platform="linux"] only */
 [remcord-platform="win32"] .titlebar #window-controls-container #quit-icon {
-    background-color: var(--interactive-icon-default);
+    background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
     -webkit-mask: url("data:image/svg+xml;charset=utf-8,<svg width='11' height='11' viewBox='0 0 11 11' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M6.279 5.5L11 10.221l-.779.779L5.5 6.279.779 11 0 10.221 4.721 5.5 0 .779.779 0 5.5 4.721 10.221 0 11 .779 6.279 5.5z' fill='%23000'/></svg>")
         no-repeat 50% 50%;
@@ -175,7 +175,7 @@
         no-repeat 50% 50%;
 }
 [remcord-platform="win32"] .titlebar #window-controls-container #minimize-icon {
-    background-color: var(--interactive-icon-default);
+    background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
     -webkit-mask: url("data:image/svg+xml;charset=utf-8,<svg width='11' height='11' viewBox='0 0 11 11' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M11 4.399V5.5H0V4.399h11z' fill='%23000'/></svg>")
         no-repeat 50% 50%;
@@ -183,7 +183,7 @@
         no-repeat 50% 50%;
 }
 [remcord-platform="win32"] .titlebar #window-controls-container #maximize-icon {
-    background-color: var(--interactive-icon-default);
+    background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
     -webkit-mask: url("data:image/svg+xml;charset=utf-8,<svg width='11' height='11' viewBox='0 0 11 11' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M11 0v11H0V0h11zM9.899 1.101H1.1V9.9h8.8V1.1z' fill='%23000'/></svg>")
         no-repeat 50% 50%;
@@ -216,7 +216,7 @@
 }
 
 [remcord-platform="win32"][isMaximized] .titlebar #window-controls-container #maximize-icon {
-    background-color: var(--interactive-icon-default);
+    background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
     -webkit-mask: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30' width='11' height='11'><style></style><path fill-rule='evenodd' d='m6 0h24v24h-6v6h-24v-24h6zm3 6h15v15h3v-18h-18zm-6 21h18v-18h-18z'/></svg>")
         no-repeat 50% 50%;

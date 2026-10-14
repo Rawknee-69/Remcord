@@ -296,6 +296,19 @@ export function registerIpc(passedWindow: BrowserWindow): void {
     ipcMain.on("win-quit", () => {
         app.quit();
     });
+    ipcMain.on("win-setOverlayColors", (_event, color: unknown, symbolColor: unknown) => {
+        // Runtime theme sync for the native overlay buttons (see
+        // `preload/overlayTheme.ts`): strictly validated hex colors, applied
+        // best-effort. Non-overlay styles have no overlay to recolor.
+        if (typeof color !== "string" || typeof symbolColor !== "string") return;
+        const hex = /^#[0-9a-f]{6}$/;
+        if (!hex.test(color) || !hex.test(symbolColor)) return;
+        try {
+            passedWindow.setTitleBarOverlay({ color, symbolColor, height: 30 });
+        } catch {
+            /* e.g. non-overlay window style: keep construction-time colors */
+        }
+    });
     ipcMain.on("get-app-version", (event) => {
         event.returnValue = getVersion();
     });
@@ -594,4 +607,143 @@ export function registerIpc(passedWindow: BrowserWindow): void {
             });
         }
     });
+
+    registerGalleryIpc(passedWindow);
+}
+
+function registerGalleryIpc(passedWindow: BrowserWindow): void {
+    // Lazy import keeps startup cost zero until the Gallery page is used.
+    void import("../common/gallery.js").then(
+        ({
+            addGalleryCategory,
+            addGalleryLink,
+            addGalleryUrl,
+            bulkRemoveGalleryItems,
+            ensureGalleryDirs,
+            getGalleryDiskUsage,
+            getGalleryItem,
+            getGalleryRoot,
+            importGalleryFiles,
+            listGalleryCategories,
+            listGalleryItems,
+            removeGalleryCategory,
+            removeGalleryItem,
+            renameGalleryCategory,
+            resolveGalleryFile,
+            setGalleryRoot,
+            updateGalleryItem,
+        }) => {
+            ensureGalleryDirs();
+            ipcMain.handle("gallery:list", () => ({ items: listGalleryItems(), categories: listGalleryCategories() }));
+            ipcMain.handle("gallery:add-url", async (_e, url: string, meta: Record<string, unknown>) => {
+                if (typeof url !== "string") return { ok: false, error: "INVALID_URL" };
+                return addGalleryUrl(url, (meta ?? {}) as Parameters<typeof addGalleryUrl>[1]);
+            });
+            ipcMain.handle("gallery:add-link", (_e, url: string, meta: Record<string, unknown>) => {
+                if (typeof url !== "string") return { ok: false, error: "INVALID_URL" };
+                return addGalleryLink(url, (meta ?? {}) as Parameters<typeof addGalleryLink>[1]);
+            });
+            ipcMain.handle("gallery:import-dialog", async (_e, meta: Record<string, unknown>) => {
+                const picked = await dialog.showOpenDialog({
+                    title: "Import files into Gallery",
+                    properties: ["openFile", "multiSelections"],
+                });
+                if (picked.canceled || picked.filePaths.length === 0) return { ok: false, error: "CANCELLED" };
+                return importGalleryFiles(picked.filePaths, (meta ?? {}) as Parameters<typeof importGalleryFiles>[1]);
+            });
+            ipcMain.handle("gallery:remove", (_e, id: string) => {
+                if (typeof id !== "string") return { ok: false };
+                return removeGalleryItem(id);
+            });
+            ipcMain.handle("gallery:bulk-remove", (_e, ids: string[]) => {
+                if (!Array.isArray(ids)) return { removed: 0 };
+                return bulkRemoveGalleryItems(ids.filter((i) => typeof i === "string").slice(0, 2000));
+            });
+            ipcMain.handle("gallery:update", (_e, id: string, patch: Record<string, unknown>) => {
+                if (typeof id !== "string") return { ok: false, error: "INVALID_ID" };
+                return updateGalleryItem(id, (patch ?? {}) as Parameters<typeof updateGalleryItem>[1]);
+            });
+            ipcMain.handle("gallery:categories", () => listGalleryCategories());
+            ipcMain.handle("gallery:category-add", (_e, name: string) => {
+                if (typeof name !== "string") return { ok: false, error: "INVALID_NAME" };
+                return addGalleryCategory(name);
+            });
+            ipcMain.handle("gallery:category-rename", (_e, oldName: string, newName: string) => {
+                if (typeof oldName !== "string" || typeof newName !== "string")
+                    return { ok: false, error: "INVALID_NAME" };
+                return renameGalleryCategory(oldName, newName);
+            });
+            ipcMain.handle("gallery:category-remove", (_e, name: string) => {
+                if (typeof name !== "string") return { ok: false };
+                return removeGalleryCategory(name);
+            });
+            ipcMain.handle("gallery:usage", () => getGalleryDiskUsage());
+            ipcMain.handle("gallery:root", () => ({ root: getGalleryRoot() }));
+            ipcMain.handle("gallery:root-pick", async () => {
+                const picked = await dialog.showOpenDialog({
+                    title: "Choose Gallery storage folder (any disk / partition / folder)",
+                    properties: ["openDirectory", "createDirectory"],
+                });
+                if (picked.canceled || !picked.filePaths[0]) return { ok: false, error: "CANCELLED" };
+                return setGalleryRoot(picked.filePaths[0]);
+            });
+            ipcMain.on("gallery:open-root", () => {
+                ensureGalleryDirs();
+                shell.showItemInFolder(getGalleryRoot());
+            });
+            ipcMain.handle("gallery:export", async (_e, ids: string[]) => {
+                if (!Array.isArray(ids) || ids.length === 0) return { ok: false, error: "NO_SELECTION" };
+                const picked = await dialog.showOpenDialog({
+                    title: "Copy Gallery items to folder",
+                    properties: ["openDirectory", "createDirectory"],
+                });
+                if (picked.canceled || !picked.filePaths[0]) return { ok: false, error: "CANCELLED" };
+                const dest = picked.filePaths[0];
+                let copied = 0;
+                let links = 0;
+                const { copyFileSync, existsSync, writeFileSync } = await import("node:fs");
+                const { default: path } = await import("node:path");
+                for (const id of ids.slice(0, 2000)) {
+                    const item = getGalleryItem(id);
+                    if (!item) continue;
+                    try {
+                        if (item.localFile) {
+                            const abs = resolveGalleryFile(item);
+                            if (abs && existsSync(abs)) {
+                                copyFileSync(abs, path.join(dest, path.basename(item.fileName || item.id)));
+                                copied++;
+                            }
+                        } else if (item.sourceUrl) {
+                            writeFileSync(
+                                path.join(dest, `${item.id}.url.txt`),
+                                `${item.title}\n${item.sourceUrl}\n`,
+                                "utf-8",
+                            );
+                            links++;
+                        }
+                    } catch (err) {
+                        console.warn("[Gallery] export failed:", err);
+                    }
+                }
+                return { ok: true, copied, links, dest };
+            });
+            ipcMain.handle("gallery:file", async (_e, id: string) => {
+                const item = typeof id === "string" ? getGalleryItem(id) : undefined;
+                if (!item?.localFile) return { ok: false, error: "NOT_FOUND" };
+                const abs = resolveGalleryFile(item);
+                if (!abs) return { ok: false, error: "NOT_FOUND" };
+                try {
+                    const buf = readFileSync(abs);
+                    // Cap inline preview transport at 48MB; larger files still
+                    // play via their remote sourceUrl.
+                    if (buf.byteLength > 48 * 1024 * 1024) return { ok: false, error: "TOO_LARGE" };
+                    void passedWindow;
+                    return { ok: true, base64: buf.toString("base64"), mime: item.mime, fileName: item.fileName };
+                } catch {
+                    return { ok: false, error: "NOT_FOUND" };
+                }
+            });
+        },
+        (err) => console.error("[Gallery] failed to init:", err),
+    );
 }

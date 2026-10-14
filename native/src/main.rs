@@ -27,6 +27,7 @@ mod protocol;
 mod quick_css;
 mod recovery;
 mod remcord_protocol;
+mod screenshare_picker;
 mod screenshare_quality;
 mod settings;
 mod settings_boot;
@@ -3004,10 +3005,12 @@ fn initialization_script(
 
 /// Full document-start script: the base [`initialization_script`] plus the
 /// host-selected screenshare capture-quality script, appended AFTER the mod
-/// adapters so capture constraining is the last document-start layer and can
-/// never precede (or perturb) the settings boot snapshot or mod bootstrap.
-/// `raw_mode` is normalized by the module (unknown values fail safe to
-/// `"default"`, which preserves existing behavior exactly).
+/// adapters so capture constraining is never before (and can never perturb)
+/// the settings boot snapshot or mod bootstrap — plus the Remcord stream
+/// setup popup ([`screenshare_picker`]), appended last so it wraps outermost
+/// and its modal is the first thing a `getDisplayMedia` call reaches.
+/// `raw_mode` is normalized by the quality module (unknown values fail safe
+/// to `"default"`, which preserves existing behavior exactly).
 fn document_start_script(
     active_mods: &[&'static ModDescriptor],
     settings_boot_json: &str,
@@ -3019,6 +3022,8 @@ fn document_start_script(
         .map_err(serde::de::Error::custom)?;
     script.push('\n');
     script.push_str(&quality);
+    script.push('\n');
+    script.push_str(&screenshare_picker::screenshare_picker_script());
     Ok(script)
 }
 
@@ -9480,8 +9485,9 @@ mod tests {
 
     #[test]
     fn document_start_script_appends_quality_after_adapters() {
-        // Ordering: the boot snapshot precedes adapters, and the capture
-        // script is the last layer — it can never perturb snapshot/mod boot.
+        // Ordering: the boot snapshot precedes adapters, the capture script
+        // follows them, and the stream setup popup is the last layer — it
+        // can never perturb snapshot/mod boot.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
         let script = document_start_script(&adapters_for(&["shelter"]), boot, platform, "balanced")
@@ -9493,21 +9499,33 @@ mod tests {
         let quality_at = script
             .find("__remcordScreenshareQuality")
             .expect("quality status present");
+        let picker_at = script
+            .find("__remcordStreamPicker")
+            .expect("picker status present");
         assert!(snapshot_at < adapter_at);
         assert!(adapter_at < quality_at);
+        assert!(quality_at < picker_at);
         assert!(!script.contains("__REMCORD_SCREENSHARE_QUALITY_MODE__"));
         assert!(script.contains("\"balanced\""));
     }
 
     #[test]
     fn document_start_script_default_mode_is_capture_inert() {
-        // Default preserves existing behavior exactly: no capture wrapping.
+        // Default quality preserves existing behavior exactly: the quality
+        // segment publishes status but contributes no capture wrapper. The
+        // stream setup popup is a separate layer and is always present.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
         let script = document_start_script(&[], boot, platform, "default").expect("must build");
         assert!(script.contains("__remcordScreenshareQuality"));
-        assert!(!script.contains("getDisplayMedia"));
-        assert!(!script.contains("applyConstraints"));
+        assert!(script.contains("__remcordStreamPicker"));
+        // Picker contract anchors: last-choice record and idempotence key.
+        assert!(script.contains("__remcordStreamPrefs"));
+        assert!(script.contains("remcord.screenshare.pickerPatch"));
+        assert!(
+            !script.contains("[Remcord][ScreenshareQuality] capture constrained"),
+            "default quality must contribute no capture wrapper"
+        );
     }
 
     #[test]
@@ -9516,7 +9534,11 @@ mod tests {
         let platform = crate::app::test_fixture_json();
         let script = document_start_script(&[], boot, platform, "ultra-hd").expect("must build");
         assert!(script.contains("\"default\""));
-        assert!(!script.contains("applyConstraints"));
+        assert!(script.contains("__remcordStreamPicker"));
+        assert!(
+            !script.contains("[Remcord][ScreenshareQuality] capture constrained"),
+            "unknown quality mode must contribute no capture wrapper"
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@
 <!-- Describe the checks you ran and any manual smoke tests. -->
 
 - [ ] `pnpm lint`
+- [ ] `pnpm test` (covers the Gallery suite `tests/gallery.test.ts` and all native-dispatch suites)
 - [ ] `pnpm build` if this PR touches runtime, bundling, or packaging code
 - [ ] Manual verification for affected flows
 - [ ] Screenshots or recordings for UI changes

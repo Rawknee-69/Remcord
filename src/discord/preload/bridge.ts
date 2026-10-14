@@ -153,6 +153,38 @@ contextBridge.exposeInMainWorld("remcord", {
             ipcRenderer.invoke("backupSave", data) as Promise<{ ok: true } | { ok: false; error: string }>,
         restore: () => ipcRenderer.invoke("backupRestore") as Promise<string>,
     },
+    gallery: {
+        list: () =>
+            ipcRenderer.invoke("gallery:list") as Promise<{
+                items: Array<Record<string, unknown>>;
+                categories: Array<Record<string, unknown>>;
+            }>,
+        addUrl: (url: string, meta?: Record<string, unknown>) =>
+            ipcRenderer.invoke("gallery:add-url", url, meta ?? {}) as Promise<Record<string, unknown>>,
+        addLink: (url: string, meta?: Record<string, unknown>) =>
+            ipcRenderer.invoke("gallery:add-link", url, meta ?? {}) as Promise<Record<string, unknown>>,
+        importDialog: (meta?: Record<string, unknown>) =>
+            ipcRenderer.invoke("gallery:import-dialog", meta ?? {}) as Promise<Record<string, unknown>>,
+        remove: (id: string) => ipcRenderer.invoke("gallery:remove", id) as Promise<{ ok: boolean }>,
+        bulkRemove: (ids: string[]) => ipcRenderer.invoke("gallery:bulk-remove", ids) as Promise<{ removed: number }>,
+        update: (id: string, patch: Record<string, unknown>) =>
+            ipcRenderer.invoke("gallery:update", id, patch) as Promise<Record<string, unknown>>,
+        categories: () => ipcRenderer.invoke("gallery:categories") as Promise<Array<Record<string, unknown>>>,
+        categoryAdd: (name: string) =>
+            ipcRenderer.invoke("gallery:category-add", name) as Promise<Record<string, unknown>>,
+        categoryRename: (oldName: string, newName: string) =>
+            ipcRenderer.invoke("gallery:category-rename", oldName, newName) as Promise<Record<string, unknown>>,
+        categoryRemove: (name: string) => ipcRenderer.invoke("gallery:category-remove", name) as Promise<unknown>,
+        usage: () => ipcRenderer.invoke("gallery:usage") as Promise<{ bytes: number; files: number; items: number }>,
+        root: () => ipcRenderer.invoke("gallery:root") as Promise<{ root: string }>,
+        pickRoot: () => ipcRenderer.invoke("gallery:root-pick") as Promise<Record<string, unknown>>,
+        openRoot: () => ipcRenderer.send("gallery:open-root"),
+        exportItems: (ids: string[]) => ipcRenderer.invoke("gallery:export", ids) as Promise<Record<string, unknown>>,
+        getFile: (id: string) =>
+            ipcRenderer.invoke("gallery:file", id) as Promise<
+                { ok: true; base64: string; mime: string; fileName: string } | { ok: false; error: string }
+            >,
+    },
     plugins: {
         list: () => ipcRenderer.invoke("plugins:list") as Promise<RemcordPluginInfo[]>,
         setEnabled: (id: string, enabled: boolean) =>

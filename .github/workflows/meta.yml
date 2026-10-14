@@ -11,7 +11,8 @@ permissions:
 
 jobs:
     update:
-        runs-on: ubuntu-latest
+        # Windows-only for now.
+        runs-on: windows-latest
         env:
             GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
 
@@ -19,14 +20,16 @@ jobs:
             - uses: actions/checkout@v6
             - uses: pnpm/action-setup@v6 # Install pnpm using packageManager key in package.json
 
-            - name: Use Node.js 22
+            # Must track package.json engines (>=26). Node 22 breaks
+            # postinstall (electron-builder install-app-deps) and the build.
+            - name: Use Node.js
               uses: actions/setup-node@v6
               with:
                   node-version-file: package.json
                   cache: pnpm
 
             - name: Install dependencies
-              run: pnpm i
+              run: pnpm i --frozen-lockfile
 
             - name: Update metainfo
               run: pnpm updateMeta

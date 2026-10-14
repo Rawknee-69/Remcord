@@ -3,8 +3,9 @@ name: Code quality
 on: [push, pull_request]
 
 jobs:
-  quality:
-    runs-on: ubuntu-latest
+  lint:
+    # Windows-only for now.
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -12,3 +13,30 @@ jobs:
         uses: biomejs/setup-biome@v2
       - name: Run Biome
         run: biome ci . --reporter=github
+
+  test:
+    # Windows-only for now.
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare PNPM
+        uses: pnpm/action-setup@v6
+
+      - name: Prepare Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      # Covers the Gallery (tests/gallery.test.ts) plus every other
+      # native-dispatch / shelter / settings regression suite.
+      # NOTE: `tsc --noEmit` is intentionally NOT run here: tsconfig.json
+      # includes scripts/**/* outside rootDir src, so bare tsc always
+      # errors with TS6059 (pre-existing, unrelated to any feature).
+      - name: Run tests
+        run: pnpm test

@@ -47,6 +47,6 @@
     height: 100%;
     width: 33.3%;
     text-align: center;
-    color: var(--interactive-icon-default);
+    color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     cursor: default;
 }

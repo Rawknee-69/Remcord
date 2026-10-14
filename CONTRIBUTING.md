@@ -106,7 +106,7 @@ We don't allow vibecoded slop. There has to be at least slight human touch in th
 ## Documentation
 
 We are still improving project and codebase documentation.
-If you have experience building docs systems or contributor docs, contact @smartfrigde on Discord.
+If you have experience building docs systems or contributor docs, contact @rawknee-69 on Discord.
 
 ## Help users in the Discord community
 

@@ -11,9 +11,12 @@ permissions:
 
 jobs:
     upload:
+        # Windows-only for now: Flatpak is Linux-only, so this job is
+        # disabled. Remove the `if: false` line to re-enable it.
+        if: false
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
 
             - name: Run flatpak-node-generator
               run: pipx run git+https://github.com/flatpak/flatpak-builder-tools.git#subdirectory=node pnpm pnpm-lock.yaml --node-sdk-extension org.freedesktop.Sdk.Extension.node26 --electron-node-headers --pnpm-store-version v11

@@ -7,6 +7,7 @@ import "./mods/custom.mjs";
 import "./plugins.mjs";
 import "./patches.mjs";
 import "./newTitlebar.mjs";
+import "./overlayTheme.js";
 import "./titlebar.mjs";
 import "./themes.js";
 import "./inviteBackButton.mjs";

@@ -1,0 +1,231 @@
+.toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 12px 0;
+    padding: 10px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 8px;
+    background: var(--background-secondary-alt);
+}
+
+.search {
+    flex: 2 1 200px;
+    min-width: 180px;
+}
+
+/* Themed Dropdown (see components/Dropdown): neutralizes its standalone
+   page margins and sizes it for toolbar flow. Higher specificity wins over
+   the component's own container margins. */
+.toolbar .dd {
+    flex: 1 1 140px;
+    min-width: 140px;
+    max-width: 220px;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.selectionBar .dd {
+    min-width: 180px;
+    max-width: 260px;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.catInput {
+    flex: 1 1 180px;
+    min-width: 180px;
+}
+
+.storageBar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 8px 0 4px;
+    padding: 8px 12px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 8px;
+    background: var(--background-primary);
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.storagePath {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 46ch;
+}
+
+.selectionBar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 8px 0;
+    padding: 8px 12px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 8px;
+    background: var(--background-modifier-accent-2, var(--background-secondary));
+    color: var(--text-normal);
+    font-size: 13px;
+}
+
+.categoryRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin: 8px 0;
+}
+
+.pill {
+    border: 1px solid var(--background-modifier-accent);
+    background: var(--background-tertiary);
+    color: var(--text-normal);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.pillActive {
+    border-color: var(--text-link);
+    background: var(--brand-500, #5865f2);
+    color: #fff;
+}
+
+.catPill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.groupTitle {
+    margin: 18px 0 6px;
+}
+
+.card {
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--background-primary);
+    content-visibility: auto;
+    contain-intrinsic-size: 220px;
+}
+
+.cardSelected {
+    outline: 2px solid var(--text-link);
+}
+
+.thumb {
+    width: 100%;
+    height: 120px;
+    object-fit: cover;
+    display: block;
+    background: var(--background-tertiary);
+}
+
+.thumbVideo {
+    width: 100%;
+    height: 120px;
+    display: block;
+    background: #000;
+}
+
+.linkThumb {
+    height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+    background: var(--background-tertiary);
+    color: var(--text-link);
+    font-size: 12px;
+    word-break: break-all;
+    overflow: hidden;
+}
+
+.meta {
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.title {
+    color: var(--text-normal);
+    font-size: 12px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sub {
+    color: var(--text-muted);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cardActions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 0 8px 8px;
+}
+
+.miniBtn {
+    background: var(--background-secondary-alt);
+    color: var(--text-normal);
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+}
+
+.miniBtn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.sentinel {
+    height: 24px;
+}
+
+.hint {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin: 8px 0;
+}
+
+.checkRow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px 0;
+    color: var(--text-muted);
+    font-size: 11px;
+}
