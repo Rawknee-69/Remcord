@@ -590,6 +590,21 @@
         return request({ type: "graphics_get_info", payload: {} }, timeoutMs);
     }
 
+    // Tray state readout (F13 core): resolved mode (disabled/dynamic/
+    // static — never the raw setting string), availability (false until an
+    // OS icon with a working reopen action ships), the authoritative
+    // minimizeToTray, and the resulting close policy. Parameter-free by
+    // protocol: no mode, flag, title, badge, path, handle, or asset
+    // selector may be supplied. The response router validates the canonical
+    // vocabulary before resolving.
+    function getTrayState(timeoutMs = 5000) {
+        requireCapability("tray.get_state");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "tray_get_state", payload: {} }, timeoutMs);
+    }
+
     // Client-mod cache wipe: the five host-managed downloaded bundle
     // caches plus the stored `modCache` map reset. Parameter-free by
     // protocol — user-owned custom bundles can never be selected.
@@ -2516,6 +2531,29 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "tray_state") {
+            const payload = response.payload.payload;
+            // Canonical tray vocabulary only: the resolved mode (never the
+            // raw setting string), availability, the authoritative
+            // minimizeToTray, and the resulting close policy. A hide verdict
+            // without both intent and availability is inconsistent and
+            // rejected; no title, badge, path, handle, or asset may ride
+            // along.
+            const modes = ["disabled", "dynamic", "static"];
+            if (
+                !payload ||
+                Object.keys(payload).length !== 4 ||
+                typeof payload.mode !== "string" ||
+                !modes.includes(payload.mode) ||
+                typeof payload.available !== "boolean" ||
+                typeof payload.minimize_to_tray !== "boolean" ||
+                typeof payload.should_hide !== "boolean" ||
+                (payload.should_hide && (!payload.minimize_to_tray || !payload.available))
+            ) {
+                request.reject(new Error("Native tray state response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -2842,6 +2880,9 @@
     // measured-or-explicitly-missing report out. The caller performs the
     // clipboard write with `navigator.clipboard`.
     const graphics = Object.freeze({ getInfo: getGraphicsInfo });
+    // Tray state readout only: resolved mode plus the close policy the
+    // host derives from it. No icon, menu, title, or badge surface.
+    const tray = Object.freeze({ getState: getTrayState });
     // Client-mod cache wipe only: an exact empty payload in, the fixed
     // allowlist outcome out. User-owned bundles can never be selected.
     const mod = Object.freeze({ clearCache: clearModCache });
@@ -2891,6 +2932,7 @@
             quickcss: quickcssShim,
             diagnostics,
             graphics,
+            tray,
             mod,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,

@@ -117,6 +117,7 @@ pub enum BridgeCommand {
     WindowDrag(WindowDragRequest),
     WindowToggleFullscreen(WindowToggleFullscreenRequest),
     WindowQuit(WindowQuitRequest),
+    TrayGetState(TrayGetStateRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -762,6 +763,15 @@ pub struct WindowToggleFullscreenRequest {}
 #[serde(deny_unknown_fields)]
 pub struct WindowQuitRequest {}
 
+/// Empty request for the `tray.get_state` capability: the read-only tray
+/// state snapshot from `crate::tray` (resolved mode, availability, the
+/// caller's `minimizeToTray`, and the resulting close policy). There are
+/// no renderer-supplied parameters by design: no mode, flag, title, badge,
+/// path, handle, or asset selector. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrayGetStateRequest {}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -1403,6 +1413,7 @@ pub enum BridgeResponsePayload {
     KeybindsToggle(KeybindsToggleResponse),
     KeybindsRemove(KeybindsRemoveResponse),
     WindowAck(WindowAckResponse),
+    TrayState(TrayGetStateResponse),
 }
 
 #[derive(Serialize)]
@@ -1928,6 +1939,19 @@ pub struct WindowAckResponse {
     pub command: &'static str,
 }
 
+/// Read-only tray state response for the `tray.get_state` capability:
+/// the canonical mode name (`disabled` / `dynamic` / `static` — never the
+/// raw setting string), availability, the authoritative `minimizeToTray`,
+/// and the resulting close policy. No title/badge text, no paths, no
+/// handles, no asset bytes cross the boundary.
+#[derive(Serialize)]
+pub struct TrayGetStateResponse {
+    pub mode: String,
+    pub available: bool,
+    pub minimize_to_tray: bool,
+    pub should_hide: bool,
+}
+
 /// Typed host-to-renderer window state event. Replaces Electron's
 /// `executeJavaScript` attribute writes for focus/blur/maximize/unmaximize
 /// with schema-validated data: the renderer owns the DOM attributes and no
@@ -2241,7 +2265,8 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // there is nothing to validate.
                 BridgeCommand::DiagnosticsGetInfo(_)
                 | BridgeCommand::GraphicsGetInfo(_)
-                | BridgeCommand::ModClearCache(_) => {}
+                | BridgeCommand::ModClearCache(_)
+                | BridgeCommand::TrayGetState(_) => {}
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
@@ -4759,6 +4784,41 @@ mod tests {
                     "{wire} with {payload} must be rejected"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn accepts_tray_get_state_without_parameters() {
+        // F13 tray state read: a parameter-free host snapshot (resolved
+        // mode, availability, minimizeToTray, close policy). Any
+        // renderer-supplied member — mode, flag, title, badge, path,
+        // handle, or asset selector — is rejected.
+        let message = r#"{"version":1,"request_id":"tray-1","command":{"type":"tray_get_state","payload":{}}}"#;
+        let parsed = parse_bridge_message(message);
+        assert!(parsed.is_ok(), "tray_get_state must parse: {parsed:?}");
+        let command = match parsed.unwrap() {
+            BridgeMessage::Request(request) => request.command,
+            BridgeMessage::Event(_) => panic!("tray_get_state must parse as a request"),
+        };
+        assert!(
+            matches!(command, BridgeCommand::TrayGetState(_)),
+            "tray_get_state must dispatch to its own typed variant"
+        );
+        for payload in [
+            r#"{"mode":"dynamic"}"#,
+            r#"{"minimize_to_tray":true}"#,
+            r#"{"title":"(3) Discord"}"#,
+            r#"{"badge":"badge-3.ico"}"#,
+            r#"{"handle":"0x1234"}"#,
+            r#"{"asset":"ac_plug_colored.png"}"#,
+        ] {
+            let message = format!(
+                "{{\"version\":1,\"request_id\":\"x\",\"command\":{{\"type\":\"tray_get_state\",\"payload\":{payload}}}}}"
+            );
+            assert!(
+                parse_bridge_message(&message).is_err(),
+                "tray_get_state with {payload} must be rejected"
+            );
         }
     }
 

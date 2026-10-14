@@ -43,6 +43,7 @@ mod shelter_injector;
 mod theme_import;
 mod themes;
 mod titlebar_plugin;
+mod tray;
 mod user_agent;
 mod webview_runtime;
 
@@ -99,8 +100,8 @@ use protocol::{
     PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
     SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
     SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
-    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
-    PROTOCOL_VERSION,
+    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, TrayGetStateResponse,
+    WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -653,6 +654,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "window.drag",
         "window.toggle_fullscreen",
         "window.quit",
+        "tray.get_state",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -5419,6 +5421,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         BOOT_SNAPSHOT.capabilities,
     )
     .map_err(|error| format!("mod settings contract is invalid: {error}"))?;
+    // F13: tray menu/badge model contract (mode resolution, five Electron
+    // actions in order, badge assets). Fail fast so the future OS tray
+    // slice can never build a drifted menu; the close path itself is
+    // untouched (`close_behavior` still reports no usable tray).
+    tray::validate_tray_contract().map_err(|error| format!("tray contract is invalid: {error}"))?;
     let mut web_context = WebContext::new(Some(profile_path.clone()));
     // Release blocker 4: Evergreen WebView2 Runtime prerequisite check,
     // before any WebView initialization. Supported loader lookup (default
@@ -9388,6 +9395,64 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         payload: None,
                                         error: Some(BridgeError {
                                             code: "DIAGNOSTICS_UNAVAILABLE",
+                                            message: error,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::TrayGetState(_) => {
+                            // F13 read-only tray state: resolved mode, the
+                            // availability flip point (false until an OS icon
+                            // ships), the authoritative minimizeToTray, and
+                            // the resulting close policy. Parameter-free like
+                            // diagnostics; a corrupt snapshot fails closed.
+                            let request_id = request.request_id;
+                            match load_settings(&profile_path) {
+                                Ok(loaded) => {
+                                    let state = tray::snapshot_tray_state(
+                                        &loaded.snapshot.tray,
+                                        loaded.snapshot.minimize_to_tray,
+                                    );
+                                    println!("{}", tray::format_log(
+                                        tray::resolve_tray_mode(&loaded.snapshot.tray),
+                                        loaded.snapshot.minimize_to_tray,
+                                        state.available,
+                                    ));
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::TrayState(
+                                            TrayGetStateResponse {
+                                                mode: state.mode.to_owned(),
+                                                available: state.available,
+                                                minimize_to_tray: state.minimize_to_tray,
+                                                should_hide: state.should_hide,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                                Err(error) => {
+                                    eprintln!("[Tray][TRAY_UNAVAILABLE] {error}");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "TRAY_UNAVAILABLE",
                                             message: error,
                                         }),
                                     };
