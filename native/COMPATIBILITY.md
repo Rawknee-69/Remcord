@@ -998,7 +998,7 @@ The document-start compatibility script owns facade creation, local response cor
 
 ### Deferred and not tested
 
-Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`remcord://`); arRPC; popup windows; general mod loader; theme install/edit (folder reveal/open now implemented natively); backup UI wiring (save + restore capabilities done, BackupSection unwired); existing broad `window.remcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's user-authored plugin UI surface is not implemented. This narrow mod path does not establish full Remcord compatibility.
+Updater; tray; native menus; downloads; permissions; screen capture; WebRTC/native media; `webRequest`; protocol handlers (`remcord://`); arRPC; popup windows; general mod loader; theme install/edit (folder reveal/open now implemented natively); existing broad `window.remcord` APIs beyond the migrated capabilities; all direct Electron preload globals except the documented mod replacements. Each mod's own settings UI, update/ref-based cache policy, and cross-mod interactions are not implemented, and Shelter's user-authored plugin UI surface is not implemented. This narrow mod path does not establish full Remcord compatibility.
 
 ### Validation status
 

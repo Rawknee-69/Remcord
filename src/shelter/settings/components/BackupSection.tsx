@@ -27,6 +27,8 @@ const {
         ModalSizes,
         ModalHeader,
         SwitchItem,
+        Text,
+        TextTags,
         showToast,
     },
     plugin: { store },

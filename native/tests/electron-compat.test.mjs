@@ -1651,6 +1651,52 @@ test("F5 gallery keeps the Electron store contract with a natively-gated page", 
     assert.match(compat, /getFile: getGalleryFile/);
 });
 
+test("F6 backup UI drives the native inspect/commit/discard flow with a working preview modal", () => {
+    // D4-3: BackupSection routes save through the shared saveBackup helper
+    // (same signature/shape both shells) and restore through the native
+    // inspect → preview-modal → commit/discard flow when
+    // isNativeBackupAvailable(), keeping the Electron JSON-string path
+    // otherwise. The preview modal must render: every component it uses
+    // has to be imported (Text/TextTags were missing and crashed it).
+    const backupSection = readFileSync(
+        new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(backupSection, /isNativeBackupAvailable\(\)/);
+    assert.match(backupSection, /inspectBackupNative\(\)/);
+    assert.match(backupSection, /commitRestoreNative\(\)/);
+    assert.match(backupSection, /discardRestoreNative\(\)/);
+    assert.match(backupSection, /normalizeNativeInspectResult/);
+    assert.match(backupSection, /normalizeNativeRestoreResult/);
+    assert.match(backupSection, /BackupRestorePreviewModal/);
+    // Regression: the preview modal renders <Text tag={TextTags.*}> — both
+    // must be destructured from shelter.ui or the modal throws at open.
+    const destructure = backupSection.match(/ui:\s*\{([\s\S]*?)\},\s*plugin:/);
+    assert.ok(destructure, "shelter.ui destructure must exist");
+    assert.match(backupSection, /<Text[ >]/, "<Text> must be used");
+    assert.match(backupSection, /TextTags\./, "TextTags.* must be used");
+    for (const name of ["Text", "TextTags"]) {
+        assert.ok(new RegExp(`\\b${name}\\b`).test(destructure[1]), `${name} must be destructured from shelter.ui`);
+    }
+    // The Electron path stays intact alongside the native branches.
+    assert.match(backupSection, /window\.remcord\.backup\.restore\(\)/);
+    assert.match(backupSection, /parseElectronRestoreResult/);
+    // Helpers + normalizers behind the UI path.
+    const settings = readFileSync(new URL("../../src/shelter/settings/settings.ts", import.meta.url), "utf8");
+    for (const fn of [
+        "isNativeBackupAvailable",
+        "saveBackup",
+        "inspectBackupNative",
+        "commitRestoreNative",
+        "discardRestoreNative",
+        "normalizeNativeInspectResult",
+        "normalizeNativeRestoreResult",
+        "parseElectronRestoreResult",
+    ]) {
+        assert.match(settings, new RegExp(`export (async )?function ${fn}`), `${fn} must stay exported`);
+    }
+});
+
 test("F4 in-mod settings UI stays Electron-owned with no native src branch", () => {
     // Vencord/Equicord persist page-side in localStorage; Shelter owns its
     // plugins through its own registrar. F4 adds no host surface, so the
