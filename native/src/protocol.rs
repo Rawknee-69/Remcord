@@ -117,6 +117,7 @@ pub enum BridgeCommand {
     WindowDrag(WindowDragRequest),
     WindowToggleFullscreen(WindowToggleFullscreenRequest),
     WindowQuit(WindowQuitRequest),
+    BadgeGetState(BadgeGetStateRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -762,6 +763,15 @@ pub struct WindowToggleFullscreenRequest {}
 #[serde(deny_unknown_fields)]
 pub struct WindowQuitRequest {}
 
+/// Empty request for the read-only `badge.get_state` capability: reports the
+/// host's last-applied overlay state (kind, mention count, asset, whether
+/// the taskbar call succeeded). There is deliberately NO title, window id,
+/// handle, or asset parameter: the state derives from `badge_title` page
+/// reports the host parsed itself. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BadgeGetStateRequest {}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -854,6 +864,13 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the Shelter loader probe
     /// (`REMCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
     ShelterLoaderProbe(ShelterLoaderProbe),
+    /// Shipped one-way event posted by the badge title observer when
+    /// `document.title` changes. Carries only the bounded title text: the
+    /// host re-parses it (`crate::badge::parse_title`), applies the overlay
+    /// itself, and never reflects the text anywhere. Over-long titles are
+    /// rejected before any parse or Win32 work; the stored state is left
+    /// untouched.
+    BadgeTitle(BadgeTitle),
     /// Shipped one-way event posted by the keybind matcher script when a
     /// `keydown` matches an enabled non-global keybind. Carries only the
     /// entry id: the host re-validates (known, enabled, non-global) and
@@ -887,6 +904,12 @@ pub enum BridgeEvent {
     /// counts/flags only — never settings values, manifests, translations,
     /// paths, or URLs.
     SettingsUiProbe(SettingsUiProbe),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BadgeTitle {
+    pub title: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1402,6 +1425,7 @@ pub enum BridgeResponsePayload {
     KeybindsAdd(KeybindsAddResponse),
     KeybindsToggle(KeybindsToggleResponse),
     KeybindsRemove(KeybindsRemoveResponse),
+    BadgeState(BadgeStateResponse),
     WindowAck(WindowAckResponse),
 }
 
@@ -1717,6 +1741,18 @@ pub struct KeybindsToggleResponse {
 #[derive(Serialize)]
 pub struct KeybindsRemoveResponse {
     pub ok: bool,
+}
+
+/// Read-only overlay-state response for the `badge.get_state` capability:
+/// the parsed kind, the mention count (only for `mention`), the applied
+/// asset file (only when a badge shows), and whether the last taskbar
+/// overlay call reported success. No title text, no handle, no path.
+#[derive(Serialize)]
+pub struct BadgeStateResponse {
+    pub kind: crate::badge::BadgeKind,
+    pub pings: Option<u32>,
+    pub asset: Option<&'static str>,
+    pub overlay_applied: bool,
 }
 
 /// Save response for the `gallery.add_url` / `gallery.add_link`
@@ -2266,6 +2302,12 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::WindowDrag(_)
                 | BridgeCommand::WindowToggleFullscreen(_)
                 | BridgeCommand::WindowQuit(_) => {}
+                // Badge state is parameter-free by protocol
+                // (`deny_unknown_fields` already rejected any
+                // renderer-supplied member: no title, window id, handle,
+                // or asset can cross). The reported state derives from
+                // `badge_title` page reports parsed host-side.
+                BridgeCommand::BadgeGetState(_) => {}
                 // Gallery: shape check only (presence + byte caps); URL
                 // schemes, id charset, name rules, category bounds, and
                 // containment live in `gallery` and are re-enforced at
@@ -2840,6 +2882,15 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                     // and are re-enforced at handling.
                     if !keybind_id_shape_valid(&payload.id) {
                         return Err("invalid keybind id".to_owned());
+                    }
+                }
+                BridgeEvent::BadgeTitle(payload) => {
+                    // Length only: the character bound lives in `badge`
+                    // (`MAX_BADGE_TITLE_CHARS`) and is re-checked at
+                    // handling; the title text is parsed host-side and
+                    // never reflected anywhere.
+                    if payload.title.chars().count() > crate::badge::MAX_BADGE_TITLE_CHARS {
+                        return Err("invalid badge title".to_owned());
                     }
                 }
                 BridgeEvent::SettingsBootProbe(payload) => {

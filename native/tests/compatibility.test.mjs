@@ -6654,3 +6654,224 @@ test("F4 keeps mod settings storage page-side with host preservation only", () =
     const substrateCode = stripComments(modSubstrate);
     assert.ok(substrateCode.includes("createModAdapter"));
 });
+
+// ---------------------------------------------------------------------------
+// Windows overlay/badge icons (F20 core).
+//
+// Electron derives the taskbar overlay from `page-title-updated`
+// (`src/discord/window.ts`): `•` unread takes badge-11.ico, `(N)`
+// mentions take badge-N.ico capped at badge-10.ico, anything else clears.
+// WebView2 exposes no title event to the host, so the document-start
+// observer (native/web/badge/observer.js) reports bounded titles as
+// one-way `badge_title` events and the host parses + applies. The
+// read-only `badge.get_state` capability reports the last-applied state.
+// ---------------------------------------------------------------------------
+
+const BADGE_CAPS = ["bridge.ping", "badge.get_state"];
+const badgeObserver = readFileSync(new URL("../web/badge/observer.js", import.meta.url), "utf8");
+
+function createBadgeRuntime(capabilities = BADGE_CAPS) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondBadge(window, request, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "badge_state", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a read-only badge.get_state capability", () => {
+    const { window } = createBadgeRuntime();
+    assert.equal(typeof window.remcord.badge.getState, "function");
+    assert.equal(window.remcord.native.supports("badge.get_state"), true);
+    assert.equal(window.remcord.badge.setState, undefined);
+    assert.equal(window.remcord.badge.setOverlay, undefined);
+});
+
+test("badge.get_state sends an exact empty payload and resolves the snapshot", async () => {
+    const { window } = createBadgeRuntime();
+    const pending = window.remcord.badge.getState();
+    const message = window.messages.find((entry) => entry.command?.type === "badge_get_state");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "badge_get_state", payload: {} });
+    respondBadge(window, message, {
+        kind: "mention",
+        pings: 3,
+        asset: "badge-3.ico",
+        overlay_applied: true,
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        kind: "mention",
+        pings: 3,
+        asset: "badge-3.ico",
+        overlayApplied: true,
+    });
+});
+
+test("badge.get_state rejects malformed snapshots", async () => {
+    for (const payload of [
+        { kind: "missiles", pings: null, asset: null, overlay_applied: false },
+        { kind: "clear", pings: 2, asset: null, overlay_applied: false },
+        { kind: "clear", pings: null, asset: "badge-1.ico", overlay_applied: false },
+        { kind: "mention", pings: null, asset: "badge-3.ico", overlay_applied: true },
+        { kind: "mention", pings: 0, asset: "badge-0.ico", overlay_applied: true },
+        { kind: "mention", pings: 3, asset: "../build/icon.ico", overlay_applied: true },
+        { kind: "unread", pings: null, asset: "badge-11.ico" },
+        "nope",
+    ]) {
+        const runtime = createBadgeRuntime();
+        const pending = runtime.window.remcord.badge.getState();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "badge_get_state");
+        respondBadge(runtime.window, message, payload);
+        await assert.rejects(pending, /badge state response schema is invalid/);
+    }
+});
+
+test("badge.get_state throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createBadgeRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("badge.get_state"), false);
+    assert.throws(
+        () => window.remcord.badge.getState(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "badge_get_state"),
+        false,
+    );
+});
+
+// ---------------------------------------------------------------------------
+// Badge title observer (F20 core, native/web/badge/observer.js).
+//
+// The observer reports `document.title` as bounded one-way `badge_title`
+// events on change only. These tests drive the shipped script in a VM with
+// a fake document plus a MutationObserver double.
+// ---------------------------------------------------------------------------
+
+function createObserverRuntime(origin = "https://discord.com", capabilities = BADGE_CAPS, framed = false) {
+    const runtime = createRuntime(origin, capabilities);
+    const document = { title: "" };
+    runtime.context.document = document;
+    if (framed) {
+        // Subframe double: the top-frame guard must stop the observer at
+        // load, before any report or MutationObserver construction.
+        runtime.window.self = runtime.window;
+        runtime.window.top = {};
+    }
+    let observerCount = 0;
+    let observedTarget = null;
+    let mutationCallback = null;
+    runtime.context.MutationObserver = class {
+        constructor(callback) {
+            observerCount += 1;
+            mutationCallback = callback;
+        }
+        observe(target, options) {
+            observedTarget = { target, options };
+        }
+        disconnect() {}
+    };
+    vm.runInContext(badgeObserver, runtime.context);
+    return {
+        ...runtime,
+        document,
+        fireMutations() {
+            if (mutationCallback) mutationCallback();
+        },
+        observerCount: () => observerCount,
+        observedTarget: () => observedTarget,
+    };
+}
+
+function badgeTitles(window) {
+    return window.messages
+        .filter((message) => message.event?.type === "badge_title")
+        .map((message) => message.event.payload.title);
+}
+
+test("the badge observer reports title changes as bounded one-way events", () => {
+    const runtime = createObserverRuntime();
+    const { window, document } = runtime;
+    // Initial document-start report carries the (empty) title.
+    assert.deepEqual(badgeTitles(window), [""]);
+    // Steady title costs no further events.
+    runtime.fireMutations();
+    assert.deepEqual(badgeTitles(window), [""]);
+    document.title = "• Discord";
+    runtime.fireMutations();
+    document.title = "(3) #general - Discord";
+    runtime.fireMutations();
+    assert.deepEqual(badgeTitles(window), ["", "• Discord", "(3) #general - Discord"]);
+    // Event reports carry the title and nothing else.
+    const serialized = JSON.stringify(window.messages.filter((m) => m.event?.type === "badge_title"));
+    assert.doesNotMatch(serialized, /url|path|handle|asset|javascript/i);
+});
+
+test("the badge observer slices long titles to the host bound", () => {
+    const runtime = createObserverRuntime();
+    runtime.document.title = `${"x".repeat(300)} - Discord`;
+    runtime.fireMutations();
+    const titles = badgeTitles(runtime.window);
+    assert.equal(titles.at(-1).length, 200);
+});
+
+test("the badge observer observes the document subtree", () => {
+    const runtime = createObserverRuntime();
+    const observed = runtime.observedTarget();
+    assert.ok(observed);
+    assert.equal(observed.target, runtime.context.document);
+    // The options object is created inside the VM realm (different
+    // Object.prototype), so compare through JSON.
+    assert.deepEqual(JSON.parse(JSON.stringify(observed.options)), {
+        childList: true,
+        characterData: true,
+        subtree: true,
+    });
+});
+
+test("the badge observer starts once per document", () => {
+    const runtime = createObserverRuntime();
+    vm.runInContext(badgeObserver, runtime.context);
+    assert.equal(runtime.observerCount(), 1);
+    // No duplicate initial report on re-injection.
+    assert.deepEqual(badgeTitles(runtime.window), [""]);
+});
+
+test("the badge observer stays silent off the entry origins and without the capability", () => {
+    const foreign = createObserverRuntime("https://example.com");
+    foreign.document.title = "(3) Discord";
+    foreign.fireMutations();
+    assert.deepEqual(badgeTitles(foreign.window), []);
+    const legacy = createObserverRuntime("https://discord.com", ["bridge.ping"]);
+    legacy.document.title = "(3) Discord";
+    legacy.fireMutations();
+    assert.deepEqual(badgeTitles(legacy.window), []);
+    // Subframe documents never drive the badge, even on an entry origin
+    // with the capability granted: no initial report, no observer.
+    const framed = createObserverRuntime("https://discord.com", BADGE_CAPS, true);
+    framed.document.title = "(3) Discord";
+    framed.fireMutations();
+    assert.deepEqual(badgeTitles(framed.window), []);
+    assert.equal(framed.observerCount(), 0);
+});
+
+test("the badge observer never breaks page scripting", () => {
+    const runtime = createObserverRuntime();
+    // A throwing title getter reports nothing and throws nothing.
+    Object.defineProperty(runtime.context.document, "title", {
+        configurable: true,
+        get() {
+            throw new Error("denied");
+        },
+    });
+    runtime.fireMutations();
+    assert.deepEqual(badgeTitles(runtime.window), [""]);
+});

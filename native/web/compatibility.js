@@ -601,6 +601,44 @@
         return request({ type: "mod_clear_cache", payload: {} }, timeoutMs);
     }
 
+    // Windows overlay/badge icons (F20): the host parses `badge_title`
+    // page reports (Electron `page-title-updated` parity: `•` unread,
+    // `(N)` mentions capped at the `badge-10.ico` asset, else clear) and
+    // applies the taskbar overlay itself. This read-only snapshot reports
+    // the last-applied state. Parameter-free by protocol: no title,
+    // window id, handle, or asset may be supplied.
+    const BADGE_KINDS = ["clear", "unread", "mention"];
+    const BADGE_ASSET_PATTERN = /^badge-(10|11|[1-9])\.ico$/;
+
+    function getBadgeState(timeoutMs = 5000) {
+        requireCapability("badge.get_state");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "badge_get_state", payload: {} }, timeoutMs).then((payload) => {
+            const kindValid = payload && typeof payload === "object" && BADGE_KINDS.includes(payload.kind);
+            const pingsValid =
+                kindValid &&
+                (payload.kind === "mention"
+                    ? Number.isInteger(payload.pings) && payload.pings >= 1
+                    : payload.pings === null || payload.pings === undefined);
+            const assetValid =
+                kindValid &&
+                (payload.kind === "clear"
+                    ? payload.asset === null || payload.asset === undefined
+                    : typeof payload.asset === "string" && BADGE_ASSET_PATTERN.test(payload.asset));
+            if (!kindValid || !pingsValid || !assetValid || typeof payload.overlay_applied !== "boolean") {
+                throw new Error("Native badge state response schema is invalid");
+            }
+            return {
+                kind: payload.kind,
+                pings: payload.kind === "mention" ? payload.pings : null,
+                asset: payload.kind === "clear" ? null : payload.asset,
+                overlayApplied: payload.overlay_applied,
+            };
+        });
+    }
+
     const PLUGIN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
     const MAX_PLUGIN_STORAGE_BYTES = 1048576;
 
@@ -2434,6 +2472,18 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "badge_state") {
+            const payload = response.payload.payload;
+            // Overlay snapshot only: the closed kind plus the bounded
+            // count, asset, and outcome flag. The `getBadgeState` caller
+            // applies the strict shape check and camelCase normalization;
+            // this branch only confirms an object arrived. No title text,
+            // handle, or path may ride along.
+            if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+                request.reject(new Error("Native badge state response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "backup_saved") {
             const payload = response.payload.payload;
             // Bounded save outcome only: cancellation plus the final archive
@@ -2845,6 +2895,10 @@
     // Client-mod cache wipe only: an exact empty payload in, the fixed
     // allowlist outcome out. User-owned bundles can never be selected.
     const mod = Object.freeze({ clearCache: clearModCache });
+    // Overlay/badge readout only: an exact empty payload in, the bounded
+    // last-applied state out. The observer posts titles through one-way
+    // events; no title text crosses this call in either direction.
+    const badge = Object.freeze({ getState: getBadgeState });
     // Runtime plugin management only: bounded inventory in, id+boolean
     // flips and id-only reloads with Electron-parity { ok } outcomes out.
     // Folder opening reuses the typed folders.open capability on the fixed
@@ -2892,6 +2946,7 @@
             diagnostics,
             graphics,
             mod,
+            badge,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,
             restart: bootRestart,

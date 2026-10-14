@@ -1819,3 +1819,63 @@ test("F4 in-mod settings UI stays Electron-owned with no native src branch", () 
     assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
     assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
 });
+
+test("Electron keeps the page-title overlay/badge contract", () => {
+    // F20 Electron source: `src/discord/window.ts` maps the document
+    // title prefix to a taskbar overlay on win32 only. These assertions
+    // pin the contract the native implementation reproduces: `•` takes
+    // badge-11.ico, `(N)` takes the numbered asset capped at badge-10.ico
+    // above 9, anything else clears, and the dock branch stays macOS-only.
+    const discordWindow = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(discordWindow, /page-title-updated/);
+    assert.match(discordWindow, /process\.platform === "win32"/);
+    assert.match(discordWindow, /title\.startsWith\("•"\)/);
+    assert.match(discordWindow, /badge-11\.ico/);
+    assert.match(discordWindow, /title\.startsWith\("\("\)/);
+    assert.match(discordWindow, /badge-10\.ico/);
+    assert.match(discordWindow, /setOverlayIcon\(null, ""\)/);
+    assert.match(discordWindow, /process\.platform === "darwin"/);
+});
+
+test("the native badge path is a deliberate separate implementation", () => {
+    // No Electron source may change for F20: the overlay stays driven by
+    // the main-process title handler, and no renderer overlay surface is
+    // added to the Electron bridge or window contract.
+    const discordWindow = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.doesNotMatch(discordWindow, /badge_get_state|badge_title|getBadgeState/);
+    const types = readFileSync(new URL("../../src/@types/remcordWindow.d.ts", import.meta.url), "utf8");
+    assert.doesNotMatch(types, /badge/);
+    // The native contract pins the same title mapping from the host side:
+    // pure parser, bundled assets only, taskbar overlay via ITaskbarList3,
+    // plus the one-way title event and the read-only state capability.
+    const nativeBadge = readFileSync(new URL("../src/badge.rs", import.meta.url), "utf8");
+    assert.match(nativeBadge, /badge-11\.ico/);
+    assert.match(nativeBadge, /badge-10\.ico/);
+    assert.match(nativeBadge, /ITaskbarList3/);
+    assert.match(nativeBadge, /SetOverlayIcon/);
+    const nativeProtocol = readFileSync(new URL("../src/protocol.rs", import.meta.url), "utf8");
+    assert.match(nativeProtocol, /BadgeGetState/);
+    assert.match(nativeProtocol, /BadgeTitle/);
+    assert.match(nativeProtocol, /BadgeStateResponse/);
+    const observer = readFileSync(new URL("../web/badge/observer.js", import.meta.url), "utf8");
+    assert.match(observer, /badge_title/);
+    assert.match(observer, /MutationObserver/);
+    assert.match(observer, /canary\.discord\.com/);
+    // The observer only reads and reports: no title/DOM writes, no
+    // navigation, no fetch, no eval surface (comments stripped first,
+    // like the resolver test does).
+    const shippedObserver = observer
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n");
+    assert.doesNotMatch(shippedObserver, /document\.title\s*=/);
+    assert.doesNotMatch(shippedObserver, /innerHTML|outerHTML|insertAdjacentHTML/);
+    assert.doesNotMatch(shippedObserver, /fetch\(|XMLHttpRequest|eval\(|new Function/);
+    // The facade exposes the read-only snapshot only: no title, handle,
+    // asset, or overlay-mutation surface.
+    const facade = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+    assert.match(facade, /badge\.get_state/);
+    assert.match(facade, /badge_get_state/);
+    assert.match(facade, /getBadgeState/);
+    assert.doesNotMatch(facade, /badge\.set|setBadgeState|setOverlayIcon/);
+});
