@@ -242,6 +242,10 @@ fn is_on_battery_power() -> bool {
 /// `--switch[=value]` / `--enable-features=a,b` / `--disable-features=c`
 /// arguments, deduplicated. Order is stable (preset order, features last)
 /// so logs and the graphics report stay comparable across runs.
+///
+/// NOTE: feature lists merge into SINGLE comma-joined switches: Chromium
+/// keeps only the last occurrence of a repeated switch, so emitting one
+/// `--enable-features` per preset would silently drop all but the last.
 fn render_preset(preset: &Preset, out: &mut Vec<String>) {
     for (name, value) in preset.switches {
         match value {
@@ -250,16 +254,47 @@ fn render_preset(preset: &Preset, out: &mut Vec<String>) {
         }
     }
     if !preset.enable_features.is_empty() {
-        out.push(format!("--enable-features={}", preset.enable_features.join(",")));
+        out.push(format!("@@enable-features:{}", preset.enable_features.join(",")));
     }
     if !preset.disable_features.is_empty() {
         out.push(format!(
-            "--disable-features={}",
+            "@@disable-features:{}",
             preset.disable_features.join(",")
         ));
     }
     out.sort();
     out.dedup();
+}
+
+/// Collapse the `@@enable-features:` / `@@disable-features:` placeholders
+/// left by [`render_preset`] into single comma-joined switches (plus the
+/// plain switches, sorted and deduplicated).
+fn collapse_feature_lists(args: &mut Vec<String>) {
+    let mut enable: Vec<String> = Vec::new();
+    let mut disable: Vec<String> = Vec::new();
+    args.retain(|arg| {
+        if let Some(list) = arg.strip_prefix("@@enable-features:") {
+            enable.extend(list.split(',').map(str::to_owned));
+            false
+        } else if let Some(list) = arg.strip_prefix("@@disable-features:") {
+            disable.extend(list.split(',').map(str::to_owned));
+            false
+        } else {
+            true
+        }
+    });
+    enable.sort();
+    enable.dedup();
+    disable.sort();
+    disable.dedup();
+    if !enable.is_empty() {
+        args.push(format!("--enable-features={}", enable.join(",")));
+    }
+    if !disable.is_empty() {
+        args.push(format!("--disable-features={}", disable.join(",")));
+    }
+    args.sort();
+    args.dedup();
 }
 
 /// Resolve the full extra-argument string for one settings snapshot:
@@ -301,6 +336,7 @@ pub fn resolve_extra_args(
         // Electron `disable-http-cache` parity (`src/main.ts`).
         args.push("--disable-http-cache".to_owned());
     }
+    collapse_feature_lists(&mut args);
     args.join(" ")
 }
 
@@ -371,5 +407,24 @@ mod tests {
         assert!(args.contains("--enable-gpu-rasterization"), "{args}");
         assert!(args.contains("--enable-features="), "{args}");
         assert!(args.contains("WebRtcHWEncoding"), "{args}");
+    }
+
+    #[test]
+    fn feature_lists_collapse_to_single_switches() {
+        // Chromium keeps only the last repeated switch: merged presets
+        // must emit exactly one enable list and one disable list.
+        let args = resolve_extra_args("performance", true, true, false, false);
+        assert_eq!(
+            args.match_indices("--enable-features=").count(),
+            1,
+            "{args}"
+        );
+        assert_eq!(
+            args.match_indices("--disable-features=").count(),
+            1,
+            "{args}"
+        );
+        // No placeholder leaks into the environment string.
+        assert!(!args.contains("@@"), "{args}");
     }
 }
