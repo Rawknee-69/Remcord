@@ -264,13 +264,62 @@ impl<'de> serde::Deserialize<'de> for SettingsSetRequest {
             SettingsSetKey::ScanInterval => SettingsSetValue::ScanInterval(
                 serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
             ),
+            SettingsSetKey::StartMinimized => SettingsSetValue::StartMinimized(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::Tray => SettingsSetValue::Tray(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::WindowStyle => SettingsSetValue::WindowStyle(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::Transparency => SettingsSetValue::Transparency(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::WindowMaterial => SettingsSetValue::WindowMaterial(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::PerformanceMode => SettingsSetValue::PerformanceMode(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::ProxyMode => SettingsSetValue::ProxyMode(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::ProxyRules => SettingsSetValue::ProxyRules(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::ProxyPacScript => SettingsSetValue::ProxyPacScript(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::ProxyBypassRules => SettingsSetValue::ProxyBypassRules(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::NoBundleUpdates => SettingsSetValue::NoBundleUpdates(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
+            SettingsSetKey::SpellcheckLanguage => SettingsSetValue::SpellcheckLanguage(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
             SettingsSetKey::SupportBannerDismissed
             | SettingsSetKey::ShowExperimentalPluginMenu
             | SettingsSetKey::ExtendedPluginAbilities
             | SettingsSetKey::QuickCss
             | SettingsSetKey::InviteWebsocket
             | SettingsSetKey::ProcessScanning
-            | SettingsSetKey::WindowsLegacyScanning => SettingsSetValue::Bool(
+            | SettingsSetKey::WindowsLegacyScanning
+            | SettingsSetKey::HardwareAcceleration
+            | SettingsSetKey::SmoothScroll
+            | SettingsSetKey::AutoScroll
+            | SettingsSetKey::Spellcheck
+            | SettingsSetKey::MultiInstance
+            | SettingsSetKey::DisableAutogain
+            | SettingsSetKey::DisableHttpCache
+            | SettingsSetKey::MobileMode
+            | SettingsSetKey::UseSystemCssEditor
+            | SettingsSetKey::PopoutPip
+            | SettingsSetKey::MinimizeToTray
+            | SettingsSetKey::BounceOnPing
+            | SettingsSetKey::SdpH264BaselineRewrite => SettingsSetValue::Bool(
                 serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
             ),
         };
@@ -5590,6 +5639,9 @@ mod tests {
         let csp = r#"{"version":1,"request_id":"settings-5","command":{"type":"settings_set","payload":{"key":"csp","value":"strict"}}}"#;
         let quick_css = r#"{"version":1,"request_id":"settings-5b","command":{"type":"settings_set","payload":{"key":"quick_css","value":true}}}"#;
         let channel = r#"{"version":1,"request_id":"settings-5c","command":{"type":"settings_set","payload":{"key":"channel","value":"canary"}}}"#;
+        let tray = r#"{"version":1,"request_id":"settings-5d","command":{"type":"settings_set","payload":{"key":"tray","value":"disabled"}}}"#;
+        let proxy = r#"{"version":1,"request_id":"settings-5e","command":{"type":"settings_set","payload":{"key":"proxy_rules","value":"http://127.0.0.1:8080"}}}"#;
+        let minimize = r#"{"version":1,"request_id":"settings-5f","command":{"type":"settings_set","payload":{"key":"minimize_to_tray","value":true}}}"#;
         assert!(matches!(
             parse_bridge_message(mods),
             Ok(BridgeMessage::Request(_))
@@ -5618,11 +5670,21 @@ mod tests {
             parse_bridge_message(channel),
             Ok(BridgeMessage::Request(_))
         ));
+        assert!(matches!(
+            parse_bridge_message(tray),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(proxy),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(matches!(
+            parse_bridge_message(minimize),
+            Ok(BridgeMessage::Request(_))
+        ));
 
         // Unknown keys never parse: the allowlist is the enum.
         let unknown = r#"{"version":1,"request_id":"settings-6","command":{"type":"settings_set","payload":{"key":"minimizeToTray","value":true}}}"#;
-        let tray = r#"{"version":1,"request_id":"settings-7","command":{"type":"settings_set","payload":{"key":"tray","value":"disabled"}}}"#;
-        let proxy = r#"{"version":1,"request_id":"settings-8","command":{"type":"settings_set","payload":{"key":"proxyRules","value":"http://127.0.0.1:8080"}}}"#;
         let icon = r#"{"version":1,"request_id":"settings-9","command":{"type":"settings_set","payload":{"key":"customIcon","value":"C:\\secret.png"}}}"#;
         // A policy string smuggled through another key never parses: the
         // csp string variant pairs only with the csp key.
@@ -5636,8 +5698,6 @@ mod tests {
         let crossed_csp = r#"{"version":1,"request_id":"settings-13","command":{"type":"settings_set","payload":{"key":"channel","value":"strict"}}}"#;
         let crossed_channel = r#"{"version":1,"request_id":"settings-14","command":{"type":"settings_set","payload":{"key":"csp","value":"canary"}}}"#;
         assert!(parse_bridge_message(unknown).is_err());
-        assert!(parse_bridge_message(tray).is_err());
-        assert!(parse_bridge_message(proxy).is_err());
         assert!(parse_bridge_message(icon).is_err());
         assert!(parse_bridge_message(smuggled).is_err());
         assert!(parse_bridge_message(hostile_mode).is_err());

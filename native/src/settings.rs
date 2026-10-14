@@ -410,6 +410,110 @@ pub enum SettingsSetKey {
     /// (the import-validated range — a zero interval could busy-loop).
     /// Takes effect on next launch.
     ScanInterval,
+    /// Hardware acceleration master switch (`hardwareAcceleration`).
+    /// Native consumer: `false` appends `--disable-gpu` to the WebView2
+    /// environment arguments (Electron `app.disableHardwareAcceleration()`
+    /// parity) and skips the GPU encode presets. Takes effect on next
+    /// launch (restart-required model).
+    HardwareAcceleration,
+    /// Smooth-scrolling toggle (`smoothScroll`). Native consumer: `false`
+    /// appends `--disable-smooth-scrolling` (Electron parity,
+    /// `src/main.ts`). Takes effect on next launch.
+    SmoothScroll,
+    /// Middle-click autoscroll (`autoScroll`). Native consumer: `true`
+    /// appends `--enable-blink-features=MiddleClickAutoscroll` (Electron
+    /// parity). Takes effect on next launch.
+    AutoScroll,
+    /// Spellcheck master switch (`spellcheck`). Native consumer: the
+    /// document-start spellcheck layer (`spellcheck.rs`) reads the
+    /// authoritative pair. Applies live on next document.
+    Spellcheck,
+    /// Multi-instance policy (`multiInstance`). Native consumer: the
+    /// single-instance gate (`single_instance.rs`) reads it at startup.
+    /// Takes effect on next launch.
+    MultiInstance,
+    /// WebRTC auto-gain-control kill switch (`disableAutogain`). Native
+    /// consumer: the document-start audio layer forces
+    /// `autoGainControl: false` on microphone tracks (stricter than
+    /// Electron, whose bundled asset is missing). Applies live on next
+    /// document.
+    DisableAutogain,
+    /// Chromium HTTP cache kill switch (`disableHttpCache`). Native
+    /// consumer: appends `--disable-http-cache` (Electron parity,
+    /// `src/main.ts`). Takes effect on next launch.
+    DisableHttpCache,
+    /// Mobile layout mode (`mobileMode`). Native consumer: selects the
+    /// Android mobile user agent (Electron parity, same UA string).
+    /// Takes effect on next launch.
+    MobileMode,
+    /// System CSS editor (`useSystemCssEditor`). Native consumer: QuickCSS
+    /// and theme edit actions open the file in the OS-associated editor
+    /// (`shell.openPath` parity) instead of the in-Discord modal.
+    /// Applies immediately.
+    UseSystemCssEditor,
+    /// Stream-popout always-on-top (`popoutPiP`). Native consumer: the
+    /// popout child window builder reads it per popout request (Electron
+    /// `overrideBrowserWindowOptions` parity). Applies to new popouts.
+    PopoutPip,
+    /// Minimize-to-tray (`minimizeToTray`). Native consumer: the close path
+    /// hides instead of quitting when a usable tray icon exists (Electron
+    /// `close` handler parity). Applies immediately.
+    MinimizeToTray,
+    /// Ping attention flash (`bounceOnPing`). Native consumer: a mention
+    /// badge transition flashes the taskbar button (Windows analogue of
+    /// Electron's macOS `app.dock.bounce()`). Applies immediately.
+    BounceOnPing,
+    /// H.264 Baseline SDP rewrite (`sdpH264BaselineRewrite`). Native
+    /// consumer: the screenshare media layer (`screenshare_media.rs`)
+    /// rewrites Constrained-Baseline to Baseline. Applies live on next
+    /// document.
+    SdpH264BaselineRewrite,
+    /// Launch visibility (`startMinimized`: `"off"` | `"minimized"` |
+    /// `"tray"`). Native consumer: `"minimized"` starts the window
+    /// minimized; `"tray"` hides to tray (needs a usable tray icon).
+    /// Read once at startup.
+    StartMinimized,
+    /// Tray icon selection (`tray`: Electron's nine `ValidTrayIcons`).
+    /// Native consumer: the tray model resolves mode/asset; the OS slice
+    /// renders it. Applies on next launch.
+    Tray,
+    /// Window chrome style (`windowStyle`). Native consumer: `"native"`
+    /// shows OS decorations, anything else keeps the frameless overlay
+    /// shell. Read once at startup (restart-required model).
+    WindowStyle,
+    /// Transparency mode (`transparency`). Native consumer: anything but
+    /// `"none"` builds a transparent window (restart-required model).
+    Transparency,
+    /// Backdrop material (`windowMaterial`). Native consumer: applies the
+    /// DWM system-backdrop type at startup (`"none"` clears it).
+    WindowMaterial,
+    /// GPU/CPU performance preset (`performanceMode`). Native consumer:
+    /// the WebView2 environment arguments gain the preset's Chromium
+    /// switches (Electron `flags.ts` parity, Windows slice). Takes effect
+    /// on next launch.
+    PerformanceMode,
+    /// Proxy mode (`proxyMode`: Electron's five `ProxyMode`s). Native
+    /// consumer: the WebView2 environment proxy config (F21). Takes effect
+    /// on next launch.
+    ProxyMode,
+    /// Fixed proxy rules (`proxyRules`: bounded printable-ASCII server
+    /// list). Native consumer: F21 proxy config. Takes effect on next
+    /// launch.
+    ProxyRules,
+    /// PAC script URL (`proxyPacScript`: bounded http(s) URL, only read
+    /// when `proxyMode` is `"pac_script"`). Takes effect on next launch.
+    ProxyPacScript,
+    /// Proxy bypass list (`proxyBypassRules`: bounded comma-separated
+    /// hosts). Takes effect on next launch.
+    ProxyBypassRules,
+    /// Mods excluded from bundle updates (`noBundleUpdates`: `ValidMods`
+    /// subset). Native consumer: the bundle fetch path serves cache only
+    /// for listed mods. Applies on next mod sync.
+    NoBundleUpdates,
+    /// Spellcheck languages (`spellcheckLanguage`: ≤16 BCP-47 tags).
+    /// Native consumer: the spellcheck layer normalizes and applies them.
+    /// Applies live on next document.
+    SpellcheckLanguage,
 }
 
 impl SettingsSetKey {
@@ -428,6 +532,31 @@ impl SettingsSetKey {
             SettingsSetKey::ProcessScanning => "processScanning",
             SettingsSetKey::WindowsLegacyScanning => "windowsLegacyScanning",
             SettingsSetKey::ScanInterval => "scanInterval",
+            SettingsSetKey::HardwareAcceleration => "hardwareAcceleration",
+            SettingsSetKey::SmoothScroll => "smoothScroll",
+            SettingsSetKey::AutoScroll => "autoScroll",
+            SettingsSetKey::Spellcheck => "spellcheck",
+            SettingsSetKey::MultiInstance => "multiInstance",
+            SettingsSetKey::DisableAutogain => "disableAutogain",
+            SettingsSetKey::DisableHttpCache => "disableHttpCache",
+            SettingsSetKey::MobileMode => "mobileMode",
+            SettingsSetKey::UseSystemCssEditor => "useSystemCssEditor",
+            SettingsSetKey::PopoutPip => "popoutPiP",
+            SettingsSetKey::MinimizeToTray => "minimizeToTray",
+            SettingsSetKey::BounceOnPing => "bounceOnPing",
+            SettingsSetKey::SdpH264BaselineRewrite => "sdpH264BaselineRewrite",
+            SettingsSetKey::StartMinimized => "startMinimized",
+            SettingsSetKey::Tray => "tray",
+            SettingsSetKey::WindowStyle => "windowStyle",
+            SettingsSetKey::Transparency => "transparency",
+            SettingsSetKey::WindowMaterial => "windowMaterial",
+            SettingsSetKey::PerformanceMode => "performanceMode",
+            SettingsSetKey::ProxyMode => "proxyMode",
+            SettingsSetKey::ProxyRules => "proxyRules",
+            SettingsSetKey::ProxyPacScript => "proxyPacScript",
+            SettingsSetKey::ProxyBypassRules => "proxyBypassRules",
+            SettingsSetKey::NoBundleUpdates => "noBundleUpdates",
+            SettingsSetKey::SpellcheckLanguage => "spellcheckLanguage",
         }
     }
 }
@@ -447,6 +576,18 @@ pub enum SettingsSetValue {
     Channel(String),
     ScreenshareQuality(String),
     ScanInterval(u64),
+    StartMinimized(String),
+    Tray(String),
+    WindowStyle(String),
+    Transparency(String),
+    WindowMaterial(String),
+    PerformanceMode(String),
+    ProxyMode(String),
+    ProxyRules(String),
+    ProxyPacScript(String),
+    ProxyBypassRules(String),
+    NoBundleUpdates(Vec<String>),
+    SpellcheckLanguage(Vec<String>),
 }
 
 /// Maximum accepted mod-enablement entries. Electron's `ValidMods` has four
@@ -463,6 +604,64 @@ pub const VALID_MODS: &[&str] = &["vencord", "equicord", "custom", "shelter"];
 /// vanilla policy). Bounded so the renderer cannot smuggle a policy string
 /// through this capability.
 pub const VALID_CSP_MODES: &[&str] = &["none", "strict", "vanilla"];
+
+/// Exact `startMinimized` modes (`src/@types/settings.d.ts`).
+pub const VALID_START_MINIMIZED_MODES: &[&str] = &["off", "minimized", "tray"];
+
+/// Exact `ValidTrayIcons` union (`src/@types/settings.d.ts`). The tray
+/// model maps unknown values to `Static`, but `settings.set` only accepts
+/// the closed Electron vocabulary.
+pub const VALID_TRAY_ICONS: &[&str] = &[
+    "dynamic",
+    "dsc-tray",
+    "clsc-dsc-tray",
+    "ac_plug_colored",
+    "ac_white_plug",
+    "ac_white_plug_hollow",
+    "ac_black_plug",
+    "ac_black_plug_hollow",
+    "disabled",
+];
+
+/// Exact `windowStyle` union (`src/@types/settings.d.ts`).
+pub const VALID_WINDOW_STYLES: &[&str] =
+    &["default", "native", "overlay", "transparent", "legacy", "rebrand"];
+
+/// Exact `transparency` union (`src/@types/settings.d.ts`).
+pub const VALID_TRANSPARENCY_MODES: &[&str] = &["universal", "modern", "none"];
+
+/// Exact `windowMaterial` union (`src/@types/settings.d.ts`).
+pub const VALID_WINDOW_MATERIALS: &[&str] = &["mica", "tabbed", "acrylic", "none"];
+
+/// Exact `performanceMode` union (`src/@types/settings.d.ts`, presets in
+/// `src/common/flags.ts`).
+pub const VALID_PERFORMANCE_MODES: &[&str] = &[
+    "battery",
+    "dynamic",
+    "performance",
+    "balanced",
+    "memory",
+    "voip",
+    "latency",
+    "smoothScreenshare",
+    "none",
+];
+
+/// Exact `ProxyMode` union (`src/@types/settings.d.ts`).
+pub const VALID_PROXY_MODES: &[&str] =
+    &["system", "direct", "fixed_servers", "pac_script", "auto_detect"];
+
+/// Maximum accepted proxy-rules / bypass-list bytes. Rules are
+/// comma/space-separated server specs, not URLs: printable ASCII only.
+pub const MAX_PROXY_RULES_BYTES: usize = 1024;
+
+/// Maximum accepted PAC-script URL bytes (http(s) only).
+pub const MAX_PAC_URL_BYTES: usize = 2048;
+
+/// Returns true for printable ASCII without control characters or DEL.
+fn is_plain_printable_ascii(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte >= 0x20 && byte < 0x7F)
+}
 
 /// Validate one allowlisted mutation before any filesystem work: the value
 /// variant must match the key, `mods` entries must be exact `ValidMods`
@@ -490,7 +689,20 @@ pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> R
         (
             SettingsSetKey::InviteWebsocket
             | SettingsSetKey::ProcessScanning
-            | SettingsSetKey::WindowsLegacyScanning,
+            | SettingsSetKey::WindowsLegacyScanning
+            | SettingsSetKey::HardwareAcceleration
+            | SettingsSetKey::SmoothScroll
+            | SettingsSetKey::AutoScroll
+            | SettingsSetKey::Spellcheck
+            | SettingsSetKey::MultiInstance
+            | SettingsSetKey::DisableAutogain
+            | SettingsSetKey::DisableHttpCache
+            | SettingsSetKey::MobileMode
+            | SettingsSetKey::UseSystemCssEditor
+            | SettingsSetKey::PopoutPip
+            | SettingsSetKey::MinimizeToTray
+            | SettingsSetKey::BounceOnPing
+            | SettingsSetKey::SdpH264BaselineRewrite,
             SettingsSetValue::Bool(_),
         ) => Ok(()),
         (SettingsSetKey::ScanInterval, SettingsSetValue::ScanInterval(ms)) => {
@@ -517,6 +729,92 @@ pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> R
             if !crate::screenshare_quality::VALID_SCREENSHARE_QUALITY_MODES.contains(&mode.as_str())
             {
                 return Err("screenshare quality is not a supported mode".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::StartMinimized, SettingsSetValue::StartMinimized(mode)) => {
+            if !VALID_START_MINIMIZED_MODES.contains(&mode.as_str()) {
+                return Err("start-minimized mode is not supported".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::Tray, SettingsSetValue::Tray(icon)) => {
+            if !VALID_TRAY_ICONS.contains(&icon.as_str()) {
+                return Err("tray icon is not a supported value".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::WindowStyle, SettingsSetValue::WindowStyle(style)) => {
+            if !VALID_WINDOW_STYLES.contains(&style.as_str()) {
+                return Err("window style is not supported".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::Transparency, SettingsSetValue::Transparency(mode)) => {
+            if !VALID_TRANSPARENCY_MODES.contains(&mode.as_str()) {
+                return Err("transparency mode is not supported".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::WindowMaterial, SettingsSetValue::WindowMaterial(material)) => {
+            if !VALID_WINDOW_MATERIALS.contains(&material.as_str()) {
+                return Err("window material is not supported".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::PerformanceMode, SettingsSetValue::PerformanceMode(mode)) => {
+            if !VALID_PERFORMANCE_MODES.contains(&mode.as_str()) {
+                return Err("performance mode is not supported".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::ProxyMode, SettingsSetValue::ProxyMode(mode)) => {
+            if !VALID_PROXY_MODES.contains(&mode.as_str()) {
+                return Err("proxy mode is not supported".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::ProxyRules, SettingsSetValue::ProxyRules(rules)) => {
+            if rules.len() > MAX_PROXY_RULES_BYTES || !is_plain_printable_ascii(rules) {
+                return Err("proxy rules are not a valid server list".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::ProxyPacScript, SettingsSetValue::ProxyPacScript(url)) => {
+            if url.len() > MAX_PAC_URL_BYTES {
+                return Err("PAC script URL is too long".to_owned());
+            }
+            let lower = url.to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                return Err("PAC script URL must be http(s)".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::ProxyBypassRules, SettingsSetValue::ProxyBypassRules(rules)) => {
+            if rules.len() > MAX_PROXY_RULES_BYTES || !is_plain_printable_ascii(rules) {
+                return Err("proxy bypass list is not valid".to_owned());
+            }
+            Ok(())
+        }
+        (SettingsSetKey::NoBundleUpdates, SettingsSetValue::NoBundleUpdates(entries)) => {
+            if entries.len() > MAX_MODS_ENTRIES {
+                return Err("bundle-update exclusion list exceeds the size limit".to_owned());
+            }
+            for entry in entries {
+                if !VALID_MODS.contains(&entry.as_str()) {
+                    return Err("bundle-update exclusion list carries an unknown mod id".to_owned());
+                }
+            }
+            Ok(())
+        }
+        (SettingsSetKey::SpellcheckLanguage, SettingsSetValue::SpellcheckLanguage(tags)) => {
+            if tags.len() > crate::spellcheck::MAX_LANGUAGES {
+                return Err("spellcheck language list is too long".to_owned());
+            }
+            for tag in tags {
+                if !crate::spellcheck::is_valid_language_tag(tag) {
+                    return Err("spellcheck language list carries an invalid tag".to_owned());
+                }
             }
             Ok(())
         }
@@ -694,9 +992,43 @@ pub fn apply_settings_set(
         (
             SettingsSetKey::InviteWebsocket
             | SettingsSetKey::ProcessScanning
-            | SettingsSetKey::WindowsLegacyScanning,
+            | SettingsSetKey::WindowsLegacyScanning
+            | SettingsSetKey::HardwareAcceleration
+            | SettingsSetKey::SmoothScroll
+            | SettingsSetKey::AutoScroll
+            | SettingsSetKey::Spellcheck
+            | SettingsSetKey::MultiInstance
+            | SettingsSetKey::DisableAutogain
+            | SettingsSetKey::DisableHttpCache
+            | SettingsSetKey::MobileMode
+            | SettingsSetKey::UseSystemCssEditor
+            | SettingsSetKey::PopoutPip
+            | SettingsSetKey::MinimizeToTray
+            | SettingsSetKey::BounceOnPing
+            | SettingsSetKey::SdpH264BaselineRewrite,
             SettingsSetValue::Bool(flag),
         ) => serde_json::Value::Bool(*flag),
+        (SettingsSetKey::StartMinimized, SettingsSetValue::StartMinimized(mode))
+        | (SettingsSetKey::Tray, SettingsSetValue::Tray(mode))
+        | (SettingsSetKey::WindowStyle, SettingsSetValue::WindowStyle(mode))
+        | (SettingsSetKey::Transparency, SettingsSetValue::Transparency(mode))
+        | (SettingsSetKey::WindowMaterial, SettingsSetValue::WindowMaterial(mode))
+        | (SettingsSetKey::PerformanceMode, SettingsSetValue::PerformanceMode(mode))
+        | (SettingsSetKey::ProxyMode, SettingsSetValue::ProxyMode(mode))
+        | (SettingsSetKey::ProxyRules, SettingsSetValue::ProxyRules(mode))
+        | (SettingsSetKey::ProxyPacScript, SettingsSetValue::ProxyPacScript(mode))
+        | (SettingsSetKey::ProxyBypassRules, SettingsSetValue::ProxyBypassRules(mode)) => {
+            serde_json::Value::String(mode.clone())
+        }
+        (SettingsSetKey::NoBundleUpdates, SettingsSetValue::NoBundleUpdates(entries))
+        | (SettingsSetKey::SpellcheckLanguage, SettingsSetValue::SpellcheckLanguage(entries)) => {
+            serde_json::Value::Array(
+                entries
+                    .iter()
+                    .map(|entry| serde_json::Value::String(entry.clone()))
+                    .collect(),
+            )
+        }
         _ => return Err("settings value does not match the allowlisted key".to_owned()),
     };
     // ONLY the allowlisted field is touched; every other key
