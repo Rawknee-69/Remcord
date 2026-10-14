@@ -34,6 +34,7 @@ mod screenshare_quality;
 mod settings;
 mod settings_boot;
 mod settings_plugin;
+mod shelter_injector;
 mod theme_import;
 mod themes;
 mod titlebar_plugin;
@@ -164,10 +165,13 @@ const VENCORD_MOD: ModDescriptor = ModDescriptor {
 ///   initialization sentinels plus a host-computed content digest.
 /// - Execution: `webFrame.executeJavaScript` from the preload -> page world,
 ///   document start, same as every other client mod. Electron additionally
-///   wraps the source in an IIFE that declares `SHELTER_INJECTOR_PLUGINS`;
-///   natively that wrapper is deliberately NOT reproduced because the
-///   `remcord://` protocol serves local assets while the preload plugin loader stays unimplemented,
-///   and Shelter skips the injector entirely when the global is absent.
+///   wraps the source in an IIFE that declares `SHELTER_INJECTOR_PLUGINS`
+///   with remote (`remcord://` URL) entries for all five bundled plugins.
+///   Natively the host prepends an equivalent declaration in LOCAL form
+///   (see `shelter_injector.rs`): pinned `{js, manifest, update: false}`
+///   objects for the servable builtins only, so Shelter's own registrar
+///   loads them with no fetch and no update checks. Shelter still skips
+///   the injector entirely when the global is absent.
 /// - Initialization: Shelter publishes `window.shelter` from an inner async
 ///   IIFE only after Discord's `#app-mount` exists and has children, so the
 ///   readiness is asynchronous rather than synchronous.
@@ -511,6 +515,27 @@ fn plugins_script_compute(
     plugins::read_plugin_source(&root, record, target)
 }
 
+/// Builds the page-world execution script for one retrieved bundle.
+///
+/// Every mod evaluates the substrate storage-context probe immediately
+/// before its own bytes. Shelter additionally evaluates the host-built
+/// `SHELTER_INJECTOR_PLUGINS` declaration FIRST (Electron's wrapper order),
+/// so the global is in place before Shelter's boot reads it. The injector
+/// declaration is static per launch (embedded artifacts); other mods pass
+/// no declaration and keep the exact previous shape.
+fn execution_script_for(
+    descriptor: &ModDescriptor,
+    bundle_js: &str,
+    shelter_injector: &str,
+) -> String {
+    let context = mod_execution_context_script(descriptor);
+    if descriptor.id == SHELTER_MOD.id {
+        format!("{shelter_injector}\n{context}\n{bundle_js}")
+    } else {
+        format!("{context}\n{bundle_js}")
+    }
+}
+
 /// Every mod the native host serves. Each entry is a thin typed descriptor plus
 /// a thin renderer adapter under `native/web/mods/<id>/`; the substrate
 /// mechanics in `mod_substrate.rs` are identical for all of them. Custom is
@@ -538,6 +563,8 @@ const THEME_LIST_SMOKE_ENV: &str = "REMCORD_NATIVE_THEME_LIST_SMOKE";
 const BACKUP_SAVE_SMOKE_ENV: &str = "REMCORD_NATIVE_BACKUP_SAVE_SMOKE";
 const BACKUP_RESTORE_SMOKE_ENV: &str = "REMCORD_NATIVE_BACKUP_RESTORE_SMOKE";
 const SHELTER_LOADER_PROBE_ENV: &str = "REMCORD_NATIVE_LOADER_PROBE";
+/// DEV-only: enable the post-marker Shelter injector observation.
+const INJECTOR_PROBE_ENV: &str = "REMCORD_NATIVE_INJECTOR_PROBE";
 const SETTINGS_BOOT_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_BOOT_SMOKE";
 const SETTINGS_UI_SMOKE_ENV: &str = "REMCORD_NATIVE_SETTINGS_UI_SMOKE";
 const FOLDERS_SMOKE_ENV: &str = "REMCORD_NATIVE_FOLDERS_SMOKE";
@@ -1802,6 +1829,22 @@ const SHELTER_LOADER_PROBE_SCRIPT: &str = r#"
   }
 })();
 "#;
+
+/// DEV-only Shelter injector observation (`REMCORD_NATIVE_INJECTOR_PROBE=1`).
+/// Reads back the two facts the injector path guarantees, after Shelter's
+/// own bootstrap marker proves the global exists: whether the host
+/// declaration was present ahead of the bundle, and whether the rpc plugin
+/// installed its page-world marker (`window.remcordRPC` in `onLoad`).
+/// Read-only (no registration, no start, no mutation); the returned string
+/// is logged by the host, never bridged. The power plugin has no
+/// page-world marker of its own — its registration is proven by the
+/// declaration unit tests plus the absence of injector load errors (a
+/// malformed map aborts Shelter's boot loop, failing the marker itself).
+const INJECTOR_PROBE_SCRIPT: &str = r#"(()=>{ try {
+  const declared = typeof SHELTER_INJECTOR_PLUGINS !== "undefined";
+  const rpc = typeof window.remcordRPC !== "undefined" && window.remcordRPC !== null;
+  return "injector-probe:declared-" + declared + " rpc-started-" + rpc;
+} catch (error) { return "injector-probe:error " + String(error && error.message || error).slice(0, 128); } })()"#;
 
 /// DEV-only settings boot snapshot probe (`REMCORD_NATIVE_SETTINGS_BOOT_SMOKE=1`).
 /// Observes the live `window.remcord.settingsBoot` surface in the document:
@@ -4699,6 +4742,7 @@ fn handle_mod_bootstrap_result(
     response_count: &mut u64,
     observe_after_marker: Option<&str>,
     loader_probe_after_marker: Option<&str>,
+    injector_probe_after_marker: Option<&str>,
     settings_plugin_start: Option<ShelterPluginStart<'_>>,
     titlebar_plugin_start: Option<ShelterPluginStart<'_>>,
 ) {
@@ -4802,6 +4846,20 @@ fn handle_mod_bootstrap_result(
         if descriptor.id == SHELTER_MOD.id {
             if let Err(error) = webview.evaluate_script(script) {
                 eprintln!("[ShelterLoader][Probe] post-marker probe failed: {error}");
+            }
+        }
+    }
+    // Shelter injector observation (F3): once Shelter's own marker proves
+    // the global exists, read back whether the host declaration was present
+    // ahead of the bundle and whether the rpc plugin installed its
+    // page-world marker. Read-only and DEV-gated; gated to Shelter like the
+    // loader probe so other mods' markers never duplicate it.
+    if let Some(script) = injector_probe_after_marker {
+        if descriptor.id == SHELTER_MOD.id {
+            if let Err(error) = webview.evaluate_script_with_callback(script, move |result| {
+                println!("[Injector][Probe] post-marker observation {result}");
+            }) {
+                eprintln!("[Injector][Probe] post-marker observation failed: {error}");
             }
         }
     }
@@ -5397,6 +5455,39 @@ fn main() -> Result<(), Box<dyn Error>> {
         "[Titlebar] artifact name='{}' bytes={} sha256={}",
         titlebar_plugin.name, titlebar_plugin.bytes, titlebar_plugin.sha256
     );
+    // Shelter injector surface (F3): validate both embedded injector
+    // artifacts and build the static declaration once per launch.
+    // Defense in depth like the settings/titlebar artifacts: the build
+    // validated, the running host re-checks, startup fails fast on drift.
+    for (artifact, expected_name) in shelter_injector::artifacts()
+        .iter()
+        .zip(shelter_injector::INJECTOR_PLUGIN_EXPECTED_NAMES.iter())
+    {
+        shelter_injector::validate_artifact(artifact.js, artifact.name, expected_name)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "embedded injector plugin '{}' must validate at startup: {error}",
+                    artifact.id
+                )
+            });
+        shelter_injector::validate_sha256(artifact.sha256).unwrap_or_else(|error| {
+            panic!(
+                "embedded injector plugin '{}' identity must be well-formed: {error}",
+                artifact.id
+            )
+        });
+        println!(
+            "[Injector] artifact id='{}' name='{}' bytes={} sha256={}",
+            artifact.id, artifact.name, artifact.bytes, artifact.sha256
+        );
+    }
+    let shelter_injector_decl = shelter_injector::injector_declaration()
+        .expect("shelter injector declaration must build at startup");
+    println!(
+        "[Injector] declaration bytes={} plugins={:?}",
+        shelter_injector_decl.len(),
+        shelter_injector::INJECTOR_PLUGIN_IDS
+    );
     let diagnostic_bare_page = std::env::var(BARE_PAGE_ENV).is_ok_and(|value| value == "1");
     let diagnostic_interaction =
         std::env::var(INTERACTION_DIAGNOSTIC_ENV).is_ok_and(|value| value == "1");
@@ -5473,6 +5564,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(SHELTER_LOADER_PROBE_ENV).is_ok_and(|value| value == "1");
     if diagnostic_shelter_loader_probe {
         println!("[ShelterLoader][Probe] shelter loader probe enabled");
+    }
+    let diagnostic_injector_probe =
+        std::env::var(INJECTOR_PROBE_ENV).is_ok_and(|value| value == "1");
+    if diagnostic_injector_probe {
+        println!("[Injector][Probe] shelter injector observation enabled");
     }
     let diagnostic_settings_boot_smoke =
         std::env::var(SETTINGS_BOOT_SMOKE_ENV).is_ok_and(|value| value == "1");
@@ -8766,7 +8862,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let execution_started_at = Instant::now();
                 let execution_script =
-                    format!("{}\n{}", mod_execution_context_script(&descriptor), bundle.js);
+                    execution_script_for(&descriptor, &bundle.js, &shelter_injector_decl);
                 if let Err(error) = webview.evaluate_script(&execution_script) {
                     send_mod_failure(
                         &descriptor,
@@ -9239,6 +9335,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 diagnostic_mod_smoke.then_some(mod_smoke_script.as_str()),
                                 diagnostic_shelter_loader_probe
                                     .then_some(SHELTER_LOADER_PROBE_SCRIPT),
+                                diagnostic_injector_probe.then_some(INJECTOR_PROBE_SCRIPT),
                                 Some(ShelterPluginStart {
                                     script: &settings_plugin_start_script,
                                     started_generation: &mut settings_plugin_started_generation,
@@ -9365,6 +9462,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut smoke_reloads_remaining,
                             &mut smoke_reload_request_id,
                             &mut response_count,
+                            None,
                             None,
                             None,
                             None,
@@ -9820,7 +9918,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        document_start_script, initialization_script, is_allowed_navigation,
+        document_start_script, execution_script_for, initialization_script, is_allowed_navigation,
         is_trusted_bridge_origin, load_custom_bundle, lookup_mod_descriptor, mod_adapter_script,
         plugins_entries_compute, plugins_list_compute, plugins_reload_compute,
         plugins_script_compute, plugins_set_enabled_compute, relaunch_command, resolve_active_mods,
@@ -10960,6 +11058,43 @@ mod tests {
         // Malformed ids are typed errors, never resolutions.
         assert!(plugins_script_compute(&root, "../x", PluginTarget::Preload).is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shelter_execution_leads_with_the_injector_declaration() {
+        // Electron's wrapper order: the injector global is declared first,
+        // then the bundle evaluates. Other mods keep the exact previous
+        // shape (context probe, then bytes).
+        let injector = crate::shelter_injector::injector_declaration()
+            .expect("the injector declaration must build");
+        let shelter_script = execution_script_for(&SHELTER_MOD, "/*bundle*/", &injector);
+        let injector_at = shelter_script
+            .find("const SHELTER_INJECTOR_PLUGINS=")
+            .expect("the declaration must lead");
+        let context_at = shelter_script
+            .find("__remcordNativeShelterStorageAtExecution")
+            .expect("the context probe must follow");
+        let bundle_at = shelter_script
+            .find("/*bundle*/")
+            .expect("bundle must trail");
+        assert!(injector_at < context_at && context_at < bundle_at);
+        for descriptor in [&VENCORD_MOD, &EQUICORD_MOD, &CUSTOM_MOD] {
+            let script = execution_script_for(descriptor, "/*bundle*/", &injector);
+            assert!(
+                !script.contains("SHELTER_INJECTOR_PLUGINS"),
+                "{} must not carry the injector declaration",
+                descriptor.id
+            );
+            assert!(script.contains("/*bundle*/"));
+        }
+        // The injector probe script is read-only reporting: no
+        // registration, start, fetch, or eval surface.
+        assert!(super::INJECTOR_PROBE_SCRIPT.contains("window.remcordRPC"));
+        assert!(super::INJECTOR_PROBE_SCRIPT.contains("SHELTER_INJECTOR_PLUGINS"));
+        assert!(!super::INJECTOR_PROBE_SCRIPT.contains("addLocalPlugin"));
+        assert!(!super::INJECTOR_PROBE_SCRIPT.contains("startPlugin"));
+        assert!(!super::INJECTOR_PROBE_SCRIPT.contains("fetch("));
+        assert_eq!(super::INJECTOR_PROBE_ENV, "REMCORD_NATIVE_INJECTOR_PROBE");
     }
 
     #[test]

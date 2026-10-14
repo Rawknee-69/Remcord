@@ -381,9 +381,8 @@ const consts = readFileSync(new URL("../../src/common/consts.ts", import.meta.ur
 test("Electron keeps the Shelter preload wrapper and its injector plugin map", () => {
     // Shelter's Electron path wraps the bundle in a host-built IIFE that
     // declares SHELTER_INJECTOR_PLUGINS and adds a macOS-only Touch Bar entry.
-    // The native milestone deliberately does not reproduce this wrapper: the
-    // remcord:// protocol and preload plugin loader are unimplemented natively,
-    // and Shelter skips the injector entirely when the global is absent. The
+    // The native milestone reproduces the declaration in local (pinned) form
+    // for the servable builtins (see the native injector test below); the
     // Electron file must therefore stay byte-identical.
     assert.match(
         shelterPreload,
@@ -407,6 +406,36 @@ test("Electron keeps the Shelter preload wrapper and its injector plugin map", (
         ipc,
         /ipcMain\.handle\("getShelterBundle", \(\) => \{\s*return \{\s*js: ifExistsRead\(path\.join\(app\.getPath\("userData"\), "shelter\.js"\)\),\s*enabled: true,/,
     );
+});
+
+test("native Shelter injector declares the servable builtins in local form", () => {
+    // The native host prepends `const SHELTER_INJECTOR_PLUGINS=<map>;` to the
+    // Shelter execution script (Electron's wrapper order), built from
+    // build-embedded artifacts — never fetched, never renderer-supplied.
+    const injector = readFileSync(new URL("../src/shelter_injector.rs", import.meta.url), "utf8");
+    const main = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    const build = readFileSync(new URL("../build.rs", import.meta.url), "utf8");
+    // Exactly the two servable builtins, keyed by Electron's exact ids.
+    // (The exclusions — host-owned settings/titlebar, Electron-only
+    // screenshare, darwin-only touchbar — are asserted in the Rust
+    // `injector_ids_are_exactly_the_two_servable_builtins` test, since this
+    // module documents them in comments.)
+    assert.match(injector, /&\["remcord-arrpc", "remcord-power"\]/);
+    // Local form: inline source plus manifest, pinned, with Electron's exact
+    // visibility values — no source URL to fetch, no update checks.
+    assert.match(injector, /"update": false/);
+    assert.match(injector, /"isVisible": false/);
+    assert.match(injector, /"allowedActions": \{\}/);
+    // Embedded at compile time from the lune pipeline output (same contract
+    // as the settings/titlebar artifacts), with name pins and markers.
+    assert.match(build, /injector_id: "remcord-arrpc"/);
+    assert.match(build, /injector_id: "remcord-power"/);
+    assert.match(build, /manifest_name: "Remcord RPC"/);
+    assert.match(build, /manifest_name: "Remcord Power Management"/);
+    // The declaration leads the Shelter execution script only: other mods
+    // keep their exact previous shape.
+    assert.match(main, /execution_script_for\(&descriptor, &bundle\.js, &shelter_injector_decl\)/);
+    assert.match(main, /if descriptor\.id == SHELTER_MOD\.id/);
 });
 
 test("Electron keeps the Equicord preload CSS requirement", () => {

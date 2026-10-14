@@ -110,6 +110,9 @@ fn main() {
     generate_settings_plugin_artifact(&out_dir);
     generate_titlebar_plugin_artifact(&out_dir);
     generate_titlebar_css(&out_dir);
+    for spec in INJECTOR_PLUGIN_SPECS {
+        generate_injector_plugin_artifact(&out_dir, spec);
+    }
     embed_windows_resources();
 }
 
@@ -395,6 +398,149 @@ fn generate_titlebar_plugin_artifact(out_dir: &str) {
 
     println!("cargo:rerun-if-changed=../ts-out/plugins/titlebar/plugin.js");
     println!("cargo:rerun-if-changed=../ts-out/plugins/titlebar/plugin.json");
+}
+
+/// Maximum accepted injector `plugin.js` size in bytes. The real artifacts
+/// are a few kilobytes (rpc ~3.5 KiB, power ~1.5 KiB); the cap only rails
+/// against embedding a wrong file.
+const MAX_INJECTOR_PLUGIN_BYTES: usize = 256 * 1024;
+
+/// Structural members every injector plugin artifact must surface: the
+/// Shelter factory lifecycle entry. A pipeline change dropping it fails the
+/// build instead of embedding a plugin Shelter could never start.
+const INJECTOR_PLUGIN_BOOT_MARKERS: &[&str] = &["onLoad"];
+
+/// One Shelter injector plugin to embed: the injector-map key (Electron's
+/// exact id), the ts-out source directory, and the expected manifest
+/// display name (refuses a foreign artifact).
+struct InjectorPluginSpec {
+    injector_id: &'static str,
+    source_dir: &'static str,
+    manifest_name: &'static str,
+}
+
+/// The injector set served through `SHELTER_INJECTOR_PLUGINS` in local
+/// (pinned) form. Only plugins with no host-owned start path and no missing
+/// Electron backend: `remcord-settings` and `remcord-titlebar` are started
+/// by the host from build-embedded artifacts (claiming those ids here would
+/// double-register them), and `remcord-screenshare` needs the Electron
+/// screenshare IPC surface its `onLoad` calls unconditionally (deferred with
+/// F9 screenshare parity; the native picker owns `getDisplayMedia`).
+const INJECTOR_PLUGIN_SPECS: &[InjectorPluginSpec] = &[
+    InjectorPluginSpec {
+        injector_id: "remcord-arrpc",
+        source_dir: "../ts-out/plugins/rpc",
+        manifest_name: "Remcord RPC",
+    },
+    InjectorPluginSpec {
+        injector_id: "remcord-power",
+        source_dir: "../ts-out/plugins/power",
+        manifest_name: "Remcord Power Management",
+    },
+];
+
+/// Validates and embeds one injector plugin artifact.
+///
+/// Same pipeline contract as the settings/titlebar artifacts: authored in
+/// `src/shelter/<name>/`, compiled by `pnpm build:plugins` (`lune ci
+/// --repoSubDir src/shelter --to ts-out/plugins`). The generated module
+/// defines `{PREFIX}_PLUGIN_{JS,SHA256,BYTES,NAME}` where `{PREFIX}` is the
+/// upper-snake form of the injector id, so both generated modules can live
+/// in one Rust module without colliding.
+fn generate_injector_plugin_artifact(out_dir: &str, spec: &InjectorPluginSpec) {
+    let prefix: String = spec
+        .injector_id
+        .to_ascii_uppercase()
+        .replace(['-', '.'], "_");
+    let js_path = Path::new(spec.source_dir).join("plugin.js");
+    let json_path = Path::new(spec.source_dir).join("plugin.json");
+    let js_bytes = fs::read(&js_path).unwrap_or_else(|error| {
+        panic!(
+            "native injector plugin artifact requires {}: {error}; run \
+             `pnpm build:plugins` (lune ci --repoSubDir src/shelter \
+             --to ts-out/plugins) from the repository root, then rebuild",
+            js_path.display()
+        );
+    });
+    let js = String::from_utf8(js_bytes).unwrap_or_else(|error| {
+        panic!("{} must be valid UTF-8: {error}", js_path.display());
+    });
+    if js.is_empty() {
+        panic!("{} must not be empty", js_path.display());
+    }
+    if js.len() > MAX_INJECTOR_PLUGIN_BYTES {
+        panic!(
+            "{} exceeds the {MAX_INJECTOR_PLUGIN_BYTES}-byte embed limit",
+            js_path.display()
+        );
+    }
+    for marker in INJECTOR_PLUGIN_BOOT_MARKERS {
+        if !js.contains(marker) {
+            panic!(
+                "{} is missing the structural member `{marker}`; \
+                 Shelter could never start this plugin",
+                js_path.display()
+            );
+        }
+    }
+
+    let meta_raw = fs::read_to_string(&json_path).unwrap_or_else(|error| {
+        panic!(
+            "native injector plugin artifact requires {}: {error}; run \
+             `pnpm build:plugins` from the repository root, then rebuild",
+            json_path.display()
+        );
+    });
+    let meta: serde_json::Value = serde_json::from_str(&meta_raw).unwrap_or_else(|error| {
+        panic!("{} is not valid JSON: {error}", json_path.display());
+    });
+    let name = meta
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("{} must define a string \"name\"", json_path.display()));
+    if name != spec.manifest_name {
+        panic!(
+            "{} names {name:?}, expected {:?}; refusing a foreign artifact",
+            json_path.display(),
+            spec.manifest_name
+        );
+    }
+
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    <sha2::Sha256 as sha2::Digest>::update(&mut hasher, js.as_bytes());
+    let digest = hasher.finalize();
+    let mut sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        sha256.push_str(&format!("{byte:02x}"));
+    }
+    let bytes = js.len();
+
+    let out_plugin = Path::new(out_dir).join("remcord_injector_plugins");
+    fs::create_dir_all(&out_plugin).expect("must create OUT_DIR/remcord_injector_plugins");
+    // Stage exact copies so the embedded text can be diffed against the
+    // pipeline output without re-running the JS build.
+    let staged_js = format!("{}.plugin.js", spec.injector_id);
+    let staged_json = format!("{}.plugin.json", spec.injector_id);
+    fs::write(out_plugin.join(&staged_js), &js).expect("must stage injector plugin.js");
+    fs::write(out_plugin.join(&staged_json), &meta_raw).expect("must stage injector plugin.json");
+    let generated = format!(
+        "/// Generated by native/build.rs from {}/*. Do not edit.\n\
+         /// One Shelter injector plugin artifact plus its content identity.\n\
+         pub const {prefix}_PLUGIN_JS: &str = {js:?};\n\
+         pub const {prefix}_PLUGIN_SHA256: &str = {sha256:?};\n\
+         pub const {prefix}_PLUGIN_BYTES: usize = {bytes};\n\
+         pub const {prefix}_PLUGIN_NAME: &str = {name:?};\n\
+         pub const {prefix}_PLUGIN_MANIFEST_JSON: &str = {meta_raw:?};\n",
+        spec.source_dir,
+    );
+    fs::write(
+        out_plugin.join(format!("{}.rs", spec.injector_id)),
+        generated,
+    )
+    .expect("must write generated injector plugin constants");
+
+    println!("cargo:rerun-if-changed={}", js_path.display());
+    println!("cargo:rerun-if-changed={}", json_path.display());
 }
 
 /// Stylesheet files backing the overlay chrome, resolved exactly like
