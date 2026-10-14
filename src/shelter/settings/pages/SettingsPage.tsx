@@ -108,7 +108,7 @@ function ElectronImportButton() {
     }
 
     return (
-        <Button size={ButtonSizes.LARGE} onClick={runImport} disabled={busy()}>
+        <Button size={ButtonSizes.LARGE} class={classes.electronImport} onClick={runImport} disabled={busy()}>
             {t["settings-importElectron"] ?? "Import from Electron app"}
         </Button>
     );

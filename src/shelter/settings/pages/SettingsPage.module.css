@@ -23,6 +23,16 @@
     margin-top: 8px;
 }
 
+/* Size-to-content guard for the Electron-import button (mirrors the
+   .recBtn pattern) so long labels fit instead of overflowing the box. */
+.electronImport {
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 100%;
+    min-width: 0;
+    white-space: nowrap;
+}
+
 .crashTitle {
     margin-bottom: 8px;
 }

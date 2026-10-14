@@ -35,7 +35,15 @@
 
 .catInput {
     flex: 1 1 180px;
-    min-width: 180px;
+    min-width: 0;
+}
+
+/* Keep toolbar / create-collection action buttons at content size so
+   their labels never squeeze or overflow the button box. */
+.toolbar > button,
+.categoryRow > button {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .storageBar {
