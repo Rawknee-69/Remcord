@@ -91,6 +91,19 @@ pub enum BridgeCommand {
     BackupInspect(BackupInspectRequest),
     BackupCommitRestore(BackupCommitRestoreRequest),
     BackupDiscardRestore(BackupDiscardRestoreRequest),
+    GalleryList(GalleryListRequest),
+    GalleryAddUrl(GalleryAddUrlRequest),
+    GalleryAddLink(GalleryAddLinkRequest),
+    GalleryRemove(GalleryRemoveRequest),
+    GalleryBulkRemove(GalleryBulkRemoveRequest),
+    GalleryUpdate(GalleryUpdateRequest),
+    GalleryCategories(GalleryCategoriesRequest),
+    GalleryCategoryAdd(GalleryCategoryAddRequest),
+    GalleryCategoryRename(GalleryCategoryRenameRequest),
+    GalleryCategoryRemove(GalleryCategoryRemoveRequest),
+    GalleryUsage(GalleryUsageRequest),
+    GalleryFile(GalleryFileRequest),
+    GalleryRoot(GalleryRootRequest),
     WindowShow(WindowShowRequest),
     WindowHide(WindowHideRequest),
     WindowMinimize(WindowMinimizeRequest),
@@ -405,6 +418,144 @@ pub struct ThemeSetEnabledRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThemesListRequest {}
+
+/// Empty request for the read-only `gallery.list` capability: the host
+/// owns the gallery root, the index read, and the newest-first ordering.
+/// There is deliberately NO path, root, selector, URL, or filter. Any
+/// extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryListRequest {}
+
+/// Renderer-supplied save metadata for gallery additions. Every member is
+/// optional and bounded; unknown members are rejected. The host slices
+/// each string exactly like Electron's `addGalleryUrl`/`addGalleryLink`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryMetaRequest {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub guild_id: String,
+    #[serde(default)]
+    pub guild_name: String,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub channel_name: String,
+    #[serde(default)]
+    pub author_name: String,
+    #[serde(default)]
+    pub message_id: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
+}
+
+/// Save request for the `gallery.add_url` capability: exactly one URL plus
+/// save metadata. There is deliberately NO path, filename, id, kind, or
+/// destination: the host validates the scheme, derives the kind and file
+/// name, generates the id, and downloads image/video bytes itself. A
+/// non-http(s) URL is refused before any network or filesystem work.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryAddUrlRequest {
+    pub url: String,
+    pub meta: GalleryMetaRequest,
+}
+
+/// Save request for the `gallery.add_link` capability: exactly one URL
+/// plus save metadata. Metadata-only (no download); same shape rules as
+/// `gallery.add_url`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryAddLinkRequest {
+    pub url: String,
+    pub meta: GalleryMetaRequest,
+}
+
+/// Removal request for the `gallery.remove` capability: exactly one
+/// validated item id. There is deliberately NO path or filename: the host
+/// resolves the cached file from its own index and enforces containment.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryRemoveRequest {
+    pub id: String,
+}
+
+/// Bulk removal request for the `gallery.bulk_remove` capability: item
+/// ids only (at most 2000 are honored, mirroring Electron's slice).
+/// Invalid ids are skipped, never dispatched.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryBulkRemoveRequest {
+    pub ids: Vec<String>,
+}
+
+/// Update request for the `gallery.update` capability: exactly one item
+/// id plus an optional title and/or category list. There is deliberately
+/// NO kind, URL, file, size, mime, timestamp, or path member: only the
+/// title and the tag list are mutable, mirroring Electron's patch shape.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryUpdateRequest {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+}
+
+/// Empty request for the read-only `gallery.categories` capability.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryCategoriesRequest {}
+
+/// Creation request for the `gallery.category_add` capability: exactly
+/// one name. Normalization and uniqueness rules live in `gallery`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryCategoryAddRequest {
+    pub name: String,
+}
+
+/// Rename request for the `gallery.category_rename` capability: exactly
+/// the old and new names. Items are retagged by the host.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryCategoryRenameRequest {
+    pub old_name: String,
+    pub new_name: String,
+}
+
+/// Removal request for the `gallery.category_remove` capability: exactly
+/// one name. Items are untagged by the host.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryCategoryRemoveRequest {
+    pub name: String,
+}
+
+/// Empty request for the read-only `gallery.usage` capability: exact disk
+/// usage measured from the filesystem by the host.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryUsageRequest {}
+
+/// Preview request for the `gallery.file` capability: exactly one
+/// validated item id. The host resolves, bounds (48 MiB transport cap),
+/// and base64-encodes the cached bytes itself.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryFileRequest {
+    pub id: String,
+}
+
+/// Empty request for the read-only `gallery.root` capability: reports the
+/// fixed profile-relative root label. There is deliberately NO path
+/// member in either direction — an absolute path never crosses.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryRootRequest {}
 
 /// Empty request for the `quickcss.read` editor capability: returns the
 /// fixed Quick CSS file text. There is deliberately NO path, filename, URL,
@@ -1165,6 +1316,18 @@ pub enum BridgeResponsePayload {
     BackupInspected(BackupInspectedResponse),
     BackupRestored(BackupRestoredResponse),
     BackupRestoreDiscarded(BackupRestoreDiscardedResponse),
+    GalleryList(GalleryListResponse),
+    GalleryAdd(GalleryAddResponse),
+    GalleryRemove(GalleryRemoveResponse),
+    GalleryBulkRemove(GalleryBulkRemoveResponse),
+    GalleryUpdate(GalleryUpdateResponse),
+    GalleryCategories(GalleryCategoriesResponse),
+    GalleryCategoryAdd(GalleryCategoryAddResponse),
+    GalleryCategoryRename(GalleryCategoryRenameResponse),
+    GalleryCategoryRemove(GalleryCategoryRemoveResponse),
+    GalleryUsage(GalleryUsageResponse),
+    GalleryFile(GalleryFileResponse),
+    GalleryRoot(GalleryRootResponse),
     WindowAck(WindowAckResponse),
 }
 
@@ -1427,6 +1590,109 @@ pub struct ThemesListResponse {
     pub themes: Vec<crate::themes::ThemeListEntry>,
 }
 
+/// Read-only inventory response for the `gallery.list` capability:
+/// items newest-first plus categories, in Electron's `{items,
+/// categories}` shape. Items carry the camelCase display keys the
+/// Gallery page casts; `localFile` values are profile-relative
+/// `files/<name>` references, never absolute paths.
+#[derive(Serialize)]
+pub struct GalleryListResponse {
+    pub items: Vec<serde_json::Value>,
+    pub categories: Vec<serde_json::Value>,
+}
+
+/// Save response for the `gallery.add_url` / `gallery.add_link`
+/// capabilities, in Electron's `{ok, item} | {ok, error}` shape. Typed
+/// failures resolve (never reject) so the page can toast the reason.
+#[derive(Serialize)]
+pub struct GalleryAddResponse {
+    pub ok: bool,
+    pub item: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// Removal response for the `gallery.remove` capability: whether an item
+/// was removed. Unknown ids resolve `ok: false` (Electron parity).
+#[derive(Serialize)]
+pub struct GalleryRemoveResponse {
+    pub ok: bool,
+}
+
+/// Bulk removal response for the `gallery.bulk_remove` capability: how
+/// many items were removed.
+#[derive(Serialize)]
+pub struct GalleryBulkRemoveResponse {
+    pub removed: usize,
+}
+
+/// Update response for the `gallery.update` capability, in Electron's
+/// `{ok, item} | {ok, error}` shape.
+#[derive(Serialize)]
+pub struct GalleryUpdateResponse {
+    pub ok: bool,
+    pub item: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// Read-only inventory response for the `gallery.categories`
+/// capability: categories alphabetically, display keys only.
+#[derive(Serialize)]
+pub struct GalleryCategoriesResponse {
+    pub categories: Vec<serde_json::Value>,
+}
+
+/// Creation response for the `gallery.category_add` capability, in
+/// Electron's `{ok, category} | {ok, error}` shape.
+#[derive(Serialize)]
+pub struct GalleryCategoryAddResponse {
+    pub ok: bool,
+    pub category: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// Rename response for the `gallery.category_rename` capability, in
+/// Electron's `{ok} | {ok, error}` shape.
+#[derive(Serialize)]
+pub struct GalleryCategoryRenameResponse {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// Removal response for the `gallery.category_remove` capability:
+/// whether a category was removed.
+#[derive(Serialize)]
+pub struct GalleryCategoryRemoveResponse {
+    pub ok: bool,
+}
+
+/// Read-only usage response for the `gallery.usage` capability: exact
+/// bytes, file count, and item count measured from the filesystem.
+#[derive(Serialize)]
+pub struct GalleryUsageResponse {
+    pub bytes: u64,
+    pub files: u64,
+    pub items: usize,
+}
+
+/// Preview response for the `gallery.file` capability, in Electron's
+/// `{ok, base64, mime, fileName} | {ok, error}` shape. The base64 text
+/// is bounded by the 48 MiB transport cap enforced at dispatch.
+#[derive(Serialize)]
+pub struct GalleryFileResponse {
+    pub ok: bool,
+    pub base64: Option<String>,
+    pub mime: Option<String>,
+    pub file_name: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Read-only root response for the `gallery.root` capability: the fixed
+/// profile-relative root label. Never an absolute path.
+#[derive(Serialize)]
+pub struct GalleryRootResponse {
+    pub root: String,
+}
+
 /// Read response for the `quickcss.read` editor capability: the fixed file
 /// text plus its byte length. No path, no enablement flag, no filesystem
 /// error text.
@@ -1567,6 +1833,37 @@ pub fn window_state_event_json(focused: bool, maximized: bool) -> String {
         "maximized": maximized,
     })
     .to_string()
+}
+
+/// Parse-time shape check for gallery save envelopes: presence plus
+/// byte caps that keep the envelope under the 8 KiB transport bound (the
+/// host slices strings Electron-style at dispatch, so anything up to
+/// these caps shrinks at dispatch instead of failing). Scheme, dedupe,
+/// kind, and containment rules live in `gallery`.
+fn gallery_save_shape_valid(url: &str, meta: &GalleryMetaRequest) -> bool {
+    !(url.is_empty()
+        || url.len() > crate::gallery::MAX_URL_BYTES
+        || meta.title.len() > 1024
+        || meta.guild_id.len() > 256
+        || meta.guild_name.len() > 256
+        || meta.channel_id.len() > 256
+        || meta.channel_name.len() > 256
+        || meta.author_name.len() > 256
+        || meta.message_id.len() > 256
+        || meta.categories.len() > 16
+        || meta.categories.iter().any(|c| c.len() > 128))
+}
+
+/// Parse-time shape check for gallery item ids: presence plus byte cap.
+/// Charset rules live in `gallery` and are re-enforced at dispatch.
+fn gallery_id_shape_valid(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64
+}
+
+/// Parse-time shape check for gallery category names: presence plus byte
+/// cap. Normalization and uniqueness live in `gallery`.
+fn gallery_name_shape_valid(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 256
 }
 
 fn valid_request_id(request_id: &str) -> bool {
@@ -1840,6 +2137,70 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::WindowDrag(_)
                 | BridgeCommand::WindowToggleFullscreen(_)
                 | BridgeCommand::WindowQuit(_) => {}
+                // Gallery: shape check only (presence + byte caps); URL
+                // schemes, id charset, name rules, category bounds, and
+                // containment live in `gallery` and are re-enforced at
+                // dispatch. Meta strings are sliced host-side exactly like
+                // Electron, so oversized members shrink instead of failing.
+                BridgeCommand::GalleryList(_)
+                | BridgeCommand::GalleryCategories(_)
+                | BridgeCommand::GalleryUsage(_)
+                | BridgeCommand::GalleryRoot(_) => {}
+                BridgeCommand::GalleryAddUrl(payload) => {
+                    if !gallery_save_shape_valid(&payload.url, &payload.meta) {
+                        return Err("invalid gallery save".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryAddLink(payload) => {
+                    if !gallery_save_shape_valid(&payload.url, &payload.meta) {
+                        return Err("invalid gallery save".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryRemove(payload) => {
+                    if !gallery_id_shape_valid(&payload.id) {
+                        return Err("invalid gallery id".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryFile(payload) => {
+                    if !gallery_id_shape_valid(&payload.id) {
+                        return Err("invalid gallery id".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryBulkRemove(payload) => {
+                    if payload.ids.is_empty() || payload.ids.len() > 4096 {
+                        return Err("invalid gallery bulk removal".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryUpdate(payload) => {
+                    if payload.id.is_empty()
+                        || payload.id.len() > 64
+                        || payload.title.as_ref().is_some_and(|t| t.len() > 4096)
+                        || payload.categories.as_ref().is_some_and(|cats| {
+                            cats.len() > 64 || cats.iter().any(|c| c.len() > 256)
+                        })
+                    {
+                        return Err("invalid gallery update".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryCategoryAdd(payload) => {
+                    if !gallery_name_shape_valid(&payload.name) {
+                        return Err("invalid gallery category name".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryCategoryRemove(payload) => {
+                    if !gallery_name_shape_valid(&payload.name) {
+                        return Err("invalid gallery category name".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryCategoryRename(payload) => {
+                    if payload.old_name.is_empty()
+                        || payload.old_name.len() > 256
+                        || payload.new_name.is_empty()
+                        || payload.new_name.len() > 256
+                    {
+                        return Err("invalid gallery category rename".to_owned());
+                    }
+                }
                 BridgeCommand::BackupSave(payload) => {
                     // The seven include flags are typed booleans by serde
                     // (`deny_unknown_fields` rejected anything else); the
@@ -3201,6 +3562,135 @@ mod tests {
         assert_eq!(open_value["payload"]["type"], "theme_folder_opened");
         assert_eq!(open_value["payload"]["payload"]["id"], "my-theme");
         assert!(open_value["payload"]["payload"].get("path").is_none());
+    }
+
+    #[test]
+    fn gallery_commands_parse_with_closed_shapes() {
+        fn wire(wire_type: &str, payload: &str) -> String {
+            format!("{{\"version\":1,\"request_id\":\"g\",\"command\":{{\"type\":\"{wire_type}\",\"payload\":{payload}}}}}")
+        }
+        // Parameter-free inventory/usage/root.
+        for wire_type in [
+            "gallery_list",
+            "gallery_categories",
+            "gallery_usage",
+            "gallery_root",
+        ] {
+            assert!(
+                matches!(
+                    parse_bridge_message(&wire(wire_type, "{}")),
+                    Ok(BridgeMessage::Request(_))
+                ),
+                "{wire_type} must parse"
+            );
+            assert!(
+                parse_bridge_message(&wire(wire_type, "{\"path\":\"C:\\\\x\"}")).is_err(),
+                "{wire_type} must refuse paths"
+            );
+        }
+        // Save pair.
+        assert!(matches!(
+            parse_bridge_message(&wire(
+                "gallery_add_url",
+                "{\"url\":\"https://x/y.png\",\"meta\":{\"title\":\"t\"}}"
+            )),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(
+            parse_bridge_message(&wire("gallery_add_link", "{\"url\":\"https://x/y\"}")).is_err(),
+            "meta is required"
+        );
+        assert!(
+            parse_bridge_message(&wire(
+                "gallery_add_url",
+                "{\"url\":\"https://x/y.png\",\"meta\":{},\"path\":\"C:\\\\x\"}"
+            ))
+            .is_err(),
+            "paths are refused"
+        );
+        assert!(
+            matches!(
+                parse_bridge_message(&wire(
+                    "gallery_add_url",
+                    "{\"url\":\"file:///C:/x.png\",\"meta\":{}}"
+                )),
+                Ok(BridgeMessage::Request(_))
+            ),
+            "scheme enforcement lives at dispatch, not parse"
+        );
+        // Id pair.
+        assert!(matches!(
+            parse_bridge_message(&wire("gallery_remove", "{\"id\":\"abc-1\"}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(
+            matches!(
+                parse_bridge_message(&wire("gallery_file", "{\"id\":\"../x\"}")),
+                Ok(BridgeMessage::Request(_))
+            ),
+            "charset enforcement lives at dispatch, not parse"
+        );
+        // Bulk + update + category trio.
+        assert!(matches!(
+            parse_bridge_message(&wire("gallery_bulk_remove", "{\"ids\":[\"a\",\"b\"]}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(
+            parse_bridge_message(&wire("gallery_bulk_remove", "{\"ids\":[]}")).is_err(),
+            "empty bulk is refused"
+        );
+        assert!(matches!(
+            parse_bridge_message(&wire(
+                "gallery_update",
+                "{\"id\":\"a\",\"title\":\"t\",\"categories\":[\"c\"]}"
+            )),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(
+            parse_bridge_message(&wire(
+                "gallery_update",
+                "{\"id\":\"a\",\"kind\":\"image\",\"path\":\"C:\\\\x\"}"
+            ))
+            .is_err(),
+            "kind/path are refused"
+        );
+        assert!(matches!(
+            parse_bridge_message(&wire(
+                "gallery_category_rename",
+                "{\"old_name\":\"a\",\"new_name\":\"b\"}"
+            )),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(
+            parse_bridge_message(&wire("gallery_category_add", "{\"name\":\"\"}")).is_err(),
+            "empty names are refused"
+        );
+        // Unknown command names are rejected.
+        assert!(
+            parse_bridge_message(&wire("gallery_import_dialog", "{}")).is_err(),
+            "F5b dialog wires do not exist"
+        );
+    }
+
+    #[test]
+    fn serializes_a_typed_gallery_list_response() {
+        use super::GalleryListResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "g-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::GalleryList(GalleryListResponse {
+                items: vec![serde_json::json!({"id": "a-1", "kind": "link", "localFile": ""})],
+                categories: vec![serde_json::json!({"name": "clips"})],
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "gallery_list");
+        assert_eq!(value["payload"]["payload"]["items"][0]["id"], "a-1");
+        assert!(value["payload"]["payload"]["items"][0]
+            .get("path")
+            .is_none());
     }
 
     #[test]

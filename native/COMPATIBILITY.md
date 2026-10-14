@@ -433,7 +433,7 @@ Deliberate Electron differences: no injector preload (host-pushed closed loader 
 
 ## Folder opening capability (Phase D Step 2)
 
-Four caller-backed folder behaviors migrate to two typed capabilities under `window.remcord.folders`: `folders.open` (wire `folders_open`, facade `folders.open(location)`) reveals exactly one of three fixed roots, and `folders.open_theme` (wire `folders_open_theme`, facade `folders.openTheme(id)`) opens exactly one validated theme directory. No generic open(path), no dialogs, no pickers, no file-in-editor paths, no theme install/edit.
+Five caller-backed folder behaviors migrate to two typed capabilities under `window.remcord.folders`: `folders.open` (wire `folders_open`, facade `folders.open(location)`) reveals exactly one of four fixed roots, and `folders.open_theme` (wire `folders_open_theme`, facade `folders.openTheme(id)`) opens exactly one validated theme directory. No generic open(path), no dialogs, no pickers, no file-in-editor paths, no theme install/edit.
 
 ### Electron chain (unchanged)
 
@@ -442,6 +442,7 @@ Four caller-backed folder behaviors migrate to two typed capabilities under `win
 | `settings.openStorageFolder` (`SettingsPage.tsx`) | `openStorageFolder` (`ipc.ts:350`) | `shell.showItemInFolder(<userData>/storage/)` | none (fixed) |
 | `settings.openThemesFolder` (`ThemesPage.tsx`) | `openThemesFolder` (`ipc.ts:159` **and** `:353` — registered twice, both fire identically) | `shell.showItemInFolder(<userData>/themes/)` | none (fixed) |
 | `plugins.openFolder` (`PluginsPage.tsx`) | `openRuntimePluginsFolder` (`ipc.ts:359`) | `shell.showItemInFolder(<userData>/plugins/)` | none (fixed) |
+| `gallery.openRoot` (`GalleryPage.tsx`) | `gallery:open-root` (`ipc.ts`, `send`) | `shell.showItemInFolder(<galleryRoot>/)` | none (fixed) |
 | `themes.folder(id)` (`ThemesCard.tsx`) | `openThemeFolder` (`ipc.ts:201`) | `shell.openPath(path.join(themesPath, id))` | raw theme id, **no validation** (`../` escapes, absolute wins in `path.join`) |
 
 `openPluginsFolder` (`extensions/`) and `openCrashesFolder` have no renderer caller and no bridge entry — deferred. `openQuickCss`/`editTheme` open files in an editor, `openImportPicker`/`openCustomIconDialog` are picker dialogs, `openExternal` is browser navigation — all separate milestones. `native/tests/electron-compat.test.mjs` asserts every handler, bridge mapping, and declared `void` contract above is byte-identical, including the double `openThemesFolder` registration and the raw `path.join`.
@@ -451,7 +452,7 @@ Four caller-backed folder behaviors migrate to two typed capabilities under `win
 ```text
 renderer await window.remcord.folders.open("themes")
   → requireCapability("folders.open") or sync UNSUPPORTED_CAPABILITY throw
-  → client enum check (storage|themes|plugins, TypeError before dispatch)
+  → client enum check (storage|themes|plugins|gallery, TypeError before dispatch)
   → {"type":"folders_open","payload":{"location":"themes"}}
      (unknown variants + any path/url/selector member host-rejected)
   → Rust folders::ensure_folder_root (create-if-missing, canonical containment)
@@ -472,11 +473,44 @@ renderer await window.remcord.folders.openTheme("my-theme")
 
 Reveal and open are different shell operations and are implemented, logged (`op=reveal` vs `op=open`), and tested as such — never described as one operation just because both show Explorer. Neither constructs a command line; both dispatch the verb and return immediately without blocking on the opened application. Non-Windows builds fail closed (`FOLDERS_UNSUPPORTED_PLATFORM`); Windows WebView2 is the target platform.
 
-Deliberate Electron differences (hardening, not regressions): closed enum instead of fixed calls scattered across channels (same three roots, one capability); theme ids validated with the exact `themes.rs` rule instead of raw `path.join`; canonical containment with planted links failing closed as `OUTSIDE_ROOT` instead of followed; errors are typed (`INVALID_THEME_ID`, `UNKNOWN_THEME`, `OUTSIDE_ROOT`, `REVEAL_FAILED`, `OPEN_FAILED`, `FOLDERS_UNAVAILABLE`) with no paths in messages instead of silent no-ops; responses echo the validated target. Shell display strings use the plain Win32 form: containment is verified on the canonical path, but the `\\?\` prefix is stripped for the shell call because verb handlers such as `SHParseDisplayName` reject it with `E_INVALIDARG` (found during DEV runtime validation).
+Deliberate Electron differences (hardening, not regressions): closed enum instead of fixed calls scattered across channels (same four roots, one capability); theme ids validated with the exact `themes.rs` rule instead of raw `path.join`; canonical containment with planted links failing closed as `OUTSIDE_ROOT` instead of followed; errors are typed (`INVALID_THEME_ID`, `UNKNOWN_THEME`, `OUTSIDE_ROOT`, `REVEAL_FAILED`, `OPEN_FAILED`, `FOLDERS_UNAVAILABLE`) with no paths in messages instead of silent no-ops; responses echo the validated target. Shell display strings use the plain Win32 form: containment is verified on the canonical path, but the `\\?\` prefix is stripped for the shell call because verb handlers such as `SHParseDisplayName` reject it with `E_INVALIDARG` (found during DEV runtime validation).
 
 ### Settings UI wiring (Phase D Step 2 follow-up)
 
-The four settings-UI actions dispatch to the native capabilities when the WebView2 shell grants them, keeping the Electron `send` path otherwise. Shared helpers in `src/shelter/settings/settings.ts` (`revealFolderNative("storage" | "themes" | "plugins")`, `openThemeFolderNative(id)`) reuse the existing `isNativeWebView()` check plus a namespace function-presence gate — no second detection mechanism — and return `true` when native handled the action, so each call site executes exactly one path. The theme id passes through verbatim; validation stays host-owned. Rejections are swallowed after a path-free `console.warn` (fire-and-forget parity with Electron's silent `send`, but never an unhandled rejection and never a path in the UI). Native-only surface stays in local minimal interfaces per the `setBlockPowerSavingInVoiceChat`/`getVersion` precedent, so `remcordWindow.d.ts` is unchanged. Wired callers: `SettingsPage.tsx` (storage), `ThemesPage.tsx` (themes), `PluginsPage.tsx` toolbar + empty-state (plugins), `ThemesCard.tsx` per-theme folder (id). The main IPC handlers, bridge mappings, and declared `void` contracts are untouched.
+The five settings-UI actions dispatch to the native capabilities when the WebView2 shell grants them, keeping the Electron `send` path otherwise. Shared helpers in `src/shelter/settings/settings.ts` (`revealFolderNative("storage" | "themes" | "plugins")`, `openThemeFolderNative(id)`) reuse the existing `isNativeWebView()` check plus a namespace function-presence gate — no second detection mechanism — and return `true` when native handled the action, so each call site executes exactly one path. The theme id passes through verbatim; validation stays host-owned. Rejections are swallowed after a path-free `console.warn` (fire-and-forget parity with Electron's silent `send`, but never an unhandled rejection and never a path in the UI). Native-only surface stays in local minimal interfaces per the `setBlockPowerSavingInVoiceChat`/`getVersion` precedent, so `remcordWindow.d.ts` is unchanged. Wired callers: `SettingsPage.tsx` (storage), `ThemesPage.tsx` (themes), `PluginsPage.tsx` toolbar + empty-state (plugins), `ThemesCard.tsx` per-theme folder (id). The gallery `Open` button calls `window.remcord.gallery.openRoot()` directly (the gallery namespace owns it; the shared helper needs no gallery variant). The main IPC handlers, bridge mappings, and declared `void` contracts are untouched.
+
+## Gallery disk cache (F5 core)
+
+F5 core migrates the Gallery persistence surface — save/browse/search/categories/disk usage/inline preview plus one folder reveal — to thirteen typed capabilities under `window.remcord.gallery` with Electron-identical method names and result shapes, so `GalleryPage.tsx` calls the same methods natively. Only the three dialog-backed actions stay Electron-only until the F5b dialog slice: `importDialog` (host multi-file picker), `exportItems` (host directory picker + copy), and `pickRoot` (host directory picker + migration). Their facade methods exist for signature parity but their capabilities are absent, so they throw `UNSUPPORTED_CAPABILITY` honestly and the page gates those buttons with disabled states instead of dead calls.
+
+### Electron chain (unchanged)
+
+`src/common/gallery.ts` owns the store: `<userData>/gallery/` root (overridable via the `galleryRoot` setting with migration copy), `gallery-index.json` (`{version: 1, items, categories}`) loaded once and cached, debounced temp-file persist, and per-operation functions (`addGalleryUrl` with exact-`sourceUrl` dedupe plus `net.fetch` download of image/video bytes into `files/` with link-fallback on failure, `addGalleryLink` metadata-only, `importGalleryFiles` capped at 100 files, `removeGalleryItem`/`bulkRemoveGalleryItems` capped at 2000 ids with contained file deletion, `updateGalleryItem` title/tag patch, category add/rename/remove with normalization + case-insensitive uniqueness + deterministic palette, `getGalleryDiskUsage` measured from fs, `resolveGalleryFile` with root containment, `setGalleryRoot` with migration). `src/discord/ipc.ts::registerGalleryIpc` exposes seventeen `gallery:*` channels (all asserted byte-identical); `src/discord/preload/bridge.ts` maps them 1:1 onto `window.remcord.gallery`. Filtering/grouping/sorting/pagination live renderer-side in `src/common/galleryUtils.ts` (pure, shared). The context-menu saver (`src/shelter/gallery/index.ts`) calls only `gallery.addUrl` — the same call works natively once the capability exists.
+
+### Native chain
+
+```text
+renderer await window.remcord.gallery.list()
+  → requireCapability("gallery.list") or sync UNSUPPORTED_CAPABILITY throw
+  → parameter-free {"type":"gallery_list","payload":{}} request
+  → Rust gallery::list_gallery_items + list_gallery_categories
+     (fixed <profile>/gallery/ root; newest-first + alphabetical)
+  → validated gallery_list { items, categories } (Electron's shape;
+     localFile stays files/<name>; no path/content/absolute reference)
+
+renderer await window.remcord.gallery.addUrl(url, meta?)
+  → requireCapability("gallery.add_url") or sync UNSUPPORTED_CAPABILITY throw
+  → client http(s) + byte checks (TypeError before dispatch)
+  → {"type":"gallery_add_url","payload":{"url","meta":{...}}}}
+  → Rust gallery::add_gallery_url (scheme re-checked; exact-URL dedupe;
+     kind/file/id derived host-side; ureq download ≤48 MiB, ≤5 redirects,
+     60 s; failure keeps a link entry — Electron parity)
+  → resolved (never rejected) gallery_add { ok, item } | { ok, error }
+```
+
+`gallery.add_link` is the same minus the download (metadata-only). `gallery.remove` / `gallery.bulk_remove` take ids only (2000 cap, invalid skipped) and delete cached files only inside the gallery root. `gallery.update` takes id + title/categories only (unknown members dropped facade-side, mirroring Electron's patch read; `deny_unknown_fields` would reject them host-side). `gallery.categories` resolves the bare array (Electron parity). `gallery.category_add` / `category_rename` resolve `{ok} | {ok, error}`; `category_remove` always `{ok: true}` once persisted (Electron parity). `gallery.usage` measures bytes/files/items from the filesystem. `gallery.file` resolves `{ok, base64, mime, fileName} | {ok, error}` with the 48 MiB transport cap (larger files play via `sourceUrl`). `gallery.root` reports the fixed label `"gallery"` (never an absolute path). `gallery.openRoot` reveals the fixed gallery root through the shared `folders.open` capability.
+
+Deliberate Electron differences (hardening, not regressions): fixed root (Electron's custom `galleryRoot` + migration deferred to F5b); bounded items (20,000), categories (512), index (64 MiB), media (48 MiB per file, the preview transport cap Electron already enforces), downloads (60 s, 5 redirects); corrupt indexes fail closed instead of resetting to empty (a silent library wipe is worse than a typed error); symlinks/junctions/non-regular files never followed or served; index writes are atomic (temp + rename); non-http(s) URLs refused before any network or filesystem work; renderer input is data only (ids, URLs, names, meta, patches) — never a path. No new dependencies: base64 uses a tested in-module encoder.
 
 ## Theme install capability (Phase D Step 3a)
 

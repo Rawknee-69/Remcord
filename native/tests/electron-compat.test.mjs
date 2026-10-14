@@ -1588,6 +1588,69 @@ test("the known-broken disableAutogain caller is left untouched", () => {
     assert.throws(() => readFileSync(new URL("../../ts-out/assets/app/js/disableAutogain.js", import.meta.url)));
 });
 
+test("F5 gallery keeps the Electron store contract with a natively-gated page", () => {
+    // The native F5 core mirrors the Electron store operation-for-operation
+    // (gallery.ts) plus the bridge signatures (bridge.ts); the Gallery page
+    // calls the same window.remcord.gallery methods natively and gates only
+    // the dialog-backed buttons (import/export/root-pick, F5b slice).
+    const store = readFileSync(new URL("../../src/common/gallery.ts", import.meta.url), "utf8");
+    for (const fn of [
+        "listGalleryItems",
+        "addGalleryUrl",
+        "addGalleryLink",
+        "removeGalleryItem",
+        "bulkRemoveGalleryItems",
+        "updateGalleryItem",
+        "listGalleryCategories",
+        "addGalleryCategory",
+        "renameGalleryCategory",
+        "removeGalleryCategory",
+        "getGalleryDiskUsage",
+        "resolveGalleryFile",
+    ]) {
+        assert.match(store, new RegExp(`export (async )?function ${fn}`), `${fn} must stay exported`);
+    }
+    assert.match(store, /gallery-index\.json/);
+    const ipc = readFileSync(new URL("../../src/discord/ipc.ts", import.meta.url), "utf8");
+    assert.match(ipc, /48 \* 1024 \* 1024/);
+    assert.match(ipc, /TOO_LARGE/);
+    const bridge = readFileSync(new URL("../../src/discord/preload/bridge.ts", import.meta.url), "utf8");
+    for (const method of [
+        "gallery:list",
+        "gallery:add-url",
+        "gallery:add-link",
+        "gallery:remove",
+        "gallery:bulk-remove",
+        "gallery:update",
+        "gallery:categories",
+        "gallery:category-add",
+        "gallery:category-rename",
+        "gallery:category-remove",
+        "gallery:usage",
+        "gallery:root",
+        "gallery:file",
+    ]) {
+        assert.match(bridge, new RegExp(`"${method}"`), `${method} must stay bridged`);
+    }
+    const page = readFileSync(new URL("../../src/shelter/settings/pages/GalleryPage.tsx", import.meta.url), "utf8");
+    // The full-page unavailable gate is gone; only dialog-backed actions
+    // stay gated behind isNativeWebView.
+    assert.doesNotMatch(page, /does not provide the Gallery disk cache yet/);
+    assert.match(page, /window\.remcord\.gallery/);
+    assert.match(page, /\.list\(\)/);
+    assert.match(page, /\.addUrl\(/);
+    assert.match(page, /F5b dialog slice/);
+    // The native contract pins the same shape from the host side.
+    const nativeGallery = readFileSync(new URL("../src/gallery.rs", import.meta.url), "utf8");
+    assert.match(nativeGallery, /INDEX_VERSION/);
+    assert.match(nativeGallery, /GALLERY_UNAVAILABLE|GALLERY_FULL/);
+    assert.match(nativeGallery, /resolve_gallery_file/);
+    const compat = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+    assert.match(compat, /const gallery = Object\.freeze/);
+    assert.match(compat, /list: listGalleryItems/);
+    assert.match(compat, /getFile: getGalleryFile/);
+});
+
 test("F4 in-mod settings UI stays Electron-owned with no native src branch", () => {
     // Vencord/Equicord persist page-side in localStorage; Shelter owns its
     // plugins through its own registrar. F4 adds no host surface, so the

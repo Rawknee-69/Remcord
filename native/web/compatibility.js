@@ -486,9 +486,9 @@
         "custom.css",
     ];
 
-    // Closed location enum for the three host-controlled roots. The
+    // Closed location enum for the four host-controlled roots. The
     // renderer selects a variant only; the host builds the directory.
-    const FOLDER_LOCATIONS = ["storage", "themes", "plugins"];
+    const FOLDER_LOCATIONS = ["storage", "themes", "plugins", "gallery"];
     // Host-managed downloaded bundle caches the `mod.clear_cache`
     // wipe may delete. User-owned custom.js/custom.css are deliberately
     // absent: they can never be selected for deletion.
@@ -503,7 +503,7 @@
     function openFolder(location, timeoutMs = 5000) {
         requireCapability("folders.open");
         if (typeof location !== "string" || !FOLDER_LOCATIONS.includes(location)) {
-            return Promise.reject(new TypeError("location must be one of storage, themes, plugins"));
+            return Promise.reject(new TypeError("location must be one of storage, themes, plugins, gallery"));
         }
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
             return Promise.reject(new TypeError("timeout must be a positive finite number"));
@@ -626,6 +626,253 @@
             }
             return payload;
         });
+    }
+
+    // Gallery disk cache (F5 core): save/browse/search/categories/disk
+    // usage/inline preview over the host-owned <profile>/gallery/ root.
+    // Method names and result shapes mirror the Electron bridge exactly
+    // (src/discord/preload/bridge.ts), so GalleryPage.tsx needs no
+    // environment branch. Import/export/root-pick need modal host dialogs
+    // (F5b slice): their methods exist for signature parity but their
+    // capabilities are absent, so they throw UNSUPPORTED_CAPABILITY
+    // honestly and the page gates those buttons.
+    const GALLERY_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+    const MAX_GALLERY_URL_BYTES = 2048;
+    const MAX_GALLERY_IDS = 2000;
+    const MAX_GALLERY_NAME_BYTES = 256;
+    // Maximum inline base64 preview text: 48 MiB of media bytes inflate by
+    // 4/3 over the wire. Mirrors the host transport cap.
+    const MAX_GALLERY_FILE_BYTES = 67108864;
+
+    function checkGalleryMeta(meta) {
+        if (meta === undefined) return null;
+        if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+            return "meta must be an object";
+        }
+        return null;
+    }
+
+    function checkGalleryUrl(url) {
+        if (typeof url !== "string" || url.length === 0 || textEncoder.encode(url).length > MAX_GALLERY_URL_BYTES) {
+            return "url must be a non-empty string of at most 2048 UTF-8 bytes";
+        }
+        // Only http(s) URLs may be saved: the host refuses every other
+        // scheme before any network or filesystem work (a renderer URL
+        // must never read local files), so reject here like Electron's
+        // own save paths do.
+        if (!/^https?:\/\//i.test(url)) {
+            return "url must be an http(s) URL";
+        }
+        return null;
+    }
+
+    function checkGalleryId(id) {
+        if (typeof id !== "string" || !GALLERY_ID_PATTERN.test(id)) {
+            return "id must match [A-Za-z0-9_-]{1,64}";
+        }
+        return null;
+    }
+
+    function checkGalleryName(name) {
+        if (typeof name !== "string" || name.length === 0 || textEncoder.encode(name).length > MAX_GALLERY_NAME_BYTES) {
+            return "name must be a non-empty string of at most 256 UTF-8 bytes";
+        }
+        return null;
+    }
+
+    // Gallery-local timeout shape check (string-or-null, like the theme
+    // section helpers): a separate name so hoisting can never rebind it
+    // to the plugins-section promise-style checker.
+    function checkGalleryTimeout(timeoutMs) {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return "timeout must be a positive finite number";
+        }
+        return null;
+    }
+
+    function listGalleryItems(timeoutMs = 5000) {
+        requireCapability("gallery.list");
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Parameter-free by protocol: the host owns the root, the read,
+        // and the newest-first ordering. No path, selector, URL, or
+        // filter may be supplied.
+        return request({ type: "gallery_list", payload: {} }, timeoutMs);
+    }
+
+    function addGalleryUrl(url, meta, timeoutMs = 120_000) {
+        requireCapability("gallery.add_url");
+        const badUrl = checkGalleryUrl(url);
+        if (badUrl) return Promise.reject(new TypeError(badUrl));
+        const badMeta = checkGalleryMeta(meta);
+        if (badMeta) return Promise.reject(new TypeError(badMeta));
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // URL plus metadata only: the host validates the scheme, derives
+        // kind/file/id, and downloads image/video bytes itself. Non-http(s)
+        // URLs are refused before any network or filesystem work. Downloads
+        // use the long-operation timeout like mod bundle retrieval.
+        return request({ type: "gallery_add_url", payload: { url, meta: meta ?? {} } }, timeoutMs);
+    }
+
+    function addGalleryLink(url, meta, timeoutMs = 30_000) {
+        requireCapability("gallery.add_link");
+        const badUrl = checkGalleryUrl(url);
+        if (badUrl) return Promise.reject(new TypeError(badUrl));
+        const badMeta = checkGalleryMeta(meta);
+        if (badMeta) return Promise.reject(new TypeError(badMeta));
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Metadata-only save: no download, no bytes. Same shape rules as
+        // addUrl.
+        return request({ type: "gallery_add_link", payload: { url, meta: meta ?? {} } }, timeoutMs);
+    }
+
+    function importGalleryDialog(_meta, _timeoutMs = 120_000) {
+        // F5b dialog slice: no host file picker exists yet, so the
+        // capability is absent and this throws UNSUPPORTED_CAPABILITY
+        // honestly. The Gallery page gates the Import button natively.
+        requireCapability("gallery.import_files");
+        return Promise.reject(new Error("unreachable"));
+    }
+
+    function removeGalleryItem(id, timeoutMs = 5000) {
+        requireCapability("gallery.remove");
+        const badId = checkGalleryId(id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Id only: the host resolves the cached file from its own index
+        // and deletes it only inside the gallery root.
+        return request({ type: "gallery_remove", payload: { id } }, timeoutMs);
+    }
+
+    function bulkRemoveGalleryItems(ids, timeoutMs = 30_000) {
+        requireCapability("gallery.bulk_remove");
+        if (
+            !Array.isArray(ids) ||
+            ids.length === 0 ||
+            ids.length > MAX_GALLERY_IDS ||
+            !ids.every((id) => typeof id === "string")
+        ) {
+            return Promise.reject(new TypeError("ids must be a non-empty array of at most 2000 id strings"));
+        }
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Ids only (at most 2000, mirroring Electron's slice); invalid
+        // ids are skipped host-side, never dispatched as paths.
+        return request({ type: "gallery_bulk_remove", payload: { ids } }, timeoutMs);
+    }
+
+    function updateGalleryItem(id, patch, timeoutMs = 5000) {
+        requireCapability("gallery.update");
+        const badId = checkGalleryId(id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+            return Promise.reject(new TypeError("patch must be an object"));
+        }
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Id plus title/categories patch only: only the title and the tag
+        // list are mutable, mirroring Electron's patch shape. No kind,
+        // URL, file, size, mime, timestamp, or path member may be supplied
+        // (the host rejects unknown members).
+        const clean = {};
+        if (patch.title !== undefined) clean.title = patch.title;
+        if (patch.categories !== undefined) clean.categories = patch.categories;
+        return request({ type: "gallery_update", payload: { id, ...clean } }, timeoutMs);
+    }
+
+    function listGalleryCategories(timeoutMs = 5000) {
+        requireCapability("gallery.categories");
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // The validator resolves the bare array for exact Electron parity.
+        return request({ type: "gallery_categories", payload: {} }, timeoutMs);
+    }
+
+    function addGalleryCategory(name, timeoutMs = 5000) {
+        requireCapability("gallery.category_add");
+        const badName = checkGalleryName(name);
+        if (badName) return Promise.reject(new TypeError(badName));
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        return request({ type: "gallery_category_add", payload: { name } }, timeoutMs);
+    }
+
+    function renameGalleryCategory(oldName, newName, timeoutMs = 5000) {
+        requireCapability("gallery.category_rename");
+        const badOld = checkGalleryName(oldName);
+        if (badOld) return Promise.reject(new TypeError(badOld));
+        const badNew = checkGalleryName(newName);
+        if (badNew) return Promise.reject(new TypeError(badNew));
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        return request(
+            { type: "gallery_category_rename", payload: { old_name: oldName, new_name: newName } },
+            timeoutMs,
+        );
+    }
+
+    function removeGalleryCategory(name, timeoutMs = 5000) {
+        requireCapability("gallery.category_remove");
+        const badName = checkGalleryName(name);
+        if (badName) return Promise.reject(new TypeError(badName));
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        return request({ type: "gallery_category_remove", payload: { name } }, timeoutMs);
+    }
+
+    function getGalleryUsage(timeoutMs = 5000) {
+        requireCapability("gallery.usage");
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        return request({ type: "gallery_usage", payload: {} }, timeoutMs);
+    }
+
+    function getGalleryRoot(timeoutMs = 5000) {
+        requireCapability("gallery.root");
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Fixed profile-relative label only; an absolute path never
+        // crosses (deliberate difference: Electron reports its custom
+        // root, native fixes the root until the F5b dialog slice).
+        return request({ type: "gallery_root", payload: {} }, timeoutMs);
+    }
+
+    function pickGalleryRoot(_timeoutMs = 120_000) {
+        // F5b dialog slice: no host directory picker exists yet, so the
+        // capability is absent and this throws UNSUPPORTED_CAPABILITY
+        // honestly. The Gallery page gates the Choose-folder button.
+        requireCapability("gallery.root_pick");
+        return Promise.reject(new Error("unreachable"));
+    }
+
+    function openGalleryRoot() {
+        // Reveal semantics through the shared folders.open capability on
+        // the fixed gallery root (Electron's send is fire-and-forget, so
+        // the resolution value is dropped the same way).
+        return openFolder("gallery").then(() => undefined);
+    }
+
+    function exportGalleryItems(_ids, _timeoutMs = 120_000) {
+        // F5b dialog slice: no host directory picker exists yet, so the
+        // capability is absent and this throws UNSUPPORTED_CAPABILITY
+        // honestly. The Gallery page gates the Copy-to-folder button.
+        requireCapability("gallery.export_items");
+        return Promise.reject(new Error("unreachable"));
+    }
+
+    function getGalleryFile(id, timeoutMs = 30_000) {
+        requireCapability("gallery.file");
+        const badId = checkGalleryId(id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        const badTimeout = checkGalleryTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Id only: the host resolves, bounds (48 MiB transport cap), and
+        // base64-encodes the cached bytes itself. Larger files play via
+        // their remote sourceUrl (Electron parity).
+        return request({ type: "gallery_file", payload: { id } }, timeoutMs);
     }
 
     // Maximum inventoried themes per response and maximum single display
@@ -1475,6 +1722,169 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_list") {
+            const payload = response.payload.payload;
+            // Items newest-first plus categories in Electron's shape.
+            // localFile values stay profile-relative (files/<name>);
+            // no path, content, or absolute reference may ride along.
+            const itemsValid =
+                Array.isArray(payload?.items) &&
+                payload.items.length <= 20000 &&
+                payload.items.every(
+                    (entry) =>
+                        entry &&
+                        typeof entry.id === "string" &&
+                        GALLERY_ID_PATTERN.test(entry.id) &&
+                        typeof entry.kind === "string" &&
+                        (entry.localFile === "" ||
+                            (typeof entry.localFile === "string" && entry.localFile.startsWith("files/"))) &&
+                        entry.path === undefined &&
+                        entry.data === undefined &&
+                        entry.base64 === undefined,
+                );
+            const categoriesValid =
+                Array.isArray(payload?.categories) &&
+                payload.categories.length <= 512 &&
+                payload.categories.every(
+                    (entry) =>
+                        entry &&
+                        typeof entry.name === "string" &&
+                        entry.path === undefined &&
+                        entry.url === undefined &&
+                        entry.data === undefined,
+                );
+            if (!payload || Object.keys(payload).length !== 2 || !itemsValid || !categoriesValid) {
+                request.reject(new Error("Native gallery list response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (
+            response.ok === true &&
+            (response.payload?.type === "gallery_add" || response.payload?.type === "gallery_update")
+        ) {
+            const payload = response.payload.payload;
+            // Electron's { ok, item } | { ok, error } shape, resolved (never
+            // rejected) by the host so the page can toast the reason.
+            const itemValid =
+                payload.item === undefined ||
+                (payload.item && typeof payload.item.id === "string" && GALLERY_ID_PATTERN.test(payload.item.id));
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok
+                    ? !payload.item || payload.error !== undefined
+                    : !payload.error || payload.item !== undefined) ||
+                !itemValid
+            ) {
+                request.reject(new Error("Native gallery save response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (
+            response.ok === true &&
+            (response.payload?.type === "gallery_remove" || response.payload?.type === "gallery_category_remove")
+        ) {
+            const payload = response.payload.payload;
+            if (!payload || Object.keys(payload).length !== 1 || typeof payload.ok !== "boolean") {
+                request.reject(new Error("Native gallery removal response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_bulk_remove") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                !Number.isSafeInteger(payload.removed) ||
+                payload.removed < 0
+            ) {
+                request.reject(new Error("Native gallery bulk removal response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_categories") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                !Array.isArray(payload.categories) ||
+                payload.categories.length > 512 ||
+                !payload.categories.every((entry) => entry && typeof entry.name === "string")
+            ) {
+                request.reject(new Error("Native gallery categories response schema is invalid"));
+                return;
+            }
+            // Electron's bridge resolves the bare array (not the
+            // `{categories}` envelope), so extract here for exact parity.
+            request.resolve(payload.categories);
+        } else if (response.ok === true && response.payload?.type === "gallery_category_add") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok
+                    ? !payload.category || typeof payload.category.name !== "string" || payload.error !== undefined
+                    : !payload.error || payload.category !== undefined)
+            ) {
+                request.reject(new Error("Native gallery category response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_category_rename") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok ? payload.error !== undefined : typeof payload.error !== "string")
+            ) {
+                request.reject(new Error("Native gallery category rename response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_usage") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                !Number.isSafeInteger(payload.bytes) ||
+                payload.bytes < 0 ||
+                !Number.isSafeInteger(payload.files) ||
+                payload.files < 0 ||
+                !Number.isSafeInteger(payload.items) ||
+                payload.items < 0
+            ) {
+                request.reject(new Error("Native gallery usage response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_file") {
+            const payload = response.payload.payload;
+            // Bounded inline preview (48 MiB of bytes at most, base64
+            // inflates by 4/3) or a typed error the thumbnail falls back
+            // from. No path may ride along.
+            const fileValid =
+                payload.ok === true
+                    ? typeof payload.base64 === "string" &&
+                      payload.base64.length <= MAX_GALLERY_FILE_BYTES &&
+                      typeof payload.mime === "string" &&
+                      typeof payload.fileName === "string" &&
+                      payload.error === undefined &&
+                      payload.path === undefined
+                    : typeof payload.error === "string" && payload.base64 === undefined && payload.path === undefined;
+            if (!payload || typeof payload.ok !== "boolean" || !fileValid) {
+                request.reject(new Error("Native gallery file response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_root") {
+            const payload = response.payload.payload;
+            // Fixed profile-relative label only; an absolute path never
+            // crosses.
+            if (!payload || Object.keys(payload).length !== 1 || payload.root !== "gallery") {
+                request.reject(new Error("Native gallery root response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "theme_folder_opened") {
             const payload = response.payload.payload;
             if (
@@ -2002,9 +2412,32 @@
         commitRestore,
         discardRestore,
     });
-    // Folder opening only: reveal for the three fixed roots, open for one
+    // Folder opening only: reveal for the four fixed roots, open for one
     // validated theme id. No path, dialog, picker, or shell surface.
     const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });
+    // Gallery disk cache only: Electron-identical method names and result
+    // shapes over host-owned storage. Import/export/root-pick need modal
+    // host dialogs (F5b slice): their methods exist for signature parity
+    // but throw UNSUPPORTED_CAPABILITY until their capabilities exist.
+    const gallery = Object.freeze({
+        list: listGalleryItems,
+        addUrl: addGalleryUrl,
+        addLink: addGalleryLink,
+        importDialog: importGalleryDialog,
+        remove: removeGalleryItem,
+        bulkRemove: bulkRemoveGalleryItems,
+        update: updateGalleryItem,
+        categories: listGalleryCategories,
+        categoryAdd: addGalleryCategory,
+        categoryRename: renameGalleryCategory,
+        categoryRemove: removeGalleryCategory,
+        usage: getGalleryUsage,
+        root: getGalleryRoot,
+        pickRoot: pickGalleryRoot,
+        openRoot: openGalleryRoot,
+        exportItems: exportGalleryItems,
+        getFile: getGalleryFile,
+    });
     // Theme installation only: CSS text in, bounded metadata out. No URL,
     // path, dialog, picker, editor, or list surface.
     // Theme CSS replacement only: validated id plus CSS text in, bounded
@@ -2179,6 +2612,7 @@
             plugins,
             backup,
             folders,
+            gallery,
             themes: themesShim,
             quickcss: quickcssShim,
             diagnostics,

@@ -11,6 +11,7 @@ mod diagnostics;
 mod downloads;
 mod environment_observer;
 mod folders;
+mod gallery;
 mod graphics;
 mod localization;
 mod main_webview;
@@ -84,13 +85,17 @@ use protocol::{
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BridgeCommand,
     BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
     BridgeResponsePayload, BundleFileEntry, BundlesListResponse, DiagnosticsInfoResponse,
-    FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse, ModCacheClearedResponse,
-    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
-    PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
-    PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
-    SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
-    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
+    FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
+    GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
+    GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
+    GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, LocalizationStringResponse,
+    ModBundleResponse, ModCacheClearedResponse, PingResponse, PluginStorageReadResponse,
+    PluginStorageWriteResponse, PluginsListResponse, PluginsReloadResponse,
+    PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse, PluginsSetEnabledResponse,
+    QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker, SettingsConfigResponse,
+    SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
+    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
+    WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -607,6 +612,19 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "backup.discard_restore",
         "folders.open",
         "folders.open_theme",
+        "gallery.list",
+        "gallery.add_url",
+        "gallery.add_link",
+        "gallery.remove",
+        "gallery.bulk_remove",
+        "gallery.update",
+        "gallery.categories",
+        "gallery.category_add",
+        "gallery.category_rename",
+        "gallery.category_remove",
+        "gallery.usage",
+        "gallery.file",
+        "gallery.root",
         "themes.install_code",
         "themes.write_css",
         "themes.import_files",
@@ -4389,6 +4407,76 @@ fn send_bridge_response(webview: &WebView, response: &BridgeResponse) {
     }
 }
 
+/// Sends one gallery success response and completes request correlation.
+/// Shared by every `gallery.*` dispatch arm so the thirteen operations
+/// cannot drift in envelope shape, correlation, or metrics logging.
+fn respond_gallery_ok(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    payload: BridgeResponsePayload,
+    metric: &str,
+    latency_ms: f64,
+) {
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: true,
+        payload: Some(payload),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Gallery][Metrics] {metric} request_latency_ms={latency_ms:.3}");
+}
+
+/// Sends one gallery typed failure: path-free code plus message, same
+/// envelope discipline as every other capability.
+fn respond_gallery_err(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    code: &'static str,
+    message: String,
+    latency_ms: f64,
+) {
+    eprintln!("[Gallery][{code}] {message}");
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: false,
+        payload: None,
+        error: Some(BridgeError { code, message }),
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Gallery][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
+}
+
+/// Converts a renderer-supplied save-metadata envelope into the bounded
+/// store form. Strings are sliced exactly like Electron's save paths;
+/// unknown members never parse (protocol `deny_unknown_fields`).
+fn gallery_meta_from_request(meta: &protocol::GalleryMetaRequest) -> gallery::GalleryMeta {
+    gallery::GalleryMeta {
+        title: meta.title.clone(),
+        guild_id: meta.guild_id.clone(),
+        guild_name: meta.guild_name.clone(),
+        channel_id: meta.channel_id.clone(),
+        channel_name: meta.channel_name.clone(),
+        author_name: meta.author_name.clone(),
+        message_id: meta.message_id.clone(),
+        categories: meta.categories.clone(),
+    }
+}
+
 /// Host-owned authoritative window state. `focused` converges only from Tao
 /// `Focused` events; `maximized` converges from `Resized` queries plus the
 /// maximize/unmaximize commands. Nothing here polls: every update is pushed
@@ -7830,6 +7918,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 FolderLocation::Storage => "storage",
                                 FolderLocation::Themes => "themes",
                                 FolderLocation::Plugins => "plugins",
+                                FolderLocation::Gallery => "gallery",
                             };
                             match ensure_folder_root(&profile_path, location)
                                 .and_then(|dir| reveal_folder(&dir))
@@ -7925,6 +8014,439 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     response_count += 1;
                                 }
                             }
+                        }
+                        BridgeCommand::GalleryList(_) => {
+                            // Newest-first items plus categories in
+                            // Electron's `{items, categories}` shape. The
+                            // host owns the root, the read, and the order.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::list_gallery_items(&profile_path)
+                                .and_then(|items| {
+                                    gallery::list_gallery_categories(&profile_path)
+                                        .map(|categories| (items, categories))
+                                }) {
+                                Ok((items, categories)) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryList(GalleryListResponse {
+                                        items: items.iter().map(gallery::gallery_item_json).collect(),
+                                        categories: categories
+                                            .iter()
+                                            .map(gallery::gallery_category_json)
+                                            .collect(),
+                                    }),
+                                    "op=list",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryAddUrl(payload) => {
+                            // Save-by-URL: the host validates the scheme,
+                            // derives kind/file/id, and downloads
+                            // image/video bytes itself. Typed failures
+                            // resolve `{ok: false, error}` (Electron parity)
+                            // so the page can toast the reason.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            let meta = gallery_meta_from_request(&payload.meta);
+                            match gallery::add_gallery_url(&profile_path, &payload.url, &meta) {
+                                Ok(item) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryAdd(GalleryAddResponse {
+                                        ok: true,
+                                        item: Some(gallery::gallery_item_json(&item)),
+                                        error: None,
+                                    }),
+                                    "op=add_url",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryAdd(GalleryAddResponse {
+                                        ok: false,
+                                        item: None,
+                                        error: Some(failure.code.to_owned()),
+                                    }),
+                                    "op=add_url",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryAddLink(payload) => {
+                            // Metadata-only save; no download. Same
+                            // envelope as `gallery.add_url`.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            let meta = gallery_meta_from_request(&payload.meta);
+                            match gallery::add_gallery_link(&profile_path, &payload.url, &meta) {
+                                Ok(item) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryAdd(GalleryAddResponse {
+                                        ok: true,
+                                        item: Some(gallery::gallery_item_json(&item)),
+                                        error: None,
+                                    }),
+                                    "op=add_link",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryAdd(GalleryAddResponse {
+                                        ok: false,
+                                        item: None,
+                                        error: Some(failure.code.to_owned()),
+                                    }),
+                                    "op=add_link",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryRemove(payload) => {
+                            // Single removal; unknown ids resolve
+                            // `{ok: false}` (Electron parity). The cached
+                            // file dies only inside the gallery root.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::remove_gallery_item(&profile_path, &payload.id) {
+                                Ok(removed) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryRemove(GalleryRemoveResponse {
+                                        ok: removed,
+                                    }),
+                                    "op=remove",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryBulkRemove(payload) => {
+                            // At most 2000 ids (Electron slice parity);
+                            // invalid ids are skipped, never dispatched.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::bulk_remove_gallery_items(&profile_path, &payload.ids) {
+                                Ok(removed) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryBulkRemove(
+                                        GalleryBulkRemoveResponse { removed },
+                                    ),
+                                    "op=bulk_remove",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryUpdate(payload) => {
+                            // Title/tag patch only; unknown ids resolve
+                            // `{ok: false, error}` (Electron parity).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::update_gallery_item(
+                                &profile_path,
+                                &payload.id,
+                                payload.title.as_deref(),
+                                payload.categories.as_deref(),
+                            ) {
+                                Ok(item) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryUpdate(GalleryUpdateResponse {
+                                        ok: true,
+                                        item: Some(gallery::gallery_item_json(&item)),
+                                        error: None,
+                                    }),
+                                    "op=update",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryUpdate(GalleryUpdateResponse {
+                                        ok: false,
+                                        item: None,
+                                        error: Some(failure.code.to_owned()),
+                                    }),
+                                    "op=update",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryCategories(_) => {
+                            // Alphabetical display metadata only.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::list_gallery_categories(&profile_path) {
+                                Ok(categories) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryCategories(
+                                        GalleryCategoriesResponse {
+                                            categories: categories
+                                                .iter()
+                                                .map(gallery::gallery_category_json)
+                                                .collect(),
+                                        },
+                                    ),
+                                    "op=categories",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryCategoryAdd(payload) => {
+                            // Typed failures resolve `{ok: false, error}`
+                            // (Electron parity).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::add_gallery_category(&profile_path, &payload.name) {
+                                Ok(category) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryCategoryAdd(
+                                        GalleryCategoryAddResponse {
+                                            ok: true,
+                                            category: Some(gallery::gallery_category_json(
+                                                &category,
+                                            )),
+                                            error: None,
+                                        },
+                                    ),
+                                    "op=category_add",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryCategoryAdd(
+                                        GalleryCategoryAddResponse {
+                                            ok: false,
+                                            category: None,
+                                            error: Some(failure.code.to_owned()),
+                                        },
+                                    ),
+                                    "op=category_add",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryCategoryRename(payload) => {
+                            // Retags items host-side; typed failures
+                            // resolve `{ok: false, error}` (Electron parity).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::rename_gallery_category(
+                                &profile_path,
+                                &payload.old_name,
+                                &payload.new_name,
+                            ) {
+                                Ok(_) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryCategoryRename(
+                                        GalleryCategoryRenameResponse { ok: true, error: None },
+                                    ),
+                                    "op=category_rename",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryCategoryRename(
+                                        GalleryCategoryRenameResponse {
+                                            ok: false,
+                                            error: Some(failure.code.to_owned()),
+                                        },
+                                    ),
+                                    "op=category_rename",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryCategoryRemove(payload) => {
+                            // Untags items host-side; always `{ok: true}`
+                            // once the index persists (Electron parity).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::remove_gallery_category(&profile_path, &payload.name) {
+                                Ok(_) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryCategoryRemove(
+                                        GalleryCategoryRemoveResponse { ok: true },
+                                    ),
+                                    "op=category_remove",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryUsage(_) => {
+                            // Exact bytes/files/items measured from the
+                            // filesystem by the host.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::gallery_disk_usage(&profile_path) {
+                                Ok((bytes, files, items)) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryUsage(GalleryUsageResponse {
+                                        bytes,
+                                        files,
+                                        items,
+                                    }),
+                                    "op=usage",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryFile(payload) => {
+                            // Inline base64 preview bounded by the 48 MiB
+                            // transport cap; larger files play via their
+                            // remote `sourceUrl` (Electron parity). Typed
+                            // failures resolve `{ok: false, error}` so the
+                            // thumbnail can fall back.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match gallery::read_gallery_file(&profile_path, &payload.id) {
+                                Ok((base64, mime, file_name)) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryFile(GalleryFileResponse {
+                                        ok: true,
+                                        base64: Some(base64),
+                                        mime: Some(mime),
+                                        file_name: Some(file_name),
+                                        error: None,
+                                    }),
+                                    "op=file",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_gallery_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::GalleryFile(GalleryFileResponse {
+                                        ok: false,
+                                        base64: None,
+                                        mime: None,
+                                        file_name: None,
+                                        error: Some(failure.code.to_owned()),
+                                    }),
+                                    "op=file",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::GalleryRoot(_) => {
+                            // Fixed profile-relative label only; an
+                            // absolute path never crosses (deliberate
+                            // difference: Electron reports the absolute
+                            // custom root, native fixes the root).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            respond_gallery_ok(
+                                &webview,
+                                &mut request_tracker,
+                                &mut response_count,
+                                request_id,
+                                BridgeResponsePayload::GalleryRoot(GalleryRootResponse {
+                                    root: gallery::GALLERY_ROOT_LABEL.to_owned(),
+                                }),
+                                "op=root",
+                                latency_ms,
+                            );
                         }
                         BridgeCommand::ThemeInstallCode(payload) => {
                             // Install from CSS text only: the id is derived

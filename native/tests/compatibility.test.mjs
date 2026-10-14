@@ -2941,7 +2941,7 @@ test("the facade exposes scoped folder reveal and theme open capabilities", () =
 
 test("folders.open sends a closed-enum reveal request and resolves the location", async () => {
     const { window } = createFoldersRuntime();
-    for (const location of ["storage", "themes", "plugins"]) {
+    for (const location of ["storage", "themes", "plugins", "gallery"]) {
         const pending = window.remcord.folders.open(location);
         assert.ok(pending instanceof Promise);
         const message = window.messages.find((entry) => entry.command?.type === "folders_open");
@@ -4078,6 +4078,302 @@ test("quickcss.write rejects malformed write responses", async () => {
 test("quickcss editor requests stay inert off the trusted origin", async () => {
     const { window } = createRuntime("https://attacker.invalid", ["bridge.ping", "quickcss.read", "quickcss.write"]);
     assert.equal(window.remcord, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Gallery disk cache contract (F5 core).
+//
+// The facade mirrors the Electron bridge method names and result shapes
+// exactly, over host-owned storage. Import/export/root-pick need modal
+// host dialogs (F5b slice): their methods exist for signature parity but
+// throw UNSUPPORTED_CAPABILITY honestly until their capabilities exist.
+// ---------------------------------------------------------------------------
+
+const GALLERY_CAPS = [
+    "bridge.ping",
+    "gallery.list",
+    "gallery.add_url",
+    "gallery.add_link",
+    "gallery.remove",
+    "gallery.bulk_remove",
+    "gallery.update",
+    "gallery.categories",
+    "gallery.category_add",
+    "gallery.category_rename",
+    "gallery.category_remove",
+    "gallery.usage",
+    "gallery.file",
+    "gallery.root",
+    "folders.open",
+];
+
+function createGalleryRuntime(capabilities = GALLERY_CAPS) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondGallery(window, request, type, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type, payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes the Electron-identical gallery namespace and nothing else", () => {
+    const { window } = createGalleryRuntime();
+    assert.deepEqual(Object.keys(window.remcord.gallery).sort(), [
+        "addLink",
+        "addUrl",
+        "bulkRemove",
+        "categories",
+        "categoryAdd",
+        "categoryRemove",
+        "categoryRename",
+        "exportItems",
+        "getFile",
+        "importDialog",
+        "list",
+        "openRoot",
+        "pickRoot",
+        "remove",
+        "root",
+        "update",
+        "usage",
+    ]);
+    for (const capability of GALLERY_CAPS.slice(1)) {
+        assert.equal(window.remcord.native.supports(capability), true);
+    }
+    // No path-taking member may exist alongside the closed namespace.
+    assert.equal(window.remcord.gallery.openPath, undefined);
+    assert.equal(window.remcord.gallery.saveFile, undefined);
+});
+
+test("gallery.list sends an exact empty payload and resolves the inventory", async () => {
+    const { window } = createGalleryRuntime();
+    const pending = window.remcord.gallery.list();
+    const message = window.messages.find((entry) => entry.command?.type === "gallery_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "gallery_list", payload: {} });
+    respondGallery(window, message, "gallery_list", {
+        items: [{ id: "a-1", kind: "link", localFile: "" }],
+        categories: [{ name: "clips" }],
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        items: [{ id: "a-1", kind: "link", localFile: "" }],
+        categories: [{ name: "clips" }],
+    });
+});
+
+test("gallery.list rejects hostile inventories", async () => {
+    for (const payload of [
+        { items: [{ id: "../x", kind: "link", localFile: "" }], categories: [] },
+        { items: [{ id: "a-1", kind: "link", localFile: "/abs/path.png" }], categories: [] },
+        { items: [{ id: "a-1", kind: "link", localFile: "files/x.png", path: "C:\\x" }], categories: [] },
+        { items: [], categories: [{ name: "clips", path: "C:\\x" }] },
+        { items: "nope", categories: [] },
+    ]) {
+        const runtime = createGalleryRuntime();
+        const pending = runtime.window.remcord.gallery.list();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "gallery_list");
+        respondGallery(runtime.window, message, "gallery_list", payload);
+        await assert.rejects(pending, /gallery list response schema is invalid/);
+    }
+});
+
+test("gallery.addUrl sends URL plus metadata and resolves the Electron shape", async () => {
+    const { window } = createGalleryRuntime();
+    const pending = window.remcord.gallery.addUrl("https://x/y.png", { title: "clip" });
+    const message = window.messages.find((entry) => entry.command?.type === "gallery_add_url");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "gallery_add_url",
+        payload: { url: "https://x/y.png", meta: { title: "clip" } },
+    });
+    respondGallery(window, message, "gallery_add", { ok: true, item: { id: "a-1" } });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { ok: true, item: { id: "a-1" } });
+    // Meta defaults to {} when omitted.
+    const second = createGalleryRuntime();
+    const pending2 = second.window.remcord.gallery.addLink("https://x/y");
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "gallery_add_link");
+    assert.deepEqual(message2.command, { type: "gallery_add_link", payload: { url: "https://x/y", meta: {} } });
+    respondGallery(second.window, message2, "gallery_add", { ok: false, error: "INVALID_URL" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending2)), { ok: false, error: "INVALID_URL" });
+});
+
+test("gallery save/update inputs are validated before dispatch", async () => {
+    const { window } = createGalleryRuntime();
+    await assert.rejects(window.remcord.gallery.addUrl(""), /url must be/);
+    await assert.rejects(window.remcord.gallery.addUrl("file:///C:/x"), /http\(s\)/);
+    await assert.rejects(window.remcord.gallery.addUrl("https://x/y", "meta"), /meta must be/);
+    await assert.rejects(window.remcord.gallery.remove("../x"), /id must match/);
+    await assert.rejects(window.remcord.gallery.remove(""), /id must match/);
+    await assert.rejects(window.remcord.gallery.bulkRemove([]), /ids must be/);
+    await assert.rejects(window.remcord.gallery.bulkRemove(["ok", 42]), /ids must be/);
+    await assert.rejects(window.remcord.gallery.update("a-1", null), /patch must be/);
+    // Unknown patch members are dropped, not rejected (Electron's
+    // updateGalleryItem reads only title/categories too): only the id
+    // crosses.
+    const dropMessage = (() => {
+        const before = window.messages.length;
+        // Short timeout: the request is intentionally never answered; the
+        // rejection is swallowed — only the sent wire shape is asserted.
+        const pending = window.remcord.gallery.update("a-1", { kind: "image", path: "C:\\x" }, 50);
+        pending.catch(() => {});
+        const sent = window.messages.slice(before).find((entry) => entry.command?.type === "gallery_update");
+        assert.ok(sent);
+        assert.deepEqual(sent.command, { type: "gallery_update", payload: { id: "a-1" } });
+        return pending;
+    })();
+    await dropMessage.catch(() => {});
+    await assert.rejects(window.remcord.gallery.categoryAdd(""), /name must be/);
+    await assert.rejects(window.remcord.gallery.getFile("../x"), /id must match/);
+    // (The dropped-patch update above intentionally sent: it proves only
+    // the id crosses. Everything else in this test rejected pre-dispatch.)
+});
+
+test("gallery.remove/update/category mutations resolve Electron-parity outcomes", async () => {
+    const { window } = createGalleryRuntime();
+    const removed = window.remcord.gallery.remove("a-1");
+    const removeMessage = window.messages.find((entry) => entry.command?.type === "gallery_remove");
+    assert.deepEqual(removeMessage.command, { type: "gallery_remove", payload: { id: "a-1" } });
+    respondGallery(window, removeMessage, "gallery_remove", { ok: true });
+    assert.deepEqual(JSON.parse(JSON.stringify(await removed)), { ok: true });
+
+    const bulk = window.remcord.gallery.bulkRemove(["a-1", "a-2"]);
+    const bulkMessage = window.messages.find((entry) => entry.command?.type === "gallery_bulk_remove");
+    respondGallery(window, bulkMessage, "gallery_bulk_remove", { removed: 2 });
+    assert.deepEqual(JSON.parse(JSON.stringify(await bulk)), { removed: 2 });
+
+    const updated = window.remcord.gallery.update("a-1", { title: "new", categories: ["clips"] });
+    const updateMessage = window.messages.find((entry) => entry.command?.type === "gallery_update");
+    assert.deepEqual(updateMessage.command, {
+        type: "gallery_update",
+        payload: { id: "a-1", title: "new", categories: ["clips"] },
+    });
+    respondGallery(window, updateMessage, "gallery_update", { ok: true, item: { id: "a-1" } });
+    assert.deepEqual(JSON.parse(JSON.stringify(await updated)), { ok: true, item: { id: "a-1" } });
+
+    const renamed = window.remcord.gallery.categoryRename("a", "b");
+    const renameMessage = window.messages.find((entry) => entry.command?.type === "gallery_category_rename");
+    assert.deepEqual(renameMessage.command, {
+        type: "gallery_category_rename",
+        payload: { old_name: "a", new_name: "b" },
+    });
+    respondGallery(window, renameMessage, "gallery_category_rename", { ok: true });
+    assert.deepEqual(JSON.parse(JSON.stringify(await renamed)), { ok: true });
+});
+
+test("gallery.getFile bounds the preview and falls back honestly", async () => {
+    const { window } = createGalleryRuntime();
+    const pending = window.remcord.gallery.getFile("a-1");
+    const message = window.messages.find((entry) => entry.command?.type === "gallery_file");
+    assert.deepEqual(message.command, { type: "gallery_file", payload: { id: "a-1" } });
+    respondGallery(window, message, "gallery_file", { ok: true, base64: "AAA=", mime: "image/png", fileName: "x.png" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        ok: true,
+        base64: "AAA=",
+        mime: "image/png",
+        fileName: "x.png",
+    });
+    // A path-bearing preview is rejected.
+    const second = createGalleryRuntime();
+    const pending2 = second.window.remcord.gallery.getFile("a-1");
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "gallery_file");
+    respondGallery(second.window, message2, "gallery_file", {
+        ok: true,
+        base64: "AAA=",
+        mime: "image/png",
+        fileName: "x.png",
+        path: "C:\\x",
+    });
+    await assert.rejects(pending2, /gallery file response schema is invalid/);
+});
+
+test("gallery dialog-backed methods throw UNSUPPORTED_CAPABILITY honestly", () => {
+    // Import/export/root-pick need modal host dialogs (F5b slice): the
+    // capabilities are absent, so the methods throw the closed
+    // UNSUPPORTED_CAPABILITY error and the page gates those buttons.
+    const { window } = createGalleryRuntime();
+    assert.equal(window.remcord.native.supports("gallery.import_files"), false);
+    assert.throws(
+        () => window.remcord.gallery.importDialog({}),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.gallery.exportItems(["a-1"]),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.gallery.pickRoot(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type?.startsWith("gallery_")),
+        false,
+    );
+});
+
+test("gallery.openRoot reveals the fixed gallery root through folders.open", async () => {
+    const { window } = createGalleryRuntime();
+    const pending = window.remcord.gallery.openRoot();
+    const message = window.messages.find((entry) => entry.command?.type === "folders_open");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "folders_open", payload: { location: "gallery" } });
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: true,
+                payload: { type: "folders_opened", payload: { location: "gallery" } },
+                error: null,
+            },
+        }),
+    );
+    // Fire-and-forget reveal like Electron's send: resolves undefined.
+    assert.equal(await pending, undefined);
+});
+
+test("gallery usage/root/categories resolve bounded host facts", async () => {
+    const { window } = createGalleryRuntime();
+    const usage = window.remcord.gallery.usage();
+    respondGallery(
+        window,
+        window.messages.find((entry) => entry.command?.type === "gallery_usage"),
+        "gallery_usage",
+        {
+            bytes: 10,
+            files: 1,
+            items: 1,
+        },
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(await usage)), { bytes: 10, files: 1, items: 1 });
+
+    const root = window.remcord.gallery.root();
+    respondGallery(
+        window,
+        window.messages.find((entry) => entry.command?.type === "gallery_root"),
+        "gallery_root",
+        {
+            root: "gallery",
+        },
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(await root)), { root: "gallery" });
+
+    const cats = window.remcord.gallery.categories();
+    respondGallery(
+        window,
+        window.messages.find((entry) => entry.command?.type === "gallery_categories"),
+        "gallery_categories",
+        { categories: [{ name: "clips", color: "#5865f2", createdAt: 1 }] },
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(await cats)), [{ name: "clips", color: "#5865f2", createdAt: 1 }]);
 });
 
 function createDiagnosticsRuntime(capabilities = ["bridge.ping", "diagnostics.get_info", "mod.clear_cache"]) {

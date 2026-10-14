@@ -2,7 +2,7 @@
 //!
 //! This module is the native counterpart of the Electron folder-opening
 //! handlers in `src/discord/ipc.ts`, exposed to the renderer through
-//! `src/discord/preload/bridge.ts`. Only the four caller-backed behaviors
+//! `src/discord/preload/bridge.ts`. Only the five caller-backed behaviors
 //! are migrated; everything else stays Electron-only:
 //!
 //! | Renderer caller | IPC channel | Electron host call | Native mapping |
@@ -10,6 +10,7 @@
 //! | `settings.openStorageFolder` (`SettingsPage.tsx`) | `openStorageFolder` | `shell.showItemInFolder(<userData>/storage/)` | reveal `storage` root |
 //! | `settings.openThemesFolder` (`ThemesPage.tsx`) | `openThemesFolder` (registered twice, both fire identically) | `shell.showItemInFolder(<userData>/themes/)` | reveal `themes` root |
 //! | `plugins.openFolder` (`PluginsPage.tsx`) | `openRuntimePluginsFolder` | `shell.showItemInFolder(<userData>/plugins/)` | reveal `plugins` root |
+//! | `gallery.openRoot` (`GalleryPage.tsx`) | `gallery:open-root` (`send`) | `shell.showItemInFolder(<galleryRoot>/)` | reveal `gallery` root |
 //! | `themes.folder(id)` (`ThemesCard.tsx`) | `openThemeFolder` | `shell.openPath(path.join(themesPath, id))` | open `themes/<validated id>/` |
 //!
 //! `openPluginsFolder` (`<userData>/extensions/`) and `openCrashesFolder`
@@ -20,7 +21,7 @@
 //! folder opening and stay deferred with their own milestones.
 //!
 //! Semantic distinction (preserved, not collapsed):
-//! - The three fixed roots use **reveal** semantics, the equivalent of
+//! - The four fixed roots use **reveal** semantics, the equivalent of
 //!   Electron `showItemInFolder()`: Explorer opens at the parent with the
 //!   folder selected. Implemented with `SHOpenFolderAndSelectItems`, a direct
 //!   shell API — never a constructed command line.
@@ -32,8 +33,8 @@
 //! and are implemented (and logged) as such.
 //!
 //! Native hardening (deliberate, documented differences from Electron):
-//! - The three roots are a closed enum, not paths: the renderer can only
-//!   name `storage`, `themes`, or `plugins`. There is no generic open(path).
+//! - The four roots are a closed enum, not paths: the renderer can only
+//!   name `storage`, `themes`, `plugins`, or `gallery`. There is no generic open(path).
 //! - The theme id is validated with the SAME rule themes already enforce
 //!   (`themes::validate_theme_id`: `[A-Za-z0-9._-]{1,64}`, never `.`/`..`,
 //!   separators impossible by charset). Electron joins the raw id with
@@ -51,14 +52,14 @@
 //! - Error messages carry only fixed labels, never host paths.
 //!
 //! Logical roots owned by this module: `<profile>/storage/`,
-//! `<profile>/themes/`, `<profile>/plugins/`, and single validated theme
-//! directories under `<profile>/themes/`. No other root, no file picking, no
-//! dialogs, no command execution.
+//! `<profile>/themes/`, `<profile>/plugins/`, `<profile>/gallery/`, and
+//! single validated theme directories under `<profile>/themes/`. No other
+//! root, no file picking, no dialogs, no command execution.
 
 use std::path::{Path, PathBuf};
 
-/// The three host-controlled roots a renderer may ask to reveal. A closed
-/// enum: unknown locations are rejected during deserialization, before any
+/// The host-controlled roots a renderer may ask to reveal. A closed enum:
+/// unknown locations are rejected during deserialization, before any
 /// filesystem or shell work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,6 +67,7 @@ pub enum FolderLocation {
     Storage,
     Themes,
     Plugins,
+    Gallery,
 }
 
 impl FolderLocation {
@@ -76,6 +78,7 @@ impl FolderLocation {
             FolderLocation::Storage => "storage",
             FolderLocation::Themes => "themes",
             FolderLocation::Plugins => "plugins",
+            FolderLocation::Gallery => "gallery",
         }
     }
 }
@@ -353,6 +356,7 @@ mod tests {
         assert_eq!(FolderLocation::Storage.dir_name(), "storage");
         assert_eq!(FolderLocation::Themes.dir_name(), "themes");
         assert_eq!(FolderLocation::Plugins.dir_name(), "plugins");
+        assert_eq!(FolderLocation::Gallery.dir_name(), "gallery");
     }
 
     #[test]
@@ -362,6 +366,7 @@ mod tests {
             FolderLocation::Storage,
             FolderLocation::Themes,
             FolderLocation::Plugins,
+            FolderLocation::Gallery,
         ] {
             let resolved = ensure_folder_root(&profile, location).expect("fixed root must resolve");
             assert!(resolved.is_dir(), "{location:?} root must exist afterwards");
