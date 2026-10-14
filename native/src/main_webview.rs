@@ -56,6 +56,7 @@ pub const PER_INSTANCE_INTEGRATIONS: &[&str] = &[
     "remcord_protocol_registration",
     "permission_handler",
     "csp_request_filter",
+    "net_request_filter",
     "process_failed_observer",
     "navigation_completed_observer",
     "initial_discord_navigation",
@@ -97,7 +98,7 @@ impl MainWebviewLifecycle {
         // The inventory lengths are part of the contract: every
         // per-instance integration below must stay listed exactly once,
         // and no process-lifetime owner may ever migrate into it.
-        debug_assert_eq!(PER_INSTANCE_INTEGRATIONS.len(), 15);
+        debug_assert_eq!(PER_INSTANCE_INTEGRATIONS.len(), 16);
         debug_assert_eq!(PROCESS_LIFETIME_OWNERS.len(), 10);
         Self {
             constructions: 0,
@@ -293,11 +294,12 @@ pub fn main_webview_builder<'a>(
 }
 
 /// Registers the per-WebView content interceptions for one main WebView:
-/// the `remcord://` protocol, the permission policy, and the CSP request
-/// filter. Must run after `build()` (needs the core WebView) and before
-/// the initial Discord navigation, so the first Discord document is
-/// intercepted like every later one. Returns the namespace roots for the
-/// popup child.
+/// the `remcord://` protocol, the permission policy, the CSP request
+/// filter, and the F21 network request filter (telemetry/localhost-WS
+/// blocking plus the YouTube Referer rewrite). Must run after `build()`
+/// (needs the core WebView) and before the initial Discord navigation,
+/// so the first Discord document is intercepted like every later one.
+/// Returns the namespace roots for the popup child.
 #[cfg(target_os = "windows")]
 pub fn attach_main_content_filters(
     webview: &WebView,
@@ -332,6 +334,13 @@ pub fn attach_main_content_filters(
         );
     }
     register_csp_interception(&core_webview2, profile_path);
+    // F21 network request filter: telemetry/localhost-WebSocket blocking
+    // plus the YouTube embed Referer rewrite. Same failure policy as the
+    // permission handler above: log loudly, never block boot (the
+    // unfiltered behavior is strictly worse but not a startup crash).
+    if let Err(e) = super::net_filter::register(&core_webview2) {
+        eprintln!("[NetFilter] Failed to register request filter: {e}");
+    }
     roots
 }
 

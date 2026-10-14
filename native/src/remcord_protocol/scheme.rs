@@ -106,6 +106,21 @@ pub fn create_environment(
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
     let options = build_environment_options();
+    // F21 proxy support: the host's own proxy settings (plus the
+    // `HTTPS_PROXY` environment) extend the base additional-args string.
+    // Renderer input never reaches this path; unreadable settings fail
+    // closed to `system` (no switches). The base const above stays the
+    // graphics-report source of truth; the effective proxy mode is logged
+    // by `proxy_startup_args`.
+    let proxy = crate::net_filter::proxy_startup_args(profile_dir);
+    if proxy.configured {
+        unsafe {
+            options.set_additional_browser_arguments(format!(
+                "{}{}",
+                ADDITIONAL_BROWSER_ARGUMENTS, proxy.args
+            ));
+        }
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     unsafe {
         CreateCoreWebView2EnvironmentWithOptions(

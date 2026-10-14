@@ -26,6 +26,7 @@ mod mod_settings;
 mod mod_substrate;
 mod navigation_completed;
 mod navigation_gate;
+mod net_filter;
 mod new_window;
 mod permissions;
 mod plugin_storage;
