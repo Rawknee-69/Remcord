@@ -185,10 +185,18 @@ pub fn format_log(action: &StartupAction, multi_instance: bool, lock_acquired: b
 #[cfg(windows)]
 fn try_acquire_windows(name: &str) -> Result<LockOutcome, String> {
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::Foundation::{
+        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
+    };
     use windows::Win32::System::Threading::CreateMutexW;
 
     let wide = HSTRING::from(name);
+    // CreateMutexW only SETS the last error when the mutex already exists;
+    // on fresh creation it leaves whatever value the thread carried from
+    // earlier calls (registry, COM, profile I/O). That stale value would
+    // read as a phantom owner, so clear it first: only a value observed
+    // after THIS call means anything.
+    unsafe { SetLastError(ERROR_SUCCESS) };
     // HSTRING storage is NUL-terminated UTF-16, so its pointer converts
     // directly; this avoids relying on Param inference at the call site.
     let handle = unsafe { CreateMutexW(None, false, windows::core::PCWSTR(wide.as_ptr())) }
@@ -455,6 +463,32 @@ mod tests {
                 !shipped.contains(forbidden),
                 "shipped code must not contain {forbidden}"
             );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_thread_error_never_reports_a_phantom_owner() {
+        // Regression: CreateMutexW only SETS the last error when the mutex
+        // already exists; a stale thread error (from registry/COM/profile
+        // calls earlier in startup) must not read as a live owner, or every
+        // launch would wrongly exit as a secondary with no window anywhere.
+        use windows::Win32::Foundation::{SetLastError, ERROR_ALREADY_EXISTS};
+        let unique = format!(
+            "remcord-phantom-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time must be available")
+                .as_nanos()
+        );
+        unsafe { SetLastError(ERROR_ALREADY_EXISTS) };
+        match try_acquire_windows(&unique) {
+            Ok(LockOutcome::Acquired(_guard)) => {}
+            Ok(LockOutcome::AlreadyRunning) => {
+                panic!("fresh mutex with stale error must acquire, got AlreadyRunning")
+            }
+            Err(error) => panic!("fresh mutex acquire failed: {error}"),
         }
     }
 }

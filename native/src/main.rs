@@ -12,8 +12,8 @@ mod child_recovery;
 mod clipboard;
 mod close_behavior;
 mod crash_reporting;
-mod css_watch;
 mod css_editor;
+mod css_watch;
 mod custom_bundle;
 mod dev_hooks;
 mod diagnostics;
@@ -36,8 +36,8 @@ mod navigation_completed;
 mod navigation_gate;
 mod net_filter;
 mod new_window;
-mod permissions;
 mod performance_flags;
+mod permissions;
 mod plugin_storage;
 mod plugins;
 mod process_failure;
@@ -110,25 +110,25 @@ use protocol::{
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse,
     BadgeStateResponse, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage,
     BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
-    ClipboardImageCopiedResponse, CrashFolderOpenedResponse, CrashListResponse, CssEditorSystemOpenedResponse,
-    DiagnosticsInfoResponse, DiagnosticsWindowOpenedResponse, DownloadsFolderOpenedResponse,
-    DownloadsListResponse, DownloadsRevealedResponse, FoldersOpenedResponse, GalleryAddResponse,
-    GalleryBulkRemoveResponse, GalleryCategoriesResponse, GalleryCategoryAddResponse,
-    GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse, GalleryExportItemsResponse,
-    GalleryFileResponse,
-    GalleryImportFilesResponse, GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse, GalleryUpdateResponse,
-    GalleryUsageResponse, KeybindsAddResponse, KeybindsListResponse, KeybindsRemoveResponse,
-    KeybindsToggleResponse, LocalizationStringResponse, MenusTemplateResponse, ModBundleResponse,
-    ModCacheClearedResponse, PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse,
-    PluginsListResponse, PluginsReloadResponse, PluginsRuntimeEntriesResponse,
-    PluginsRuntimeScriptResponse, PluginsSetEnabledResponse, QuickCssReadResponse,
-    QuickCssWrittenResponse, RequestTracker, RpcBlacklistResponse, RpcDetectableAddResponse,
-    RpcDetectableRemoveResponse, RpcDetectablesResponse, RpcProcessListResponse,
-    RpcProcessRefreshResponse, SettingsConfigResponse, SettingsImportedResponse,
-    SettingsMutationResponse, SettingsSetResponse, SpellcheckStateResponse, ThemeEnabledResponse,
-    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    ThemesListResponse, TrayGetStateResponse, WindowAckResponse, WindowCustomIconSetResponse,
-    WindowStateResponse,
+    ClipboardImageCopiedResponse, CrashFolderOpenedResponse, CrashListResponse,
+    CssEditorSystemOpenedResponse, DiagnosticsInfoResponse, DiagnosticsWindowOpenedResponse,
+    DownloadsFolderOpenedResponse, DownloadsListResponse, DownloadsRevealedResponse,
+    FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
+    GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
+    GalleryCategoryRenameResponse, GalleryExportItemsResponse, GalleryFileResponse,
+    GalleryImportFilesResponse, GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse,
+    GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse, KeybindsListResponse,
+    KeybindsRemoveResponse, KeybindsToggleResponse, LocalizationStringResponse,
+    MenusTemplateResponse, ModBundleResponse, ModCacheClearedResponse, PingResponse,
+    PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
+    PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
+    RpcBlacklistResponse, RpcDetectableAddResponse, RpcDetectableRemoveResponse,
+    RpcDetectablesResponse, RpcProcessListResponse, RpcProcessRefreshResponse,
+    SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
+    SettingsSetResponse, SpellcheckStateResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
+    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
+    TrayGetStateResponse, WindowAckResponse, WindowCustomIconSetResponse, WindowStateResponse,
     PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
@@ -139,14 +139,14 @@ use serde::Serialize;
 use settings::{
     apply_block_power_saving, apply_plugin_state, apply_settings_set, load_settings, SettingsSetKey,
 };
+#[cfg(target_os = "windows")]
+use tao::platform::windows::WindowExtWindows;
 use tao::{
     dpi::{LogicalPosition, LogicalSize, Size},
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
-#[cfg(target_os = "windows")]
-use tao::platform::windows::WindowExtWindows;
 use theme_import::{
     import_from_paths, show_import_picker, FileImportOutcome, PickerOutcome, ThemeImportFailure,
     ThemeImportSummary,
@@ -3470,6 +3470,7 @@ fn initialization_script(
 /// spellcheck pair is normalized by the spellcheck module (F18: Electron
 /// `webPreferences.spellcheck` plus the session language-list parity — a
 /// hostile/empty language falls back to `"en-US"`, never an empty tag).
+#[allow(clippy::too_many_arguments)]
 fn document_start_script(
     active_mods: &[&'static ModDescriptor],
     settings_boot_json: &str,
@@ -5112,14 +5113,15 @@ fn flash_taskbar_button(window: &tao::window::Window) {
         Foundation::HWND,
         UI::WindowsAndMessaging::{FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG},
     };
-    let mut info = FLASHWINFO::default();
-    info.cbSize = std::mem::size_of::<FLASHWINFO>() as u32;
-    info.hwnd = HWND(window.hwnd() as _);
-    info.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
-    info.uCount = 0;
-    info.dwTimeout = 0;
+    let info = FLASHWINFO {
+        cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+        hwnd: HWND(window.hwnd() as _),
+        dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+        uCount: 0,
+        dwTimeout: 0,
+    };
     unsafe {
-        let _ = FlashWindowEx(&mut info);
+        let _ = FlashWindowEx(&info);
     }
 }
 
@@ -6827,8 +6829,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // mode is not `disabled`. Failure is never fatal — close quits and
     // startup shows, exactly like the no-tray path.
     let tray_handle: Option<tray_icon::TrayHandle> =
-        if crate::tray::resolve_tray_mode(&chrome_snapshot.tray)
-            != crate::tray::TrayMode::Disabled
+        if crate::tray::resolve_tray_mode(&chrome_snapshot.tray) != crate::tray::TrayMode::Disabled
         {
             match tray_icon::spawn_tray(proxy.clone()) {
                 Ok(handle) => {
@@ -13892,8 +13893,9 @@ mod tests {
         let on = document_start_script(&[], boot, platform, "default", true, true, "en-US", false)
             .expect("must build");
         assert!(on.contains("const preferHwH264 = true"));
-        let off = document_start_script(&[], boot, platform, "default", false, true, "en-US", false)
-            .expect("must build");
+        let off =
+            document_start_script(&[], boot, platform, "default", false, true, "en-US", false)
+                .expect("must build");
         assert!(off.contains("const preferHwH264 = false"));
     }
 
@@ -13907,12 +13909,21 @@ mod tests {
             .expect("must build");
         assert!(on.contains("const spellcheckEnabled = true"));
         assert!(on.contains("const spellcheckLang = \"fr-FR\""));
-        let off = document_start_script(&[], boot, platform, "default", true, false, "en-US", false)
-            .expect("must build");
-        assert!(off.contains("const spellcheckEnabled = false"));
-        let hostile =
-            document_start_script(&[], boot, platform, "default", true, true, "../escape", false)
+        let off =
+            document_start_script(&[], boot, platform, "default", true, false, "en-US", false)
                 .expect("must build");
+        assert!(off.contains("const spellcheckEnabled = false"));
+        let hostile = document_start_script(
+            &[],
+            boot,
+            platform,
+            "default",
+            true,
+            true,
+            "../escape",
+            false,
+        )
+        .expect("must build");
         assert!(hostile.contains("const spellcheckLang = \"en-US\""));
         assert!(!hostile.contains("../escape"));
     }
@@ -13924,8 +13935,9 @@ mod tests {
         // stream setup popup is a separate layer and is always present.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "default", true, true, "en-US", false)
-            .expect("must build");
+        let script =
+            document_start_script(&[], boot, platform, "default", true, true, "en-US", false)
+                .expect("must build");
         assert!(script.contains("__remcordScreenshareMedia"));
         assert!(script.contains("__remcordSpellcheck"));
         assert!(script.contains("__remcordScreenshareQuality"));
@@ -13943,8 +13955,9 @@ mod tests {
     fn document_start_script_unknown_mode_fails_safe_to_default() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "ultra-hd", true, true, "en-US", false)
-            .expect("must build");
+        let script =
+            document_start_script(&[], boot, platform, "ultra-hd", true, true, "en-US", false)
+                .expect("must build");
         assert!(script.contains("\"default\""));
         assert!(script.contains("__remcordStreamPicker"));
         assert!(

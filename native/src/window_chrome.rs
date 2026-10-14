@@ -138,8 +138,8 @@ fn decode_icon_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 /// embedded mark. Shared by startup chrome selection and the live
 /// `window.set_custom_icon` path.
 pub fn window_icon_from_file(path: &str) -> Option<tao::window::Icon> {
-    let (rgba, width, height) = load_icon_file(path)
-        .or_else(|| decode_icon_rgba(crate::app_icon::embedded_png_bytes()))?;
+    let (rgba, width, height) =
+        load_icon_file(path).or_else(|| decode_icon_rgba(crate::app_icon::embedded_png_bytes()))?;
     tao::window::Icon::from_rgba(rgba, width, height).ok()
 }
 
@@ -204,9 +204,7 @@ pub fn show_custom_icon_picker() -> Result<Option<String>, String> {
             .GetDisplayName(SIGDN_FILESYSPATH)
             .map_err(|_| "icon picker cannot be shown".to_owned())?;
         let text = display.to_string().unwrap_or_default();
-        windows::Win32::System::Com::CoTaskMemFree(Some(
-            display.0 as *const std::ffi::c_void,
-        ));
+        windows::Win32::System::Com::CoTaskMemFree(Some(display.0 as *const std::ffi::c_void));
         if text.is_empty() {
             return Err("icon picker cannot be shown".to_owned());
         }

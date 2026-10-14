@@ -438,7 +438,7 @@ pub fn extract_importable_values(
             "proxyRules" | "proxyBypassRules" => raw.as_str().and_then(|rules| {
                 if rules.len() > crate::settings::MAX_PROXY_RULES_BYTES
                     || rules.is_empty()
-                    || !rules.bytes().all(|byte| byte >= 0x20 && byte < 0x7F)
+                    || !rules.bytes().all(|byte| (0x20..0x7F).contains(&byte))
                 {
                     return None;
                 }

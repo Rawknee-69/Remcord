@@ -211,7 +211,10 @@ mod windows_impl {
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0},
+            Foundation::{
+                CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
+                HANDLE, WAIT_OBJECT_0,
+            },
             System::{
                 Registry::{
                     HKEY_CURRENT_USER, KEY_WRITE, REG_CREATED_NEW_KEY, REG_CREATE_KEY_DISPOSITION,
@@ -341,6 +344,9 @@ mod windows_impl {
     pub fn acquire_instance_mutex(mutex: &str) -> Option<(InstanceGuard, bool)> {
         let name = wide_null(mutex);
         unsafe {
+            // See single_instance.rs: only a value observed after THIS call
+            // means anything; clear the thread's stale error first.
+            SetLastError(ERROR_SUCCESS);
             match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
                 Ok(handle) => {
                     let existed = GetLastError() == ERROR_ALREADY_EXISTS;

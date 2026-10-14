@@ -103,8 +103,8 @@ fn build_tray_icon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, S
     use windows::Win32::{
         Foundation::HWND,
         Graphics::Gdi::{
-            CreateBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
-            BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+            CreateBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
         },
         UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO},
     };
@@ -156,7 +156,7 @@ fn build_tray_icon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, S
         // 1-bpp AND mask: 0 bit (black) = opaque, 1 bit (white) =
         // transparent. Derive from alpha so translucent pixels do not
         // leave dark fringes.
-        let mask_row_bytes = (width as usize + 31) / 32 * 4;
+        let mask_row_bytes = (width as usize).div_ceil(32) * 4;
         let mut mask_bits = vec![0u8; mask_row_bytes * height as usize];
         for y in 0..height as usize {
             for x in 0..width as usize {
@@ -236,15 +236,14 @@ fn run_tray_worker(
             },
             UI::{
                 Shell::{
-                    Shell_NotifyIconW, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE,
-                    NIF_TIP,
+                    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+                    NOTIFYICONDATAW,
                 },
                 WindowsAndMessaging::{
-                    AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyIcon,
-                    DestroyMenu, DestroyWindow, DispatchMessageW, GetWindowLongPtrW, PeekMessageW,
+                    AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyIcon, DestroyMenu,
+                    DestroyWindow, DispatchMessageW, GetWindowLongPtrW, PeekMessageW,
                     RegisterClassW, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, HICON,
-                    MF_SEPARATOR, MF_STRING, MSG, PM_REMOVE, WM_QUIT, WNDCLASSW,
-                    WS_OVERLAPPED,
+                    MF_SEPARATOR, MF_STRING, MSG, PM_REMOVE, WM_QUIT, WNDCLASSW, WS_OVERLAPPED,
                 },
             },
         },
@@ -326,7 +325,7 @@ fn run_tray_worker(
         delete.hWnd = hwnd;
         delete.uID = 1;
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &mut delete);
+            let _ = Shell_NotifyIconW(NIM_DELETE, &delete);
             let raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ThreadState;
             if !raw.is_null() {
                 drop(Box::from_raw(raw));
@@ -349,11 +348,7 @@ fn run_tray_worker(
         icon,
     });
     unsafe {
-        SetWindowLongPtrW(
-            hwnd,
-            GWLP_USERDATA,
-            Box::into_raw(state) as isize,
-        );
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
     }
     // Add the notification icon.
     let mut tip = [0u16; 128];
@@ -368,7 +363,7 @@ fn run_tray_worker(
     data.uCallbackMessage = WM_TRAY_CALLBACK;
     data.hIcon = icon;
     data.szTip = tip;
-    let added = unsafe { Shell_NotifyIconW(NIM_ADD, &mut data).as_bool() };
+    let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() };
     if !added {
         teardown(hwnd);
         report(Err("tray icon registration failed".to_owned()));
@@ -382,8 +377,7 @@ fn run_tray_worker(
             break;
         }
         let mut msg = MSG::default();
-        let has_message =
-            unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() };
+        let has_message = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() };
         if has_message {
             if msg.message == WM_QUIT {
                 break;
@@ -412,9 +406,9 @@ unsafe extern "system" fn tray_wnd_proc(
     use windows::Win32::{
         Foundation::{LRESULT, POINT},
         UI::WindowsAndMessaging::{
-            DefWindowProcW, GetCursorPos, GetWindowLongPtrW, SetForegroundWindow,
-            TrackPopupMenu, GWLP_USERDATA, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON,
-            WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP,
+            DefWindowProcW, GetCursorPos, GetWindowLongPtrW, SetForegroundWindow, TrackPopupMenu,
+            GWLP_USERDATA, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WM_COMMAND,
+            WM_LBUTTONUP, WM_RBUTTONUP,
         },
     };
     if message == WM_TRAY_CALLBACK {

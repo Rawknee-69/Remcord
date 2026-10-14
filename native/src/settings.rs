@@ -624,8 +624,14 @@ pub const VALID_TRAY_ICONS: &[&str] = &[
 ];
 
 /// Exact `windowStyle` union (`src/@types/settings.d.ts`).
-pub const VALID_WINDOW_STYLES: &[&str] =
-    &["default", "native", "overlay", "transparent", "legacy", "rebrand"];
+pub const VALID_WINDOW_STYLES: &[&str] = &[
+    "default",
+    "native",
+    "overlay",
+    "transparent",
+    "legacy",
+    "rebrand",
+];
 
 /// Exact `transparency` union (`src/@types/settings.d.ts`).
 pub const VALID_TRANSPARENCY_MODES: &[&str] = &["universal", "modern", "none"];
@@ -648,8 +654,13 @@ pub const VALID_PERFORMANCE_MODES: &[&str] = &[
 ];
 
 /// Exact `ProxyMode` union (`src/@types/settings.d.ts`).
-pub const VALID_PROXY_MODES: &[&str] =
-    &["system", "direct", "fixed_servers", "pac_script", "auto_detect"];
+pub const VALID_PROXY_MODES: &[&str] = &[
+    "system",
+    "direct",
+    "fixed_servers",
+    "pac_script",
+    "auto_detect",
+];
 
 /// Maximum accepted proxy-rules / bypass-list bytes. Rules are
 /// comma/space-separated server specs, not URLs: printable ASCII only.
@@ -660,7 +671,7 @@ pub const MAX_PAC_URL_BYTES: usize = 2048;
 
 /// Returns true for printable ASCII without control characters or DEL.
 fn is_plain_printable_ascii(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte >= 0x20 && byte < 0x7F)
+    !value.is_empty() && value.bytes().all(|byte| (0x20..0x7F).contains(&byte))
 }
 
 /// Validate one allowlisted mutation before any filesystem work: the value

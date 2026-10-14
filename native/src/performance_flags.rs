@@ -254,7 +254,10 @@ fn render_preset(preset: &Preset, out: &mut Vec<String>) {
         }
     }
     if !preset.enable_features.is_empty() {
-        out.push(format!("@@enable-features:{}", preset.enable_features.join(",")));
+        out.push(format!(
+            "@@enable-features:{}",
+            preset.enable_features.join(",")
+        ));
     }
     if !preset.disable_features.is_empty() {
         out.push(format!(

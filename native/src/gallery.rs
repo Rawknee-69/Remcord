@@ -504,8 +504,7 @@ pub fn import_local_files(
             .to_ascii_lowercase();
         let (kind, mime) = import_kind_for_extension(&ext);
         let base = safe_file_name(
-            &path
-                .file_name()
+            path.file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("file"),
         );
@@ -528,8 +527,7 @@ pub fn import_local_files(
             }
         };
         let title = slice_chars(
-            &path
-                .file_stem()
+            path.file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("file"),
             256,
@@ -1413,9 +1411,7 @@ pub fn show_gallery_import_picker() -> Result<Option<Vec<std::path::PathBuf>>, G
                 .GetDisplayName(SIGDN_FILESYSPATH)
                 .map_err(|_| failed())?;
             let text = display.to_string().unwrap_or_default();
-            windows::Win32::System::Com::CoTaskMemFree(Some(
-                display.0 as *const std::ffi::c_void,
-            ));
+            windows::Win32::System::Com::CoTaskMemFree(Some(display.0 as *const std::ffi::c_void));
             if text.is_empty() {
                 return Err(failed());
             }
@@ -1474,9 +1470,7 @@ pub fn show_gallery_export_dir_picker() -> Result<Option<std::path::PathBuf>, Ga
             .GetDisplayName(SIGDN_FILESYSPATH)
             .map_err(|_| failed())?;
         let text = display.to_string().unwrap_or_default();
-        windows::Win32::System::Com::CoTaskMemFree(Some(
-            display.0 as *const std::ffi::c_void,
-        ));
+        windows::Win32::System::Com::CoTaskMemFree(Some(display.0 as *const std::ffi::c_void));
         if text.is_empty() {
             return Err(failed());
         }

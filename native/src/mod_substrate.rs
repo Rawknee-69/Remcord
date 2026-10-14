@@ -362,6 +362,7 @@ fn download_mod_asset(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cached_or_downloaded_asset(
     agent: &ureq::Agent,
     descriptor: &ModDescriptor,
