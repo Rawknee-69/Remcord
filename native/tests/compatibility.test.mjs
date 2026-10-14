@@ -776,7 +776,9 @@ test("settings.set throws UNSUPPORTED_CAPABILITY when the snapshot denies it", (
 test("settings.set rejects unknown keys and mismatched types without sending", async () => {
     const { window } = createSettingsSetRuntime();
     // Unknown keys: Electron-only or unsafe settings have no wire shape.
-    await assert.rejects(window.remcord.settings.set("tray", true), /allowlisted/);
+    // (`tray` is allowlisted as an enum, so a bool is a type error, not an
+    // unknown key; camelCase proxyRules never existed on the wire.)
+    await assert.rejects(window.remcord.settings.set("tray", true), /tray icons/);
     await assert.rejects(window.remcord.settings.set("proxyRules", "http://127.0.0.1:8080"), /allowlisted/);
     await assert.rejects(window.remcord.settings.set("customIcon", "C:\\secret.png"), /allowlisted/);
     // Key/variant mismatches: bool keys refuse arrays, mods refuses a bool,
@@ -911,8 +913,10 @@ test("settings.import_electron throws UNSUPPORTED_CAPABILITY when the snapshot d
 test("settings.import_electron rejects hostile key lists without paths", async () => {
     // Unknown keys, duplicates across lists, values, and paths are all
     // refused: only disjoint subsets of the allowlist resolve.
+    // (windowStyle/proxyMode graduated to valid import keys; customIcon
+    // stays out as a renderer-supplied path.)
     for (const payload of [
-        { applied: ["windowStyle"], skipped: [] },
+        { applied: ["customIcon"], skipped: [] },
         { applied: ["mods"], skipped: ["mods"] },
         { applied: ["mods", "channel"], skipped: [], values: { mods: ["vencord"] } },
         { applied: ["mods"], skipped: [], path: "C:\\x" },
@@ -4517,6 +4521,7 @@ test("the facade exposes the Electron-identical gallery namespace and nothing el
         "exportItems",
         "getFile",
         "importDialog",
+        "importFiles",
         "list",
         "openRoot",
         "pickRoot",
