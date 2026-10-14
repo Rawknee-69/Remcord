@@ -98,6 +98,7 @@ pub enum BridgeCommand {
     KeybindsAdd(KeybindsAddRequest),
     KeybindsToggle(KeybindsToggleRequest),
     KeybindsRemove(KeybindsRemoveRequest),
+    MenusGetTemplate(MenusGetTemplateRequest),
     GalleryAddUrl(GalleryAddUrlRequest),
     GalleryAddLink(GalleryAddLinkRequest),
     GalleryRemove(GalleryRemoveRequest),
@@ -500,6 +501,15 @@ pub struct KeybindsToggleRequest {
 pub struct KeybindsRemoveRequest {
     pub id: String,
 }
+
+/// Empty request for the read-only `menus.get_template` capability (F15):
+/// the host owns the Electron-mirrored template and builds the Keybind
+/// submenu from the validated keybind inventory. There is deliberately
+/// NO selector, id, label, or locale parameter — labels resolve
+/// renderer-side through `getLang`. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MenusGetTemplateRequest {}
 
 /// Renderer-supplied save metadata for gallery additions. Every member is
 /// optional and bounded; unknown members are rejected. The host slices
@@ -1516,6 +1526,7 @@ pub enum BridgeResponsePayload {
     RpcDetectableAdd(RpcDetectableAddResponse),
     RpcDetectableRemove(RpcDetectableRemoveResponse),
     RpcBlacklist(RpcBlacklistResponse),
+    MenusTemplate(MenusTemplateResponse),
     WindowAck(WindowAckResponse),
     WindowState(WindowStateResponse),
     TrayState(TrayGetStateResponse),
@@ -1883,6 +1894,18 @@ pub struct RpcDetectableRemoveResponse {
 #[derive(Serialize)]
 pub struct RpcBlacklistResponse {
     pub entries: Vec<RpcBlacklistEntry>,
+}
+/// Template response for the `menus.get_template` capability (F15): the
+/// four static Electron-mirrored menus, the dynamic Keybind submenu
+/// (enabled + non-global entries only, `{kind, id, labelId,
+/// accelerator}`), and the fixed context-menu state (`"suppressed"` —
+/// Electron parity). Labels are ids resolved renderer-side through
+/// `getLang`; no localized string, path, URL, or code ever crosses.
+#[derive(Serialize)]
+pub struct MenusTemplateResponse {
+    pub menus: Vec<serde_json::Value>,
+    pub keybind_menu: Vec<serde_json::Value>,
+    pub context_menu: String,
 }
 
 /// Save response for the `gallery.add_url` / `gallery.add_link`
@@ -2480,6 +2503,14 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // (`deny_unknown_fields`); `runJavascript` fails the
                 // action check at dispatch.
                 BridgeCommand::KeybindsList(_) => {}
+                // Menus (F15): parameter-free by protocol
+                // (`deny_unknown_fields` already rejected any
+                // renderer-supplied member), so no shape check is needed.
+                // The static template lives in `menus`; the Keybind
+                // submenu is built from the `keybinds` inventory at
+                // dispatch. The context menu stays suppressed (Electron
+                // parity) — no kind, entry, or action crosses.
+                BridgeCommand::MenusGetTemplate(_) => {}
                 BridgeCommand::KeybindsAdd(payload) => {
                     if payload.id.is_empty()
                         || payload.id.len() > crate::keybinds::MAX_KEYBIND_ID_BYTES
@@ -4358,6 +4389,58 @@ mod tests {
         assert!(value["payload"]["payload"]["keybinds"][0]
             .get("js")
             .is_none());
+    }
+
+    #[test]
+    fn menus_get_template_parses_parameter_free() {
+        // The F15 template read is host-owned: any renderer-supplied
+        // member (selector, id, label, locale, kind) is rejected.
+        let request = r#"{"version":1,"request_id":"menus-1","command":{"type":"menus_get_template","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(request))
+                if matches!(request.command, BridgeCommand::MenusGetTemplate(_))
+        ));
+        for hostile in [
+            r#"{"version":1,"request_id":"menus-2","command":{"type":"menus_get_template","payload":{"id":"remcord"}}}"#,
+            r#"{"version":1,"request_id":"menus-3","command":{"type":"menus_get_template","payload":{"locale":"de"}}}"#,
+            r#"{"version":1,"request_id":"menus-4","command":{"type":"menus_get_template","payload":{"kind":"image"}}}"#,
+            r#"{"version":1,"request_id":"menus-5","command":{"type":"menus_get_template","payload":{"labels":["menu-quit"]}}}"#,
+        ] {
+            assert!(parse_bridge_message(hostile).is_err());
+        }
+    }
+
+    #[test]
+    fn serializes_a_typed_menus_template_response() {
+        use super::MenusTemplateResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "menus-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::MenusTemplate(
+                MenusTemplateResponse {
+                    menus: vec![
+                        serde_json::json!({"id": "remcord", "labelId": "menu-remcord", "items": []}),
+                    ],
+                    keybind_menu: vec![
+                        serde_json::json!({"kind": "keybind", "id": "a-1", "labelId": "keybind-mute", "accelerator": "Ctrl+M"}),
+                    ],
+                    context_menu: "suppressed".to_owned(),
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "menus_template");
+        assert_eq!(value["payload"]["payload"]["menus"][0]["id"], "remcord");
+        assert_eq!(
+            value["payload"]["payload"]["keybind_menu"][0]["labelId"],
+            "keybind-mute"
+        );
+        assert_eq!(value["payload"]["payload"]["context_menu"], "suppressed");
+        assert!(value["payload"]["payload"].get("labels").is_none());
+        assert!(value["payload"]["payload"].get("path").is_none());
     }
 
     #[test]

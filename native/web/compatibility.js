@@ -595,6 +595,41 @@
         return request({ type: "keybinds_remove", payload: { id } }, timeoutMs);
     }
 
+    // Native menu template (F15 core): the Electron-mirrored app-menu
+    // model as host-owned data plus the suppressed context-menu state.
+    // tao 0.37 has no menu-bar API and the window is frameless (like
+    // Electron's frame:false + autoHideMenuBar), so no menu bar is
+    // installed — this read-only template is the host-ownable slice.
+    // Static menus carry labelIds resolved renderer-side through
+    // getLang; the Keybind submenu carries enabled non-global entries
+    // only (global entries are system hotkeys). The context menu stays
+    // suppressed: Discord's in-app menus own every context (Save to
+    // Gallery lives in the Gallery plugin via gallery.addUrl).
+    const MENU_TOP_LEVEL_IDS = ["remcord", "edit", "view", "window"];
+    const MENU_KEYBIND_LABEL_IDS = [
+        "keybind-mute",
+        "keybind-deafen",
+        "keybind-leaveCall",
+        "keybind-pushToTalk",
+        "keybind-navigateBack",
+        "keybind-navigateForward",
+        "keybind-openQuickCss",
+        "keybind-openSettings",
+    ];
+    const MAX_MENU_KEYBIND_ENTRIES = 64;
+
+    function getMenuTemplate(timeoutMs = 5000) {
+        requireCapability("menus.get_template");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host owns the template and
+        // builds the Keybind submenu from its validated inventory.
+        // Labels resolve renderer-side; the validator resolves the
+        // template object for exact parity with the host shape.
+        return request({ type: "menus_get_template", payload: {} }, timeoutMs);
+    }
+
     // arRPC presence (F11 core): game-state reads plus blacklist/detectable
     // mutations over the host-owned stores. Method names mirror the Electron
     // bridge (`window.remcord.rpc.*`); outcomes are async with typed shapes.
@@ -2208,6 +2243,51 @@
                 return;
             }
             request.resolve(payload.entries);
+        } else if (response.ok === true && response.payload?.type === "menus_template") {
+            const payload = response.payload.payload;
+            // Host-owned Electron-mirrored template: four static menus
+            // with fixed ids, a bounded Keybind submenu with the closed
+            // label shape, and the fixed suppressed context-menu state.
+            // No localized strings, paths, URLs, or code may ride along.
+            const menusValid =
+                Array.isArray(payload?.menus) &&
+                payload.menus.length === MENU_TOP_LEVEL_IDS.length &&
+                payload.menus.every(
+                    (menu, index) =>
+                        menu &&
+                        menu.id === MENU_TOP_LEVEL_IDS[index] &&
+                        typeof menu.labelId === "string" &&
+                        menu.labelId.length > 0 &&
+                        Array.isArray(menu.items),
+                );
+            const keybindMenuValid =
+                Array.isArray(payload?.keybindMenu) &&
+                payload.keybindMenu.length <= MAX_MENU_KEYBIND_ENTRIES &&
+                payload.keybindMenu.every(
+                    (entry) =>
+                        entry &&
+                        entry.kind === "keybind" &&
+                        typeof entry.id === "string" &&
+                        KEYBIND_ID_PATTERN.test(entry.id) &&
+                        typeof entry.labelId === "string" &&
+                        MENU_KEYBIND_LABEL_IDS.includes(entry.labelId) &&
+                        typeof entry.accelerator === "string" &&
+                        textEncoder.encode(entry.accelerator).length <= MAX_KEYBIND_ACCELERATOR_BYTES &&
+                        entry.js === undefined &&
+                        entry.path === undefined &&
+                        entry.url === undefined,
+                );
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                !menusValid ||
+                !keybindMenuValid ||
+                payload.contextMenu !== "suppressed"
+            ) {
+                request.reject(new Error("Native menu template response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "localization_string") {
             const payload = response.payload.payload;
             if (
@@ -3299,6 +3379,10 @@
     // Client-mod cache wipe only: an exact empty payload in, the fixed
     // allowlist outcome out. User-owned bundles can never be selected.
     const mod = Object.freeze({ clearCache: clearModCache });
+    // Native menu template only (F15): an exact empty payload in, the
+    // Electron-mirrored template out. No menu bar is installed (frameless
+    // window, no tao menu API); labels resolve through getLang.
+    const menus = Object.freeze({ getTemplate: getMenuTemplate });
     // arRPC game state only: live process inventory, custom detectables,
     // and the blacklist over host-owned stores. `getBlacklist` is the
     // synchronous seeded-cache read (Electron parity for Shelter's hot
@@ -3362,6 +3446,7 @@
             graphics,
             tray,
             mod,
+            menus,
             rpc,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,
