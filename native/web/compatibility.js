@@ -2434,6 +2434,38 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "window_state") {
+            const payload = response.payload.payload;
+            // F16 persisted geometry: clamped integer bounds plus the live
+            // maximized flag, with the optional best-effort monitor hint.
+            // No handle, path, URL, or error text may ride along.
+            const geometryValid =
+                payload &&
+                Number.isSafeInteger(payload.width) &&
+                payload.width >= 400 &&
+                payload.width <= 16384 &&
+                Number.isSafeInteger(payload.height) &&
+                payload.height >= 300 &&
+                payload.height <= 16384 &&
+                Number.isSafeInteger(payload.x) &&
+                payload.x >= -32768 &&
+                payload.x <= 32768 &&
+                Number.isSafeInteger(payload.y) &&
+                payload.y >= -32768 &&
+                payload.y <= 32768 &&
+                typeof payload.is_maximized === "boolean" &&
+                (payload.display_id === undefined ||
+                    (Number.isSafeInteger(payload.display_id) && payload.display_id >= 0));
+            if (
+                !geometryValid ||
+                !Object.keys(payload).every((key) =>
+                    ["width", "height", "x", "y", "is_maximized", "display_id"].includes(key),
+                )
+            ) {
+                request.reject(new Error("Native window state response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "backup_saved") {
             const payload = response.payload.payload;
             // Bounded save outcome only: cancellation plus the final archive
@@ -2634,6 +2666,15 @@
             quit() {
                 requireCapability("window.quit");
                 return request({ type: "window_quit", payload: {} });
+            },
+            // F16 persisted-geometry read: the host captured the bounds
+            // from its own window events, so the renderer supplies no
+            // parameter — the response is validated below before it
+            // resolves. There is deliberately no setState/move/resize:
+            // placement is host-owned, never renderer-driven.
+            getState() {
+                requireCapability("window.get_state");
+                return request({ type: "window_get_state", payload: {} });
             },
             // Synchronous local-state reads — NO synchronous native bridge
             // call, NO polling. Seeded from boot snapshot and converged by
@@ -2877,6 +2918,7 @@
                 drag: native.window.drag,
                 toggleFullscreen: native.window.toggleFullscreen,
                 quit: native.window.quit,
+                getState: native.window.getState,
                 maximized: native.window.maximized,
                 isNormal: native.window.isNormal,
             }),

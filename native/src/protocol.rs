@@ -117,6 +117,7 @@ pub enum BridgeCommand {
     WindowDrag(WindowDragRequest),
     WindowToggleFullscreen(WindowToggleFullscreenRequest),
     WindowQuit(WindowQuitRequest),
+    WindowGetState(WindowGetStateRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -762,6 +763,17 @@ pub struct WindowToggleFullscreenRequest {}
 #[serde(deny_unknown_fields)]
 pub struct WindowQuitRequest {}
 
+/// Empty request for the `window.get_state` capability (F16): read the
+/// persisted window geometry plus the live maximized flag. The renderer
+/// supplies no parameter of any kind — geometry is host-owned, captured
+/// from the Tao window on move/resize/maximize events and read back from
+/// `<profile>/storage/window.json`. Any extra field is rejected. There is
+/// deliberately NO `window.set_state` / `window.move` / `window.resize`:
+/// arbitrary renderer-driven placement is not an Electron surface.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowGetStateRequest {}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeEventMessage {
@@ -1403,6 +1415,7 @@ pub enum BridgeResponsePayload {
     KeybindsToggle(KeybindsToggleResponse),
     KeybindsRemove(KeybindsRemoveResponse),
     WindowAck(WindowAckResponse),
+    WindowState(WindowStateResponse),
 }
 
 #[derive(Serialize)]
@@ -1928,6 +1941,24 @@ pub struct WindowAckResponse {
     pub command: &'static str,
 }
 
+/// Persisted window geometry for the `window.get_state` capability (F16).
+/// Snake-case bridge shape (every other response payload is snake-case);
+/// the on-disk `<profile>/storage/window.json` keeps Electron's camelCase
+/// keys instead (see `window_state`). `width`/`height` are clamped to
+/// `400x300..=16384`, origins to `±32768`; `display_id` is the
+/// best-effort `available_monitors()` index hint (or absent when the
+/// capture knew no monitor). No handle, path, or URL crosses here.
+#[derive(Serialize)]
+pub struct WindowStateResponse {
+    pub width: i64,
+    pub height: i64,
+    pub x: i64,
+    pub y: i64,
+    pub is_maximized: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<i64>,
+}
+
 /// Typed host-to-renderer window state event. Replaces Electron's
 /// `executeJavaScript` attribute writes for focus/blur/maximize/unmaximize
 /// with schema-validated data: the renderer owns the DOM attributes and no
@@ -2265,7 +2296,8 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::WindowUnmaximize(_)
                 | BridgeCommand::WindowDrag(_)
                 | BridgeCommand::WindowToggleFullscreen(_)
-                | BridgeCommand::WindowQuit(_) => {}
+                | BridgeCommand::WindowQuit(_)
+                | BridgeCommand::WindowGetState(_) => {}
                 // Gallery: shape check only (presence + byte caps); URL
                 // schemes, id charset, name rules, category bounds, and
                 // containment live in `gallery` and are re-enforced at
@@ -3325,7 +3357,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_all_eight_window_chrome_commands_without_parameters() {
+    fn accepts_all_nine_window_commands_without_parameters() {
         // Each typed window command carries an exact empty payload: no
         // window id, handle, coordinate, style, message, or process member
         // exists to supply.
@@ -3338,6 +3370,7 @@ mod tests {
             ("window_drag", "win-6"),
             ("window_toggle_fullscreen", "win-7"),
             ("window_quit", "win-8"),
+            ("window_get_state", "win-9"),
         ] {
             let message = format!(
                 "{{\"version\":1,\"request_id\":\"{request_id}\",\"command\":{{\"type\":\"{wire}\",\"payload\":{{}}}}}}"
@@ -3359,6 +3392,7 @@ mod tests {
                     matches!(command, BridgeCommand::WindowToggleFullscreen(_))
                 }
                 "window_quit" => matches!(command, BridgeCommand::WindowQuit(_)),
+                "window_get_state" => matches!(command, BridgeCommand::WindowGetState(_)),
                 _ => unreachable!(),
             };
             assert!(expected, "{wire} must dispatch to its own typed variant");
@@ -3407,6 +3441,7 @@ mod tests {
                 "window_drag",
                 "window_toggle_fullscreen",
                 "window_quit",
+                "window_get_state",
             ] {
                 let message = format!(
                     "{{\"version\":1,\"request_id\":\"win-z\",\"command\":{{\"type\":\"{wire}\",\"payload\":{payload}}}}}"
@@ -3449,6 +3484,104 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, ["command"]);
+    }
+
+    #[test]
+    fn window_get_state_carries_no_parameters() {
+        // The geometry read is parameter-free: no bounds, handle, monitor
+        // selector, or flag may be supplied.
+        let request = r#"{"version":1,"request_id":"win-9","command":{"type":"window_get_state","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+        for payload in [
+            r#"{"width":835}"#,
+            r#"{"x":10,"y":10}"#,
+            r#"{"is_maximized":true}"#,
+            r#"{"display_id":0}"#,
+            r#"{"live":true}"#,
+        ] {
+            let message = format!(
+                "{{\"version\":1,\"request_id\":\"win-x\",\"command\":{{\"type\":\"window_get_state\",\"payload\":{payload}}}}}"
+            );
+            assert!(
+                parse_bridge_message(&message).is_err(),
+                "window_get_state with {payload} must be rejected"
+            );
+        }
+        // And no setter exists: placement is host-owned, never renderer-driven.
+        for wire in [
+            "window_set_state",
+            "window_move",
+            "window_resize",
+            "window_set_bounds",
+        ] {
+            let message = format!(
+                "{{\"version\":1,\"request_id\":\"win-y\",\"command\":{{\"type\":\"{wire}\",\"payload\":{{}}}}}}"
+            );
+            assert!(
+                parse_bridge_message(&message).is_err(),
+                "{wire} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn serializes_a_typed_window_state_without_handles_or_paths() {
+        use super::{BridgeResponsePayload, WindowStateResponse};
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "win-9".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::WindowState(WindowStateResponse {
+                width: 835,
+                height: 600,
+                x: 100,
+                y: 100,
+                is_maximized: false,
+                display_id: Some(0),
+            })),
+            error: None,
+        };
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serialized["payload"]["type"],
+            serde_json::Value::String("window_state".to_owned())
+        );
+        let inner = &serialized["payload"]["payload"];
+        assert_eq!(inner["width"], serde_json::Value::from(835));
+        assert_eq!(inner["is_maximized"], serde_json::Value::from(false));
+        assert_eq!(inner["display_id"], serde_json::Value::from(0));
+        // Geometry plus flags only: no handle, path, URL, or error text.
+        let mut keys: Vec<&str> = inner
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["display_id", "height", "is_maximized", "width", "x", "y"]
+        );
+        // The hint is optional: a capture without a known monitor omits it.
+        let without_hint = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "win-10".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::WindowState(WindowStateResponse {
+                width: 835,
+                height: 600,
+                x: 100,
+                y: 100,
+                is_maximized: true,
+                display_id: None,
+            })),
+            error: None,
+        };
+        let serialized = serde_json::to_value(&without_hint).unwrap();
+        assert!(serialized["payload"]["payload"].get("display_id").is_none());
     }
 
     #[test]
