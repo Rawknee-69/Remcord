@@ -99,10 +99,7 @@ test("workflow: opt-in dispatch, policy test first, Electron secrets untouched",
     assert.ok(workflow.includes("workflow_dispatch"), "manual opt-in trigger only");
     assert.ok(workflow.includes("require-signed"), "fail-closed input present");
     assert.ok(workflow.includes("native/tests/signing-policy.test.mjs"), "policy test gates the job");
-    assert.ok(
-        workflow.includes("Confirm-ArtifactSignatures.ps1"),
-        "audit step present on every run",
-    );
+    assert.ok(workflow.includes("Confirm-ArtifactSignatures.ps1"), "audit step present on every run");
     assert.ok(workflow.includes("Invoke-CodeSigning.ps1"), "sign step present behind the flag");
     for (const secret of policy.secretNames) {
         assert.ok(workflow.includes(secret), `workflow wires secret ${secret}`);

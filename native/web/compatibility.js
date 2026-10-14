@@ -335,19 +335,13 @@
             if (typeof value !== "string" || !SETTINGS_VALID_CHANNELS.includes(value)) {
                 return Promise.reject(new TypeError("value must be one of the supported release channels"));
             }
-        } else if (
-            key === "invite_websocket" ||
-            key === "process_scanning" ||
-            key === "windows_legacy_scanning"
-        ) {
+        } else if (key === "invite_websocket" || key === "process_scanning" || key === "windows_legacy_scanning") {
             if (typeof value !== "boolean") {
                 return Promise.reject(new TypeError("value must be a boolean for this key"));
             }
         } else if (key === "scan_interval") {
             if (!Number.isSafeInteger(value) || value < 1000 || value > 600000) {
-                return Promise.reject(
-                    new TypeError("value must be a safe integer of 1000..600000 milliseconds"),
-                );
+                return Promise.reject(new TypeError("value must be a safe integer of 1000..600000 milliseconds"));
             }
         } else if (typeof value !== "boolean") {
             return Promise.reject(new TypeError("value must be a boolean for this key"));
@@ -379,14 +373,12 @@
                             key === "windows_legacy_scanning" ||
                             key === "scan_interval"
                           ? key === "scan_interval"
-                            ? Number.isSafeInteger(payload.value) &&
-                              payload.value >= 1000 &&
-                              payload.value <= 600000
-                              ? payload.value
-                              : undefined
-                            : typeof payload.value === "boolean"
-                              ? payload.value
-                              : undefined
+                              ? Number.isSafeInteger(payload.value) && payload.value >= 1000 && payload.value <= 600000
+                                  ? payload.value
+                                  : undefined
+                              : typeof payload.value === "boolean"
+                                ? payload.value
+                                : undefined
                           : typeof payload.value === "boolean"
                             ? payload.value
                             : undefined;
@@ -2267,9 +2259,7 @@
                       : payload?.key === "channel"
                         ? typeof payload?.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
                         : payload?.key === "scan_interval"
-                          ? Number.isSafeInteger(payload?.value) &&
-                            payload.value >= 1000 &&
-                            payload.value <= 600000
+                          ? Number.isSafeInteger(payload?.value) && payload.value >= 1000 && payload.value <= 600000
                           : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
             if (
                 !payload ||
@@ -2421,9 +2411,7 @@
             if (
                 !payload ||
                 typeof payload.ok !== "boolean" ||
-                (payload.ok
-                    ? payload.error !== undefined && payload.error !== null
-                    : typeof payload.error !== "string")
+                (payload.ok ? payload.error !== undefined && payload.error !== null : typeof payload.error !== "string")
             ) {
                 request.reject(new Error("Native detectable save response schema is invalid"));
                 return;
@@ -2575,11 +2563,8 @@
                 !Number.isInteger(payload.height) ||
                 payload.height < 0 ||
                 payload.height > 4096 ||
-                (payload.error !== null &&
-                    payload.error !== undefined &&
-                    typeof payload.error !== "string") ||
-                (typeof payload.error === "string" &&
-                    (payload.error.length === 0 || payload.error.length > 64))
+                (payload.error !== null && payload.error !== undefined && typeof payload.error !== "string") ||
+                (typeof payload.error === "string" && (payload.error.length === 0 || payload.error.length > 64))
             ) {
                 request.reject(new Error("Native clipboard response schema is invalid"));
                 return;
@@ -2622,10 +2607,7 @@
                 Array.isArray(payload?.languages) &&
                 payload.languages.length <= 16 &&
                 payload.languages.every(
-                    (entry) =>
-                        typeof entry === "string" &&
-                        entry.length > 0 &&
-                        textEncoder.encode(entry).length <= 35,
+                    (entry) => typeof entry === "string" && entry.length > 0 && textEncoder.encode(entry).length <= 35,
                 );
             if (
                 !payload ||

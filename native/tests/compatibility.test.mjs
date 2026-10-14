@@ -4953,10 +4953,14 @@ test("the facade exposes namespaced diagnostics and mod cache capabilities and n
     assert.equal(Object.isFrozen(window.remcord.mod), true);
     assert.equal(window.remcord.native.supports("diagnostics.get_info"), true);
     assert.equal(window.remcord.native.supports("mod.clear_cache"), true);
-    // Exactly one member each: no clipboard, delete, or selector surface.
+    // Exactly one member each for diagnostics/mod: no delete or selector
+    // surface. The clipboard namespace is single-purpose (image copy
+    // only, F17) â€” no generic handle, text writer, or reader.
     assert.deepEqual(Object.keys(window.remcord.diagnostics).sort(), ["getInfo"]);
     assert.deepEqual(Object.keys(window.remcord.mod).sort(), ["clearCache"]);
-    assert.equal(window.remcord.clipboard, undefined);
+    assert.deepEqual(Object.keys(window.remcord.clipboard).sort(), ["copyImage"]);
+    assert.equal(Object.isFrozen(window.remcord.clipboard), true);
+    assert.equal(window.remcord.native.supports("clipboard.copy_image"), false);
     assert.equal(window.remcord.fs, undefined);
 });
 
@@ -7059,9 +7063,7 @@ test("rpc.get_process_list rejects malformed inventories", async () => {
         const runtime = createRpcRuntime();
         respondRpcSeed(runtime.window);
         const pending = runtime.window.remcord.rpc.getProcessList();
-        const message = runtime.window.messages.find(
-            (entry) => entry.command?.type === "rpc_get_process_list",
-        );
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "rpc_get_process_list");
         respondRpc(runtime.window, message, "rpc_process_list", payload);
         await assert.rejects(pending, /process list response schema is invalid/);
     }
@@ -7079,9 +7081,7 @@ test("rpc.refresh_process_list resolves confirmation", async () => {
     const bad = createRpcRuntime();
     respondRpcSeed(bad.window);
     const pending2 = bad.window.remcord.rpc.refreshProcessList();
-    const message2 = bad.window.messages.find(
-        (entry) => entry.command?.type === "rpc_refresh_process_list",
-    );
+    const message2 = bad.window.messages.find((entry) => entry.command?.type === "rpc_refresh_process_list");
     respondRpc(bad.window, message2, "rpc_process_refresh", { refreshed: true, count: -1 });
     await assert.rejects(pending2, /process refresh response schema is invalid/);
 });
@@ -7129,10 +7129,7 @@ test("rpc.add_detectable refuses hostile shapes before dispatch", async () => {
         }),
         /os must be/,
     );
-    await assert.rejects(
-        window.remcord.rpc.addDetectable({ ...MODAL_GAME, path: "C:\\evil" }),
-        /not allowlisted/,
-    );
+    await assert.rejects(window.remcord.rpc.addDetectable({ ...MODAL_GAME, path: "C:\\evil" }), /not allowlisted/);
     assert.equal(
         window.messages.some((message) => message.command?.type === "rpc_add_detectable"),
         false,
@@ -7160,15 +7157,11 @@ test("rpc.getBlacklist is synchronous and seeds from the host", async () => {
     respondRpcSeed(window, [{ name: "G", id: 7 }]);
     // The seed converges on a microtask; one macrotask guarantees it ran.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
-        { name: "G", id: 7 },
-    ]);
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [{ name: "G", id: 7 }]);
     // Copies, not live references: mutating the answer cannot poison the cache.
     const first = window.remcord.rpc.getBlacklist();
     first.push({ name: "evil", id: 8 });
-    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
-        { name: "G", id: 7 },
-    ]);
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [{ name: "G", id: 7 }]);
 });
 
 test("the blacklist broadcast converges the cache without a round trip", () => {
@@ -7179,21 +7172,15 @@ test("the blacklist broadcast converges the cache without a round trip", () => {
             detail: { version: 1, entries: [{ name: "H", id: 9 }] },
         }),
     );
-    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
-        { name: "H", id: 9 },
-    ]);
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [{ name: "H", id: 9 }]);
     // A misshapen broadcast never clobbers the cache.
     window.dispatchEvent(
         new FakeCustomEvent("remcord-native:rpc-blacklist-updated", {
             detail: { version: 1, entries: "nope" },
         }),
     );
-    window.dispatchEvent(
-        new FakeCustomEvent("remcord-native:rpc-blacklist-updated", { detail: null }),
-    );
-    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
-        { name: "H", id: 9 },
-    ]);
+    window.dispatchEvent(new FakeCustomEvent("remcord-native:rpc-blacklist-updated", { detail: null }));
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [{ name: "H", id: 9 }]);
 });
 
 test("rpc.blacklist_game/unblacklist_game send closed shapes and converge the cache", async () => {
@@ -7209,9 +7196,7 @@ test("rpc.blacklist_game/unblacklist_game send closed shapes and converge the ca
     respondRpc(window, message, "rpc_blacklist", { entries: [{ name: "Some Game", id: 123 }] });
     assert.deepEqual(JSON.parse(JSON.stringify(await pending)), [{ name: "Some Game", id: 123 }]);
     // The synchronous read converges from the mutation response.
-    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
-        { name: "Some Game", id: 123 },
-    ]);
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [{ name: "Some Game", id: 123 }]);
     const unpending = window.remcord.rpc.unblacklistGame(123);
     const unmessage = window.messages.find((entry) => entry.command?.type === "rpc_unblacklist_game");
     assert.deepEqual(unmessage.command, { type: "rpc_unblacklist_game", payload: { id: 123 } });
@@ -7231,8 +7216,7 @@ test("rpc mutations refuse hostile shapes before dispatch", async () => {
     assert.equal(
         window.messages.some(
             (message) =>
-                message.command?.type === "rpc_blacklist_game" ||
-                message.command?.type === "rpc_unblacklist_game",
+                message.command?.type === "rpc_blacklist_game" || message.command?.type === "rpc_unblacklist_game",
         ),
         false,
     );
@@ -7570,10 +7554,10 @@ test("the tray badge helper maps titles to Electron's overlay assets", () => {
             context,
         );
     // Unread prefix, mention counts with the >9 cap, and the clear state.
-    assert.deepEqual(badge("GÇó Discord"), { kind: "unread" });
+    assert.deepEqual(badge("â€¢ Discord"), { kind: "unread" });
     assert.deepEqual(badge("(3) Discord"), { kind: "mentions", count: 3 });
     assert.deepEqual(badge("Discord"), { kind: "none" });
-    assert.equal(asset("GÇó x"), "badge-11.ico");
+    assert.equal(asset("â€¢ x"), "badge-11.ico");
     assert.equal(asset("(3) x"), "badge-3.ico");
     assert.equal(asset("(12) x"), "badge-10.ico");
     assert.equal(asset("x"), null);
@@ -7601,7 +7585,7 @@ test("the tray badge helper stays off the entry origins' neighbors and off the b
 // The host mirrors Electron's setMenu() template as data (five top-level
 // menus, Keybind submenu from the validated inventory) and keeps the page
 // context menu suppressed. No menu bar is installed (frameless window, no
-// tao menu API) GÇö the read-only menus.get_template capability is the
+// tao menu API) â€” the read-only menus.get_template capability is the
 // host-ownable slice.
 // ---------------------------------------------------------------------------
 
@@ -7633,9 +7617,7 @@ function validMenuTemplate() {
             { id: "view", labelId: "menu-view", items: [] },
             { id: "window", labelId: "menu-window", items: [] },
         ],
-        keybindMenu: [
-            { kind: "keybind", id: "a-1", labelId: "keybind-mute", accelerator: "Ctrl+M" },
-        ],
+        keybindMenu: [{ kind: "keybind", id: "a-1", labelId: "keybind-mute", accelerator: "Ctrl+M" }],
         contextMenu: "suppressed",
     };
 }
@@ -7669,9 +7651,7 @@ test("menus.get_template rejects hostile template shapes", async () => {
         },
         {
             ...template,
-            keybindMenu: [
-                { kind: "keybind", id: "a-1", labelId: "keybind-runJavascript", accelerator: "Ctrl+M" },
-            ],
+            keybindMenu: [{ kind: "keybind", id: "a-1", labelId: "keybind-runJavascript", accelerator: "Ctrl+M" }],
         },
         {
             ...template,
@@ -7690,9 +7670,7 @@ test("menus.get_template rejects hostile template shapes", async () => {
     ]) {
         const runtime = createMenusRuntime();
         const pending = runtime.window.remcord.menus.getTemplate();
-        const message = runtime.window.messages.find(
-            (entry) => entry.command?.type === "menus_get_template",
-        );
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "menus_get_template");
         respondMenus(runtime.window, message, payload);
         await assert.rejects(pending, /menu template response schema is invalid/);
     }
@@ -7710,13 +7688,8 @@ test("menus.get_template throws UNSUPPORTED_CAPABILITY when the snapshot denies 
         false,
     );
 });
-    // Exactly one member each for diagnostics/mod: no delete or selector
-    // surface. The clipboard namespace is single-purpose (image copy
-    // only, F17) GÇö no generic handle, text writer, or reader.
-    assert.deepEqual(Object.keys(window.remcord.clipboard).sort(), ["copyImage"]);
-    assert.equal(Object.isFrozen(window.remcord.clipboard), true);
-    assert.equal(window.remcord.native.supports("clipboard.copy_image"), false);
 
+// F17 clipboard helpers (appended): single-purpose image-copy runtime.
 function createClipboardRuntime(capabilities = ["bridge.ping", "clipboard.copy_image"]) {
     return createRuntime("https://discord.com", capabilities);
 }
@@ -7801,9 +7774,7 @@ test("clipboard.copyImage rejects malformed copy outcomes", async () => {
     ]) {
         const runtime = createClipboardRuntime();
         const pending = runtime.window.remcord.clipboard.copyImage("https://example.com/i.png");
-        const message = runtime.window.messages.find(
-            (entry) => entry.command?.type === "clipboard_copy_image",
-        );
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "clipboard_copy_image");
         runtime.window.dispatchEvent(
             new FakeCustomEvent("remcord-native:response", {
                 detail: {
@@ -7900,9 +7871,7 @@ test("F18 spellcheck.getState rejects malformed states", async () => {
     ]) {
         const runtime = createSpellcheckRuntime();
         const pending = runtime.window.remcord.spellcheck.getState();
-        const message = runtime.window.messages.find(
-            (entry) => entry.command?.type === "spellcheck_get_state",
-        );
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "spellcheck_get_state");
         runtime.window.dispatchEvent(
             new FakeCustomEvent("remcord-native:response", {
                 detail: {
@@ -7937,7 +7906,7 @@ test("F18 spellcheck apply layer is origin-gated, idempotent, and capability-fre
 // Windows overlay/badge icons (F20 core).
 //
 // Electron derives the taskbar overlay from `page-title-updated`
-// (`src/discord/window.ts`): `GÇó` unread takes badge-11.ico, `(N)`
+// (`src/discord/window.ts`): `â€¢` unread takes badge-11.ico, `(N)`
 // mentions take badge-N.ico capped at badge-10.ico, anything else clears.
 // WebView2 exposes no title event to the host, so the document-start
 // observer (native/web/badge/observer.js) reports bounded titles as
@@ -8083,11 +8052,11 @@ test("the badge observer reports title changes as bounded one-way events", () =>
     // Steady title costs no further events.
     runtime.fireMutations();
     assert.deepEqual(badgeTitles(window), [""]);
-    document.title = "GÇó Discord";
+    document.title = "â€¢ Discord";
     runtime.fireMutations();
     document.title = "(3) #general - Discord";
     runtime.fireMutations();
-    assert.deepEqual(badgeTitles(window), ["", "GÇó Discord", "(3) #general - Discord"]);
+    assert.deepEqual(badgeTitles(window), ["", "â€¢ Discord", "(3) #general - Discord"]);
     // Event reports carry the title and nothing else.
     const serialized = JSON.stringify(window.messages.filter((m) => m.event?.type === "badge_title"));
     assert.doesNotMatch(serialized, /url|path|handle|asset|javascript/i);
@@ -8386,9 +8355,7 @@ test("crash responses reject hostile or malformed payloads without resolving", a
     const { window } = createCrashRuntime();
     // Wrong location echo on the reveal path.
     const openPending = window.remcord.crash.openFolder();
-    const openMessage = window.messages.find(
-        (entry) => entry.command?.type === "crash_open_folder",
-    );
+    const openMessage = window.messages.find((entry) => entry.command?.type === "crash_open_folder");
     respondCrashFolderOpened(window, openMessage, "storage");
     await assert.rejects(openPending, /crash folder response schema is invalid/);
 

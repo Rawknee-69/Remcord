@@ -1939,7 +1939,10 @@ test("F11 keeps the Electron rpc bridge, worker, and stores intact", () => {
     // shell adds async paths alongside (never rewrites these members).
     assert.match(bridge, /refreshProcessList:\s*\(\)\s*=>\s*ipcRenderer\.send\("refreshProcessList"\)/);
     assert.match(bridge, /getProcessList:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getProcessList"\)/);
-    assert.match(bridge, /addDetectable:\s*\(detectable:\s*Game\)\s*=>\s*ipcRenderer\.send\("addDetectable", detectable\)/);
+    assert.match(
+        bridge,
+        /addDetectable:\s*\(detectable:\s*Game\)\s*=>\s*ipcRenderer\.send\("addDetectable", detectable\)/,
+    );
     assert.match(bridge, /removeDetectable:\s*\(id:\s*string\)\s*=>\s*ipcRenderer\.send\("removeDetectable", id\)/);
     assert.match(bridge, /getDetectables:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getDetectables"\)/);
     assert.match(bridge, /getBlacklist:\s*\(\)\s*=>\s*rpcBlacklistCache\.get\(\)/);
@@ -2178,13 +2181,13 @@ test("F18 spellcheck keeps Electron session ownership with a validated native st
 test("Electron keeps the page-title overlay/badge contract", () => {
     // F20 Electron source: `src/discord/window.ts` maps the document
     // title prefix to a taskbar overlay on win32 only. These assertions
-    // pin the contract the native implementation reproduces: `GÇó` takes
+    // pin the contract the native implementation reproduces: `â€¢` takes
     // badge-11.ico, `(N)` takes the numbered asset capped at badge-10.ico
     // above 9, anything else clears, and the dock branch stays macOS-only.
     const discordWindow = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
     assert.match(discordWindow, /page-title-updated/);
     assert.match(discordWindow, /process\.platform === "win32"/);
-    assert.match(discordWindow, /title\.startsWith\("GÇó"\)/);
+    assert.match(discordWindow, /title\.startsWith\("â€¢"\)/);
     assert.match(discordWindow, /badge-11\.ico/);
     assert.match(discordWindow, /title\.startsWith\("\("\)/);
     assert.match(discordWindow, /badge-10\.ico/);
