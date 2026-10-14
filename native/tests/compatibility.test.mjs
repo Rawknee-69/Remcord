@@ -8269,3 +8269,134 @@ test("F25 openers stay inert off the trusted origin", () => {
     ]);
     assert.equal(window.remcord, undefined);
 });
+
+function createCrashRuntime(capabilities = ["bridge.ping", "crash.list", "crash.open_folder"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondCrashList(window, request, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "crash_list", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function validCrashInventory() {
+    return {
+        available: true,
+        record_count: 1,
+        records: [
+            {
+                schema: 1,
+                timestamp_ms: 1700000000000,
+                role: "main",
+                kind: "RenderProcessExited",
+                reason: "Crashed",
+                exit_code: 1,
+                recovery: "observed",
+            },
+        ],
+        dump_files: [{ name: "a1b2c3d4.dmp", bytes: 17 }],
+    };
+}
+
+function respondCrashFolderOpened(window, request, location = "crashes") {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "crash_folder_opened", payload: { location } },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a scoped crash inventory and folder reveal", () => {
+    const { window } = createCrashRuntime();
+    assert.equal(typeof window.remcord.crash.list, "function");
+    assert.equal(typeof window.remcord.crash.openFolder, "function");
+    assert.equal(Object.isFrozen(window.remcord.crash), true);
+    assert.deepEqual(Object.keys(window.remcord.crash).sort(), ["list", "openFolder"]);
+    assert.equal(window.remcord.native.supports("crash.list"), true);
+    assert.equal(window.remcord.native.supports("crash.open_folder"), true);
+    // No uploader, no dump reader, no self-destruct surface may exist.
+    assert.equal(window.remcord.crash.upload, undefined);
+    assert.equal(window.remcord.crash.trigger, undefined);
+    assert.equal(window.remcord.crash.readDump, undefined);
+});
+
+test("crash.list sends a parameter-free inventory request and resolves it", async () => {
+    const { window } = createCrashRuntime();
+    const pending = window.remcord.crash.list();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "crash_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "crash_list", payload: {} });
+
+    respondCrashList(window, message, validCrashInventory());
+    assert.deepEqual(await pending, validCrashInventory());
+    window.messages.length = 0;
+});
+
+test("crash.openFolder sends a parameter-free reveal request and resolves the label", async () => {
+    const { window } = createCrashRuntime();
+    const pending = window.remcord.crash.openFolder();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "crash_open_folder");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "crash_open_folder", payload: {} });
+
+    respondCrashFolderOpened(window, message, "crashes");
+    assert.equal(await pending, "crashes");
+});
+
+test("crash capabilities throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
+    const { window } = createCrashRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("crash.list"), false);
+    assert.equal(window.remcord.native.supports("crash.open_folder"), false);
+    assert.throws(
+        () => window.remcord.crash.list(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.crash.openFolder(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "crash_list"),
+        false,
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "crash_open_folder"),
+        false,
+    );
+});
+
+test("crash responses reject hostile or malformed payloads without resolving", async () => {
+    const { window } = createCrashRuntime();
+    // Wrong location echo on the reveal path.
+    const openPending = window.remcord.crash.openFolder();
+    const openMessage = window.messages.find(
+        (entry) => entry.command?.type === "crash_open_folder",
+    );
+    respondCrashFolderOpened(window, openMessage, "storage");
+    await assert.rejects(openPending, /crash folder response schema is invalid/);
+
+    // Inventory with a path member riding along.
+    const listPending = window.remcord.crash.list();
+    const listMessage = window.messages.find((entry) => entry.command?.type === "crash_list");
+    const hostile = validCrashInventory();
+    hostile.records[0].path = "C:\\secret";
+    respondCrashList(window, listMessage, hostile);
+    await assert.rejects(listPending, /crash inventory response schema is invalid/);
+});

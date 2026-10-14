@@ -1155,6 +1155,34 @@
         });
     }
 
+    // Crash inventory only: an exact empty payload in, the bounded
+    // host-owned failure inventory out (readiness flag, newest-first
+    // fixed-shape records, dump-file metadata). No path, filter, count,
+    // selector, URL, dump content, or page datum may ride along.
+    function listCrashes(timeoutMs = 5000) {
+        requireCapability("crash.list");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "crash_list", payload: {} }, timeoutMs);
+    }
+
+    function openCrashFolder(timeoutMs = 5000) {
+        requireCapability("crash.open_folder");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Reveal semantics (the Explorer behavior Electron gets from its
+        // crash-folder call): the host opens the parent with the fixed
+        // crashes root selected.
+        return request({ type: "crash_open_folder", payload: {} }, timeoutMs).then((payload) => {
+            if (payload.location !== "crashes") {
+                throw new Error("Native crash folder response schema is invalid");
+            }
+            return payload.location;
+        });
+    }
+
     function installThemeFromCode(css, timeoutMs = 5000) {
         requireCapability("themes.install_code");
         if (typeof css !== "string" || css.length === 0 || textEncoder.encode(css).length > MAX_THEME_CSS_BYTES) {
@@ -3343,6 +3371,76 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "crash_list") {
+            const payload = response.payload.payload;
+            // Bounded inventory: readiness flag, newest-first fixed-shape
+            // records, dump metadata. No paths, URLs, contents, counts, or
+            // page data may ride along.
+            const recordsValid =
+                Array.isArray(payload?.records) &&
+                payload.records.length <= 500 &&
+                payload.records.every(
+                    (entry) =>
+                        entry &&
+                        Object.keys(entry).length === 7 &&
+                        entry.schema === 1 &&
+                        typeof entry.timestamp_ms === "number" &&
+                        Number.isSafeInteger(entry.timestamp_ms) &&
+                        entry.timestamp_ms >= 0 &&
+                        (entry.role === "main" || entry.role === "child") &&
+                        typeof entry.kind === "string" &&
+                        entry.kind.length > 0 &&
+                        textEncoder.encode(entry.kind).length <= 64 &&
+                        typeof entry.reason === "string" &&
+                        entry.reason.length > 0 &&
+                        textEncoder.encode(entry.reason).length <= 64 &&
+                        (entry.exit_code === null ||
+                            (Number.isInteger(entry.exit_code) &&
+                                entry.exit_code >= -2147483648 &&
+                                entry.exit_code <= 2147483647)) &&
+                        typeof entry.recovery === "string" &&
+                        textEncoder.encode(entry.recovery).length <= 2048 &&
+                        entry.path === undefined &&
+                        entry.url === undefined &&
+                        entry.data === undefined,
+                );
+            const dumpsValid =
+                Array.isArray(payload?.dump_files) &&
+                payload.dump_files.length <= 256 &&
+                payload.dump_files.every(
+                    (entry) =>
+                        entry &&
+                        Object.keys(entry).length === 2 &&
+                        typeof entry.name === "string" &&
+                        entry.name.length > 0 &&
+                        textEncoder.encode(entry.name).length <= 128 &&
+                        Number.isSafeInteger(entry.bytes) &&
+                        entry.bytes >= 0 &&
+                        entry.path === undefined &&
+                        entry.url === undefined &&
+                        entry.data === undefined,
+                );
+            if (
+                !payload ||
+                Object.keys(payload).length !== 4 ||
+                payload.available !== true ||
+                !Number.isSafeInteger(payload.record_count) ||
+                payload.record_count < 0 ||
+                payload.record_count !== payload.records.length ||
+                !recordsValid ||
+                !dumpsValid
+            ) {
+                request.reject(new Error("Native crash inventory response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "crash_folder_opened") {
+            const payload = response.payload.payload;
+            if (!payload || Object.keys(payload).length !== 1 || payload.location !== "crashes") {
+                request.reject(new Error("Native crash folder response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else {
             const error = new Error(
                 typeof response.error?.message === "string" ? response.error.message : "Native bridge request failed",
@@ -3539,6 +3637,10 @@
     // Folder opening only: reveal for the four fixed roots, open for one
     // validated theme id. No path, dialog, picker, or shell surface.
     const folders = Object.freeze({ open: openFolder, openTheme: openThemeFolder });
+    // Crash reporting only: bounded host-owned failure inventory in, reveal
+    // of the fixed crashes root out. No uploader, no dump contents, no
+    // paths, no self-destruct surface.
+    const crash = Object.freeze({ list: listCrashes, openFolder: openCrashFolder });
     // Gallery disk cache only: Electron-identical method names and result
     // shapes over host-owned storage. Import/export/root-pick need modal
     // host dialogs (F5b slice): their methods exist for signature parity
@@ -3777,6 +3879,7 @@
             plugins,
             backup,
             folders,
+            crash,
             gallery,
             downloads,
             themes: themesShim,
