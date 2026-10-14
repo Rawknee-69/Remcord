@@ -4,6 +4,7 @@ mod browser_recovery;
 mod bundles;
 mod channel;
 mod child_recovery;
+mod clipboard;
 mod close_behavior;
 mod css_watch;
 mod custom_bundle;
@@ -87,8 +88,8 @@ use protocol::{
     window_state_event_json, AppVersionResponse, BackupInspectedResponse,
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BridgeCommand,
     BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
-    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, DiagnosticsInfoResponse,
-    FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
+    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, ClipboardImageCopiedResponse,
+    DiagnosticsInfoResponse, FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
     GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
     GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
     GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse,
@@ -644,6 +645,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "quickcss.write",
         "diagnostics.get_info",
         "graphics.get_info",
+        "clipboard.copy_image",
         "mod.clear_cache",
         "window.show",
         "window.hide",
@@ -9399,6 +9401,70 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::ClipboardCopyImage(payload) => {
+                            // Image-to-clipboard copy (F17): the host
+                            // downloads the renderer-named http(s) URL
+                            // itself (bounded, raster-only), decodes with
+                            // in-box WIC, and places a CF_DIB on the
+                            // Windows clipboard. Typed failures resolve
+                            // `{ok: false, error}` (gallery parity) so the
+                            // page can toast the reason; only the
+                            // fixed-vocabulary code crosses.
+                            let request_id = request.request_id;
+                            match clipboard::copy_image_url_to_clipboard(&payload.url) {
+                                Ok(copied) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::ClipboardImageCopied(
+                                            ClipboardImageCopiedResponse {
+                                                ok: true,
+                                                width: copied.width,
+                                                height: copied.height,
+                                                error: None,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Clipboard][Metrics] op=copy_image latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Clipboard][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::ClipboardImageCopied(
+                                            ClipboardImageCopiedResponse {
+                                                ok: false,
+                                                width: 0,
+                                                height: 0,
+                                                error: Some(failure.code.to_owned()),
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Clipboard][Metrics] op=copy_image latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                            }
+                        }
                         BridgeCommand::GraphicsGetInfo(_) => {
                             // CDP-backed graphics report: the two fixed probes
                             // (`System.getInfo`, `Browser.getVersion`) are
@@ -12680,7 +12746,11 @@ mod tests {
         assert!(super::BOOT_SNAPSHOT
             .capabilities
             .contains(&"mod.clear_cache"));
-        // No generic surface may exist alongside them: no clipboard handle,
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"clipboard.copy_image"));
+        // No generic surface may exist alongside them: no bare `clipboard`
+        // handle (only the single-purpose `clipboard.copy_image` URL read),
         // no file deletion selector, no bundle-reader, no eval, and no
         // renderer-selected CDP method (the two probed methods are fixed).
         for capability in [

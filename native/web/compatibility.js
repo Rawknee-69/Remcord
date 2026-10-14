@@ -574,6 +574,27 @@
         return request({ type: "diagnostics_get_info", payload: {} }, timeoutMs);
     }
 
+    // Image-to-clipboard copy (F17): exactly one http(s) image URL in, the
+    // placed bitmap dimensions or a fixed-vocabulary error code out. The
+    // host downloads and decodes the bytes itself with in-box WIC and
+    // places a CF_DIB on the Windows clipboard; the renderer never supplies
+    // bytes, paths, or dimensions. Typed failures resolve (gallery parity)
+    // so the page can toast the reason.
+    const MAX_CLIPBOARD_IMAGE_URL_CHARS = 2048;
+    function copyClipboardImage(url, timeoutMs = 30000) {
+        requireCapability("clipboard.copy_image");
+        if (typeof url !== "string" || url.trim().length === 0) {
+            return Promise.reject(new TypeError("url must be a non-empty string"));
+        }
+        if (url.length > MAX_CLIPBOARD_IMAGE_URL_CHARS) {
+            return Promise.reject(new TypeError("url must be at most 2048 characters"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "clipboard_copy_image", payload: { url } }, timeoutMs);
+    }
+
     // CDP-backed graphics report: WebView2 Runtime version, the exact
     // additional browser arguments, the environment label, plus the
     // Browser.getVersion / System.getInfo sections (each marked measured,
@@ -1896,6 +1917,32 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "clipboard_image_copied") {
+            const payload = response.payload.payload;
+            // Placed-bitmap echo or a fixed-vocabulary error code only: no
+            // bytes, paths, or URLs may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 4 ||
+                typeof payload.ok !== "boolean" ||
+                typeof payload.width !== "number" ||
+                !Number.isInteger(payload.width) ||
+                payload.width < 0 ||
+                payload.width > 4096 ||
+                typeof payload.height !== "number" ||
+                !Number.isInteger(payload.height) ||
+                payload.height < 0 ||
+                payload.height > 4096 ||
+                (payload.error !== null &&
+                    payload.error !== undefined &&
+                    typeof payload.error !== "string") ||
+                (typeof payload.error === "string" &&
+                    (payload.error.length === 0 || payload.error.length > 64))
+            ) {
+                request.reject(new Error("Native clipboard response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "graphics_info") {
             const payload = response.payload.payload;
             // CDP-backed graphics report: fixed keys, bounded strings, and
@@ -2838,6 +2885,9 @@
     // Diagnostics readout only: host-owned facts in, no parameters out.
     // The caller performs the clipboard write with `navigator.clipboard`.
     const diagnostics = Object.freeze({ getInfo: getDiagnosticsInfo });
+    // Single-purpose clipboard namespace: image copy only. There is no
+    // generic clipboard handle, text writer, or reader on this surface.
+    const clipboard = Object.freeze({ copyImage: copyClipboardImage });
     // CDP-backed graphics report only: the two fixed probes in, the bounded
     // measured-or-explicitly-missing report out. The caller performs the
     // clipboard write with `navigator.clipboard`.
@@ -2890,6 +2940,7 @@
             themes: themesShim,
             quickcss: quickcssShim,
             diagnostics,
+            clipboard,
             graphics,
             mod,
             settingsBoot,

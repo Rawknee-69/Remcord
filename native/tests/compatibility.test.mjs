@@ -4804,10 +4804,14 @@ test("the facade exposes namespaced diagnostics and mod cache capabilities and n
     assert.equal(Object.isFrozen(window.remcord.mod), true);
     assert.equal(window.remcord.native.supports("diagnostics.get_info"), true);
     assert.equal(window.remcord.native.supports("mod.clear_cache"), true);
-    // Exactly one member each: no clipboard, delete, or selector surface.
+    // Exactly one member each for diagnostics/mod: no delete or selector
+    // surface. The clipboard namespace is single-purpose (image copy
+    // only, F17) — no generic handle, text writer, or reader.
     assert.deepEqual(Object.keys(window.remcord.diagnostics).sort(), ["getInfo"]);
     assert.deepEqual(Object.keys(window.remcord.mod).sort(), ["clearCache"]);
-    assert.equal(window.remcord.clipboard, undefined);
+    assert.deepEqual(Object.keys(window.remcord.clipboard).sort(), ["copyImage"]);
+    assert.equal(Object.isFrozen(window.remcord.clipboard), true);
+    assert.equal(window.remcord.native.supports("clipboard.copy_image"), false);
     assert.equal(window.remcord.fs, undefined);
 });
 
@@ -6653,4 +6657,106 @@ test("F4 keeps mod settings storage page-side with host preservation only", () =
     assert.ok(vencordCode.includes("settings_state"));
     const substrateCode = stripComments(modSubstrate);
     assert.ok(substrateCode.includes("createModAdapter"));
+});
+
+function createClipboardRuntime(capabilities = ["bridge.ping", "clipboard.copy_image"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const CLIPBOARD_COPIED_FIXTURE = { ok: true, width: 64, height: 48, error: null };
+
+function respondClipboardCopied(window, request, payload = CLIPBOARD_COPIED_FIXTURE) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "clipboard_image_copied", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("clipboard.copyImage sends the bare URL and resolves the placed dimensions", async () => {
+    const { window } = createClipboardRuntime();
+    const pending = window.remcord.clipboard.copyImage("https://cdn.discordapp.com/attachments/a/b.png");
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "clipboard_copy_image");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "clipboard_copy_image",
+        payload: { url: "https://cdn.discordapp.com/attachments/a/b.png" },
+    });
+    respondClipboardCopied(window, message);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), CLIPBOARD_COPIED_FIXTURE);
+});
+
+test("clipboard.copyImage resolves typed host failures so the page can toast", async () => {
+    const { window } = createClipboardRuntime();
+    const pending = window.remcord.clipboard.copyImage("https://example.com/i.png");
+    const message = window.messages.find((entry) => entry.command?.type === "clipboard_copy_image");
+    respondClipboardCopied(window, message, { ok: false, width: 0, height: 0, error: "CLIPBOARD_BUSY" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        ok: false,
+        width: 0,
+        height: 0,
+        error: "CLIPBOARD_BUSY",
+    });
+});
+
+test("clipboard.copyImage rejects bad URLs client-side without sending", async () => {
+    const { window } = createClipboardRuntime();
+    for (const bad of ["", "   ", 42, null, undefined, {}, "x".repeat(2049)]) {
+        await assert.rejects(window.remcord.clipboard.copyImage(bad), TypeError);
+    }
+    assert.equal(
+        window.messages.some((entry) => entry.command?.type === "clipboard_copy_image"),
+        false,
+    );
+});
+
+test("clipboard.copyImage throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createClipboardRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("clipboard.copy_image"), false);
+    assert.throws(
+        () => window.remcord.clipboard.copyImage("https://example.com/i.png"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((entry) => entry.command?.type === "clipboard_copy_image"),
+        false,
+    );
+});
+
+test("clipboard.copyImage rejects malformed copy outcomes", async () => {
+    for (const payload of [
+        { ok: true, width: 64, height: 48, error: null, bytes: "aGVsbG8=" },
+        { ok: true, width: 64, height: 48, error: null, url: "https://example.com/i.png" },
+        { ok: true, width: -1, height: 48, error: null },
+        { ok: true, width: 5000, height: 48, error: null },
+        { ok: "yes", width: 64, height: 48, error: null },
+        { ok: false, width: 0, height: 0, error: "" },
+        { ok: false, width: 0, height: 0 },
+        { ok: true, width: 64, height: 48 },
+    ]) {
+        const runtime = createClipboardRuntime();
+        const pending = runtime.window.remcord.clipboard.copyImage("https://example.com/i.png");
+        const message = runtime.window.messages.find(
+            (entry) => entry.command?.type === "clipboard_copy_image",
+        );
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: true,
+                    payload: { type: "clipboard_image_copied", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /Native clipboard response schema is invalid/);
+    }
 });
