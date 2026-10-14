@@ -2679,7 +2679,9 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::GraphicsGetInfo(_)
                 | BridgeCommand::ModClearCache(_)
                 | BridgeCommand::TrayGetState(_)
-                | BridgeCommand::SpellcheckGetState(_) => {}
+                | BridgeCommand::SpellcheckGetState(_)
+                | BridgeCommand::DiagnosticsOpenWebrtcInternals(_)
+                | BridgeCommand::DiagnosticsOpenGpuPage(_) => {}
                 // Clipboard image copy (F17): shape check only (presence +
                 // byte cap + http(s) scheme); the content rules (raster
                 // MIME, byte/pixel caps, WIC decodability) live in
@@ -2695,9 +2697,6 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid clipboard image url".to_owned());
                     }
                 }
-                BridgeCommand::DiagnosticsOpenWebrtcInternals(_)
-                | BridgeCommand::DiagnosticsOpenGpuPage(_)
-                | BridgeCommand::ModClearCache(_) => {}
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
@@ -2723,7 +2722,6 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::WindowToggleFullscreen(_)
                 | BridgeCommand::WindowQuit(_)
                 | BridgeCommand::WindowGetState(_) => {}
-                BridgeCommand::WindowQuit(_) => {}
                 // Badge state is parameter-free by protocol
                 // (`deny_unknown_fields` already rejected any
                 // renderer-supplied member: no title, window id, handle,
