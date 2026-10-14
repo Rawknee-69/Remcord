@@ -7266,3 +7266,182 @@ test("the delivery script carries no forbidden surfaces", () => {
     assert.ok(code.includes("remcord-native:rpc-invite"));
     assert.ok(code.includes("__remcordNativeRpcDelivery"));
 });
+
+// ---------------------------------------------------------------------------
+// F13: tray icon state (mode resolution + read-only state capability +
+// page-side badge mapping). The OS icon itself is a deferred slice (needs a
+// tray-icon crate + asset pipeline); the host ships the decision model, the
+// parameter-free `tray.get_state` capability, and the title->badge mapping
+// both sides share. No icon, menu construction, title, or badge text ever
+// crosses the bridge.
+// ---------------------------------------------------------------------------
+
+const trayBadge = readFileSync(new URL("../web/tray/badge.js", import.meta.url), "utf8");
+
+function createTrayRuntime(capabilities = ["bridge.ping", "tray.get_state"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondTrayState(
+    window,
+    request,
+    payload = { mode: "dynamic", available: false, minimize_to_tray: true, should_hide: false },
+) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "tray_state", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function runTrayBadge(origin = "https://discord.com") {
+    const window = new FakeWindow(origin);
+    const context = vm.createContext({
+        window,
+        performance,
+        TextEncoder,
+        TextDecoder,
+        console: { error() {}, info() {} },
+        setTimeout,
+        clearTimeout,
+        Date,
+        JSON,
+        Object,
+    });
+    vm.runInContext(trayBadge, context);
+    return { window, context };
+}
+
+test("the facade exposes a read-only tray state namespace and no icon surface", () => {
+    const { window } = createTrayRuntime();
+    assert.equal(typeof window.remcord.tray.getState, "function");
+    assert.equal(Object.isFrozen(window.remcord.tray), true);
+    assert.equal(window.remcord.native.supports("tray.get_state"), true);
+    // No icon construction, menu building, badge, or title surface may exist.
+    assert.equal(window.remcord.tray.show, undefined);
+    assert.equal(window.remcord.tray.hide, undefined);
+    assert.equal(window.remcord.tray.setIcon, undefined);
+    assert.equal(window.remcord.tray.setMenu, undefined);
+    assert.equal(window.remcord.tray.setBadge, undefined);
+    assert.equal(window.remcord.tray.setTitle, undefined);
+});
+
+test("tray.get_state sends an exact empty payload and resolves the canonical state", async () => {
+    const { window } = createTrayRuntime();
+    const pending = window.remcord.tray.getState();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "tray_get_state");
+    assert.ok(message);
+    // No mode, flag, title, badge, path, handle, or asset selector.
+    assert.deepEqual(message.command, { type: "tray_get_state", payload: {} });
+
+    respondTrayState(window, message);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        mode: "dynamic",
+        available: false,
+        minimize_to_tray: true,
+        should_hide: false,
+    });
+});
+
+test("tray.get_state throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createTrayRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("tray.get_state"), false);
+    assert.throws(
+        () => window.remcord.tray.getState(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "tray_get_state"),
+        false,
+    );
+});
+
+test("tray.get_state rejects non-canonical and inconsistent states", async () => {
+    // Unknown modes, raw setting echoes, extra members, and a hide verdict
+    // without availability are all refused before resolving.
+    for (const payload of [
+        { mode: "ac_plug_colored", available: false, minimize_to_tray: true, should_hide: false },
+        { mode: "../../etc/passwd", available: false, minimize_to_tray: true, should_hide: false },
+        { mode: "dynamic", available: false, minimize_to_tray: true, should_hide: true },
+        { mode: "dynamic", available: false, minimize_to_tray: false, should_hide: true },
+        { mode: "dynamic", available: false, minimize_to_tray: true, should_hide: false, path: "C:\\x" },
+        { mode: "dynamic", available: false, minimize_to_tray: true, should_hide: false, badge: "badge-3.ico" },
+        { mode: "dynamic", available: false, minimize_to_tray: true },
+        { mode: 42, available: false, minimize_to_tray: true, should_hide: false },
+    ]) {
+        const runtime = createTrayRuntime();
+        const pending = runtime.window.remcord.tray.getState();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "tray_get_state");
+        respondTrayState(runtime.window, message, payload);
+        await assert.rejects(pending, /tray state response schema is invalid/, JSON.stringify(payload));
+    }
+});
+
+test("tray.get_state rejects host failures with the typed error", async () => {
+    const { window } = createTrayRuntime();
+    const pending = window.remcord.tray.getState();
+    const message = window.messages.find((entry) => entry.command?.type === "tray_get_state");
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: false,
+                payload: null,
+                error: { code: "TRAY_UNAVAILABLE", message: "tray state is unavailable" },
+            },
+        }),
+    );
+    await assert.rejects(pending, /tray state is unavailable/);
+});
+
+test("the tray badge helper maps titles to Electron's overlay assets", () => {
+    const { window, context } = runTrayBadge();
+    const helper = window.__remcordTrayBadge;
+    assert.ok(helper);
+    assert.equal(helper.installed, true);
+    // Cross-realm results are JSON-compared: the helper lives in the
+    // document realm, so prototypes differ from test-realm literals.
+    const badge = (title) =>
+        JSON.parse(
+            JSON.stringify(
+                vm.runInContext(`window.__remcordTrayBadge.badgeForTitle(${JSON.stringify(title)})`, context),
+            ),
+        );
+    const asset = (title) =>
+        vm.runInContext(
+            `window.__remcordTrayBadge.badgeAsset(window.__remcordTrayBadge.badgeForTitle(${JSON.stringify(title)}))`,
+            context,
+        );
+    // Unread prefix, mention counts with the >9 cap, and the clear state.
+    assert.deepEqual(badge("GÇó Discord"), { kind: "unread" });
+    assert.deepEqual(badge("(3) Discord"), { kind: "mentions", count: 3 });
+    assert.deepEqual(badge("Discord"), { kind: "none" });
+    assert.equal(asset("GÇó x"), "badge-11.ico");
+    assert.equal(asset("(3) x"), "badge-3.ico");
+    assert.equal(asset("(12) x"), "badge-10.ico");
+    assert.equal(asset("x"), null);
+    // A non-digit paren prefix degrades to unread instead of inventing an asset.
+    assert.equal(asset("(abc) x"), "badge-11.ico");
+});
+
+test("the tray badge helper stays off the entry origins' neighbors and off the bridge", () => {
+    for (const origin of ["https://example.com", "https://evil.discord.com"]) {
+        const { window } = runTrayBadge(origin);
+        assert.equal(window.__remcordTrayBadge, undefined, origin);
+        assert.equal(window.messages.length, 0, origin);
+    }
+    const code = stripComments(trayBadge);
+    assert.doesNotMatch(code, /postMessage/);
+    assert.doesNotMatch(code, /fetch\(/);
+    assert.doesNotMatch(code, /eval\(|new Function/);
+    assert.doesNotMatch(code, /localStorage|sessionStorage|indexedDB/);
+    assert.doesNotMatch(code, /innerHTML/);
+});

@@ -1989,3 +1989,73 @@ test("F11 enables the four scanner keys through the native settings path", () =>
         assert.ok(settingsTs.includes(`"${key}"`), `${key} must be writable natively`);
     }
 });
+
+test("F13 tray keeps Electron's menu/badge/close shapes with a read-only native state", () => {
+    // Electron owns the icon: disabled builds nothing, dynamic resolves the
+    // ac_plug_colored asset, anything else names a static one; win32 icons
+    // resize to 16 px; the five menu actions + tooltip + click-to-reopen
+    // come from tray.ts.
+    const tray = readFileSync(new URL("../../src/discord/tray.ts", import.meta.url), "utf8");
+    assert.match(tray, /getConfig\("tray"\)/);
+    assert.match(tray, /trayIcon === "disabled"/);
+    assert.match(tray, /trayIcon === "dynamic"/);
+    assert.match(tray, /ac_plug_colored/);
+    assert.match(tray, /resize\(\{ height: 16 \}\)/);
+    for (const label of [
+        "menu-remcord",
+        "tray-openRemcord",
+        "tray-openSettings",
+        "tray-supportServer",
+        "tray-restartRemcord",
+        "tray-quitRemcord",
+        "tray-tooltip",
+    ]) {
+        assert.match(tray, new RegExp(`"${label}"`), `${label} must stay sourced`);
+    }
+    assert.match(tray, /revealWindow\(mainWindow\)/);
+    assert.match(tray, /setForceQuit\(true\)/);
+    // Electron owns the badge: bullet means unread (badge-11), (N) means N
+    // mentions capped at badge-10, anything else clears; minimizeToTray
+    // closes hide, otherwise the app quits (window.ts).
+    const windowMain = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(windowMain, /badge-11\.ico/);
+    assert.match(windowMain, /badge-10\.ico/);
+    assert.match(windowMain, /setOverlayIcon\(null, ""\)/);
+    assert.match(windowMain, /getConfig\("minimizeToTray"\)/);
+    // Defaults the native model resolves against (config.ts).
+    const config = readFileSync(new URL("../../src/common/config.ts", import.meta.url), "utf8");
+    assert.match(config, /tray: "dynamic"/);
+    assert.match(config, /minimizeToTray: true/);
+    // The native contract pins the same shapes from the host side without
+    // touching the close path: mode resolution, the five menu actions in
+    // Electron's order, the badge assets, and the parameter-free state
+    // capability. close_behavior.rs still reports no usable tray, so every
+    // close still quits exactly like today.
+    const nativeTray = readFileSync(new URL("../src/tray.rs", import.meta.url), "utf8");
+    assert.match(nativeTray, /resolve_tray_mode/);
+    assert.match(nativeTray, /TrayMode::Disabled/);
+    assert.match(nativeTray, /TrayMode::Dynamic/);
+    assert.match(nativeTray, /badge-11\.ico/);
+    assert.match(nativeTray, /badge-10\.ico/);
+    assert.match(nativeTray, /"open", "settings", "support", "restart", "quit"/);
+    assert.match(nativeTray, /validate_tray_contract/);
+    const closeBehavior = readFileSync(new URL("../src/close_behavior.rs", import.meta.url), "utf8");
+    assert.match(closeBehavior, /pub fn tray_available\(\) -> bool \{\n {4}false\n\}/);
+    const nativeProtocol = readFileSync(new URL("../src/protocol.rs", import.meta.url), "utf8");
+    assert.match(nativeProtocol, /TrayGetState\(TrayGetStateRequest\)/);
+    assert.match(nativeProtocol, /TrayState\(TrayGetStateResponse\)/);
+    assert.match(nativeProtocol, /tray_get_state/);
+    const nativeMain = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    assert.match(nativeMain, /mod tray;/);
+    assert.match(nativeMain, /"tray\.get_state"/);
+    assert.match(nativeMain, /BridgeCommand::TrayGetState/);
+    assert.match(nativeMain, /validate_tray_contract/);
+    const compat = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+    assert.match(compat, /getTrayState/);
+    assert.match(compat, /const tray = Object\.freeze\(\{ getState: getTrayState \}\)/);
+    assert.match(compat, /tray_state/);
+    const badge = readFileSync(new URL("../web/tray/badge.js", import.meta.url), "utf8");
+    assert.match(badge, /badgeForTitle/);
+    assert.match(badge, /badge-11\.ico/);
+    assert.match(badge, /__remcordTrayBadge/);
+});
