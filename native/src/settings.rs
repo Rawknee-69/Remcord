@@ -335,9 +335,12 @@ pub struct SettingsMutation {
 ///   `performanceMode`, `smoothScroll`, `autoScroll`, `spellcheck`,
 ///   `spellcheckLanguage`): DEFERRED with the media/voice milestone.
 /// - RPC / scanning (`inviteWebsocket`, `processScanning`,
-///   `windowsLegacyScanning`, `scanInterval`, `keybinds`): DEFERRED with
-///   arRPC; `keybinds` additionally carries arbitrary renderer JS and is
-///   UNSAFE as a value.
+///   `windowsLegacyScanning`, `scanInterval`): DEFERRED with arRPC.
+///   `keybinds` is NOT set through this capability: entries carry
+///   arbitrary stored JS in Electron, so they are owned by the dedicated
+///   `keybinds.*` capabilities (`keybinds.rs`), which validate the closed
+///   id/accelerator/action shape and structurally exclude `runJavascript`.
+///   The snapshot field stays an opaque validated-envelope array.
 /// - themes / QuickCSS (`quickCss`, `csp`): owned by their own native
 ///   capabilities (themes list/toggle/import, Quick CSS host push); the
 ///   QuickCSS switch is disabled in the native Themes UI, so it has no
@@ -741,6 +744,30 @@ pub fn apply_plugin_state(
         source: SettingsSource::File,
         payload_bytes,
     })
+}
+
+/// Replace the whole `keybinds` array with caller-validated entries.
+///
+/// Narrow writer for the F8 keybind capabilities: the caller
+/// (`keybinds.rs`) has already validated every entry (closed id shape,
+/// parsed accelerator, executable action only — `runJavascript` can never
+/// reach this function). Same ownership semantics: authoritative load
+/// first, missing file starts from defaults, corrupt file is an error
+/// that is never overwritten, every other key (including unknown future
+/// keys) preserved, atomic temp+rename persistence. Returns the persisted
+/// file size.
+pub fn write_keybinds(profile_dir: &Path, entries: &[serde_json::Value]) -> Result<usize, String> {
+    let load = load_settings(profile_dir)?;
+    let mut document = load_document_for_write(profile_dir, load)?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| "settings file is invalid: top-level JSON must be an object".to_owned())?;
+    // ONLY the keybinds field is touched.
+    object.insert(
+        "keybinds".to_owned(),
+        serde_json::Value::Array(entries.to_vec()),
+    );
+    persist_settings_document(profile_dir, &document)
 }
 
 /// Host-constructed settings path. The renderer cannot influence this: the

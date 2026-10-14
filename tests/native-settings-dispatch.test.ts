@@ -1012,3 +1012,96 @@ test("native settings import rejects misshapen host outcomes", async () => {
         restoreConsole();
     }
 });
+
+test("native keybind helpers gate on runtime plus full namespace presence", async () => {
+    installGlobals({ settingsImpl: {} });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeKeybindAvailable(), false);
+    } finally {
+        restoreConsole();
+    }
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            addKeybind: () => Promise.resolve({ ok: true, id: "a-1" }),
+            toggleKeybind: () => Promise.resolve({ ok: true, enabled: false }),
+            removeKeybind: () => Promise.resolve({ ok: true }),
+        },
+    });
+    try {
+        const helpers = await loadHelpers();
+        // listKeybinds missing: partial namespace falls back safely.
+        assert.equal(helpers.isNativeKeybindAvailable(), false);
+    } finally {
+        restoreConsole();
+    }
+    const calls: string[] = [];
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            addKeybind: (keybind: unknown) => {
+                calls.push("add");
+                return Promise.resolve({ ok: true, id: (keybind as { id: string }).id });
+            },
+            toggleKeybind: () => {
+                calls.push("toggle");
+                return Promise.resolve({ ok: true, enabled: true });
+            },
+            removeKeybind: () => {
+                calls.push("remove");
+                return Promise.resolve({ ok: true });
+            },
+            listKeybinds: () => Promise.resolve([]),
+        },
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeKeybindAvailable(), true);
+        assert.deepEqual(
+            await helpers.addKeybindNative({
+                id: "a-1",
+                accelerator: "Ctrl+M",
+                action: "mute",
+                global: true,
+                enabled: true,
+            }),
+            { ok: true, id: "a-1", error: undefined },
+        );
+        assert.deepEqual(await helpers.toggleKeybindNative("a-1"), { ok: true, enabled: true });
+        assert.deepEqual(await helpers.removeKeybindNative("a-1"), { ok: true });
+        assert.deepEqual(calls, ["add", "toggle", "remove"]);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native keybind helpers reject misshapen host outcomes", async () => {
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            addKeybind: () => Promise.resolve({ ok: "yes" }),
+            toggleKeybind: () => Promise.resolve(null),
+            removeKeybind: () => Promise.resolve("removed"),
+            listKeybinds: () => Promise.resolve([]),
+        },
+    });
+    try {
+        const helpers = await loadHelpers();
+        await assert.rejects(helpers.addKeybindNative({}), /invalid result|unavailable/);
+        await assert.rejects(helpers.toggleKeybindNative("a-1"), /invalid result|unavailable/);
+        await assert.rejects(helpers.removeKeybindNative("a-1"), /invalid result|unavailable/);
+    } finally {
+        restoreConsole();
+    }
+    installGlobals({ runtime: "webview2", settingsImpl: {} });
+    try {
+        const helpers = await loadHelpers();
+        await assert.rejects(
+            helpers.addKeybindNative({ id: "a", accelerator: "Ctrl+M", action: "mute", global: true, enabled: true }),
+            /unavailable/,
+        );
+    } finally {
+        restoreConsole();
+    }
+});

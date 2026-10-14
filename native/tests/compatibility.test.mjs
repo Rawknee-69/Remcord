@@ -13,6 +13,7 @@ const vencordAdapter = readFileSync(new URL("../web/mods/vencord/adapter.js", im
 const shelterAdapter = readFileSync(new URL("../web/mods/shelter/adapter.js", import.meta.url), "utf8");
 const equicordAdapter = readFileSync(new URL("../web/mods/equicord/adapter.js", import.meta.url), "utf8");
 const customAdapter = readFileSync(new URL("../web/mods/custom/adapter.js", import.meta.url), "utf8");
+const keybindMatcher = readFileSync(new URL("../web/keybinds/matcher.js", import.meta.url), "utf8");
 const pluginLoader = readFileSync(new URL("../web/plugins/loader.js", import.meta.url), "utf8");
 const testModAdapter = readFileSync(new URL("../web/mods/testmod/adapter.js", import.meta.url), "utf8");
 
@@ -924,6 +925,289 @@ test("settings.import_electron rejects hostile key lists without paths", async (
         respondSettingsImported(runtime.window, message, payload);
         await assert.rejects(pending, /settings import response schema is invalid/);
     }
+});
+
+// ---------------------------------------------------------------------------
+// Keybind execution (F8 core).
+//
+// Same member names as the Electron bridge (which are fire-and-forget
+// sends), but async with typed outcomes. runJavascript has no wire shape:
+// the maker refuses it before dispatch and the host refuses it at
+// dispatch; stored code can never cross.
+// ---------------------------------------------------------------------------
+
+const KEYBIND_CAPS = ["bridge.ping", "keybinds.list", "keybinds.add", "keybinds.toggle", "keybinds.remove"];
+
+function createKeybindsRuntime(capabilities = KEYBIND_CAPS) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondKeybinds(window, request, type, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type, payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes Electron-named keybind members and no code surface", () => {
+    const { window } = createKeybindsRuntime();
+    assert.equal(typeof window.remcord.settings.addKeybind, "function");
+    assert.equal(typeof window.remcord.settings.toggleKeybind, "function");
+    assert.equal(typeof window.remcord.settings.removeKeybind, "function");
+    assert.equal(typeof window.remcord.settings.listKeybinds, "function");
+    for (const capability of KEYBIND_CAPS.slice(1)) {
+        assert.equal(window.remcord.native.supports(capability), true);
+    }
+    assert.equal(window.remcord.settings.runJavascript, undefined);
+    assert.equal(window.remcord.settings.registerHotkey, undefined);
+});
+
+test("keybinds.list sends an exact empty payload and resolves metadata only", async () => {
+    const { window } = createKeybindsRuntime();
+    const pending = window.remcord.settings.listKeybinds();
+    const message = window.messages.find((entry) => entry.command?.type === "keybinds_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "keybinds_list", payload: {} });
+    respondKeybinds(window, message, "keybinds_list", {
+        keybinds: [{ id: "a-1", accelerator: "Ctrl+M", action: "mute", global: true, enabled: true }],
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), [
+        { id: "a-1", accelerator: "Ctrl+M", action: "mute", global: true, enabled: true },
+    ]);
+});
+
+test("keybinds.list rejects code-bearing inventories", async () => {
+    for (const payload of [
+        { keybinds: [{ id: "a-1", accelerator: "Ctrl+M", action: "runJavascript", global: true, enabled: true }] },
+        {
+            keybinds: [
+                { id: "a-1", accelerator: "Ctrl+M", action: "mute", global: true, enabled: true, js: "alert(1)" },
+            ],
+        },
+        { keybinds: [{ id: "../x", accelerator: "Ctrl+M", action: "mute", global: true, enabled: true }] },
+        { keybinds: "nope" },
+    ]) {
+        const runtime = createKeybindsRuntime();
+        const pending = runtime.window.remcord.settings.listKeybinds();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "keybinds_list");
+        respondKeybinds(runtime.window, message, "keybinds_list", payload);
+        await assert.rejects(pending, /keybind list response schema is invalid/);
+    }
+});
+
+test("settings.addKeybind sends the closed shape and echoes the id", async () => {
+    const { window } = createKeybindsRuntime();
+    const entry = { id: "a-1", accelerator: "Ctrl+Shift+M", action: "mute", global: true, enabled: true };
+    const pending = window.remcord.settings.addKeybind(entry);
+    const message = window.messages.find((entry) => entry.command?.type === "keybinds_add");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "keybinds_add",
+        payload: { id: "a-1", accelerator: "Ctrl+Shift+M", action: "mute", global: true, enabled: true },
+    });
+    respondKeybinds(window, message, "keybinds_add", { ok: true, id: "a-1" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { ok: true, id: "a-1" });
+    // A mismatched id echo is rejected: one entry's save can never
+    // resolve another entry's call.
+    const second = createKeybindsRuntime();
+    const pending2 = second.window.remcord.settings.addKeybind(entry);
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "keybinds_add");
+    respondKeybinds(second.window, message2, "keybinds_add", { ok: true, id: "other" });
+    await assert.rejects(pending2, /keybind save response schema is invalid/);
+    // Typed failures resolve for the maker toast.
+    const third = createKeybindsRuntime();
+    const pending3 = third.window.remcord.settings.addKeybind(entry);
+    const message3 = third.window.messages.find((entry) => entry.command?.type === "keybinds_add");
+    respondKeybinds(third.window, message3, "keybinds_add", { ok: false, error: "INVALID_KEYBIND" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending3)), { ok: false, error: "INVALID_KEYBIND" });
+});
+
+test("settings.addKeybind refuses code and hostile shapes before dispatch", async () => {
+    const { window } = createKeybindsRuntime();
+    const good = { id: "a-1", accelerator: "Ctrl+M", action: "mute", global: true, enabled: true };
+    await assert.rejects(
+        window.remcord.settings.addKeybind({ ...good, action: "runJavascript", js: "alert(1)" }),
+        /executable/,
+    );
+    await assert.rejects(window.remcord.settings.addKeybind({ ...good, js: "alert(1)" }), /executable code/);
+    await assert.rejects(window.remcord.settings.addKeybind({ ...good, id: "../x" }), /id must match/);
+    await assert.rejects(window.remcord.settings.addKeybind({ ...good, accelerator: "" }), /accelerator/);
+    await assert.rejects(
+        window.remcord.settings.addKeybind({ ...good, action: "launchMissiles" }),
+        /executable actions/,
+    );
+    await assert.rejects(window.remcord.settings.addKeybind({ ...good, global: "yes" }), /booleans/);
+    await assert.rejects(window.remcord.settings.addKeybind("nope"), /object/);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "keybinds_add"),
+        false,
+    );
+});
+
+test("settings.toggleKeybind/removeKeybind send id-only requests with typed outcomes", async () => {
+    const { window } = createKeybindsRuntime();
+    const toggled = window.remcord.settings.toggleKeybind("a-1");
+    const toggleMessage = window.messages.find((entry) => entry.command?.type === "keybinds_toggle");
+    assert.deepEqual(toggleMessage.command, { type: "keybinds_toggle", payload: { id: "a-1" } });
+    respondKeybinds(window, toggleMessage, "keybinds_toggle", { ok: true, enabled: false });
+    assert.deepEqual(JSON.parse(JSON.stringify(await toggled)), { ok: true, enabled: false });
+
+    const removed = window.remcord.settings.removeKeybind("a-1");
+    const removeMessage = window.messages.find((entry) => entry.command?.type === "keybinds_remove");
+    assert.deepEqual(removeMessage.command, { type: "keybinds_remove", payload: { id: "a-1" } });
+    respondKeybinds(window, removeMessage, "keybinds_remove", { ok: true });
+    assert.deepEqual(JSON.parse(JSON.stringify(await removed)), { ok: true });
+
+    await assert.rejects(window.remcord.settings.toggleKeybind("../x"), /id must match/);
+    await assert.rejects(window.remcord.settings.removeKeybind(""), /id must match/);
+});
+
+test("keybind capabilities throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
+    const { window } = createKeybindsRuntime(["bridge.ping"]);
+    for (const capability of KEYBIND_CAPS.slice(1)) {
+        assert.equal(window.remcord.native.supports(capability), false);
+    }
+    assert.throws(
+        () => window.remcord.settings.listKeybinds(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () =>
+            window.remcord.settings.addKeybind({
+                id: "a",
+                accelerator: "Ctrl+M",
+                action: "mute",
+                global: true,
+                enabled: true,
+            }),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.settings.toggleKeybind("a"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.settings.removeKeybind("a"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type?.startsWith("keybinds_")),
+        false,
+    );
+});
+
+// ---------------------------------------------------------------------------
+// Non-global keybind matcher (F8 core, native/web/keybinds/matcher.js).
+//
+// The matcher observes keydown against the enabled non-global inventory
+// and reports matches as id-only one-way events. These tests drive the
+// shipped script in a VM: inventory fetch, canonical matching across
+// maker release-order noise, scope filtering, and the shadow behavior.
+// ---------------------------------------------------------------------------
+
+function createMatcherRuntime() {
+    const runtime = createKeybindsRuntime();
+    vm.runInContext(keybindMatcher, runtime.context);
+    return runtime;
+}
+
+function respondKeybindsList(window, entries) {
+    const message = window.messages.find((entry) => entry.command?.type === "keybinds_list");
+    assert.ok(message, "matcher must fetch the inventory");
+    respondKeybinds(window, message, "keybinds_list", { keybinds: entries });
+}
+
+function fakeKeydown(overrides = {}) {
+    return {
+        type: "keydown",
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        metaKey: false,
+        key: "",
+        defaultPrevented: false,
+        preventDefault() {
+            this.defaultPrevented = true;
+        },
+        stopPropagation() {},
+        ...overrides,
+    };
+}
+
+function matchedIds(window) {
+    return window.messages
+        .filter((message) => message.event?.type === "keybind_matched")
+        .map((message) => message.event.payload.id);
+}
+
+// The inventory fetch resolves through the facade promise chain; one
+// microtask is not enough ticks in every case, so flush briefly.
+function flushInventory() {
+    return new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+test("the matcher reports canonical matches across maker ordering noise", async () => {
+    const { window } = createMatcherRuntime();
+    respondKeybindsList(window, [
+        { id: "a-1", accelerator: "Shift+Ctrl+M", action: "mute", global: false, enabled: true },
+        { id: "off", accelerator: "Ctrl+O", action: "deafen", global: false, enabled: false },
+        { id: "glob", accelerator: "Ctrl+G", action: "mute", global: true, enabled: true },
+    ]);
+    await flushInventory();
+    // Canonical Ctrl+Shift+M regardless of stored token order.
+    window.dispatchEvent(fakeKeydown({ ctrlKey: true, shiftKey: true, key: "m" }));
+    assert.deepEqual(matchedIds(window), ["a-1"]);
+    // Disabled and global entries never match in-page.
+    window.dispatchEvent(fakeKeydown({ ctrlKey: true, key: "o" }));
+    window.dispatchEvent(fakeKeydown({ ctrlKey: true, key: "g" }));
+    assert.deepEqual(matchedIds(window), ["a-1"]);
+    // A near-miss (missing Shift) matches nothing.
+    window.dispatchEvent(fakeKeydown({ ctrlKey: true, key: "m" }));
+    assert.deepEqual(matchedIds(window), ["a-1"]);
+});
+
+test("the matcher shadows the page on match and ignores default-prevented keys", async () => {
+    const { window } = createMatcherRuntime();
+    respondKeybindsList(window, [{ id: "a-1", accelerator: "Ctrl+M", action: "mute", global: false, enabled: true }]);
+    await flushInventory();
+    let prevented = false;
+    let stopped = false;
+    window.dispatchEvent({
+        ...fakeKeydown({ ctrlKey: true, key: "M" }),
+        preventDefault() {
+            prevented = true;
+        },
+        stopPropagation() {
+            stopped = true;
+        },
+    });
+    assert.deepEqual(matchedIds(window), ["a-1"]);
+    assert.equal(prevented, true);
+    assert.equal(stopped, true);
+    // Already-handled keys are left alone.
+    window.dispatchEvent(fakeKeydown({ ctrlKey: true, key: "M", defaultPrevented: true }));
+    assert.deepEqual(matchedIds(window), ["a-1"]);
+});
+
+test("the matcher never breaks page input and carries ids only", async () => {
+    const { window } = createMatcherRuntime();
+    respondKeybindsList(window, [
+        { id: "a-1", accelerator: "Not+A+Keybind", action: "mute", global: false, enabled: true },
+    ]);
+    await flushInventory();
+    // Garbage inventory matches nothing and throws nothing.
+    window.dispatchEvent(fakeKeydown({ ctrlKey: true, key: "a" }));
+    assert.deepEqual(matchedIds(window), []);
+    // Match reports carry the id and nothing else.
+    const serialized = JSON.stringify(window.messages.filter((m) => m.event?.type === "keybind_matched"));
+    assert.doesNotMatch(serialized, /accelerator|action|javascript|url|path/i);
 });
 
 test("initializes a frozen compatibility facade with the boot snapshot", () => {

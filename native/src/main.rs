@@ -13,6 +13,7 @@ mod environment_observer;
 mod folders;
 mod gallery;
 mod graphics;
+mod keybinds;
 mod localization;
 mod main_webview;
 mod mod_cache;
@@ -89,14 +90,16 @@ use protocol::{
     FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
     GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
     GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
-    GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, LocalizationStringResponse,
-    ModBundleResponse, ModCacheClearedResponse, PingResponse, PluginStorageReadResponse,
-    PluginStorageWriteResponse, PluginsListResponse, PluginsReloadResponse,
-    PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse, PluginsSetEnabledResponse,
-    QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker, SettingsConfigResponse,
-    SettingsImportedResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
-    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
+    GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse,
+    KeybindsListResponse, KeybindsRemoveResponse, KeybindsToggleResponse,
+    LocalizationStringResponse, ModBundleResponse, ModCacheClearedResponse, PingResponse,
+    PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
+    PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
+    SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
+    SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
+    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
+    PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -614,6 +617,10 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "backup.discard_restore",
         "folders.open",
         "folders.open_theme",
+        "keybinds.list",
+        "keybinds.add",
+        "keybinds.toggle",
+        "keybinds.remove",
         "gallery.list",
         "gallery.add_url",
         "gallery.add_link",
@@ -659,6 +666,10 @@ const CUSTOM_ADAPTER_SCRIPT: &str = include_str!("../web/mods/custom/adapter.js"
 /// `plugins.get_runtime_script` capabilities with one uniform page-world
 /// api). Always injected (see [`initialization_script`]).
 const PLUGIN_LOADER_SCRIPT: &str = include_str!("../web/plugins/loader.js");
+/// Non-global keybind matcher: the native counterpart of Electron's
+/// menu-accelerator path for focused-app-only keybinds (F8 core). Always
+/// injected (see [`initialization_script`]).
+const KEYBIND_MATCHER_SCRIPT: &str = include_str!("../web/keybinds/matcher.js");
 
 /// The renderer adapter for one registered mod, or `None` for a descriptor
 /// with no adapter file (a registry entry must always carry one).
@@ -3156,6 +3167,12 @@ enum NativeEvent {
         received_at: Instant,
         discarded: bool,
     },
+    /// One global-hotkey firing from the keybind worker thread. Carries
+    /// only the keybind id: the event loop re-validates (known, enabled,
+    /// global) and executes the stored action itself.
+    KeybindFired {
+        keybind_id: String,
+    },
     /// One DEV-only window chrome smoke step (`REMCORD_NATIVE_WINDOW_SMOKE=1`).
     /// Drives the shipped renderer facade through the real typed bridge and
     /// logs the resulting native state. Never present in normal runs.
@@ -3337,9 +3354,13 @@ fn initialization_script(
         script.push_str(adapter);
     }
     // Runtime plugin execution (F2) runs after the client-mod adapters,
-    // matching Electron's preload order (mods, then plugins).
+    // matching Electron's preload order (mods, then plugins). The keybind
+    // matcher (F8) runs last: it only observes keydown and reports matches,
+    // so it can never perturb mod bootstrap, plugin loading, or settings.
     script.push('\n');
     script.push_str(PLUGIN_LOADER_SCRIPT);
+    script.push('\n');
+    script.push_str(KEYBIND_MATCHER_SCRIPT);
     Ok(script)
 }
 
@@ -3373,6 +3394,89 @@ where
 {
     if let Err(error) = proxy.send_event(event) {
         eprintln!("[Native] Could not queue event: {error}");
+    }
+}
+
+/// Global-hotkey worker thread (F8 core). Owns the Win32 hotkey table
+/// plus its own message loop: each sync replaces the whole table
+/// (unregister-all + re-register, Electron's refresh model), and every
+/// `WM_HOTKEY` firing crosses to the event loop as `KeybindFired`
+/// carrying only the keybind id. Ids never reach Win32 (worker-local
+/// table indices do). Polls the sync channel every 50 ms so management
+/// mutations apply promptly without blocking hotkey delivery. No hooks,
+/// no SendInput, no synthetic key events.
+fn run_hotkey_worker(
+    rx: std::sync::mpsc::Receiver<keybinds::HotkeySync>,
+    proxy: &EventLoopProxy<NativeEvent>,
+) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE, WM_HOTKEY};
+        let mut current: Vec<(i32, String)> = Vec::new();
+        let mut next_id: i32 = 1;
+        let unregister_all = |current: &mut Vec<(i32, String)>| {
+            for (id, _) in current.drain(..) {
+                unsafe {
+                    let _ = UnregisterHotKey(None, id);
+                }
+            }
+        };
+        loop {
+            // Drain hotkey firings without blocking.
+            loop {
+                let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+                let has =
+                    unsafe { PeekMessageW(&mut message, None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE) };
+                if !has.as_bool() {
+                    break;
+                }
+                let fired = message.wParam.0 as i32;
+                if let Some((_, keybind_id)) = current.iter().find(|(id, _)| *id == fired) {
+                    let keybind_id = keybind_id.clone();
+                    queue_event(proxy, NativeEvent::KeybindFired { keybind_id });
+                }
+            }
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(keybinds::HotkeySync(bindings)) => {
+                    unregister_all(&mut current);
+                    for binding in &bindings {
+                        let id = next_id;
+                        next_id = next_id.wrapping_add(1);
+                        let registered = unsafe {
+                            RegisterHotKey(
+                                None,
+                                id,
+                                HOT_KEY_MODIFIERS(binding.modifiers),
+                                binding.vk,
+                            )
+                        };
+                        if registered.is_ok() {
+                            current.push((id, binding.id.clone()));
+                        } else {
+                            // Conflict (system/Discord/another app holds the
+                            // chord): loud per-keybind skip, the rest stand.
+                            eprintln!(
+                                "[Keybinds][conflict] id={} modifiers={} vk={} is already registered; skipping",
+                                binding.id, binding.modifiers, binding.vk
+                            );
+                        }
+                    }
+                    println!("[Keybinds][Hotkeys] registered={}", current.len());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    unregister_all(&mut current);
+                    return;
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        while rx.recv().is_ok() {}
     }
 }
 
@@ -4463,6 +4567,134 @@ fn respond_gallery_err(
     println!("[Gallery][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
 }
 
+/// Sends one keybind success response and completes request correlation.
+/// Shared by every `keybinds.*` dispatch arm so the four operations
+/// cannot drift in envelope shape, correlation, or metrics logging.
+fn respond_keybinds_ok(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    payload: BridgeResponsePayload,
+    metric: &str,
+    latency_ms: f64,
+) {
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: true,
+        payload: Some(payload),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Keybinds][Metrics] {metric} request_latency_ms={latency_ms:.3}");
+}
+
+/// Sends one keybind typed failure: path-free code plus message, same
+/// envelope discipline as every other capability.
+fn respond_keybinds_err(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    code: &'static str,
+    message: String,
+    latency_ms: f64,
+) {
+    eprintln!("[Keybinds][{code}] {message}");
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: false,
+        payload: None,
+        error: Some(BridgeError { code, message }),
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Keybinds][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
+}
+
+/// Re-validates one keybind firing and executes its stored action.
+/// `from_hotkey` selects the expected scope: worker firings must name
+/// global entries, matcher reports must name non-global ones — a cross
+/// claim is logged and dropped. Unknown or disabled ids are logged and
+/// dropped (a stale table or a crafted event can never execute).
+fn fire_keybind(
+    webview: &WebView,
+    profile_path: &std::path::Path,
+    keybind_id: &str,
+    from_hotkey: bool,
+) {
+    let entries = match keybinds::list_keybinds(profile_path) {
+        Ok(entries) => entries,
+        Err(failure) => {
+            eprintln!("[Keybinds][{}] {}", failure.code, failure.message);
+            return;
+        }
+    };
+    let Some(entry) = entries.iter().find(|entry| entry.id == keybind_id) else {
+        eprintln!("[Keybinds][unknown] firing for an unknown keybind id; dropping");
+        return;
+    };
+    if !entry.enabled {
+        eprintln!("[Keybinds][disabled] firing for a disabled keybind; dropping");
+        return;
+    }
+    if entry.global != from_hotkey {
+        eprintln!("[Keybinds][scope] firing claimed the wrong scope; dropping");
+        return;
+    }
+    execute_keybind_action(webview, entry.action);
+}
+
+/// Executes one validated keybind action in the main document. The action
+/// selects a fixed page script (flux dispatch, history calls, the F4
+/// QuickCSS handoff, settings pushState); nothing is interpolated and no
+/// response is ever sent (fire-and-forget, like Electron's `runAction`).
+fn execute_keybind_action(webview: &WebView, action: keybinds::KeybindAction) {
+    let script = keybinds::keybind_action_script(action);
+    if let Err(error) = webview.evaluate_script(&script) {
+        eprintln!(
+            "[Keybinds][{}] action script failed: {error}",
+            action.as_str()
+        );
+    } else {
+        println!("[Keybinds][Action] action={}", action.as_str());
+    }
+}
+
+/// Re-registers the worker hotkey table from authoritative settings
+/// (Electron's `refreshGlobalKeybinds` model). Runs after startup and
+/// after every successful management mutation. A broken worker channel
+/// only logs: management still works, hotkeys go inert until restart.
+fn sync_hotkey_worker(
+    sender: &Option<std::sync::mpsc::Sender<keybinds::HotkeySync>>,
+    profile_path: &std::path::Path,
+) {
+    let Some(sender) = sender else {
+        return;
+    };
+    let bindings = match keybinds::list_keybinds(profile_path) {
+        Ok(entries) => keybinds::global_hotkey_bindings(&entries),
+        Err(failure) => {
+            eprintln!("[Keybinds][{}] {}", failure.code, failure.message);
+            return;
+        }
+    };
+    if sender.send(keybinds::HotkeySync(bindings)).is_err() {
+        eprintln!(
+            "[Keybinds] hotkey worker is unavailable; global hotkeys are inert until restart"
+        );
+    }
+}
+
 /// Converts a renderer-supplied save-metadata envelope into the bounded
 /// store form. Strings are sliced exactly like Electron's save paths;
 /// unknown members never parse (protocol `deny_unknown_fields`).
@@ -5503,6 +5735,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         eprintln!("[Backup][Restore] could not start the restore worker: {error}");
     }
+    // Dedicated global-hotkey worker for keybinds (F8 core): Win32
+    // `RegisterHotKey` plus its own message loop live here so the
+    // WebView/UI thread never blocks; firings cross back as `KeybindFired`
+    // on the event loop. The table re-syncs from authoritative settings
+    // at startup and after every management mutation (Electron's
+    // refreshGlobalKeybinds model). Registration conflicts fail
+    // per-keybind and loud, never aborting the set. No hooks, no
+    // SendInput, no synthetic key events.
+    const KEYBIND_HOTKEY_WORKER_NAME: &str = "remcord-keybind-hotkeys";
+    let (hotkey_tx, hotkey_rx) = std::sync::mpsc::channel::<keybinds::HotkeySync>();
+    let hotkey_proxy = proxy.clone();
+    let mut keybind_hotkey_tx: Option<std::sync::mpsc::Sender<keybinds::HotkeySync>> = None;
+    if let Err(error) = thread::Builder::new()
+        .name(KEYBIND_HOTKEY_WORKER_NAME.to_owned())
+        .spawn(move || {
+            run_hotkey_worker(hotkey_rx, &hotkey_proxy);
+        })
+    {
+        eprintln!("[Keybinds] could not start the hotkey worker: {error}");
+    } else {
+        keybind_hotkey_tx = Some(hotkey_tx);
+    }
+    sync_hotkey_worker(&keybind_hotkey_tx, &profile_path);
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
@@ -8529,6 +8784,190 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 latency_ms,
                             );
                         }
+                        BridgeCommand::KeybindsList(_) => {
+                            // Validated inventory, metadata only. Entries
+                            // that cannot validate (including
+                            // `runJavascript` survivors) are already
+                            // excluded by the keybind owner.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match keybinds::list_keybinds(&profile_path) {
+                                Ok(entries) => respond_keybinds_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::KeybindsList(KeybindsListResponse {
+                                        keybinds: entries
+                                            .iter()
+                                            .map(|entry| {
+                                                serde_json::json!({
+                                                    "id": entry.id,
+                                                    "accelerator": entry.accelerator,
+                                                    "action": entry.action.as_str(),
+                                                    "global": entry.global,
+                                                    "enabled": entry.enabled,
+                                                })
+                                            })
+                                            .collect(),
+                                    }),
+                                    "op=list",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_keybinds_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::KeybindsAdd(payload) => {
+                            // Validated save; `runJavascript` and `js`
+                            // members fail validation (never stored, never
+                            // executed). Success re-registers the global
+                            // set, mirroring refreshGlobalKeybinds.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match keybinds::add_keybind(
+                                &profile_path,
+                                &payload.id,
+                                &payload.accelerator,
+                                &payload.action,
+                                payload.global,
+                                payload.enabled,
+                            ) {
+                                Ok(entry) => {
+                                    sync_hotkey_worker(&keybind_hotkey_tx, &profile_path);
+                                    respond_keybinds_ok(
+                                        &webview,
+                                        &mut request_tracker,
+                                        &mut response_count,
+                                        request_id,
+                                        BridgeResponsePayload::KeybindsAdd(KeybindsAddResponse {
+                                            ok: true,
+                                            id: Some(entry.id),
+                                            error: None,
+                                        }),
+                                        "op=add",
+                                        latency_ms,
+                                    );
+                                }
+                                Err(failure) => respond_keybinds_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::KeybindsAdd(KeybindsAddResponse {
+                                        ok: false,
+                                        id: None,
+                                        error: Some(failure.code.to_owned()),
+                                    }),
+                                    "op=add",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::KeybindsToggle(payload) => {
+                            // Flip + re-register; unknown ids resolve
+                            // `{ok: false}` without writing.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match keybinds::toggle_keybind(&profile_path, &payload.id) {
+                                Ok(enabled) => {
+                                    sync_hotkey_worker(&keybind_hotkey_tx, &profile_path);
+                                    respond_keybinds_ok(
+                                        &webview,
+                                        &mut request_tracker,
+                                        &mut response_count,
+                                        request_id,
+                                        BridgeResponsePayload::KeybindsToggle(
+                                            KeybindsToggleResponse {
+                                                ok: true,
+                                                enabled: Some(enabled),
+                                            },
+                                        ),
+                                        "op=toggle",
+                                        latency_ms,
+                                    );
+                                }
+                                Err(failure) => {
+                                    if failure.code == "NOT_FOUND" {
+                                        respond_keybinds_ok(
+                                            &webview,
+                                            &mut request_tracker,
+                                            &mut response_count,
+                                            request_id,
+                                            BridgeResponsePayload::KeybindsToggle(
+                                                KeybindsToggleResponse { ok: false, enabled: None },
+                                            ),
+                                            "op=toggle",
+                                            latency_ms,
+                                        );
+                                    } else {
+                                        respond_keybinds_err(
+                                            &webview,
+                                            &mut request_tracker,
+                                            &mut response_count,
+                                            request_id,
+                                            failure.code,
+                                            failure.message,
+                                            latency_ms,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        BridgeCommand::KeybindsRemove(payload) => {
+                            // Remove + re-register; unknown ids resolve
+                            // `{ok: false}` without writing.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match keybinds::remove_keybind(&profile_path, &payload.id) {
+                                Ok(_) => {
+                                    sync_hotkey_worker(&keybind_hotkey_tx, &profile_path);
+                                    respond_keybinds_ok(
+                                        &webview,
+                                        &mut request_tracker,
+                                        &mut response_count,
+                                        request_id,
+                                        BridgeResponsePayload::KeybindsRemove(
+                                            KeybindsRemoveResponse { ok: true },
+                                        ),
+                                        "op=remove",
+                                        latency_ms,
+                                    );
+                                }
+                                Err(failure) => {
+                                    if failure.code == "NOT_FOUND" {
+                                        respond_keybinds_ok(
+                                            &webview,
+                                            &mut request_tracker,
+                                            &mut response_count,
+                                            request_id,
+                                            BridgeResponsePayload::KeybindsRemove(
+                                                KeybindsRemoveResponse { ok: false },
+                                            ),
+                                            "op=remove",
+                                            latency_ms,
+                                        );
+                                    } else {
+                                        respond_keybinds_err(
+                                            &webview,
+                                            &mut request_tracker,
+                                            &mut response_count,
+                                            request_id,
+                                            failure.code,
+                                            failure.message,
+                                            latency_ms,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         BridgeCommand::ThemeInstallCode(payload) => {
                             // Install from CSS text only: the id is derived
                             // from `@name`, the filename is fixed, and the
@@ -9591,6 +10030,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            Event::UserEvent(NativeEvent::KeybindFired { keybind_id }) => {
+                // Global-hotkey firing from the worker thread: re-validate
+                // (known, enabled, global-scope) and execute the stored
+                // action. Anything else is logged and dropped — a stale
+                // worker table can outlive a management mutation by one
+                // sync, and ids never come from the renderer here either.
+                fire_keybind(&webview, &profile_path, &keybind_id, true);
+            }
             Event::UserEvent(NativeEvent::ThemeImportReady {
                 request_id,
                 received_at,
@@ -10434,8 +10881,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                             Err(error) => eprintln!("[SettingsBoot] setLang failed: {error}"),
                         }
                     }
-                    BridgeEvent::SettingsBootRestart(_) => {
-                        // Electron relaunches the application
+                    BridgeEvent::KeybindMatched(payload) => {
+                        // In-page matcher report: carries only the entry
+                        // id. firings must name non-global entries (global
+                        // ones fire through the hotkey worker instead); the
+                        // shared validator enforces scope plus known and
+                        // enabled, then executes the stored action.
+                        fire_keybind(&webview, &profile_path, &payload.id, false);
+                    }
+                    BridgeEvent::SettingsBootRestart(_) => {                        // Electron relaunches the application
                         // (`app.relaunch()` + `app.exit()`), and the native
                         // shell must match that: mod adapters are resolved
                         // once at startup and baked into the document-start
@@ -11337,6 +11791,31 @@ mod tests {
                 "{forbidden} must never be importable"
             );
         }
+    }
+
+    #[test]
+    fn f8_keybind_execution_registers_validated_entries_without_code() {
+        // Management capabilities exist in the boot snapshot; the matcher
+        // ships in the document-start script; runJavascript has no wire
+        // shape anywhere (no command, no event, no action variant).
+        for capability in [
+            "keybinds.list",
+            "keybinds.add",
+            "keybinds.toggle",
+            "keybinds.remove",
+        ] {
+            assert!(super::BOOT_SNAPSHOT.capabilities.contains(&capability));
+        }
+        assert!(super::KEYBIND_MATCHER_SCRIPT.contains("keybind_matched"));
+        assert!(super::KEYBIND_MATCHER_SCRIPT.contains("remcordNativeKeybindMatcher"));
+        assert!(crate::keybinds::KeybindAction::parse("runJavascript").is_none());
+        // The action scripts carry fixed Electron shapes and no
+        // interpolation surface.
+        let mute = crate::keybinds::keybind_action_script(crate::keybinds::KeybindAction::Mute);
+        assert!(mute.contains("AUDIO_TOGGLE_SELF_MUTE"));
+        // Voice actions stay flux dispatches (harmless without a call);
+        // settings navigation uses the fixed path.
+        assert!(crate::keybinds::KEYBIND_OPEN_SETTINGS_PATH.starts_with('/'));
     }
 
     #[test]

@@ -1651,6 +1651,63 @@ test("F5 gallery keeps the Electron store contract with a natively-gated page", 
     assert.match(compat, /getFile: getGalleryFile/);
 });
 
+test("F8 keybind execution runs validated entries with runJavascript structurally excluded", () => {
+    // Electron registers enabled+global entries as system hotkeys and
+    // serves enabled non-global ones as menu accelerators; runAction runs
+    // nine actions including arbitrary-JS execution. Natively the same
+    // entries register through RegisterHotKey (global) and the in-page
+    // matcher (non-global), actions run through fixed page scripts, and
+    // runJavascript has no wire shape anywhere.
+    const keybindsMain = readFileSync(new URL("../../src/discord/globalKeybinds.ts", import.meta.url), "utf8");
+    assert.match(keybindsMain, /globalShortcut\.register\(keybind\.accelerator/);
+    assert.match(keybindsMain, /globalShortcut\.unregisterAll\(\)/);
+    assert.match(ipc, /ipcMain\.on\("addKeybind"/);
+    assert.match(ipc, /ipcMain\.on\("toggleKeybind"/);
+    assert.match(ipc, /ipcMain\.on\("removeKeybind"/);
+    assert.match(ipc, /refreshGlobalKeybinds\(\)/);
+    // The Keybinds page manages entries through the same member names
+    // natively (async capabilities) and offers no runJavascript action
+    // on that path; the card toggles/removes through the same members.
+    const keybindsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/KeybindsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.doesNotMatch(keybindsPage, /not available in the native Remcord app yet/);
+    assert.match(keybindsPage, /KeybindMaker/);
+    const keybindMaker = readFileSync(
+        new URL("../../src/shelter/settings/components/KeybindMaker.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(keybindMaker, /isNativeKeybindAvailable\(\)/);
+    assert.match(keybindMaker, /addKeybindNative\(/);
+    const keybindCard = readFileSync(
+        new URL("../../src/shelter/settings/components/KeybindCard.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(keybindCard, /toggleKeybindNative\(/);
+    assert.match(keybindCard, /removeKeybindNative\(/);
+    // The native contract pins the same shape from the host side. Doc
+    // comments name the forbidden primitives for contrast — strip comment
+    // lines before asserting, like the resolver test does.
+    const nativeKeybinds = readFileSync(new URL("../src/keybinds.rs", import.meta.url), "utf8");
+    assert.match(nativeKeybinds, /STRUCTURALLY EXCLUDED/);
+    const shippedKeybinds = nativeKeybinds
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n");
+    assert.doesNotMatch(shippedKeybinds, /SendInput|SetWindowsHookEx|WH_KEYBOARD/);
+    // Global registration lives in the main-thread worker owner; the
+    // matched event shape lives in the protocol plus the matcher script.
+    const nativeMain = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    assert.match(nativeMain, /RegisterHotKey/);
+    assert.match(nativeMain, /KeybindFired/);
+    const nativeProtocol = readFileSync(new URL("../src/protocol.rs", import.meta.url), "utf8");
+    assert.match(nativeProtocol, /KeybindMatched/);
+    const matcher = readFileSync(new URL("../web/keybinds/matcher.js", import.meta.url), "utf8");
+    assert.match(matcher, /keybind_matched/);
+    assert.match(matcher, /preventDefault/);
+});
+
 test("F7 settings import stays copy-only with no Electron auto-migration", () => {
     // The Electron app never migrates settings between profiles: no
     // cross-profile import call may exist on its side (the internal

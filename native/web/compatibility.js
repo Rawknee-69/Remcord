@@ -438,6 +438,129 @@
         return request({ type: "app_get_version", payload: {} }, timeoutMs).then((payload) => payload.version);
     }
 
+    // Keybind management (F8 core): same member names as the Electron
+    // bridge (`settings.addKeybind/toggleKeybind/removeKeybind`, which are
+    // fire-and-forget sends), but async with typed outcomes — the host
+    // validates, persists, and re-registers the global set. `listKeybinds`
+    // serves the validated inventory the in-page matcher filters.
+    const KEYBIND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+    const MAX_KEYBIND_ACCELERATOR_BYTES = 32;
+    const MAX_KEYBIND_LIST_ENTRIES = 64;
+    // The eight executable actions (keybinds.rs parity). `runJavascript`
+    // is structurally excluded: it has no wire shape and never executes.
+    const KEYBIND_ACTIONS = [
+        "mute",
+        "deafen",
+        "leaveCall",
+        "pushToTalk",
+        "navigateBack",
+        "navigateForward",
+        "openQuickCss",
+        "openSettings",
+    ];
+
+    function checkKeybindId(id) {
+        if (typeof id !== "string" || !KEYBIND_ID_PATTERN.test(id)) {
+            return "id must match [A-Za-z0-9_-]{1,64}";
+        }
+        return null;
+    }
+
+    function checkKeybindAccelerator(accelerator) {
+        if (
+            typeof accelerator !== "string" ||
+            accelerator.length === 0 ||
+            textEncoder.encode(accelerator).length > MAX_KEYBIND_ACCELERATOR_BYTES
+        ) {
+            return "accelerator must be a non-empty string of at most 32 UTF-8 bytes";
+        }
+        return null;
+    }
+
+    function listKeybinds(timeoutMs = 5000) {
+        requireCapability("keybinds.list");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host owns the inventory,
+        // validation, and bounds. Entries carry metadata only. The
+        // validator resolves the bare array for exact Electron parity.
+        return request({ type: "keybinds_list", payload: {} }, timeoutMs);
+    }
+
+    function addKeybind(keybind, timeoutMs = 5000) {
+        requireCapability("keybinds.add");
+        if (!keybind || typeof keybind !== "object" || Array.isArray(keybind)) {
+            return Promise.reject(new TypeError("keybind must be an object"));
+        }
+        const badId = checkKeybindId(keybind.id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        const badAccelerator = checkKeybindAccelerator(keybind.accelerator);
+        if (badAccelerator) return Promise.reject(new TypeError(badAccelerator));
+        if (typeof keybind.action !== "string" || !KEYBIND_ACTIONS.includes(keybind.action)) {
+            return Promise.reject(new TypeError("action must be one of the eight executable actions"));
+        }
+        if (typeof keybind.global !== "boolean" || typeof keybind.enabled !== "boolean") {
+            return Promise.reject(new TypeError("global and enabled must be booleans"));
+        }
+        if (keybind.js !== undefined) {
+            // Stored code can never cross: runJavascript entries are
+            // refused outright, not sanitized.
+            return Promise.reject(new TypeError("keybind must not carry executable code"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Id plus accelerator plus action plus flags only: the host
+        // validates the grammar, refuses duplicates, persists, and
+        // re-registers. Typed failures resolve { ok: false, error } so
+        // the maker can toast the reason.
+        return request(
+            {
+                type: "keybinds_add",
+                payload: {
+                    id: keybind.id,
+                    accelerator: keybind.accelerator,
+                    action: keybind.action,
+                    global: keybind.global,
+                    enabled: keybind.enabled,
+                },
+            },
+            timeoutMs,
+        ).then((payload) => {
+            // Id echo must equal the request: one entry's save can never
+            // resolve another entry's call.
+            if (payload.ok === true && payload.id !== keybind.id) {
+                throw new Error("Native keybind save response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
+    function toggleKeybind(id, timeoutMs = 5000) {
+        requireCapability("keybinds.toggle");
+        const badId = checkKeybindId(id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Id only: the host flips the stored flag and re-registers.
+        // Unknown ids resolve { ok: false } without writing.
+        return request({ type: "keybinds_toggle", payload: { id } }, timeoutMs);
+    }
+
+    function removeKeybind(id, timeoutMs = 5000) {
+        requireCapability("keybinds.remove");
+        const badId = checkKeybindId(id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Id only: the host removes the entry and re-registers. Unknown
+        // ids resolve { ok: false } without writing.
+        return request({ type: "keybinds_remove", payload: { id } }, timeoutMs);
+    }
+
     // Read-only host facts for the debug/GPU copy actions: app version,
     // WebView2 Runtime version, profile-kind label, channel, csp, mod ids.
     // Fixed-vocabulary strings plus the filtered id list only — no paths,
@@ -1655,6 +1778,68 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "keybinds_list") {
+            const payload = response.payload.payload;
+            // Validated inventory, metadata only: bounded entries with the
+            // closed id/accelerator/action/flag shape. No js, path, URL, or
+            // code member may ride along.
+            const entriesValid =
+                Array.isArray(payload?.keybinds) &&
+                payload.keybinds.length <= MAX_KEYBIND_LIST_ENTRIES &&
+                payload.keybinds.every(
+                    (entry) =>
+                        entry &&
+                        typeof entry.id === "string" &&
+                        KEYBIND_ID_PATTERN.test(entry.id) &&
+                        typeof entry.accelerator === "string" &&
+                        textEncoder.encode(entry.accelerator).length <= MAX_KEYBIND_ACCELERATOR_BYTES &&
+                        typeof entry.action === "string" &&
+                        KEYBIND_ACTIONS.includes(entry.action) &&
+                        typeof entry.global === "boolean" &&
+                        typeof entry.enabled === "boolean" &&
+                        entry.js === undefined &&
+                        entry.path === undefined &&
+                        entry.url === undefined,
+                );
+            if (!payload || Object.keys(payload).length !== 1 || !entriesValid) {
+                request.reject(new Error("Native keybind list response schema is invalid"));
+                return;
+            }
+            request.resolve(payload.keybinds);
+        } else if (response.ok === true && response.payload?.type === "keybinds_add") {
+            const payload = response.payload.payload;
+            // Typed echo: success carries the saved id (which must equal
+            // the request — one entry's save can never resolve another's),
+            // failure carries the code for the maker toast.
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok
+                    ? typeof payload.id !== "string" || payload.error !== undefined
+                    : typeof payload.error !== "string" || payload.id !== undefined)
+            ) {
+                request.reject(new Error("Native keybind save response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "keybinds_toggle") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok ? typeof payload.enabled !== "boolean" : payload.enabled !== undefined)
+            ) {
+                request.reject(new Error("Native keybind toggle response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "keybinds_remove") {
+            const payload = response.payload.payload;
+            if (!payload || Object.keys(payload).length !== 1 || typeof payload.ok !== "boolean") {
+                request.reject(new Error("Native keybind removal response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "localization_string") {
             const payload = response.payload.payload;
             if (
@@ -2630,6 +2815,10 @@
         set: setSetting,
         setLang: bootSetLang,
         importElectron: importElectronSettings,
+        addKeybind,
+        toggleKeybind,
+        removeKeybind,
+        listKeybinds,
     });
     const themesShim = Object.freeze({
         installFromCode: installThemeFromCode,

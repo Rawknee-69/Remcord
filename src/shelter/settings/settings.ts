@@ -1129,6 +1129,95 @@ export async function importElectronSettingsNative(): Promise<ElectronImportResu
     return { applied: result.applied, skipped: result.skipped, restartRequired: result.restartRequired };
 }
 
+/** Minimal native keybind namespace. `remcordWindow.d.ts` stays
+ * Electron-shaped (fire-and-forget `void` members); the native async
+ * result shapes are described only here, at the call sites that consume
+ * them. No code, path, URL, or generic member.
+ */
+interface NativeKeybindNamespace {
+    addKeybind?: (keybind: unknown) => Promise<unknown>;
+    toggleKeybind?: (id: string) => Promise<unknown>;
+    removeKeybind?: (id: string) => Promise<unknown>;
+    listKeybinds?: () => Promise<unknown>;
+}
+
+/** True when the native keybind capabilities are the active path. Gated
+ * on the existing `isNativeWebView` environment check AND function
+ * presence — no second detection mechanism. All four members must be
+ * present; a partial namespace falls back safely. */
+export function isNativeKeybindAvailable(): boolean {
+    if (!isNativeWebView()) return false;
+    const settings = (window.remcord as unknown as { settings?: NativeKeybindNamespace }).settings;
+    return (
+        typeof settings?.addKeybind === "function" &&
+        typeof settings?.toggleKeybind === "function" &&
+        typeof settings?.removeKeybind === "function" &&
+        typeof settings?.listKeybinds === "function"
+    );
+}
+
+export interface KeybindAddResult {
+    ok: boolean;
+    id?: string;
+    error?: string;
+}
+
+export interface KeybindToggleResult {
+    ok: boolean;
+    enabled?: boolean;
+}
+
+/**
+ * Native keybind save. Rejects on transport failure; typed host failures
+ * (`{ok:false, error}`) resolve so the maker can toast the reason.
+ * `runJavascript` entries never reach here — the maker offers only the
+ * eight executable actions natively.
+ */
+export async function addKeybindNative(keybind: unknown): Promise<KeybindAddResult> {
+    const settings = (window.remcord as unknown as { settings?: NativeKeybindNamespace }).settings;
+    const save = settings?.addKeybind;
+    if (typeof save !== "function") throw new Error("[Remcord] Native keybind save is unavailable.");
+    const result = (await save(keybind)) as { ok?: unknown; id?: unknown; error?: unknown };
+    if (!result || typeof result.ok !== "boolean") {
+        throw new Error("[Remcord] Native keybind save returned an invalid result.");
+    }
+    return {
+        ok: result.ok,
+        id: typeof result.id === "string" ? result.id : undefined,
+        error: typeof result.error === "string" ? result.error : undefined,
+    };
+}
+
+/**
+ * Native keybind enable flip. Unknown ids resolve `{ok:false}` without
+ * writing; transport failures reject.
+ */
+export async function toggleKeybindNative(id: string): Promise<KeybindToggleResult> {
+    const settings = (window.remcord as unknown as { settings?: NativeKeybindNamespace }).settings;
+    const toggle = settings?.toggleKeybind;
+    if (typeof toggle !== "function") throw new Error("[Remcord] Native keybind toggle is unavailable.");
+    const result = (await toggle(id)) as { ok?: unknown; enabled?: unknown };
+    if (!result || typeof result.ok !== "boolean") {
+        throw new Error("[Remcord] Native keybind toggle returned an invalid result.");
+    }
+    return { ok: result.ok, enabled: typeof result.enabled === "boolean" ? result.enabled : undefined };
+}
+
+/**
+ * Native keybind removal. Unknown ids resolve `{ok:false}` without
+ * writing; transport failures reject.
+ */
+export async function removeKeybindNative(id: string): Promise<{ ok: boolean }> {
+    const settings = (window.remcord as unknown as { settings?: NativeKeybindNamespace }).settings;
+    const remove = settings?.removeKeybind;
+    if (typeof remove !== "function") throw new Error("[Remcord] Native keybind removal is unavailable.");
+    const result = (await remove(id)) as { ok?: unknown };
+    if (!result || typeof result.ok !== "boolean") {
+        throw new Error("[Remcord] Native keybind removal returned an invalid result.");
+    }
+    return { ok: result.ok };
+}
+
 /** User-facing preview of one held staged restore (normalized, never throwing). */
 export interface NativeRestorePreview {
     includes: Record<string, boolean>;

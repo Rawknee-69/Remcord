@@ -542,6 +542,39 @@ Importable keys (23): `mods`, `csp`, `channel` (exact unions, restart-requiring)
 
 Deliberately excluded: window chrome (`windowStyle`, `transparency`, `windowMaterial` — native chrome differs), `tray` (F13 missing), `performanceMode` (engine differs), lifecycle (`hardwareAcceleration`, `startMinimized`, `multiInstance`, `doneSetup`, `automaticUpdates`), network routing (`proxyMode`, `proxyRules`, `proxyBypassRules`, `proxyPacScript` — machine-specific), process args (`additionalArguments` — unsafe), paths (`customIcon`, `galleryRoot`), code URLs (`customJsBundle`, `customCssBundle`), `keybinds` (F8, carries JS), `audio` (voice surfaces), `modCache` (re-fetched), platform keys (`vaapi`, `useMacSystemPicker`, `sdpH264BaselineRewrite`), arRPC keys (`inviteWebsocket`, `processScanning`, `windowsLegacyScanning`, `scanInterval` excepted as bounded persistence only — F11 deferred), and ephemeral keys (`"0"`, `ignoreProtocolWarning`). Absent keys keep native values; present-but-invalid keys are skipped and named, never guessed.
 
+## Keybind execution (F8 core)
+
+F8 migrates keybind management plus execution: three typed async capabilities (`keybinds.add` / `keybinds.toggle` / `keybinds.remove`) plus a read-only inventory (`keybinds.list`), all over the native `settings.keybinds` array. The facade keeps Electron's member names (`settings.addKeybind/toggleKeybind/removeKeybind`, fire-and-forget sends there) with typed async outcomes; the Keybinds page, card, and maker call the same members natively with optimistic store updates (reverted when the host refuses). Every management call re-registers the global set (Electron's `refreshGlobalKeybinds` model).
+
+### Electron chain (unchanged)
+
+`src/discord/globalKeybinds.ts::registerGlobalKeybinds` registers enabled + global entries via `globalShortcut.register` (failures swallowed) at window creation; `refreshGlobalKeybinds` unregisters all and re-registers after every management mutation. Enabled + non-global entries become app-menu accelerators instead (`menu.ts::setMenu`, focused-app-only). `src/common/keybindActions.ts::runAction` runs nine actions: voice toggles dispatch fixed Shelter flux events, navigation runs history back/forward, `openQuickCss` opens the CSS file in the system editor, `openSettings` pushes `/settings/remcord-settings` history state, `runJavascript` executes the stored `js`. `src/discord/ipc.ts` exposes `addKeybind` / `toggleKeybind` / `removeKeybind` sync sends; `src/discord/preload/bridge.ts` maps them 1:1. `native/tests/electron-compat.test.mjs` asserts all of this is byte-identical.
+
+### Native chain
+
+```text
+renderer maker save → settings.addKeybind({id, accelerator, action, global, enabled})
+  → requireCapability("keybinds.add") or sync UNSUPPORTED_CAPABILITY throw
+  → client checks (id shape, accelerator bytes, 8-action allowlist, bool
+     flags, NO js member — TypeError before dispatch)
+  → {"type":"keybinds_add","payload":{...}} (js/paths/URLs host-rejected)
+  → host: id shape + accelerator grammar + action allowlist + duplicate
+     check → persist → re-register worker table
+  → resolved (never rejected) keybinds_add { ok, id } | { ok, error }
+
+global chord pressed anywhere
+  → worker WM_HOTKEY → KeybindFired { keybind_id }
+  → host re-validates (known, enabled, GLOBAL scope) → fixed action script
+
+focused Discord keydown matches a non-global entry
+  → matcher posts keybind_matched { id }
+  → host re-validates (known, enabled, NON-global scope) → fixed action script
+```
+
+Global hotkeys use Win32 `RegisterHotKey` on a dedicated worker thread (own message loop, 50 ms sync poll; conflicts fail per-keybind and loud). Non-global keybinds have no native menu (F15), so the document-start matcher (`native/web/keybinds/matcher.js`) compares canonical parsed forms — maker release-order noise cannot break a match — and shadows the page on match (menu-accelerator parity). Every firing re-validates scope: a global id through the matcher (or vice versa) is dropped loudly. Voice actions dispatch Electron's exact flux events (harmless without a call; F10 stays deferred; `pushToTalk` keeps press-only latching). `openSettings` pushes the fixed path; `openQuickCss` dispatches the F4 handoff.
+
+Deliberate Electron differences (hardening, not regressions): `runJavascript` is structurally excluded permanently (no wire shape, no action variant, `js` refused by `deny_unknown_fields`, stored survivors skipped at listing); duplicate ids refused (`KEYBIND_EXISTS`, Electron pushes blindly); inventory bounded (64 entries); accelerators bounded (32 bytes) with a closed token table (numpad refused like the maker); non-global inventory refreshes throttled (30 s) instead of menu rebuilds; management failures resolve typed outcomes instead of silent sends; the maker does not offer `runJavascript` natively.
+
 ## Theme install capability (Phase D Step 3a)
 
 `themes.install_code` (wire `theme_install_code`, facade `window.remcord.themes.installFromCode(css)`) installs one BetterDiscord theme from CSS text under the host-controlled themes root. No URL, no path, no filename, no id, no dialog, no fetch: the host derives the id from `@name`, fixes `src.css`, and keeps the theme disabled. No `src/` caller is branched — the Electron theme UI keeps calling `install`/`edit`/`openImportPicker`.

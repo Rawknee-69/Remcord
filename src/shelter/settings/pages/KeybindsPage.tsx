@@ -4,7 +4,6 @@ import { EmptyState } from "../components/EmptyState.jsx";
 import { KeybindCard } from "../components/KeybindCard.jsx";
 import { KeybindMaker } from "../components/KeybindMaker.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
-import { isNativeWebView } from "../settings.js";
 import classes from "./KeybindsPage.module.css";
 
 const {
@@ -14,9 +13,9 @@ const {
 
 export function KeybindsPage() {
     function addNewKeybind() {
-        // The native shell exposes no keybind capability; the Add action is
-        // disabled natively, and this guards the empty-state action too.
-        if (isNativeWebView()) return;
+        // The native shell serves the same add/toggle/remove capabilities
+        // through `window.remcord.settings` (host-validated, persisted,
+        // re-registered), so no environment branch is needed here.
         openModal(({ close }: { close: () => void }) => <KeybindMaker close={close} />);
     }
 
@@ -31,28 +30,10 @@ export function KeybindsPage() {
                 </Text>
             </SettingsPageHeader>
             <div class={classes.toolbar}>
-                <Button
-                    size={ButtonSizes.LARGE}
-                    disabled={isNativeWebView()}
-                    title={isNativeWebView() ? "Keybinds are not available in the native Remcord app" : undefined}
-                    onClick={addNewKeybind}
-                >
+                <Button size={ButtonSizes.LARGE} onClick={addNewKeybind}>
                     {t["keybind-addKeybind"]}
                 </Button>
             </div>
-            <Show when={isNativeWebView()}>
-                <div
-                    style={{
-                        background: "rgba(255, 255, 210, 0.85)",
-                        border: "1px solid #e6c200",
-                        color: "#2d2100",
-                        padding: "12px 16px",
-                    }}
-                >
-                    Keybinds are not available in the native Remcord app yet. Existing keybinds are listed below but
-                    cannot be changed here.
-                </div>
-            </Show>
             <Show when={window.remcord.platform === "linux"}>
                 <div
                     style={{
@@ -78,9 +59,7 @@ export function KeybindsPage() {
                     />
                 }
             >
-                <For each={keybinds()}>
-                    {(keybind: Keybind) => <KeybindCard keybind={keybind} disabled={isNativeWebView()} />}
-                </For>
+                <For each={keybinds()}>{(keybind: Keybind) => <KeybindCard keybind={keybind} />}</For>
             </Show>
         </>
     );

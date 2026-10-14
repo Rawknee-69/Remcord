@@ -1,5 +1,6 @@
 import { createSignal, onCleanup, Show } from "solid-js";
 import type { KeybindActions } from "../../../@types/keybind.js";
+import { addKeybindNative, isNativeKeybindAvailable } from "../settings.js";
 import { Dropdown } from "./Dropdown.jsx";
 import classes from "./KeybindMaker.module.css";
 
@@ -19,6 +20,7 @@ const {
         Divider,
         SwitchItem,
         genId,
+        showToast,
     },
     plugin: { store },
 } = shelter;
@@ -86,6 +88,36 @@ export const KeybindMaker = (props: { close: () => void }) => {
             id: genId(),
             ...(action() === "runJavascript" && { js: javascriptCode() }),
         };
+        // Native WebView2 saves through the async capability with an
+        // optimistic store update (reverted with a toast when the host
+        // refuses); Electron keeps the original store push plus
+        // fire-and-forget send. `runJavascript` is unoffered natively
+        // (see the action dropdown below), so the `js` spread never fires
+        // on that path — the host would refuse it regardless.
+        if (isNativeKeybindAvailable()) {
+            store.settings.keybinds = [...current, keybind];
+            void addKeybindNative(keybind).then(
+                (result) => {
+                    if (!result.ok) {
+                        store.settings.keybinds = (store.settings.keybinds ?? []).filter(
+                            (entry: { id: string }) => entry.id !== keybind.id,
+                        );
+                        showToast({
+                            title: "Keybind not saved",
+                            content: String(result.error ?? "invalid keybind"),
+                            duration: 4000,
+                        });
+                    }
+                },
+                () => {
+                    store.settings.keybinds = (store.settings.keybinds ?? []).filter(
+                        (entry: { id: string }) => entry.id !== keybind.id,
+                    );
+                    showToast({ title: "Keybind not saved", duration: 4000 });
+                },
+            );
+            return;
+        }
         current.push(keybind);
         store.settings.keybinds = current;
         console.log(current);
@@ -137,7 +169,12 @@ export const KeybindMaker = (props: { close: () => void }) => {
                         { label: t["keybind-navigateForward"], value: "navigateForward" },
                         { label: t["keybind-navigateBack"], value: "navigateBack" },
                         { label: t["keybind-openSettings"], value: "openSettings" },
-                        { label: t["keybind-runJavascript"], value: "runJavascript" },
+                        // `runJavascript` executes arbitrary stored code: it
+                        // has no native wire shape and is refused host-side,
+                        // so the maker does not offer it natively.
+                        ...(!isNativeKeybindAvailable()
+                            ? [{ label: t["keybind-runJavascript"], value: "runJavascript" }]
+                            : []),
                         { label: t["keybind-openQuickCss"], value: "openQuickCss" },
                     ]}
                 />

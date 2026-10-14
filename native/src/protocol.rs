@@ -93,6 +93,10 @@ pub enum BridgeCommand {
     BackupCommitRestore(BackupCommitRestoreRequest),
     BackupDiscardRestore(BackupDiscardRestoreRequest),
     GalleryList(GalleryListRequest),
+    KeybindsList(KeybindsListRequest),
+    KeybindsAdd(KeybindsAddRequest),
+    KeybindsToggle(KeybindsToggleRequest),
+    KeybindsRemove(KeybindsRemoveRequest),
     GalleryAddUrl(GalleryAddUrlRequest),
     GalleryAddLink(GalleryAddLinkRequest),
     GalleryRemove(GalleryRemoveRequest),
@@ -437,6 +441,48 @@ pub struct ThemesListRequest {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GalleryListRequest {}
+
+/// Empty request for the read-only `keybinds.list` capability: the host
+/// owns the keybind inventory, validation, and bounds. There is
+/// deliberately NO path, selector, URL, or filter. Any extra field is
+/// rejected. Entries carry metadata only (id/accelerator/action/flags) —
+/// never code: `runJavascript` entries are skipped host-side and a `js`
+/// member can never parse.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeybindsListRequest {}
+
+/// Save request for the `keybinds.add` capability: exactly one id, one
+/// accelerator, one action, and two flags. There is deliberately NO `js`
+/// member (`deny_unknown_fields` refuses it — stored code can never
+/// cross), NO path, URL, or second entry: the host validates the id
+/// shape, parses the accelerator, and accepts only the eight executable
+/// actions (`runJavascript` fails validation at dispatch).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeybindsAddRequest {
+    pub id: String,
+    pub accelerator: String,
+    pub action: String,
+    pub global: bool,
+    pub enabled: bool,
+}
+
+/// Flip request for the `keybinds.toggle` capability: exactly one
+/// validated id. The host flips the stored flag and re-registers.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeybindsToggleRequest {
+    pub id: String,
+}
+
+/// Removal request for the `keybinds.remove` capability: exactly one
+/// validated id. The host removes the entry and re-registers.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeybindsRemoveRequest {
+    pub id: String,
+}
 
 /// Renderer-supplied save metadata for gallery additions. Every member is
 /// optional and bounded; unknown members are rejected. The host slices
@@ -808,6 +854,12 @@ pub enum BridgeEvent {
     /// DEV-only diagnostic posted by the Shelter loader probe
     /// (`REMCORD_NATIVE_LOADER_PROBE=1`). Never sent by shipped code.
     ShelterLoaderProbe(ShelterLoaderProbe),
+    /// Shipped one-way event posted by the keybind matcher script when a
+    /// `keydown` matches an enabled non-global keybind. Carries only the
+    /// entry id: the host re-validates (known, enabled, non-global) and
+    /// executes the stored action itself. No accelerator, action, code,
+    /// path, or URL can cross this event.
+    KeybindMatched(KeybindMatched),
     /// Shipped one-way event posted by the `settingsBoot.setLang(locale)`
     /// boot-surface function. Fire-and-forget like Electron's
     /// `ipcRenderer.send("setLang", lang)`: no response is ever sent. The
@@ -835,6 +887,12 @@ pub enum BridgeEvent {
     /// counts/flags only — never settings values, manifests, translations,
     /// paths, or URLs.
     SettingsUiProbe(SettingsUiProbe),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeybindMatched {
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1340,6 +1398,10 @@ pub enum BridgeResponsePayload {
     GalleryUsage(GalleryUsageResponse),
     GalleryFile(GalleryFileResponse),
     GalleryRoot(GalleryRootResponse),
+    KeybindsList(KeybindsListResponse),
+    KeybindsAdd(KeybindsAddResponse),
+    KeybindsToggle(KeybindsToggleResponse),
+    KeybindsRemove(KeybindsRemoveResponse),
     WindowAck(WindowAckResponse),
 }
 
@@ -1623,6 +1685,40 @@ pub struct GalleryListResponse {
     pub categories: Vec<serde_json::Value>,
 }
 
+/// Read-only inventory response for the `keybinds.list` capability:
+/// validated entries with metadata only (id/accelerator/action/flags).
+/// `runJavascript` entries are skipped host-side; no `js` member, path,
+/// URL, or code ever crosses.
+#[derive(Serialize)]
+pub struct KeybindsListResponse {
+    pub keybinds: Vec<serde_json::Value>,
+}
+
+/// Save response for the `keybinds.add` capability, in Electron's
+/// fire-and-forget spirit but with a typed echo: `{ok, id} | {ok,
+/// error}`. Failures resolve (never reject) so the maker can toast.
+#[derive(Serialize)]
+pub struct KeybindsAddResponse {
+    pub ok: bool,
+    pub id: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Flip response for the `keybinds.toggle` capability: whether an entry
+/// was flipped plus its new state. Unknown ids resolve `{ok: false}`.
+#[derive(Serialize)]
+pub struct KeybindsToggleResponse {
+    pub ok: bool,
+    pub enabled: Option<bool>,
+}
+
+/// Removal response for the `keybinds.remove` capability: whether an
+/// entry was removed. Unknown ids resolve `{ok: false}`.
+#[derive(Serialize)]
+pub struct KeybindsRemoveResponse {
+    pub ok: bool,
+}
+
 /// Save response for the `gallery.add_url` / `gallery.add_link`
 /// capabilities, in Electron's `{ok, item} | {ok, error}` shape. Typed
 /// failures resolve (never reject) so the page can toast the reason.
@@ -1886,6 +1982,12 @@ fn gallery_id_shape_valid(id: &str) -> bool {
 /// cap. Normalization and uniqueness live in `gallery`.
 fn gallery_name_shape_valid(name: &str) -> bool {
     !name.is_empty() && name.len() <= 256
+}
+
+/// Parse-time shape check for keybind ids: presence plus byte cap.
+/// Charset rules live in `keybinds` and are re-enforced at dispatch.
+fn keybind_id_shape_valid(id: &str) -> bool {
+    !id.is_empty() && id.len() <= crate::keybinds::MAX_KEYBIND_ID_BYTES
 }
 
 fn valid_request_id(request_id: &str) -> bool {
@@ -2173,6 +2275,34 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::GalleryCategories(_)
                 | BridgeCommand::GalleryUsage(_)
                 | BridgeCommand::GalleryRoot(_) => {}
+                // Keybinds: shape check only (presence + byte caps); the
+                // accelerator grammar, id charset, action allowlist, and
+                // inventory bounds live in `keybinds` and are re-enforced
+                // at dispatch. The `js` member can never parse
+                // (`deny_unknown_fields`); `runJavascript` fails the
+                // action check at dispatch.
+                BridgeCommand::KeybindsList(_) => {}
+                BridgeCommand::KeybindsAdd(payload) => {
+                    if payload.id.is_empty()
+                        || payload.id.len() > crate::keybinds::MAX_KEYBIND_ID_BYTES
+                        || payload.accelerator.is_empty()
+                        || payload.accelerator.len() > crate::keybinds::MAX_ACCELERATOR_BYTES
+                        || payload.action.is_empty()
+                        || payload.action.len() > 32
+                    {
+                        return Err("invalid keybind save".to_owned());
+                    }
+                }
+                BridgeCommand::KeybindsToggle(payload) => {
+                    if !keybind_id_shape_valid(&payload.id) {
+                        return Err("invalid keybind id".to_owned());
+                    }
+                }
+                BridgeCommand::KeybindsRemove(payload) => {
+                    if !keybind_id_shape_valid(&payload.id) {
+                        return Err("invalid keybind id".to_owned());
+                    }
+                }
                 BridgeCommand::GalleryAddUrl(payload) => {
                     if !gallery_save_shape_valid(&payload.url, &payload.meta) {
                         return Err("invalid gallery save".to_owned());
@@ -2704,6 +2834,14 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                     }
                 }
                 BridgeEvent::SettingsBootRestart(_) => {}
+                BridgeEvent::KeybindMatched(payload) => {
+                    // Shape check only (presence + byte cap); id charset,
+                    // membership, enablement, and scope live in `keybinds`
+                    // and are re-enforced at handling.
+                    if !keybind_id_shape_valid(&payload.id) {
+                        return Err("invalid keybind id".to_owned());
+                    }
+                }
                 BridgeEvent::SettingsBootProbe(payload) => {
                     if !matches!(
                         payload.settings_source.as_str(),
@@ -3716,6 +3854,95 @@ mod tests {
         ] {
             assert!(parse_bridge_message(hostile).is_err());
         }
+    }
+
+    #[test]
+    fn keybind_commands_parse_with_closed_shapes() {
+        fn wire(wire_type: &str, payload: &str) -> String {
+            format!("{{\"version\":1,\"request_id\":\"k\",\"command\":{{\"type\":\"{wire_type}\",\"payload\":{payload}}}}}")
+        }
+        assert!(matches!(
+            parse_bridge_message(&wire("keybinds_list", "{}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(parse_bridge_message(&wire("keybinds_list", "{\"path\":\"C:\\\\x\"}")).is_err());
+        // Save: exact shape only. `js` can never parse; runJavascript is a
+        // dispatch-time refusal, not a parse error (clearer typed code).
+        assert!(matches!(
+            parse_bridge_message(&wire(
+                "keybinds_add",
+                "{\"id\":\"a-1\",\"accelerator\":\"Ctrl+M\",\"action\":\"mute\",\"global\":true,\"enabled\":true}"
+            )),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(parse_bridge_message(&wire(
+            "keybinds_add",
+            "{\"id\":\"a-1\",\"accelerator\":\"Ctrl+M\",\"action\":\"runJavascript\",\"global\":true,\"enabled\":true}"
+        ))
+        .is_ok(), "runJavascript parses; dispatch refuses it");
+        assert!(
+            parse_bridge_message(&wire(
+                "keybinds_add",
+                "{\"id\":\"a-1\",\"accelerator\":\"Ctrl+M\",\"action\":\"mute\",\"global\":true,\"enabled\":true,\"js\":\"alert(1)\"}"
+            ))
+            .is_err(),
+            "stored code can never cross"
+        );
+        assert!(
+            parse_bridge_message(&wire(
+                "keybinds_add",
+                "{\"id\":\"a-1\",\"accelerator\":\"Ctrl+M\",\"action\":\"mute\",\"global\":true}"
+            ))
+            .is_err(),
+            "enabled is required"
+        );
+        // Toggle/remove: id only.
+        assert!(matches!(
+            parse_bridge_message(&wire("keybinds_toggle", "{\"id\":\"a-1\"}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(parse_bridge_message(&wire("keybinds_remove", "{\"id\":\"\"}")).is_err());
+        assert!(
+            parse_bridge_message(&wire(
+                "keybinds_toggle",
+                "{\"id\":\"a-1\",\"enabled\":true}"
+            ))
+            .is_err(),
+            "no second member"
+        );
+        // Matched event: id only.
+        let matched = r#"{"version":1,"event":{"type":"keybind_matched","payload":{"id":"a-1"}}}"#;
+        assert!(matches!(
+            parse_bridge_message(matched),
+            Ok(BridgeMessage::Event(_))
+        ));
+        let matched_action = r#"{"version":1,"event":{"type":"keybind_matched","payload":{"id":"a-1","action":"mute"}}}"#;
+        assert!(
+            parse_bridge_message(matched_action).is_err(),
+            "actions never cross events"
+        );
+    }
+
+    #[test]
+    fn serializes_a_typed_keybinds_list_response() {
+        use super::KeybindsListResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "k-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::KeybindsList(KeybindsListResponse {
+                keybinds: vec![
+                    serde_json::json!({"id": "a-1", "accelerator": "Ctrl+M", "action": "mute", "global": true, "enabled": true}),
+                ],
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "keybinds_list");
+        assert_eq!(value["payload"]["payload"]["keybinds"][0]["id"], "a-1");
+        assert!(value["payload"]["payload"]["keybinds"][0]
+            .get("js")
+            .is_none());
     }
 
     #[test]
