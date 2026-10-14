@@ -55,6 +55,10 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_System_Threading",
+    # Process enumeration for the arRPC presence inventory (F11):
+    # ToolHelp32 snapshots only (pid + exe path). No handle, module, or
+    # thread enumeration is enabled.
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 [dev-dependencies]

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::arrpc::RpcBlacklistEntry;
 use crate::backup::{MAX_CLIENT_MODS_BYTES, MAX_CLIENT_MOD_STRING_BYTES, MAX_SHELTER_MOD_BYTES};
 use crate::folders::{FolderLocation, MAX_FOLDER_THEME_ID_BYTES};
 use crate::localization::MAX_LANG_KEY_BYTES;
@@ -109,6 +110,14 @@ pub enum BridgeCommand {
     GalleryUsage(GalleryUsageRequest),
     GalleryFile(GalleryFileRequest),
     GalleryRoot(GalleryRootRequest),
+    RpcGetProcessList(RpcGetProcessListRequest),
+    RpcRefreshProcessList(RpcRefreshProcessListRequest),
+    RpcGetDetectables(RpcGetDetectablesRequest),
+    RpcAddDetectable(RpcAddDetectableRequest),
+    RpcRemoveDetectable(RpcRemoveDetectableRequest),
+    RpcGetBlacklist(RpcGetBlacklistRequest),
+    RpcBlacklistGame(RpcBlacklistGameRequest),
+    RpcUnblacklistGame(RpcUnblacklistGameRequest),
     WindowShow(WindowShowRequest),
     WindowHide(WindowHideRequest),
     WindowMinimize(WindowMinimizeRequest),
@@ -239,10 +248,16 @@ impl<'de> serde::Deserialize<'de> for SettingsSetRequest {
             SettingsSetKey::ScreenshareQuality => SettingsSetValue::ScreenshareQuality(
                 serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
             ),
+            SettingsSetKey::ScanInterval => SettingsSetValue::ScanInterval(
+                serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
+            ),
             SettingsSetKey::SupportBannerDismissed
             | SettingsSetKey::ShowExperimentalPluginMenu
             | SettingsSetKey::ExtendedPluginAbilities
-            | SettingsSetKey::QuickCss => SettingsSetValue::Bool(
+            | SettingsSetKey::QuickCss
+            | SettingsSetKey::InviteWebsocket
+            | SettingsSetKey::ProcessScanning
+            | SettingsSetKey::WindowsLegacyScanning => SettingsSetValue::Bool(
                 serde_json::from_value(raw.value).map_err(serde::de::Error::custom)?,
             ),
         };
@@ -613,6 +628,79 @@ pub struct GalleryFileRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GalleryRootRequest {}
+
+/// Empty request for the read-only `rpc.get_process_list` capability: the
+/// host enumerates running processes live (ToolHelp32 snapshot, sorted by
+/// pid) and returns arRPC `ProcessInfo` tuples (`[pid, exe_path, args]`;
+/// args are always `[]` — unavailable from a snapshot, never invented).
+/// There is deliberately NO pid, path, filter, or selector: the inventory
+/// is whole and bounded. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcGetProcessListRequest {}
+
+/// Empty request for the `rpc.refresh_process_list` capability: same live
+/// enumeration as the read, resolving `{refreshed, count}` so callers can
+/// confirm the scan ran (Electron's fire-and-forget `void` cannot confirm).
+/// Parameter-free by protocol, like the read.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcRefreshProcessListRequest {}
+
+/// Empty request for the read-only `rpc.get_detectables` capability: the
+/// host-owned custom detectables inventory. There is deliberately NO path,
+/// selector, URL, or filter. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcGetDetectablesRequest {}
+
+/// Save request for the `rpc.add_detectable` capability: exactly one game
+/// object in the `AddDetectableModal` shape. There is deliberately NO path,
+/// URL, id override, or destination: the host validates the closed shape
+/// (`arrpc::validate_detectable`) and appends the canonical rebuilt value.
+/// Deep shape rules live in `arrpc` and are re-enforced at dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcAddDetectableRequest {
+    pub detectable: serde_json::Value,
+}
+
+/// Removal request for the `rpc.remove_detectable` capability: exactly one
+/// custom detectable id (string match, mirroring `removeDetectable`). There
+/// is deliberately NO path or index: the host filters its own store.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcRemoveDetectableRequest {
+    pub id: String,
+}
+
+/// Empty request for the read-only `rpc.get_blacklist` capability. The
+/// facade serves it synchronously from its document-start-seeded cache
+/// (Electron's preload-cache parity); the host read behind it is the
+/// tolerant `<profile>/storage/blacklist.json` load. Parameter-free by
+/// protocol: no path, selector, or filter. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcGetBlacklistRequest {}
+
+/// Save request for the `rpc.blacklist_game` capability: exactly one game
+/// name plus its numeric app id. There is deliberately NO path, URL, or
+/// second entry: the host normalizes, dedupes by id, persists, and returns
+/// the new list (Electron's handler returns it for the cache + broadcast).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcBlacklistGameRequest {
+    pub name: String,
+    pub id: i64,
+}
+
+/// Removal request for the `rpc.unblacklist_game` capability: exactly one
+/// numeric app id. The host filters its own store and returns the new list.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcUnblacklistGameRequest {
+    pub id: i64,
+}
 
 /// Empty request for the `quickcss.read` editor capability: returns the
 /// fixed Quick CSS file text. There is deliberately NO path, filename, URL,
@@ -1402,6 +1490,12 @@ pub enum BridgeResponsePayload {
     KeybindsAdd(KeybindsAddResponse),
     KeybindsToggle(KeybindsToggleResponse),
     KeybindsRemove(KeybindsRemoveResponse),
+    RpcProcessList(RpcProcessListResponse),
+    RpcProcessRefresh(RpcProcessRefreshResponse),
+    RpcDetectables(RpcDetectablesResponse),
+    RpcDetectableAdd(RpcDetectableAddResponse),
+    RpcDetectableRemove(RpcDetectableRemoveResponse),
+    RpcBlacklist(RpcBlacklistResponse),
     WindowAck(WindowAckResponse),
 }
 
@@ -1717,6 +1811,56 @@ pub struct KeybindsToggleResponse {
 #[derive(Serialize)]
 pub struct KeybindsRemoveResponse {
     pub ok: bool,
+}
+
+/// Read-only inventory response for the `rpc.get_process_list`
+/// capability: live-enumerated arRPC `ProcessInfo` tuples
+/// (`[pid, exe_path, args]` with args always `[]`). Pids and exe names
+/// only — no command lines, window titles, or usernames.
+#[derive(Serialize)]
+pub struct RpcProcessListResponse {
+    pub processes: Vec<serde_json::Value>,
+}
+
+/// Refresh response for the `rpc.refresh_process_list` capability: whether
+/// the live scan ran plus the enumerated entry count.
+#[derive(Serialize)]
+pub struct RpcProcessRefreshResponse {
+    pub refreshed: bool,
+    pub count: usize,
+}
+
+/// Read-only inventory response for the `rpc.get_detectables` capability:
+/// validated custom detectable game objects in stored order.
+#[derive(Serialize)]
+pub struct RpcDetectablesResponse {
+    pub detectables: Vec<serde_json::Value>,
+}
+
+/// Save response for the `rpc.add_detectable` capability: whether the
+/// validated entry was stored. Failures resolve `{ok:false, error}` (never
+/// reject) so the UI can toast the reason.
+#[derive(Serialize)]
+pub struct RpcDetectableAddResponse {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// Removal response for the `rpc.remove_detectable` capability: whether an
+/// entry was removed. Unknown ids resolve `{ok: false}`.
+#[derive(Serialize)]
+pub struct RpcDetectableRemoveResponse {
+    pub ok: bool,
+}
+
+/// Blacklist response for `rpc.get_blacklist` / `rpc.blacklist_game` /
+/// `rpc.unblacklist_game`: the full validated list (Electron's handlers
+/// return the list for the cache update + broadcast). Mutations converge
+/// every document through the `remcord-native:rpc-blacklist-updated` host
+/// event as well.
+#[derive(Serialize)]
+pub struct RpcBlacklistResponse {
+    pub entries: Vec<RpcBlacklistEntry>,
 }
 
 /// Save response for the `gallery.add_url` / `gallery.add_link`
@@ -2303,6 +2447,41 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid keybind id".to_owned());
                     }
                 }
+                // arRPC: shape check only (presence + byte caps); id
+                // charsets, the detectable game shape, blacklist
+                // normalization, and inventory bounds live in `arrpc` and
+                // are re-enforced at dispatch. Reads are parameter-free by
+                // protocol (`deny_unknown_fields` already rejected any
+                // renderer-supplied member).
+                BridgeCommand::RpcGetProcessList(_)
+                | BridgeCommand::RpcRefreshProcessList(_)
+                | BridgeCommand::RpcGetDetectables(_)
+                | BridgeCommand::RpcGetBlacklist(_) => {}
+                BridgeCommand::RpcAddDetectable(payload) => {
+                    // The game object is deep-validated in `arrpc` at
+                    // dispatch; the transport bound is the only parse-time
+                    // gate so hostile multi-megabyte objects fail early.
+                    let serialized = serde_json::to_string(&payload.detectable)
+                        .map_err(|_| "invalid detectable game".to_owned())?;
+                    if serialized.len() > 16 * 1024 {
+                        return Err("invalid detectable game".to_owned());
+                    }
+                }
+                BridgeCommand::RpcRemoveDetectable(payload) => {
+                    if payload.id.is_empty()
+                        || payload.id.len() > crate::arrpc::MAX_DETECTABLE_ID_BYTES
+                    {
+                        return Err("invalid detectable id".to_owned());
+                    }
+                }
+                BridgeCommand::RpcBlacklistGame(payload) => {
+                    if payload.name.is_empty()
+                        || payload.name.len() > crate::arrpc::MAX_BLACKLIST_NAME_BYTES
+                    {
+                        return Err("invalid blacklist entry".to_owned());
+                    }
+                }
+                BridgeCommand::RpcUnblacklistGame(_) => {}
                 BridgeCommand::GalleryAddUrl(payload) => {
                     if !gallery_save_shape_valid(&payload.url, &payload.meta) {
                         return Err("invalid gallery save".to_owned());
@@ -3838,6 +4017,87 @@ mod tests {
     }
 
     #[test]
+    fn rpc_commands_parse_with_closed_shapes() {
+        fn wire(wire_type: &str, payload: &str) -> String {
+            format!("{{\"version\":1,\"request_id\":\"r\",\"command\":{{\"type\":\"{wire_type}\",\"payload\":{payload}}}}}")
+        }
+        // Parameter-free reads/refresh.
+        for wire_type in [
+            "rpc_get_process_list",
+            "rpc_refresh_process_list",
+            "rpc_get_detectables",
+            "rpc_get_blacklist",
+        ] {
+            assert!(
+                matches!(
+                    parse_bridge_message(&wire(wire_type, "{}")),
+                    Ok(BridgeMessage::Request(_))
+                ),
+                "{wire_type} must parse"
+            );
+            assert!(
+                parse_bridge_message(&wire(wire_type, "{\"path\":\"C:\\\\x\"}")).is_err(),
+                "{wire_type} must refuse paths"
+            );
+        }
+        // Detectable save: object required, oversized refused early.
+        assert!(matches!(
+            parse_bridge_message(&wire(
+                "rpc_add_detectable",
+                "{\"detectable\":{\"id\":\"1\",\"name\":\"G\",\"executables\":[]}}"
+            )),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(
+            parse_bridge_message(&wire("rpc_add_detectable", "{\"id\":\"1\"}")).is_err(),
+            "detectable member is required"
+        );
+        assert!(
+            parse_bridge_message(&wire(
+                "rpc_add_detectable",
+                &format!(
+                    "{{\"detectable\":{{\"id\":\"1\",\"name\":\"{}\"}}}}",
+                    "x".repeat(17 * 1024)
+                )
+            ))
+            .is_err(),
+            "oversized detectables fail early"
+        );
+        // Detectable remove: id presence + cap.
+        assert!(matches!(
+            parse_bridge_message(&wire("rpc_remove_detectable", "{\"id\":\"abc\"}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(parse_bridge_message(&wire("rpc_remove_detectable", "{\"id\":\"\"}")).is_err());
+        // Blacklist save: name presence + cap; id is a typed integer.
+        assert!(matches!(
+            parse_bridge_message(&wire("rpc_blacklist_game", "{\"name\":\"G\",\"id\":7}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+        assert!(
+            parse_bridge_message(&wire("rpc_blacklist_game", "{\"name\":\"\",\"id\":7}")).is_err(),
+            "empty names are refused"
+        );
+        assert!(
+            parse_bridge_message(&wire("rpc_blacklist_game", "{\"name\":\"G\",\"id\":\"7\"}"))
+                .is_err(),
+            "string ids never parse"
+        );
+        assert!(
+            parse_bridge_message(&wire(
+                "rpc_blacklist_game",
+                "{\"name\":\"G\",\"id\":7,\"path\":\"C:\\\\x\"}"
+            ))
+            .is_err(),
+            "paths are refused"
+        );
+        assert!(matches!(
+            parse_bridge_message(&wire("rpc_unblacklist_game", "{\"id\":7}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+    }
+
+    #[test]
     fn settings_import_electron_parses_parameter_free() {
         let request = r#"{"version":1,"request_id":"import-1","command":{"type":"settings_import_electron","payload":{}}}"#;
         assert!(matches!(
@@ -3987,6 +4247,78 @@ mod tests {
         assert_eq!(value["payload"]["type"], "gallery_list");
         assert_eq!(value["payload"]["payload"]["items"][0]["id"], "a-1");
         assert!(value["payload"]["payload"]["items"][0]
+            .get("path")
+            .is_none());
+    }
+
+    #[test]
+    fn serializes_typed_rpc_responses() {
+        use super::{
+            RpcBlacklistResponse, RpcDetectablesResponse, RpcProcessListResponse,
+            RpcProcessRefreshResponse,
+        };
+        use crate::arrpc::RpcBlacklistEntry;
+        let list = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "r-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::RpcProcessList(
+                RpcProcessListResponse {
+                    processes: vec![serde_json::json!([4, "C:\\a.exe", []])],
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(list).unwrap();
+        assert_eq!(value["payload"]["type"], "rpc_process_list");
+        assert_eq!(
+            value["payload"]["payload"]["processes"][0],
+            serde_json::json!([4, "C:\\a.exe", []])
+        );
+        let refresh = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "r-2".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::RpcProcessRefresh(
+                RpcProcessRefreshResponse {
+                    refreshed: true,
+                    count: 3,
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(refresh).unwrap();
+        assert_eq!(value["payload"]["type"], "rpc_process_refresh");
+        assert_eq!(value["payload"]["payload"]["count"], 3);
+        let detectables = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "r-3".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::RpcDetectables(
+                RpcDetectablesResponse {
+                    detectables: vec![serde_json::json!({"id": "1"})],
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(detectables).unwrap();
+        assert_eq!(value["payload"]["type"], "rpc_detectables");
+        let blacklist = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "r-4".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::RpcBlacklist(RpcBlacklistResponse {
+                entries: vec![RpcBlacklistEntry {
+                    name: "G".to_owned(),
+                    id: 7,
+                }],
+            })),
+            error: None,
+        };
+        let value = serde_json::to_value(blacklist).unwrap();
+        assert_eq!(value["payload"]["type"], "rpc_blacklist");
+        assert_eq!(value["payload"]["payload"]["entries"][0]["id"], 7);
+        assert!(value["payload"]["payload"]["entries"][0]
             .get("path")
             .is_none());
     }

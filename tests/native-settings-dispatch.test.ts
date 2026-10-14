@@ -98,6 +98,11 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "csp",
             "quickCss",
             "channel",
+            // arRPC scanner keys (F11): host `settings.set` allowlist parity.
+            "inviteWebsocket",
+            "processScanning",
+            "windowsLegacyScanning",
+            "scanInterval",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), true, `${key} must be writable`);
         }

@@ -162,6 +162,12 @@ export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
     "csp",
     "quickCss",
     "channel",
+    // arRPC scanner keys (F11): host `settings.set` allowlist parity. All
+    // take effect on next launch (restart-required model).
+    "inviteWebsocket",
+    "processScanning",
+    "windowsLegacyScanning",
+    "scanInterval",
 ];
 
 /** True when `key` has a native persistence path (closed allowlist). */
@@ -198,7 +204,11 @@ function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], s
         key === "extendedPluginAbilities" ||
         key === "csp" ||
         key === "quickCss" ||
-        key === "channel"
+        key === "channel" ||
+        key === "inviteWebsocket" ||
+        key === "processScanning" ||
+        key === "windowsLegacyScanning" ||
+        key === "scanInterval"
     ) {
         const previous = store.settings[key];
         (store.settings as Record<string, unknown>)[key as string] = value;
@@ -265,7 +275,11 @@ export type NativeSettingsSetKey =
     | "extendedPluginAbilities"
     | "csp"
     | "quickCss"
-    | "channel";
+    | "channel"
+    | "inviteWebsocket"
+    | "processScanning"
+    | "windowsLegacyScanning"
+    | "scanInterval";
 
 /** Wire keys for the closed native `settings.set` capability. */
 const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
@@ -276,14 +290,18 @@ const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
     csp: "csp",
     quickCss: "quick_css",
     channel: "channel",
+    inviteWebsocket: "invite_websocket",
+    processScanning: "process_scanning",
+    windowsLegacyScanning: "windows_legacy_scanning",
+    scanInterval: "scan_interval",
 };
 
 /** Minimal native `settings.set` shape (closed allowlist, key echo + value). */
 interface NativeSettingsSet {
     set: (
         key: string,
-        value: boolean | string[] | string,
-    ) => Promise<{ key: string; value: boolean | string[] | string }>;
+        value: boolean | string[] | string | number,
+    ) => Promise<{ key: string; value: boolean | string[] | string | number }>;
 }
 
 /**
@@ -318,9 +336,12 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
         (store.settings as Record<string, unknown>)[key as string] = value;
     });
     const nativeSet = (window.remcord as unknown as { settings: NativeSettingsSet }).settings.set;
-    let applied: { key: string; value: boolean | string[] | string };
+    let applied: { key: string; value: boolean | string[] | string | number };
     try {
-        applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[] | string);
+        applied = await nativeSet(
+            NATIVE_SETTINGS_SET_WIRE_KEY[key],
+            value as boolean | string[] | string | number,
+        );
     } catch (error) {
         withPreservedSettingsScroll(() => {
             (store.settings as Record<string, unknown>)[key as string] = previous;

@@ -335,7 +335,11 @@ pub struct SettingsMutation {
 ///   `performanceMode`, `smoothScroll`, `autoScroll`, `spellcheck`,
 ///   `spellcheckLanguage`): DEFERRED with the media/voice milestone.
 /// - RPC / scanning (`inviteWebsocket`, `processScanning`,
-///   `windowsLegacyScanning`, `scanInterval`): DEFERRED with arRPC.
+///   `windowsLegacyScanning`, `scanInterval`): owned by the arRPC milestone
+///   (F11, `arrpc.rs`); the scanner resolves them from the snapshot at
+///   startup (restart-required model, like `channel`). `scanInterval` takes
+///   a bounded `u64` (1000–600000 ms, the import-validated range); the three
+///   flags are bools.
 ///   `keybinds` is NOT set through this capability: entries carry
 ///   arbitrary stored JS in Electron, so they are owned by the dedicated
 ///   `keybinds.*` capabilities (`keybinds.rs`), which validate the closed
@@ -389,6 +393,23 @@ pub enum SettingsSetKey {
     /// preserves existing behavior exactly). Takes effect on next launch
     /// (restart-required model, like `channel`).
     ScreenshareQuality,
+    /// Discord invite-websocket listener (`inviteWebsocket`). Native
+    /// consumer: the arRPC milestone (F11) reads it from the snapshot at
+    /// startup. Takes effect on next launch (restart-required model).
+    InviteWebsocket,
+    /// arRPC process scanning master switch (`processScanning`). Native
+    /// consumer: the scanner resolves it at startup; `false` disables
+    /// enumeration-driven detection. Takes effect on next launch.
+    ProcessScanning,
+    /// arRPC legacy Windows enumeration (`windowsLegacyScanning`). Native
+    /// consumer: resolved at startup alongside `processScanning`. Takes
+    /// effect on next launch.
+    WindowsLegacyScanning,
+    /// arRPC scan interval in milliseconds (`scanInterval`). Native
+    /// consumer: the scanner cadence at startup; bounded 1000–600000
+    /// (the import-validated range — a zero interval could busy-loop).
+    /// Takes effect on next launch.
+    ScanInterval,
 }
 
 impl SettingsSetKey {
@@ -403,16 +424,20 @@ impl SettingsSetKey {
             SettingsSetKey::QuickCss => "quickCss",
             SettingsSetKey::Channel => "channel",
             SettingsSetKey::ScreenshareQuality => "screenshareQuality",
+            SettingsSetKey::InviteWebsocket => "inviteWebsocket",
+            SettingsSetKey::ProcessScanning => "processScanning",
+            SettingsSetKey::WindowsLegacyScanning => "windowsLegacyScanning",
+            SettingsSetKey::ScanInterval => "scanInterval",
         }
     }
 }
 
 /// Bounded value union for the allowlist. The key selects which variant is
-/// legal; anything else is a type error. There is deliberately no number,
-/// object, or null variant: no allowlisted key needs one. The three string
-/// variants serve exactly one key each (`csp` mode, `channel` id,
-/// `screenshareQuality` mode), so a value for one can never land in another's
-/// document field.
+/// legal; anything else is a type error. There is deliberately no object or
+/// null variant: no allowlisted key needs one. The string variants serve
+/// exactly one key each (`csp` mode, `channel` id, `screenshareQuality`
+/// mode), so a value for one can never land in another's document field;
+/// `scanInterval` is the only number variant (bounded milliseconds).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SettingsSetValue {
@@ -421,6 +446,7 @@ pub enum SettingsSetValue {
     Csp(String),
     Channel(String),
     ScreenshareQuality(String),
+    ScanInterval(u64),
 }
 
 /// Maximum accepted mod-enablement entries. Electron's `ValidMods` has four
@@ -461,6 +487,20 @@ pub fn validate_settings_set(key: SettingsSetKey, value: &SettingsSetValue) -> R
             | SettingsSetKey::QuickCss,
             SettingsSetValue::Bool(_),
         ) => Ok(()),
+        (
+            SettingsSetKey::InviteWebsocket
+            | SettingsSetKey::ProcessScanning
+            | SettingsSetKey::WindowsLegacyScanning,
+            SettingsSetValue::Bool(_),
+        ) => Ok(()),
+        (SettingsSetKey::ScanInterval, SettingsSetValue::ScanInterval(ms)) => {
+            if (*ms < crate::settings_import::MIN_SCAN_INTERVAL_MS)
+                || (*ms > crate::settings_import::MAX_SCAN_INTERVAL_MS)
+            {
+                return Err("scan interval is outside the supported range".to_owned());
+            }
+            Ok(())
+        }
         (SettingsSetKey::Csp, SettingsSetValue::Csp(mode)) => {
             if !VALID_CSP_MODES.contains(&mode.as_str()) {
                 return Err("csp mode is not a supported policy".to_owned());
@@ -641,11 +681,20 @@ pub fn apply_settings_set(
         (SettingsSetKey::ScreenshareQuality, SettingsSetValue::ScreenshareQuality(mode)) => {
             serde_json::Value::String(mode.clone())
         }
+        (SettingsSetKey::ScanInterval, SettingsSetValue::ScanInterval(ms)) => {
+            serde_json::Value::Number(serde_json::Number::from(*ms))
+        }
         (
             SettingsSetKey::SupportBannerDismissed
             | SettingsSetKey::ShowExperimentalPluginMenu
             | SettingsSetKey::ExtendedPluginAbilities
             | SettingsSetKey::QuickCss,
+            SettingsSetValue::Bool(flag),
+        ) => serde_json::Value::Bool(*flag),
+        (
+            SettingsSetKey::InviteWebsocket
+            | SettingsSetKey::ProcessScanning
+            | SettingsSetKey::WindowsLegacyScanning,
             SettingsSetValue::Bool(flag),
         ) => serde_json::Value::Bool(*flag),
         _ => return Err("settings value does not match the allowlisted key".to_owned()),
@@ -1382,6 +1431,106 @@ mod tests {
         assert_eq!(snapshot.screenshare_quality, "default");
         let defaults = SettingsSnapshot::default();
         assert_eq!(defaults.screenshare_quality, "default");
+    }
+
+    #[test]
+    fn set_applies_the_three_rpc_flags_and_round_trips() {
+        for (key, field) in [
+            (SettingsSetKey::InviteWebsocket, "inviteWebsocket"),
+            (SettingsSetKey::ProcessScanning, "processScanning"),
+            (
+                SettingsSetKey::WindowsLegacyScanning,
+                "windowsLegacyScanning",
+            ),
+        ] {
+            let profile = unique_profile_dir("set-rpc-flag");
+            std::fs::create_dir_all(profile.join("storage")).unwrap();
+            let path = profile.join("storage").join("settings.json");
+            std::fs::write(&path, r#"{"channel":"stable"}"#).unwrap();
+            let mutation = apply_settings_set(&profile, key, &SettingsSetValue::Bool(true))
+                .expect("an allowlisted rpc flag mutation must persist");
+            assert_eq!(mutation.key, key);
+            assert_eq!(mutation.value, SettingsSetValue::Bool(true));
+            let document: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(document[field], true);
+            assert_eq!(document["channel"], "stable");
+            // A bool can never validate as another key's variant.
+            assert!(validate_settings_set(key, &SettingsSetValue::Csp("none".to_owned())).is_err());
+        }
+        assert_eq!(
+            SettingsSetKey::InviteWebsocket.storage_key(),
+            "inviteWebsocket"
+        );
+        assert_eq!(
+            SettingsSetKey::ProcessScanning.storage_key(),
+            "processScanning"
+        );
+        assert_eq!(
+            SettingsSetKey::WindowsLegacyScanning.storage_key(),
+            "windowsLegacyScanning"
+        );
+        assert_eq!(SettingsSetKey::ScanInterval.storage_key(), "scanInterval");
+    }
+
+    #[test]
+    fn set_validates_the_scan_interval_range() {
+        for healthy in [1_000, 5_000, 600_000] {
+            assert!(
+                validate_settings_set(
+                    SettingsSetKey::ScanInterval,
+                    &SettingsSetValue::ScanInterval(healthy),
+                )
+                .is_ok(),
+                "{healthy} must validate"
+            );
+        }
+        for hostile in [0, 999, 600_001, u64::MAX] {
+            assert!(
+                validate_settings_set(
+                    SettingsSetKey::ScanInterval,
+                    &SettingsSetValue::ScanInterval(hostile),
+                )
+                .is_err(),
+                "{hostile} must be refused"
+            );
+        }
+        // The interval is the only number variant: bools and strings can
+        // never land in the `scanInterval` document field (or vice versa).
+        assert!(
+            validate_settings_set(SettingsSetKey::ScanInterval, &SettingsSetValue::Bool(true),)
+                .is_err()
+        );
+        assert!(validate_settings_set(
+            SettingsSetKey::ScanInterval,
+            &SettingsSetValue::Csp("none".to_owned()),
+        )
+        .is_err());
+        assert!(
+            validate_settings_set(SettingsSetKey::Csp, &SettingsSetValue::ScanInterval(5_000),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn set_applies_scan_interval_and_round_trips() {
+        let profile = unique_profile_dir("set-scan-interval");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(&path, r#"{"scanInterval":5000}"#).unwrap();
+        let mutation = apply_settings_set(
+            &profile,
+            SettingsSetKey::ScanInterval,
+            &SettingsSetValue::ScanInterval(10_000),
+        )
+        .expect("an allowlisted interval mutation must persist");
+        assert_eq!(mutation.key, SettingsSetKey::ScanInterval);
+        assert_eq!(mutation.value, SettingsSetValue::ScanInterval(10_000));
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["scanInterval"], 10_000);
+        let reread = load_settings(&profile).expect("the mutated file must load");
+        assert_eq!(reread.snapshot.scan_interval, 10_000);
     }
 
     #[test]
