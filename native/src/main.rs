@@ -1,4 +1,5 @@
 mod app;
+mod app_icon;
 mod backup;
 mod browser_recovery;
 mod bundles;
@@ -5419,6 +5420,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         BOOT_SNAPSHOT.capabilities,
     )
     .map_err(|error| format!("mod settings contract is invalid: {error}"))?;
+    // F29: app icon rebrand — build/icon.{ico,png} carry the Remcord artwork
+    // shared by the exe embed, the Inno Setup icon, and the Linux packaging.
+    // Fail fast if the inventory below drifts from the pinned table.
+    app_icon::validate_icon_contract(
+        app_icon::ICON_ICO_REL_PATH,
+        app_icon::ICON_PNG_REL_PATH,
+        app_icon::ICON_CONSUMERS,
+    )
+    .map_err(|error| format!("app icon contract is invalid: {error}"))?;
     let mut web_context = WebContext::new(Some(profile_path.clone()));
     // Release blocker 4: Evergreen WebView2 Runtime prerequisite check,
     // before any WebView initialization. Supported loader lookup (default
