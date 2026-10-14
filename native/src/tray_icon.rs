@@ -480,4 +480,44 @@ mod tests {
         assert!(width > 0 && height > 0);
         assert_eq!(bgra.len(), width as usize * height as usize * 4);
     }
+
+    /// The built icon is a real GDI icon object: `GetIconInfo` resolves it
+    /// and the color bitmap dimensions match the decoded PNG (proves the
+    /// DIB + mask construction above produces a well-formed `HICON`
+    /// instead of a silently blank tray slot). Windows-only: needs a
+    /// desktop session (like the tray itself).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn built_icon_is_a_well_formed_gdi_icon() {
+        use windows::Win32::{
+            Graphics::Gdi::{GetObjectW, BITMAP},
+            UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo},
+        };
+        let icon = build_tray_icon().expect("tray icon must build");
+        let (width, height, _) = tray_bitmap_pixels().expect("embedded PNG must decode");
+        unsafe {
+            let mut icon_info =
+                std::mem::zeroed::<windows::Win32::UI::WindowsAndMessaging::ICONINFO>();
+            // Rebuild through the same constructor the worker uses, then
+            // interrogate the object GDI actually holds.
+            let _ = DestroyIcon(icon);
+            let rebuilt = build_tray_icon().expect("tray icon must rebuild");
+            assert!(GetIconInfo(rebuilt, &mut icon_info).is_ok());
+            assert!(!icon_info.hbmColor.is_invalid());
+            assert!(!icon_info.hbmMask.is_invalid());
+            let mut bitmap = BITMAP::default();
+            let bytes = GetObjectW(
+                icon_info.hbmColor.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bitmap as *mut _ as *mut std::ffi::c_void),
+            );
+            assert!(bytes > 0, "color bitmap must be queryable");
+            assert_eq!(bitmap.bmWidth, width as i32);
+            assert_eq!(bitmap.bmHeight, height as i32);
+            assert_eq!(bitmap.bmBitsPixel, 32);
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(icon_info.hbmColor.into());
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(icon_info.hbmMask.into());
+            let _ = DestroyIcon(rebuilt);
+        }
+    }
 }

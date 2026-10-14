@@ -571,16 +571,15 @@
                                         : key === "proxy_rules" || key === "proxy_bypass_rules"
                                           ? typeof payload.value === "string" &&
                                             textEncoder.encode(payload.value).length <=
-                                              MAX_SETTINGS_PROXY_RULES_BYTES &&
+                                                MAX_SETTINGS_PROXY_RULES_BYTES &&
                                             isPrintableAscii(payload.value)
                                               ? payload.value
                                               : undefined
                                           : key === "proxy_pac_script"
                                             ? typeof payload.value === "string" &&
-                                              textEncoder.encode(payload.value).length <=
-                                                MAX_SETTINGS_PAC_URL_BYTES &&
+                                              textEncoder.encode(payload.value).length <= MAX_SETTINGS_PAC_URL_BYTES &&
                                               (payload.value.toLowerCase().startsWith("http://") ||
-                                                payload.value.toLowerCase().startsWith("https://"))
+                                                  payload.value.toLowerCase().startsWith("https://"))
                                                 ? payload.value
                                                 : undefined
                                             : key === "no_bundle_updates"
@@ -601,7 +600,7 @@
                                                           typeof entry === "string" &&
                                                           entry.length > 0 &&
                                                           textEncoder.encode(entry).length <=
-                                                            MAX_SETTINGS_LANG_TAG_BYTES,
+                                                              MAX_SETTINGS_LANG_TAG_BYTES,
                                                   )
                                                     ? payload.value
                                                     : undefined
@@ -2579,14 +2578,13 @@
                                         : payload?.key === "proxy_rules" || payload?.key === "proxy_bypass_rules"
                                           ? typeof payload?.value === "string" &&
                                             textEncoder.encode(payload.value).length <=
-                                              MAX_SETTINGS_PROXY_RULES_BYTES &&
+                                                MAX_SETTINGS_PROXY_RULES_BYTES &&
                                             isPrintableAscii(payload.value)
                                           : payload?.key === "proxy_pac_script"
                                             ? typeof payload?.value === "string" &&
-                                              textEncoder.encode(payload.value).length <=
-                                                MAX_SETTINGS_PAC_URL_BYTES &&
+                                              textEncoder.encode(payload.value).length <= MAX_SETTINGS_PAC_URL_BYTES &&
                                               (payload.value.toLowerCase().startsWith("http://") ||
-                                                payload.value.toLowerCase().startsWith("https://"))
+                                                  payload.value.toLowerCase().startsWith("https://"))
                                             : payload?.key === "no_bundle_updates"
                                               ? Array.isArray(payload?.value) &&
                                                 payload.value.length <= MAX_SETTINGS_MODS_ENTRIES &&
@@ -2603,7 +2601,7 @@
                                                           typeof entry === "string" &&
                                                           entry.length > 0 &&
                                                           textEncoder.encode(entry).length <=
-                                                            MAX_SETTINGS_LANG_TAG_BYTES,
+                                                              MAX_SETTINGS_LANG_TAG_BYTES,
                                                   )
                                                 : SETTINGS_SET_KEYS.includes(payload?.key) &&
                                                   typeof payload?.value === "boolean";

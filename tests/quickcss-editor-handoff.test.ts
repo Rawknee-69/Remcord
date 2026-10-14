@@ -98,3 +98,47 @@ test("mod mode read failure throws the real error", async () => {
     const { loadQuickCssEditorSource } = await import("../src/shelter/settings/quickCssEditorSource.js");
     await assert.rejects(loadQuickCssEditorSource("vencord"), /boom/);
 });
+
+function setNativeWindow(remcord: Record<string, unknown>) {
+    Reflect.set(globalThis, "window", { remcord });
+    if (Reflect.get(globalThis, "shelter") === undefined) {
+        Reflect.set(globalThis, "shelter", { plugin: { store: { settings: {}, themes: [] } } });
+    }
+}
+
+test("system CSS editor handoff is unavailable without the native shell", async () => {
+    setNativeWindow({});
+    const { isNativeCssEditorAvailable, openSystemCssEditor } = await import(
+        "../src/shelter/settings/settings.js"
+    );
+    assert.equal(isNativeCssEditorAvailable(), false);
+    await assert.rejects(openSystemCssEditor(), /unavailable/);
+});
+
+test("system CSS editor handoff opens through the host namespace", async () => {
+    let opened = 0;
+    setNativeWindow({
+        boot: { runtime: "webview2" },
+        cssEditor: {
+            openSystem: () => {
+                opened += 1;
+                return Promise.resolve({ opened: true });
+            },
+        },
+    });
+    const { isNativeCssEditorAvailable, openSystemCssEditor } = await import(
+        "../src/shelter/settings/settings.js"
+    );
+    assert.equal(isNativeCssEditorAvailable(), true);
+    assert.equal(await openSystemCssEditor(), true);
+    assert.equal(opened, 1);
+});
+
+test("system CSS editor handoff rejects misshapen host outcomes", async () => {
+    setNativeWindow({
+        boot: { runtime: "webview2" },
+        cssEditor: { openSystem: () => Promise.resolve({ opened: false }) },
+    });
+    const { openSystemCssEditor } = await import("../src/shelter/settings/settings.js");
+    await assert.rejects(openSystemCssEditor(), /Could not open/);
+});

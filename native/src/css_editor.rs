@@ -81,8 +81,14 @@ mod tests {
 
     #[test]
     fn failure_codes_are_fixed_vocabulary() {
-        assert_eq!(CssEditorFailure::EnsureFailed.code(), "CSS_EDITOR_ENSURE_FAILED");
-        assert_eq!(CssEditorFailure::OpenFailed.code(), "CSS_EDITOR_OPEN_FAILED");
+        assert_eq!(
+            CssEditorFailure::EnsureFailed.code(),
+            "CSS_EDITOR_ENSURE_FAILED"
+        );
+        assert_eq!(
+            CssEditorFailure::OpenFailed.code(),
+            "CSS_EDITOR_OPEN_FAILED"
+        );
     }
 
     #[test]

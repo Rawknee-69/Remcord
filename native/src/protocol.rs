@@ -4021,7 +4021,9 @@ mod tests {
                 }
                 "window_quit" => matches!(command, BridgeCommand::WindowQuit(_)),
                 "window_get_state" => matches!(command, BridgeCommand::WindowGetState(_)),
-                "window_set_custom_icon" => matches!(command, BridgeCommand::WindowSetCustomIcon(_)),
+                "window_set_custom_icon" => {
+                    matches!(command, BridgeCommand::WindowSetCustomIcon(_))
+                }
                 _ => unreachable!(),
             };
             assert!(expected, "{wire} must dispatch to its own typed variant");

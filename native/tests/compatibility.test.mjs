@@ -8407,10 +8407,7 @@ test("settings.set rejects hostile native-shell values client-side without sendi
     for (const [key, value] of hostile) {
         await assert.rejects(window.remcord.settings.set(key, value), TypeError);
     }
-    assert.equal(
-        window.messages.filter((entry) => entry.command?.type === "settings_set").length,
-        before,
-    );
+    assert.equal(window.messages.filter((entry) => entry.command?.type === "settings_set").length, before);
 });
 
 test("css_editor.openSystem sends the exact empty payload and resolves the ack", async () => {
@@ -8491,10 +8488,7 @@ test("gallery.export_items sends bounded ids and resolves counts", async () => {
     assert.deepEqual(await pending, { exported: 2, skipped: 0 });
     await assert.rejects(window.remcord.gallery.exportItems([]), TypeError);
     await assert.rejects(window.remcord.gallery.exportItems("a"), TypeError);
-    await assert.rejects(
-        window.remcord.gallery.exportItems(new Array(201).fill("a")),
-        TypeError,
-    );
+    await assert.rejects(window.remcord.gallery.exportItems(new Array(201).fill("a")), TypeError);
 });
 
 test("window.setCustomIcon sends the exact empty payload and resolves the flag", async () => {
