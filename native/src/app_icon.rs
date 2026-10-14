@@ -20,6 +20,10 @@
 //!   rail, and compares `sha256` digests against the rebranded_expected
 //!   hashes. Unit tests run it against the real repo assets plus synthetic
 //!   corruptions.
+//! - [`validate_embedded_icons`] runs the same validation at startup against
+//!   copies of the assets compiled into the binary (`include_bytes!`, so the
+//!   check needs no repo or install-directory access at runtime): a corrupt
+//!   or reverted asset fails the build's own boot instead of shipping.
 //! - [`validate_icon_contract`] pins the consumer inventory the startup
 //!   path passes in (same fail-fast shape as F4's
 //!   `validate_mod_settings_contract`).
@@ -78,6 +82,14 @@ pub const EXPECTED_ICON_PNG_SHA256: &str =
 /// this is a safety rail against hashing unbounded input, not a claim about
 /// icon formats.
 pub const MAX_ICON_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Copy of `build/icon.ico` compiled into the binary, so the startup check
+/// below needs no repo or install-directory access at runtime. The `winres`
+/// exe embed (`native/build.rs`) reads the same file at compile time.
+const EMBEDDED_ICO: &[u8] = include_bytes!("../../build/icon.ico");
+
+/// Copy of `build/icon.png` compiled into the binary (same rationale).
+const EMBEDDED_PNG: &[u8] = include_bytes!("../../build/icon.png");
 
 /// PNG file signature (8 bytes).
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -256,6 +268,13 @@ pub fn validate_icon_bytes(ico: &[u8], png: &[u8]) -> Result<IconReport, IconErr
     })
 }
 
+/// Validates the compiled-in icon copies, returning the parsed facts. The
+/// startup path calls this once and fails fast on any error: a truncated or
+/// reverted asset can never boot a half-rebranded binary.
+pub fn validate_embedded_icons() -> Result<IconReport, IconError> {
+    validate_icon_bytes(EMBEDDED_ICO, EMBEDDED_PNG)
+}
+
 /// Pins the F29 consumer inventory. The startup path passes the asset paths
 /// and consumer table it was built with; any drift from the constants above
 /// (wrong path, dropped or added consumer, reordered table) fails fast with
@@ -364,6 +383,18 @@ mod tests {
         assert_eq!(report.ico_bytes, ico.len());
         assert_eq!(report.png_bytes, png.len());
         assert_eq!((report.png_width, report.png_height), (512, 512));
+    }
+
+    #[test]
+    fn embedded_copies_match_repo_assets() {
+        // The compiled-in copies must validate identically: otherwise the
+        // binary would boot-check different bytes than the repo ships.
+        let report = validate_embedded_icons().expect("embedded icon copies must validate");
+        let ico = read_repo_asset(ICON_ICO_REL_PATH);
+        let png = read_repo_asset(ICON_PNG_REL_PATH);
+        assert_eq!(report.ico_bytes, ico.len());
+        assert_eq!(report.png_bytes, png.len());
+        assert!(report.ico_images >= 1);
     }
 
     #[test]
