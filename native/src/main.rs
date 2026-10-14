@@ -8,6 +8,7 @@ mod close_behavior;
 mod css_watch;
 mod custom_bundle;
 mod diagnostics;
+mod discord_protocol;
 mod downloads;
 mod environment_observer;
 mod folders;
@@ -3223,6 +3224,14 @@ enum NativeEvent {
     /// once per document ~8 s after the probe started, so the async media
     /// and geolocation settlements have landed before the host reads back.
     PermissionsSmokeReadback,
+    /// A `discord://` deeplink for the live window (F19). Carries only the
+    /// host-sanitized path (`[A-Za-z0-9/_\-@.]`, bounded): the startup
+    /// deeplink flushes it after the first trusted document, and the
+    /// second-instance listener forwards links from newcomer processes.
+    /// Never renderer input, never a URL, path, or command.
+    DiscordDeeplink {
+        path: String,
+    },
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -5581,6 +5590,66 @@ fn main() -> Result<(), Box<dyn Error>> {
     // F16 startup restore: reopen where the user left off. Runs before any
     // window is shown; first run keeps the compiled-in default.
     apply_stored_window_state(&window, &profile_path);
+    // F19 `discord://` protocol links (Electron: `setAsDefaultProtocolClient`
+    // + `second-instance`/`open-url` + `navigateTo`). The OS scheme always
+    // (re)registers the running executable; registration never fails boot.
+    // A `discord://-…` tail argument becomes the pending deeplink, applied
+    // after the first trusted document below. A running instance for this
+    // user+profile receives the link instead through the handoff file, and
+    // the newcomer exits — but only when `multi_instance` is off (F27 owns
+    // the link-less second-launch policy; multi-instance mode boots its own
+    // window and navigates it to the link).
+    let mut pending_deeplink =
+        discord_protocol::extract_link_target(&std::env::args().collect::<Vec<_>>());
+    match discord_protocol::ensure_discord_protocol_registered() {
+        discord_protocol::RegistrationOutcome::Registered => {
+            println!("[Deeplink] discord:// scheme registered for this executable");
+        }
+        discord_protocol::RegistrationOutcome::Failed => {
+            eprintln!("[Deeplink] discord:// scheme registration failed; links may open elsewhere");
+        }
+    }
+    let deeplink_user = discord_protocol::current_user_component();
+    let deeplink_tag = discord_protocol::profile_tag_component(&profile_path);
+    let deeplink_mutex = discord_protocol::mutex_name(&deeplink_user, &deeplink_tag);
+    let deeplink_event = discord_protocol::event_name(&deeplink_user, &deeplink_tag);
+    discord_protocol::clear_stale_handoff(&profile_path);
+    let deeplink_guard: Option<(discord_protocol::InstanceGuard, bool)> =
+        discord_protocol::acquire_instance_mutex(&deeplink_mutex);
+    {
+        let listener_proxy = proxy.clone();
+        let listener_profile = profile_path.clone();
+        let listener_event = deeplink_event.clone();
+        discord_protocol::spawn_listener_thread(listener_profile, listener_event, move |path| {
+            queue_event(&listener_proxy, NativeEvent::DiscordDeeplink { path });
+        });
+    }
+    if let Some(target) = pending_deeplink.clone() {
+        let multi_instance = match load_settings(&profile_path) {
+            Ok(loaded) => loaded.snapshot.multi_instance,
+            Err(error) => {
+                eprintln!("[Deeplink] settings unreadable, keeping link in this window ({error})");
+                true
+            }
+        };
+        let already_running = deeplink_guard.as_ref().is_some_and(|(_, existed)| *existed);
+        if !multi_instance && already_running {
+            let sanitized = discord_protocol::sanitize_deeplink_path(&target);
+            match discord_protocol::forward_to_running_instance(
+                &profile_path,
+                &deeplink_event,
+                &sanitized,
+            ) {
+                discord_protocol::ForwardOutcome::Forwarded => {
+                    println!("[Deeplink] forwarded to the running instance; exiting");
+                    return Ok(());
+                }
+                discord_protocol::ForwardOutcome::NotForwarded => {
+                    eprintln!("[Deeplink] forward failed; booting with the link in this window");
+                }
+            }
+        }
+    }
     // Fail fast if the embedded package version ever loses its shape: the
     // capability serves this constant on every request.
     if let Err(error) = validate_version(current_app_version()) {
@@ -7214,6 +7283,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     settings_set_before: settings_set_smoke_before,
                                 },
                             });
+                            // F19: the startup `discord://` deeplink lands
+                            // on the first trusted Discord document (the
+                            // boot document is Discord home; the link names
+                            // the channel/page the user asked for). One
+                            // shot: second-instance links arrive as
+                            // `DiscordDeeplink` events instead.
+                            if let Some(target) = pending_deeplink.take() {
+                                let sanitized =
+                                    discord_protocol::sanitize_deeplink_path(&target);
+                                match discord_protocol::deeplink_script(&sanitized) {
+                                    Ok(script) => {
+                                        match webview.evaluate_script(&script) {
+                                            Ok(()) => println!(
+                                                "[Deeplink] navigating to {sanitized}"
+                                            ),
+                                            Err(error) => eprintln!(
+                                                "[Deeplink] startup navigation failed: {error}"
+                                            ),
+                                        }
+                                    }
+                                    Err(error) => eprintln!(
+                                        "[Deeplink] startup link refused: {error}"
+                                    ),
+                                }
+                            }
                         }
                         navigation_gate::FinishAction::SkipFailed => {
                             // The outcome arrived first and the navigation
@@ -7256,6 +7350,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ) {
                         eprintln!("[Permissions][Smoke] readback failed: {error}");
                     }
+                }
+            }
+            Event::UserEvent(NativeEvent::DiscordDeeplink { path }) => {
+                // F19 second-instance link (or any late link): the document
+                // is already live, so navigate now and bring the window
+                // forward — Electron `navigateTo` parity (restore, show,
+                // focus; no taskbar toggle without a tray icon). The path
+                // is re-sanitized at receipt: the handoff file crossed a
+                // process boundary and is untrusted input.
+                let sanitized = discord_protocol::sanitize_deeplink_path(&path);
+                match discord_protocol::deeplink_script(&sanitized) {
+                    Ok(script) => match webview.evaluate_script(&script) {
+                        Ok(()) => {
+                            println!("[Deeplink] navigating to {sanitized}");
+                            window.set_visible(true);
+                            if window.is_minimized() {
+                                window.set_minimized(false);
+                            }
+                            window.set_focus();
+                        }
+                        Err(error) => {
+                            eprintln!("[Deeplink] navigation failed: {error}")
+                        }
+                    },
+                    Err(error) => eprintln!("[Deeplink] link refused: {error}"),
                 }
             }
             Event::UserEvent(NativeEvent::LiveCssSignal(signal)) => {

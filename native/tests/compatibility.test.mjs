@@ -6755,3 +6755,42 @@ test("F16 exposes no renderer-driven placement surface", () => {
         assert.equal(bootstrapTemplate.includes(wire), false);
     }
 });
+test("F19 exposes no deeplink capability: discord:// navigation stays host-only", () => {
+    // F19 is host-side OS integration (scheme registration, argv scan,
+    // pushState navigation, second-instance handoff). The renderer must
+    // never be able to trigger navigation, so the facade carries no
+    // deeplink namespace, capability, or wire command.
+    const { window } = createRuntime();
+    for (const capability of [
+        "discord.deeplink",
+        "deeplink.navigate",
+        "protocol.open",
+        "protocol.handle",
+        "protocol.register",
+        "open_url",
+        "second_instance",
+    ]) {
+        assert.equal(window.remcord.native.supports(capability), false);
+    }
+    // No deeplink wire traffic may exist either.
+    assert.equal(
+        window.messages.some(
+            (message) =>
+                (message.command?.type ?? "").includes("deeplink") ||
+                (message.command?.type ?? "").includes("discord_link") ||
+                (message.command?.type ?? "").includes("protocol_link"),
+        ),
+        false,
+    );
+    const code = stripComments(bootstrapTemplate);
+    for (const fragment of [
+        "deeplink",
+        "discord://",
+        "second-instance",
+        "open-url",
+        "pushState",
+        "setAsDefaultProtocolClient",
+    ]) {
+        assert.equal(code.includes(fragment), false, `${fragment} must not ship in the facade`);
+    }
+});
