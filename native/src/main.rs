@@ -1,6 +1,7 @@
 mod app;
 mod arrpc;
 mod backup;
+mod badge;
 mod browser_recovery;
 mod bundles;
 mod channel;
@@ -93,9 +94,10 @@ use process_failure::ProcessFailedEvent;
 use protocol::{
     parse_bridge_message, validate_mod_bundle_id, validate_vencord_css_mod_id,
     window_state_event_json, AppVersionResponse, BackupInspectedResponse,
-    BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BridgeCommand,
-    BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
-    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, ClipboardImageCopiedResponse,
+    BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BadgeStateResponse,
+    BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest,
+    BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
+    ClipboardImageCopiedResponse,
     DiagnosticsInfoResponse, FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
     GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
     GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
@@ -666,6 +668,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "clipboard.copy_image",
         "mod.clear_cache",
         "spellcheck.get_state",
+        "badge.get_state",
         "window.show",
         "window.hide",
         "window.minimize",
@@ -698,6 +701,10 @@ const KEYBIND_MATCHER_SCRIPT: &str = include_str!("../web/keybinds/matcher.js");
 /// to `window.remcordRPC.listen` (F11 core). Always injected (see
 /// [`initialization_script`]).
 const RPC_DELIVERY_SCRIPT: &str = include_str!("../web/arrpc/delivery.js");
+/// Page-title badge observer: the native counterpart of Electron's
+/// `page-title-updated` overlay-icon branch (F20 core). Always injected
+/// (see [`initialization_script`]).
+const BADGE_OBSERVER_SCRIPT: &str = include_str!("../web/badge/observer.js");
 
 /// The renderer adapter for one registered mod, or `None` for a descriptor
 /// with no adapter file (a registry entry must always carry one).
@@ -3396,12 +3403,16 @@ fn initialization_script(
     // The arRPC delivery bridge (F11) runs after the matcher: it only
     // observes host presence events and forwards them, so it can never
     // perturb anything before it.
+    // The badge observer (F20) runs after it: like the matcher it only
+    // observes (document.title) and reports, so ordering between the two
+    // observers is irrelevant.
     script.push('\n');
     script.push_str(PLUGIN_LOADER_SCRIPT);
     script.push('\n');
     script.push_str(KEYBIND_MATCHER_SCRIPT);
     script.push('\n');
     script.push_str(RPC_DELIVERY_SCRIPT);
+    script.push_str(BADGE_OBSERVER_SCRIPT);
     Ok(script)
 }
 
@@ -6706,6 +6717,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Authoritative window state tracked from native events. Seeded from
     // boot snapshot (both false at startup since window is created hidden).
     let mut native_window_state = NativeWindowState::default();
+    // Last-applied taskbar overlay state (F20): parsed from `badge_title`
+    // page reports. Starts clear; only a changed state re-applies.
+    let mut badge_state = badge::BadgeState::default();
     // Startup visibility fires exactly once per process (first real
     // document); reloads and later documents never re-apply it, and
     // shutdown drops the owned window handle with no stale state.
@@ -9840,6 +9854,37 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::BadgeGetState(_) => {
+                            // Read-only overlay snapshot: the last state
+                            // parsed from `badge_title` reports plus
+                            // whether the taskbar call succeeded. No
+                            // parameter exists; any extra member was
+                            // already rejected at deserialization.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            let response = BridgeResponse {
+                                version: PROTOCOL_VERSION,
+                                request_id: request_id.clone(),
+                                ok: true,
+                                payload: Some(BridgeResponsePayload::BadgeState(
+                                    BadgeStateResponse {
+                                        kind: badge_state.kind,
+                                        pings: badge_state.pings,
+                                        asset: badge_state.asset,
+                                        overlay_applied: badge_state.overlay_applied,
+                                    },
+                                )),
+                                error: None,
+                            };
+                            send_bridge_response(&webview, &response);
+                            if let Err(error) = request_tracker.complete(&request_id) {
+                                eprintln!("[Bridge] correlation failure after response: {error}");
+                            }
+                            response_count += 1;
+                            println!(
+                                "[Badge][Metrics] op=get_state request_latency_ms={latency_ms:.3}"
+                            );
+                        }
                         BridgeCommand::ThemeInstallCode(payload) => {
                             // Install from CSS text only: the id is derived
                             // from `@name`, the filename is fixed, and the
@@ -11941,6 +11986,43 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // enabled, then executes the stored action.
                         fire_keybind(&webview, &profile_path, &payload.id, false);
                     }
+                    BridgeEvent::BadgeTitle(payload) => {
+                        // Page-title report from the badge observer: the
+                        // only renderer-supplied value is the bounded title
+                        // text, which is re-parsed host-side and never
+                        // reflected. Over-long reports are dropped without
+                        // touching state; an unchanged parse applies
+                        // nothing, so steady titles cost no Win32 calls.
+                        match badge::validate_title(&payload.title) {
+                            Err(reason) => eprintln!("[Badge][TITLE_REJECTED] {reason}"),
+                            Ok(()) => {
+                                let next = badge::parse_title(&payload.title);
+                                if next != badge_state {
+                                    #[cfg(target_os = "windows")]
+                                    let applied = {
+                                        use tao::platform::windows::WindowExtWindows;
+                                        match badge::apply_overlay_icon(window.hwnd(), &next) {
+                                            Ok(applied) => applied,
+                                            Err(error) => {
+                                                eprintln!("[Badge][OVERLAY_FAILED] {error}");
+                                                false
+                                            }
+                                        }
+                                    };
+                                    #[cfg(not(target_os = "windows"))]
+                                    let applied = match badge::apply_overlay_icon(0, &next) {
+                                        Ok(applied) => applied,
+                                        Err(error) => {
+                                            eprintln!("[Badge][OVERLAY_FAILED] {error}");
+                                            false
+                                        }
+                                    };
+                                    badge_state = next.with_overlay(applied);
+                                    println!("{}", badge::format_log(&badge_state));
+                                }
+                            }
+                        }
+                    }
                     BridgeEvent::SettingsBootRestart(_) => {                        // Electron relaunches the application
                         // (`app.relaunch()` + `app.exit()`), and the native
                         // shell must match that: mod adapters are resolved
@@ -12990,6 +13072,28 @@ mod tests {
         let template = crate::menus::menu_template_json(&[]);
         assert_eq!(template["menus"].as_array().map(|v| v.len()), Some(4));
         assert_eq!(template["keybindMenu"].as_array().map(|v| v.len()), Some(0));
+    fn f20_badge_reports_titles_without_renderer_surface() {
+        // The read-only state capability exists in the boot snapshot; the
+        // title observer ships in the document-start script with the entry
+        // origin gates, the per-document guard, and the top-frame guard.
+        // The host parses titles itself (spot-checked here); asset names
+        // can only come from the bundled table, never the wire.
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"badge.get_state"));
+        assert!(super::BADGE_OBSERVER_SCRIPT.contains("badge_title"));
+        assert!(super::BADGE_OBSERVER_SCRIPT.contains("remcordNativeBadgeObserver"));
+        assert!(super::BADGE_OBSERVER_SCRIPT.contains("canary.discord.com"));
+        assert!(super::BADGE_OBSERVER_SCRIPT.contains("window.self !== window.top"));
+        assert_eq!(
+            crate::badge::parse_title("• Discord").asset,
+            Some("badge-11.ico")
+        );
+        assert_eq!(
+            crate::badge::parse_title("(12) Discord").asset,
+            Some("badge-10.ico")
+        );
+        assert_eq!(crate::badge::parse_title("Discord").asset, None);
     }
 
     #[test]
@@ -14196,7 +14300,12 @@ mod tests {
         assert!(!script.contains("watch"));
         assert!(!script.contains("LiveCss"));
         assert!(!script.contains("fs.watch"));
-        assert!(!script.contains("MutationObserver"));
+        // The badge observer (F20) is the single sanctioned
+        // MutationObserver in the document-start script: it only reads
+        // document.title and reports it host-side (typeof guard plus one
+        // construction — exactly two mentions). Live watching itself adds
+        // none, so any further occurrence fails this test loudly.
+        assert_eq!(script.matches("MutationObserver").count(), 2);
         // Exactly one watcher set for the whole application lifetime.
         assert_eq!(crate::css_watch::LiveCssWatchers::watcher_count(), 2);
         assert_eq!(crate::css_watch::CSS_DEBOUNCE_MS, 300);
