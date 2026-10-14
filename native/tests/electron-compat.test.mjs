@@ -2306,3 +2306,28 @@ test("F26 keeps Electron crash handling intact and pins the native local-only co
     assert.doesNotMatch(compat, /crash_upload/);
     assert.doesNotMatch(compat, /crash_trigger/);
 });
+
+test("F27 multi-instance parity: Electron lock decision, native enforcement", () => {
+    // Electron owns the policy source: requestSingleInstanceLock gated on
+    // multiInstance===false (src/main.ts), second-instance focuses the
+    // existing window and routes discord://- links (src/discord/window.ts).
+    const main = readFileSync(new URL("../../src/main.ts", import.meta.url), "utf8");
+    assert.match(main, /requestSingleInstanceLock\(\)/);
+    assert.match(main, /getConfig\("multiInstance"\) === false/);
+    const electronWindow = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(electronWindow, /second-instance/);
+    assert.match(electronWindow, /discord:\/\/-/);
+    // Native enforces the same decision in a new module only: kernel lock +
+    // startup exit, per-profile mutex names, no renderer surface.
+    const policy = readFileSync(new URL("../src/single_instance.rs", import.meta.url), "utf8");
+    assert.match(policy, /decide_startup/);
+    assert.match(policy, /ExitAsSecondary/);
+    assert.match(policy, /CreateMutexW/);
+    assert.match(policy, /RemcordSingleInstance-/);
+    // The setting the policy reads keeps its Electron default (false) on
+    // both sides of the bridge.
+    const nativeSettings = readFileSync(new URL("../src/settings.rs", import.meta.url), "utf8");
+    assert.match(nativeSettings, /pub multi_instance: bool/);
+    const electronConfig = readFileSync(new URL("../../src/common/config.ts", import.meta.url), "utf8");
+    assert.match(electronConfig, /multiInstance: false/);
+});
