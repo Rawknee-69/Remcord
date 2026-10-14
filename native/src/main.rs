@@ -6,6 +6,7 @@ mod channel;
 mod child_recovery;
 mod close_behavior;
 mod css_watch;
+mod custom_bundle;
 mod diagnostics;
 mod downloads;
 mod environment_observer;
@@ -50,8 +51,9 @@ use std::{
 use mod_substrate::{
     load_mod_bundle, managed_css_order_script, managed_css_remove_script, managed_css_script,
     mod_css_script, mod_execution_context_script, mod_marker_script, stage as mod_stage,
-    validate_descriptor, DocumentModLifecycle, ModArtifactIdentity, ModCache, ModCssSource,
-    ModDescriptor, ModEnabling, ModHostMetrics, PageGlobalReadiness, PendingModBootstrap,
+    validate_descriptor, validate_mod_bundle, DocumentModLifecycle, ModArtifactIdentity, ModBundle,
+    ModCache, ModCssSource, ModDescriptor, ModEnabling, ModHostMetrics, PageGlobalReadiness,
+    PendingModBootstrap,
 };
 
 use app::{current_app_version, validate_version};
@@ -246,6 +248,59 @@ const EQUICORD_MOD: ModDescriptor = ModDescriptor {
     log_tag: "Mod:Equicord",
 };
 
+/// Custom client mods as the fourth consumer of the same substrate. Traced
+/// from `src/discord/preload/mods/custom.mts` and `ipc.ts:130-137`:
+///
+/// - Source: the user's own `<profile>/custom.js` + `<profile>/custom.css`
+///   (host-built fixed paths; the renderer supplies only the logical id
+///   `"custom"`, never a path or URL). There is deliberately NO download:
+///   `js_url` / `css.url` below are non-resolving `example.invalid`
+///   placeholders that satisfy structural validation only — retrieval is
+///   local-file only (`custom_bundle.rs`) and `load_mod_bundle` refuses a
+///   `UserOwned` descriptor outright, so the URLs can never be fetched even
+///   by a mistaken call.
+/// - Identity: user-owned bytes carry no upstream banner or sentinel, so
+///   the `UserOwned` identity accepts any UTF-8 bytes within the
+///   descriptor's size bounds and versions them by content digest.
+/// - CSS: optional — the Electron preload calls `insertCSS(bundle.css)`
+///   only when CSS is present, so a missing `custom.css` skips the CSS
+///   stage instead of failing (unlike Equicord, whose CSS is required).
+/// - Verification: Electron verifies nothing after execution, and no
+///   custom bundle can be required to publish a page-world global. The
+///   marker therefore checks the host's own storage-context probe object
+///   (defined by the pre-execution script immediately before the user JS),
+///   which proves "host context plus user JS evaluated without delivery
+///   failing" — the exact Electron success shape.
+/// - Enablement: gated on `settings.mods`, matching
+///   `getConfig("mods").includes("custom")`.
+const CUSTOM_MOD: ModDescriptor = ModDescriptor {
+    id: "custom",
+    capability: "mod.get_bundle",
+    js_url: "https://example.invalid/custom.js",
+    js_file: "custom.js",
+    css: Some(ModCssSource {
+        url: "https://example.invalid/custom.css",
+        file: "custom.css",
+        max_bytes: custom_bundle::MAX_CUSTOM_CSS_BYTES,
+        style_element_id: "remcord-native-custom-css",
+        // The mod-agnostic CSS result event, with the host-supplied mod id
+        // echoed back so the host can refuse a result claimed for another mod.
+        result_event: "mod_css_result",
+    }),
+    allowed_hosts: &["example.invalid"],
+    max_js_bytes: custom_bundle::MAX_CUSTOM_JS_BYTES,
+    identity: ModArtifactIdentity::UserOwned,
+    page_global: "__remcordNativeCustomStorageAtExecution",
+    page_global_requires: None,
+    page_global_readiness: PageGlobalReadiness::Synchronous,
+    enabling: ModEnabling::SettingsMods,
+    success_marker: "custom-bootstrap-executed",
+    settings_key: None,
+    bootstrap_dom_event: "remcord-native:custom-bootstrap",
+    storage_context_global: "__remcordNativeCustomStorageAtExecution",
+    log_tag: "Mod:Custom",
+};
+
 fn lookup_mod_descriptor(mod_id: &str) -> Option<ModDescriptor> {
     KNOWN_MODS
         .iter()
@@ -259,10 +314,32 @@ fn find_mod_descriptor(mod_id: &str) -> Option<&'static ModDescriptor> {
     KNOWN_MODS.iter().find(|descriptor| descriptor.id == mod_id)
 }
 
+/// Loads a user-owned custom bundle from host-built profile-root files.
+///
+/// The renderer's logical id got us here; both file paths below are fixed
+/// host constants (`custom_bundle.rs`), so no renderer path, URL, or
+/// filename input can reach the filesystem. Envelope validation (UTF-8,
+/// size caps, at-least-one-half) stays owned by the shared substrate via
+/// the `UserOwned` identity: this function only moves raw bytes.
+fn load_custom_bundle(
+    descriptor: &ModDescriptor,
+    profile: std::path::PathBuf,
+) -> Result<ModBundle, String> {
+    debug_assert!(matches!(
+        descriptor.identity,
+        ModArtifactIdentity::UserOwned
+    ));
+    let raw = custom_bundle::load_raw_custom_bundle(&profile)
+        .map_err(|failure| format!("[{}:{}] {}", descriptor.id, failure.code, failure.message))?;
+    validate_mod_bundle(descriptor, raw.js.unwrap_or_default(), raw.css)
+}
+
 /// Every mod the native host serves. Each entry is a thin typed descriptor plus
 /// a thin renderer adapter under `native/web/mods/<id>/`; the substrate
-/// mechanics in `mod_substrate.rs` are identical for all of them.
-const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD, SHELTER_MOD, EQUICORD_MOD];
+/// mechanics in `mod_substrate.rs` are identical for all of them. Custom is
+/// the user-owned member: same capability, same pipeline, but local-file
+/// retrieval (`custom_bundle.rs`) instead of a fixed upstream download.
+const KNOWN_MODS: &[ModDescriptor] = &[VENCORD_MOD, SHELTER_MOD, EQUICORD_MOD, CUSTOM_MOD];
 
 /// DEV diagnostic: force a mod's adapter OFF regardless of `settings.mods`, so
 /// a "native without <mod>" control run needs no profile edit.
@@ -345,6 +422,7 @@ const MOD_SUBSTRATE_SCRIPT: &str = include_str!("../web/mod-substrate/mod-bootst
 const VENCORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/vencord/adapter.js");
 const SHELTER_ADAPTER_SCRIPT: &str = include_str!("../web/mods/shelter/adapter.js");
 const EQUICORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/equicord/adapter.js");
+const CUSTOM_ADAPTER_SCRIPT: &str = include_str!("../web/mods/custom/adapter.js");
 
 /// The renderer adapter for one registered mod, or `None` for a descriptor
 /// with no adapter file (a registry entry must always carry one).
@@ -353,6 +431,7 @@ fn mod_adapter_script(descriptor: &ModDescriptor) -> Option<&'static str> {
         "vencord" => Some(VENCORD_ADAPTER_SCRIPT),
         "shelter" => Some(SHELTER_ADAPTER_SCRIPT),
         "equicord" => Some(EQUICORD_ADAPTER_SCRIPT),
+        "custom" => Some(CUSTOM_ADAPTER_SCRIPT),
         _ => None,
     }
 }
@@ -368,6 +447,7 @@ fn adapter_state_name(descriptor: &ModDescriptor) -> Option<&'static str> {
         ("vencord", "__remcordNativeVencord"),
         ("shelter", "__remcordNativeShelter"),
         ("equicord", "__remcordNativeEquicord"),
+        ("custom", "__remcordNativeCustom"),
     ];
     STATE_NAMES
         .iter()
@@ -8046,10 +8126,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
 
                             let generation = document_lifecycle.generation();
-                            let cached_bundle = bundle_cache
-                                .lock()
-                                .ok()
-                                .and_then(|guard| guard.get(descriptor.id));
+                            // User-owned bundles bypass the in-memory cache
+                            // and are re-read per request: the files are the
+                            // user's live editor surface, so an edit applies
+                            // on the next document without a restart.
+                            // Download-published bundles are immutable per
+                            // session and stay cached.
+                            let is_user_owned = matches!(
+                                descriptor.identity,
+                                ModArtifactIdentity::UserOwned
+                            );
+                            let cached_bundle = if is_user_owned {
+                                None
+                            } else {
+                                bundle_cache
+                                    .lock()
+                                    .ok()
+                                    .and_then(|guard| guard.get(descriptor.id))
+                            };
                             if let Some(bundle) = cached_bundle {
                                 println!(
                                     "[{}][capability] request accepted from in-memory cache (document_generation={generation})",
@@ -8075,10 +8169,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     .name(format!("remcord-{}-bundle", descriptor.id))
                                     .spawn(move || {
                                         let retrieval_started_at = Instant::now();
-                                        let result = load_mod_bundle(&descriptor, profile);
+                                        let result = if is_user_owned {
+                                            load_custom_bundle(&descriptor, profile)
+                                        } else {
+                                            load_mod_bundle(&descriptor, profile)
+                                        };
                                         if let Ok(ref bundle) = result {
-                                            if let Ok(mut guard) = cache_ref.lock() {
-                                                guard.insert(descriptor.id, bundle.clone());
+                                            if !is_user_owned {
+                                                if let Ok(mut guard) = cache_ref.lock() {
+                                                    guard.insert(descriptor.id, bundle.clone());
+                                                }
                                             }
                                         }
                                         let retrieval_ms =
@@ -9217,17 +9317,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         document_start_script, initialization_script, is_allowed_navigation,
-        is_trusted_bridge_origin, lookup_mod_descriptor, mod_adapter_script, relaunch_command,
-        resolve_active_mods, settings_plugin_start_due, settings_plugin_start_script,
-        settings_ui_probe_script, startup_visibility, titlebar_plugin_start_script,
-        StartupVisibility, EQUICORD_MOD, KNOWN_MODS, PERMISSIONS_SMOKE_SCRIPT,
-        REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE,
-        SHELTER_MOD, TITLEBAR_PLUGIN_ID, TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
+        is_trusted_bridge_origin, load_custom_bundle, lookup_mod_descriptor, mod_adapter_script,
+        relaunch_command, resolve_active_mods, settings_plugin_start_due,
+        settings_plugin_start_script, settings_ui_probe_script, startup_visibility,
+        titlebar_plugin_start_script, StartupVisibility, CUSTOM_MOD, EQUICORD_MOD, KNOWN_MODS,
+        PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
+        SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
+        TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
         mod_marker_script, validate_descriptor, validate_mod_bundle, DocumentModLifecycle,
-        ModEnabling,
+        ModArtifactIdentity, ModEnabling,
     };
 
     /// Every registered mod, for tests that must hold for all of them.
@@ -9268,7 +9369,7 @@ mod tests {
         // The snapshot must exist before the settings plugin could execute:
         // the serialized snapshot precedes every mod adapter in the same
         // document-start script, and no splice placeholder may remain.
-        for id in ["vencord", "shelter", "equicord"] {
+        for id in ["vencord", "shelter", "equicord", "custom"] {
             let script = initialization_script(
                 &adapters_for(&[id]),
                 crate::settings_boot::test_fixture_json(),
@@ -9590,6 +9691,7 @@ mod tests {
             ("vencord", "__remcordNativeVencordAdapter"),
             ("shelter", "__remcordNativeShelterAdapter"),
             ("equicord", "__remcordNativeEquicordAdapter"),
+            ("custom", "__remcordNativeCustomAdapter"),
         ];
         for (id, own_flag) in expectations {
             let script = initialization_script(
@@ -9648,13 +9750,23 @@ mod tests {
         assert!(enabled.contains("__remcordNativeVencordAdapter"));
         assert!(enabled.contains("__remcordNativeShelterAdapter"));
         assert!(!enabled.contains("__remcordNativeEquicordAdapter"));
+        assert!(!enabled.contains("__remcordNativeCustomAdapter"));
         let equicord = script_for(&["equicord"]);
         assert!(equicord.contains("__remcordNativeEquicordAdapter"));
         assert!(equicord.contains("__remcordNativeShelterAdapter"));
         assert!(!equicord.contains("__remcordNativeVencordAdapter"));
+        assert!(!equicord.contains("__remcordNativeCustomAdapter"));
+        // Custom follows the same settings gate: present only when
+        // `settings.mods` names it, alongside always-on Shelter.
+        let custom = script_for(&["custom"]);
+        assert!(custom.contains("__remcordNativeCustomAdapter"));
+        assert!(custom.contains("getModBundle(\"custom\")"));
+        assert!(custom.contains("__remcordNativeShelterAdapter"));
+        assert!(!custom.contains("__remcordNativeVencordAdapter"));
         let disabled = script_for(&[]);
         assert!(!disabled.contains("__remcordNativeVencordAdapter"));
         assert!(!disabled.contains("__remcordNativeEquicordAdapter"));
+        assert!(!disabled.contains("__remcordNativeCustomAdapter"));
         assert!(disabled.contains("__remcordNativeShelterAdapter"));
     }
 
@@ -9685,7 +9797,7 @@ mod tests {
 
     #[test]
     fn every_registered_descriptor_declares_its_traced_contract() {
-        assert_eq!(KNOWN_MODS.len(), 3);
+        assert_eq!(KNOWN_MODS.len(), 4);
         let vencord = lookup_mod_descriptor("vencord").unwrap();
         assert_eq!(vencord.id, VENCORD_MOD.id);
         assert_eq!(vencord.capability, "mod.get_bundle");
@@ -9736,10 +9848,54 @@ mod tests {
         assert_eq!(equicord.enabling, ModEnabling::SettingsMods);
         assert_eq!(equicord.success_marker, "equicord-bootstrap-executed");
 
+        // Custom: user-owned `<profile>/custom.js` + `<profile>/custom.css`
+        // (host-built fixed paths, never a download), `UserOwned` identity,
+        // optional CSS, no page-world global of its own (the marker checks
+        // the host storage-context probe), and a settings gate matching
+        // Electron's `getConfig("mods").includes("custom")`.
+        let custom = lookup_mod_descriptor("custom").unwrap();
+        assert_eq!(custom.id, CUSTOM_MOD.id);
+        assert_eq!(custom.capability, "mod.get_bundle");
+        assert_eq!(custom.js_file, "custom.js");
+        let custom_css = custom.css.expect("Custom declares an optional stylesheet");
+        assert_eq!(custom_css.file, "custom.css");
+        assert_eq!(custom_css.style_element_id, "remcord-native-custom-css");
+        assert!(matches!(custom.identity, ModArtifactIdentity::UserOwned));
+        assert_eq!(
+            custom.page_global,
+            "__remcordNativeCustomStorageAtExecution"
+        );
+        assert_eq!(
+            custom.storage_context_global,
+            "__remcordNativeCustomStorageAtExecution"
+        );
+        assert_eq!(custom.page_global_requires, None);
+        assert_eq!(custom.settings_key, None);
+        assert_eq!(custom.enabling, ModEnabling::SettingsMods);
+        assert_eq!(custom.success_marker, "custom-bootstrap-executed");
+        assert_eq!(
+            custom.bootstrap_dom_event,
+            "remcord-native:custom-bootstrap"
+        );
+        // Single source of truth for the size caps: the descriptor carries
+        // the exact constants the local-file reader enforces.
+        assert_eq!(
+            custom.max_js_bytes,
+            crate::custom_bundle::MAX_CUSTOM_JS_BYTES
+        );
+        assert_eq!(
+            custom_css.max_bytes,
+            crate::custom_bundle::MAX_CUSTOM_CSS_BYTES
+        );
+        // The placeholder URLs are never fetched (retrieval is local-file
+        // only, and the downloader refuses `UserOwned` outright), but they
+        // must still satisfy structural validation like every descriptor.
+        assert!(is_allowed_mod_download_url(&custom, custom.js_url));
+        assert!(is_allowed_mod_download_url(&custom, custom_css.url));
+
         // Nothing that is not registered resolves, and the registry is
         // EXACT-match only: no prefix, case, path, or URL shape selects one.
         for unregistered in [
-            "custom",
             "arbitrary",
             "Vencord",
             "SHELTER",
@@ -9807,12 +9963,24 @@ mod tests {
             active.iter().map(|d| d.id).collect::<Vec<_>>(),
             vec!["vencord", "equicord"]
         );
-        // A settings entry for an unregistered name selects nothing.
-        let active = resolve_active_mods(&settings(&["custom", "DoNotChange"]), None);
+        // A settings entry for an unregistered name selects nothing, while
+        // the registered `custom` id selects the custom adapter (its bytes
+        // still come from the host-built profile files, resolved per
+        // request — an absent `custom.js`/`custom.css` fails retrieval
+        // instead of executing nothing).
+        let active = resolve_active_mods(&settings(&["DoNotChange"]), None);
         assert_eq!(
             active.iter().map(|d| d.id).collect::<Vec<_>>(),
             vec!["shelter"]
         );
+        let active = resolve_active_mods(&settings(&["custom", "DoNotChange"]), None);
+        assert_eq!(
+            active.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec!["shelter", "custom"]
+        );
+        // The settings gate still applies: an allowlist naming custom
+        // cannot enable it without the settings entry.
+        assert!(resolve_active_mods(&settings(&[]), Some("custom")).is_empty());
         // Whitespace and empty entries in the allowlist are ignored.
         let active = resolve_active_mods(&settings(&[]), Some(" shelter , "));
         assert_eq!(
@@ -9842,6 +10010,9 @@ mod tests {
             }
             ModArtifactIdentity::BuildHeader { .. } => {
                 panic!("Shelter must not claim a build header it does not publish")
+            }
+            ModArtifactIdentity::UserOwned => {
+                panic!("Shelter is download-published; only custom is user-owned")
             }
         }
         // Equicord DOES publish a banner, so it uses the header shape.
@@ -9940,6 +10111,128 @@ mod tests {
             assert!(super::BOOT_SNAPSHOT
                 .capabilities
                 .contains(&descriptor.capability));
+        }
+    }
+
+    #[test]
+    fn custom_bundles_execute_from_host_built_profile_files() {
+        // End-to-end through the real loader + shared validator: bytes the
+        // user drops at `<profile>/custom.js` / `<profile>/custom.css`
+        // validate into a servable bundle with a content-digest version.
+        // No path, URL, or filename crosses from the renderer at any point.
+        let profile = std::env::temp_dir().join(format!(
+            "remcord-custom-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&profile).expect("temp profile must be creatable");
+        // Nothing installed: the capability must fail typed, never serve
+        // an empty bundle.
+        let error = load_custom_bundle(&CUSTOM_MOD, profile.clone())
+            .expect_err("absent custom files must fail");
+        assert!(
+            error.contains("CUSTOM_NOT_INSTALLED"),
+            "unexpected error: {error}"
+        );
+        assert!(!error.contains(&profile.to_string_lossy().into_owned()));
+        // JS-only: CSS stage is skipped, validation passes.
+        std::fs::write(profile.join("custom.js"), b"window.__custom = 1;").unwrap();
+        let bundle =
+            load_custom_bundle(&CUSTOM_MOD, profile.clone()).expect("js-only custom must validate");
+        assert_eq!(bundle.js, "window.__custom = 1;");
+        assert!(bundle.css.is_none());
+        assert!(bundle.version.starts_with("sha256-"));
+        // Adding CSS changes the version (the digest covers both halves).
+        std::fs::write(profile.join("custom.css"), b".x{color:red}").unwrap();
+        let with_css =
+            load_custom_bundle(&CUSTOM_MOD, profile.clone()).expect("js+css custom must validate");
+        assert_eq!(with_css.css.unwrap(), ".x{color:red}");
+        assert_ne!(with_css.version, bundle.version);
+        // Identical bytes always produce the identical version.
+        let again = load_custom_bundle(&CUSTOM_MOD, profile.clone()).expect("reread must validate");
+        assert_eq!(again.version, with_css.version);
+        // CSS-only: the empty-implicit JS half is accepted for user-owned
+        // bundles (a download-published bundle would be refused here).
+        std::fs::remove_file(profile.join("custom.js")).unwrap();
+        let css_only = load_custom_bundle(&CUSTOM_MOD, profile.clone())
+            .expect("css-only custom must validate");
+        assert_eq!(css_only.js, "");
+        assert_eq!(css_only.js_bytes, 0);
+        // Non-UTF8 bytes are refused, never served.
+        std::fs::write(profile.join("custom.js"), vec![0xff, 0xfe, 0x00]).unwrap();
+        assert!(load_custom_bundle(&CUSTOM_MOD, profile.clone()).is_err());
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[test]
+    fn custom_bundles_never_reach_the_downloader() {
+        // Defense in depth: even a mistaken direct call fails closed with
+        // a message naming the local-file path instead of attempting the
+        // placeholder URL.
+        let error = crate::mod_substrate::load_mod_bundle(
+            &CUSTOM_MOD,
+            std::env::temp_dir().join("remcord-custom-never"),
+        )
+        .expect_err("UserOwned must never download");
+        assert!(error.contains("local profile files"));
+    }
+
+    #[test]
+    fn custom_marker_checks_the_host_context_probe_not_a_page_global() {
+        // No custom bundle can be required to publish a page-world global,
+        // so the marker proves the host's own storage-context probe object
+        // (defined immediately before the user JS) instead.
+        let context = mod_execution_context_script(&CUSTOM_MOD);
+        assert!(context.contains("__remcordNativeCustomStorageAtExecution"));
+        // Custom keeps its state outside localStorage: no settings key is
+        // invented for the storage diagnostic.
+        assert!(context.contains(r#"settingsState = "not_applicable";"#));
+        let marker = mod_marker_script(&CUSTOM_MOD, "request-1", 1.5).unwrap();
+        assert!(marker.contains("globalThis.__remcordNativeCustomStorageAtExecution"));
+        assert!(marker.contains("custom-bootstrap-executed"));
+        assert!(marker.contains("remcord-native:custom-bootstrap"));
+        assert!(!marker.contains("eval("));
+        assert!(!marker.contains("new Function"));
+        // The CSS stage uses the mod-agnostic result family with the
+        // host-supplied id echoed, exactly like Equicord.
+        let css_source = CUSTOM_MOD.css.expect("custom declares optional CSS");
+        let css = mod_css_script(&CUSTOM_MOD, &css_source, "request-1", ".x{}").unwrap();
+        assert!(css.contains("remcord-native-custom-css"));
+        assert!(css.contains("mod_css_result"));
+        assert!(css.contains("mod_id: \"custom\""));
+    }
+
+    #[test]
+    fn custom_adapter_requests_only_the_logical_id() {
+        // The adapter carries identity only: no custom filename, path,
+        // plain-http URL, file-read, sync-IPC, or eval surface may appear
+        // anywhere in the injected file. (The three `https://discord.com`
+        // entry origins are the required origin gate, asserted below.)
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("getModBundle(\"custom\")"));
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("__remcordNativeCustomAdapter"));
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("__remcordNativeCustom"));
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("remcord-native:custom-bootstrap"));
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("custom-bootstrap-executed"));
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("https://discord.com"));
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("https://canary.discord.com"));
+        assert!(super::CUSTOM_ADAPTER_SCRIPT.contains("https://ptb.discord.com"));
+        for forbidden in [
+            "custom.js",
+            "custom.css",
+            "example.invalid",
+            "http://",
+            "readFile",
+            "sendSync",
+            "eval(",
+            "new Function",
+        ] {
+            assert!(
+                !super::CUSTOM_ADAPTER_SCRIPT.contains(forbidden),
+                "custom adapter must not contain {forbidden:?}"
+            );
         }
     }
 
@@ -10819,8 +11112,11 @@ mod tests {
     fn native_bundle_allowlist_matches_the_seven_electron_names() {
         // Semantic parity with Electron `BUNDLE_FILES`
         // (`src/common/backup.ts`): same 7 names in the same order.
-        // `custom.js` / `custom.css` are inventory-only and stay
-        // non-executable natively (asserted by the electron-compat suite).
+        // `custom.js` / `custom.css` are inventoried here AND executed from
+        // the same host-built profile paths by the custom mod pipeline
+        // (`custom_bundle.rs` + the registered `custom` descriptor); the
+        // inventory never implies a renderer-supplied path (asserted by the
+        // electron-compat suite).
         assert_eq!(
             super::BUNDLE_FILES,
             &[

@@ -2222,12 +2222,13 @@ mod tests {
                 "must reject {hostile}"
             );
         }
-        // Charset-valid but UNREGISTERED ids parse here and are rejected at
-        // dispatch with UNKNOWN_MOD: exact registry match only, so a file
+        // Charset-valid ids parse here; registry membership (registered ids
+        // like `shelter`/`custom` vs file names or unknown mods) is enforced
+        // at dispatch with UNKNOWN_MOD: exact registry match only, so a file
         // name or an unregistered mod can never become a source selector.
-        for unregistered in ["shelter", "vencord.js", "equicord", "custom", "Vencord"] {
+        for parseable in ["shelter", "vencord.js", "equicord", "custom", "Vencord"] {
             let message = format!(
-                r#"{{"version":1,"request_id":"m-x","command":{{"type":"mod_get_bundle","payload":{{"mod_id":"{unregistered}"}}}}}}"#
+                r#"{{"version":1,"request_id":"m-x","command":{{"type":"mod_get_bundle","payload":{{"mod_id":"{parseable}"}}}}}}"#
             );
             assert!(
                 matches!(
@@ -2237,9 +2238,9 @@ mod tests {
                         ..
                     }))
                 ),
-                "{unregistered} must parse and be rejected by the host registry"
+                "{parseable} must parse; the host registry decides servability"
             );
-            assert!(validate_mod_bundle_id(unregistered).is_ok());
+            assert!(validate_mod_bundle_id(parseable).is_ok());
         }
     }
 

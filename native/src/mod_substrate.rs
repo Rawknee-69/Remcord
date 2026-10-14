@@ -61,6 +61,18 @@ pub enum ModArtifactIdentity {
     /// the reported version is the host-computed SHA-256 digest prefix of the
     /// retrieved bytes. Shelter's published build has no banner at all.
     SourceSentinels { sentinels: &'static [&'static str] },
+    /// The artifact is user-owned local content with no upstream publisher,
+    /// so there is no banner or sentinel to prove: any UTF-8 bytes within
+    /// the descriptor's size bounds are accepted. The reported version is
+    /// the host-computed SHA-256 digest prefix over the retrieved bytes
+    /// (JS bytes, a zero separator, then CSS bytes when a stylesheet is
+    /// present), so any edit to either half changes the version. Custom
+    /// client mods (`custom.js` / `custom.css`) are the only consumer: the
+    /// authoritative source is the host-built profile-root path, never a
+    /// renderer-supplied path or URL, and retrieval never touches the
+    /// network. The JS half may be empty (CSS-only custom bundle) as long
+    /// as at least one half carries bytes; the CSS half is always optional.
+    UserOwned,
 }
 
 /// When the mod publishes its page-world global relative to bundle evaluation.
@@ -391,10 +403,21 @@ fn cached_or_downloaded_asset(
 
 /// Retrieves (disk cache first, fixed-source download second) and validates
 /// the bundle described by `descriptor`.
+///
+/// A `UserOwned` descriptor (custom client mods) is refused outright: its
+/// bytes live in host-built profile-root files served by `custom_bundle`,
+/// never at a download URL, so routing one through the downloader would be
+/// a bug even though the placeholder URL could never resolve.
 pub fn load_mod_bundle(
     descriptor: &ModDescriptor,
     profile: std::path::PathBuf,
 ) -> Result<ModBundle, String> {
+    if matches!(descriptor.identity, ModArtifactIdentity::UserOwned) {
+        return Err(format!(
+            "[{}] user-owned bundles load from local profile files, never downloads",
+            descriptor.id
+        ));
+    }
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(Duration::from_secs(30))
@@ -445,14 +468,29 @@ pub fn validate_mod_bundle(
     js: Vec<u8>,
     css: Option<Vec<u8>>,
 ) -> Result<ModBundle, String> {
-    if js.is_empty() || js.len() > descriptor.max_js_bytes {
+    let user_owned = matches!(descriptor.identity, ModArtifactIdentity::UserOwned);
+    // Download-published bundles must always carry a JS half: an empty
+    // artifact is a failed download, never a mod. A user-owned bundle may
+    // be CSS-only (empty JS) as long as the CSS half carries bytes; both
+    // halves empty is still "not installed", reported by the loader before
+    // validation is ever reached.
+    let css_present = css.as_ref().is_some_and(|bytes| !bytes.is_empty());
+    if js.len() > descriptor.max_js_bytes {
+        return Err(format!(
+            "[{}] JS bundle was empty or exceeded its size limit",
+            descriptor.id
+        ));
+    }
+    if js.is_empty() && !(user_owned && css_present) {
         return Err(format!(
             "[{}] JS bundle was empty or exceeded its size limit",
             descriptor.id
         ));
     }
     // Identity is proven on the RAW bytes, before any text reinterpretation.
-    let version = prove_artifact_identity(descriptor, &js)?;
+    // A user-owned bundle has no upstream proof; its version is the
+    // host-computed digest over both halves (see `prove_artifact_identity`).
+    let version = prove_artifact_identity(descriptor, &js, css.as_deref())?;
     let js = String::from_utf8(js)
         .map_err(|error| format!("[{}] JS bundle is not UTF-8: {error}", descriptor.id))?;
     let js_bytes = js.len();
@@ -471,10 +509,17 @@ pub fn validate_mod_bundle(
             (Some(text), Some(bytes))
         }
         (Some(_), None) => {
-            return Err(format!(
-                "[{}] descriptor declares CSS but no stylesheet was provided",
-                descriptor.id
-            ))
+            // A download-published stylesheet is required: its preload
+            // calls `insertCSS(bundle.css!)`. A user-owned stylesheet is
+            // optional: custom CSS applies only when `custom.css` exists.
+            if user_owned {
+                (None, None)
+            } else {
+                return Err(format!(
+                    "[{}] descriptor declares CSS but no stylesheet was provided",
+                    descriptor.id
+                ));
+            }
         }
         (None, None) => (None, None),
         (None, Some(_)) => {
@@ -496,7 +541,11 @@ pub fn validate_mod_bundle(
 
 /// Proves the raw artifact bytes are the registered mod's own release build and
 /// derives the version string reported to the renderer.
-fn prove_artifact_identity(descriptor: &ModDescriptor, js: &[u8]) -> Result<String, String> {
+fn prove_artifact_identity(
+    descriptor: &ModDescriptor,
+    js: &[u8],
+    css: Option<&[u8]>,
+) -> Result<String, String> {
     match descriptor.identity {
         ModArtifactIdentity::BuildHeader { prefix } => std::str::from_utf8(js)
             .ok()
@@ -531,6 +580,29 @@ fn prove_artifact_identity(descriptor: &ModDescriptor, js: &[u8]) -> Result<Stri
             Ok(format!(
                 "sha256-{}",
                 hex_digest_prefix(js, DIGEST_VERSION_CHARS)
+            ))
+        }
+        ModArtifactIdentity::UserOwned => {
+            // No upstream proof exists for user-owned bytes: any content
+            // within the descriptor's size bounds is the user's own mod.
+            // The version still identifies content exactly: the digest covers
+            // the JS half, a zero separator, then the CSS half (or nothing
+            // when no stylesheet is present), so an edit to either half
+            // changes the version and identical bytes always agree.
+            let mut hasher = Sha256::new();
+            hasher.update(js);
+            hasher.update([0u8]);
+            if let Some(css) = css {
+                hasher.update(css);
+            }
+            let encoded = hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            Ok(format!(
+                "sha256-{}",
+                encoded[..DIGEST_VERSION_CHARS.min(encoded.len())].to_owned()
             ))
         }
     }
@@ -945,6 +1017,10 @@ pub fn validate_descriptor(descriptor: &ModDescriptor) -> Result<(), String> {
                 ));
             }
         }
+        // A user-owned bundle proves nothing upstream: there is no banner
+        // or sentinel to validate, so the identity is structurally complete
+        // by construction.
+        ModArtifactIdentity::UserOwned => {}
     }
     match descriptor.page_global_readiness {
         PageGlobalReadiness::Synchronous => {
@@ -1114,10 +1190,11 @@ pub struct PendingModBootstrap {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_mod_download_url, managed_css_order_script, managed_css_remove_script,
-        managed_css_script, mod_css_script, mod_execution_context_script, mod_marker_script,
-        validate_descriptor, validate_mod_bundle, DocumentModLifecycle, ModArtifactIdentity,
-        ModCache, ModCssSource, ModDescriptor, ModEnabling, ModHostMetrics, PageGlobalReadiness,
+        is_allowed_mod_download_url, load_mod_bundle, managed_css_order_script,
+        managed_css_remove_script, managed_css_script, mod_css_script,
+        mod_execution_context_script, mod_marker_script, validate_descriptor, validate_mod_bundle,
+        DocumentModLifecycle, ModArtifactIdentity, ModCache, ModCssSource, ModDescriptor,
+        ModEnabling, ModHostMetrics, PageGlobalReadiness,
     };
 
     /// Synthetic adapter contract proving the substrate is not tied to any one
@@ -1275,6 +1352,101 @@ mod tests {
         };
         assert!(validate_mod_bundle(&empty, headerless_bundle(), None).is_err());
         assert!(validate_descriptor(&empty).is_err());
+    }
+
+    /// Synthetic descriptor for the user-owned shape: no upstream publisher,
+    /// optional CSS, and no page-world global of its own (mirrors the real
+    /// `custom` descriptor in `main.rs` without importing it).
+    pub fn user_owned_descriptor() -> ModDescriptor {
+        ModDescriptor {
+            id: "custom",
+            capability: "mod.get_bundle",
+            js_url: "https://example.invalid/custom.js",
+            js_file: "custom.js",
+            css: Some(ModCssSource {
+                url: "https://example.invalid/custom.css",
+                file: "custom.css",
+                max_bytes: 1024 * 1024,
+                style_element_id: "remcord-native-custom-css",
+                result_event: "mod_css_result",
+            }),
+            allowed_hosts: &["example.invalid"],
+            max_js_bytes: 8 * 1024 * 1024,
+            identity: ModArtifactIdentity::UserOwned,
+            page_global: "__remcordNativeCustomStorageAtExecution",
+            page_global_requires: None,
+            page_global_readiness: PageGlobalReadiness::Synchronous,
+            enabling: ModEnabling::SettingsMods,
+            success_marker: "custom-bootstrap-executed",
+            settings_key: None,
+            bootstrap_dom_event: "remcord-native:custom-bootstrap",
+            storage_context_global: "__remcordNativeCustomStorageAtExecution",
+            log_tag: "Mod:Custom",
+        }
+    }
+
+    #[test]
+    fn user_owned_bundles_accept_any_utf8_bytes_with_a_content_digest() {
+        let descriptor = user_owned_descriptor();
+        assert!(validate_descriptor(&descriptor).is_ok());
+        // JS-only: the stylesheet is optional for user-owned bundles (a
+        // download-published bundle declaring CSS would be refused here).
+        let js_only =
+            validate_mod_bundle(&descriptor, b"window.__custom = 1;".to_vec(), None).unwrap();
+        assert_eq!(js_only.js, "window.__custom = 1;");
+        assert!(js_only.css.is_none());
+        assert!(js_only.version.starts_with("sha256-"));
+        assert_eq!(js_only.version.len(), "sha256-".len() + 16);
+        // JS + CSS: both halves validate, and the digest covers both (an
+        // edit to either half changes the version).
+        let both = validate_mod_bundle(
+            &descriptor,
+            b"window.__custom = 1;".to_vec(),
+            Some(b".x{color:red}".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(both.css.unwrap(), ".x{color:red}");
+        assert_ne!(both.version, js_only.version);
+        let css_edit = validate_mod_bundle(
+            &descriptor,
+            b"window.__custom = 1;".to_vec(),
+            Some(b".x{color:blue}".to_vec()),
+        )
+        .unwrap();
+        assert_ne!(css_edit.version, both.version);
+        // CSS-only: the empty JS half is accepted (never manufactured into
+        // a placeholder), and the digest still identifies content exactly.
+        let css_only =
+            validate_mod_bundle(&descriptor, b"".to_vec(), Some(b".x{}".to_vec())).unwrap();
+        assert_eq!(css_only.js, "");
+        assert_eq!(css_only.js_bytes, 0);
+        let css_only_other =
+            validate_mod_bundle(&descriptor, b"".to_vec(), Some(b".y{}".to_vec())).unwrap();
+        assert_ne!(css_only_other.version, css_only.version);
+        let css_only_again =
+            validate_mod_bundle(&descriptor, b"".to_vec(), Some(b".x{}".to_vec())).unwrap();
+        assert_eq!(css_only_again.version, css_only.version);
+        // Both halves empty is still refused.
+        assert!(validate_mod_bundle(&descriptor, b"".to_vec(), None).is_err());
+        // Oversize halves are refused even for user-owned bundles.
+        let big_js = vec![b'x'; 8 * 1024 * 1024 + 1];
+        assert!(validate_mod_bundle(&descriptor, big_js, None).is_err());
+        let big_css = vec![b'x'; 1024 * 1024 + 1];
+        assert!(validate_mod_bundle(&descriptor, b"window.x=1;".to_vec(), Some(big_css)).is_err());
+        // Non-UTF8 bytes are refused, never served.
+        assert!(validate_mod_bundle(&descriptor, vec![0xff, 0xfe], None).is_err());
+    }
+
+    #[test]
+    fn user_owned_descriptors_never_reach_the_downloader() {
+        // The downloader refuses before building any request, so this test
+        // is hermetic: no network, no filesystem, no placeholder fetch.
+        let error = load_mod_bundle(
+            &user_owned_descriptor(),
+            std::env::temp_dir().join("remcord-user-owned-never"),
+        )
+        .expect_err("UserOwned must never download");
+        assert!(error.contains("local profile files"));
     }
 
     #[test]
@@ -1658,7 +1830,11 @@ mod tests {
     /// contract.
     #[test]
     fn every_mod_shape_satisfies_the_same_substrate_lifecycle() {
-        for descriptor in [test_descriptor(), headerless_descriptor()] {
+        for descriptor in [
+            test_descriptor(),
+            headerless_descriptor(),
+            user_owned_descriptor(),
+        ] {
             assert!(
                 validate_descriptor(&descriptor).is_ok(),
                 "{} must be a servable descriptor",
@@ -1677,6 +1853,7 @@ mod tests {
                     b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec()
                 }
                 ModArtifactIdentity::SourceSentinels { .. } => headerless_bundle(),
+                ModArtifactIdentity::UserOwned => b"window.__custom = 1;".to_vec(),
             };
             let css = descriptor
                 .css
@@ -1739,13 +1916,23 @@ mod tests {
             }
 
             // Failure propagation: a bad artifact is typed, never silent.
-            let mut tampered = if descriptor.css.is_some() {
-                b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec()
+            // (A user-owned bundle accepts any bytes by design, so its
+            // failure shapes are emptiness and size bounds, not identity.)
+            if matches!(descriptor.identity, ModArtifactIdentity::UserOwned) {
+                assert!(validate_mod_bundle(&descriptor, b"".to_vec(), None).is_err());
+                assert!(
+                    validate_mod_bundle(&descriptor, vec![b'x'; 8 * 1024 * 1024 + 1], None)
+                        .is_err()
+                );
             } else {
-                headerless_bundle()
-            };
-            tampered.truncate(tampered.len() / 2);
-            assert!(validate_mod_bundle(&descriptor, tampered, None).is_err());
+                let mut tampered = if descriptor.css.is_some() {
+                    b"// TestMod 1.0.0\nvar TestMod = {};\n".to_vec()
+                } else {
+                    headerless_bundle()
+                };
+                tampered.truncate(tampered.len() / 2);
+                assert!(validate_mod_bundle(&descriptor, tampered, None).is_err());
+            }
         }
     }
 

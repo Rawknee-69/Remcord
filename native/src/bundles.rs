@@ -31,10 +31,14 @@
 //!   filesystem convention (plugin storage and themes reject planted links
 //!   instead of following them).
 //! - `custom.js` / `custom.css` are inventoried exactly like the other five
-//!   names (same allowlist, same ordering, same presence semantics) but stay
-//!   inventory-only and non-executable: there is no authoritative
-//!   host-controlled source for custom artifacts, so no native execution or
-//!   restore path may treat presence as servability.
+//!   names (same allowlist, same ordering, same presence semantics) AND are
+//!   executable through the registered `custom` mod pipeline: the
+//!   authoritative host-controlled source is the same two host-built
+//!   profile-root paths this inventory joins, served by `custom_bundle.rs`
+//!   (local-file retrieval, never a renderer path/URL) and validated by the
+//!   shared substrate's `UserOwned` identity. Inventory presence therefore
+//!   means "servable when `settings.mods` names `custom`", exactly like the
+//!   other servable names mean "servable when enabled".
 //! - A filesystem error other than "not found" (e.g. permission denied)
 //!   fails the whole inventory closed as `BUNDLES_UNAVAILABLE` instead of
 //!   guessing absence. Error messages carry only the fixed allowlisted name,
@@ -48,9 +52,10 @@
 use std::path::Path;
 
 /// Exact Electron `BUNDLE_FILES` allowlist (`src/common/backup.ts`), in the
-/// same order. `custom.js` / `custom.css` are inventory-only (see module
-/// docs); they are listed so a future backup export slice can reason about
-/// the same set Electron reasons about.
+/// same order. `custom.js` / `custom.css` are served for execution by the
+/// registered `custom` mod pipeline (see `custom_bundle.rs`); they are
+/// listed here so inventory, backup, and execution reason about the same
+/// set Electron reasons about.
 pub const BUNDLE_FILES: &[&str] = &[
     "vencord.js",
     "vencord.css",

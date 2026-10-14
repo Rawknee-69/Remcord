@@ -574,23 +574,58 @@ test("no src caller uses the native bundle discovery path", () => {
     assert.match(backupSection, /window\.remcord\.backup\.restore\(\)/);
 });
 
-test("custom bundles stay inventory-only and non-executable natively", () => {
-    // No authoritative host-controlled source exists for custom artifacts,
-    // so presence in the inventory must never imply servability: the mod
-    // registry serves only registered host-controlled descriptors, and the
-    // discovery module documents the restriction.
+test("custom bundles execute from the host-controlled local source natively", () => {
+    // F1: the authoritative host-controlled source is the host-built
+    // profile-root path (`custom_bundle.rs`), so presence in the inventory
+    // means servability when `settings.mods` names `custom` — the renderer
+    // still supplies only the logical id, never a path or URL.
     const nativeBundles = readFileSync(new URL("../src/bundles.rs", import.meta.url), "utf8");
+    const nativeCustom = readFileSync(new URL("../src/custom_bundle.rs", import.meta.url), "utf8");
     const nativeBackup = readFileSync(new URL("../src/backup.rs", import.meta.url), "utf8");
+    const nativeModCache = readFileSync(new URL("../src/mod_cache.rs", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
-    assert.match(nativeBundles, /inventory-only and non-executable/);
-    // No descriptor registers the custom id, so inventory presence can
-    // never become execution (the pre-existing "custom" settings-gate test
-    // below only proves an unregistered id enables nothing).
-    assert.doesNotMatch(main, /id: "custom"/);
-    // The native backup facade exposes discovery plus save plus the
-    // inspect/commit/discard trio: no Electron channel name, dialog send,
-    // zip/generic member, or bundle content may exist alongside them, and
-    // custom artifacts stay DATA ONLY inside the archive (never executed).
+    const customAdapter = readFileSync(new URL("../web/mods/custom/adapter.js", import.meta.url), "utf8");
+    // The inventory and the execution path reason about the same fixed names.
+    assert.match(nativeCustom, /CUSTOM_JS_FILE: &str = "custom\.js"/);
+    assert.match(nativeCustom, /CUSTOM_CSS_FILE: &str = "custom\.css"/);
+    // Retrieval is local-file only: links never followed, size caps enforced,
+    // no network, no renderer-supplied path.
+    assert.match(nativeCustom, /symlink_metadata/);
+    assert.match(nativeCustom, /MAX_CUSTOM_JS_BYTES/);
+    assert.match(nativeCustom, /MAX_CUSTOM_CSS_BYTES/);
+    assert.doesNotMatch(nativeCustom, /ureq|https?:\/\/|getModBundle\("custom"\)/);
+    // A descriptor registers the custom id on the shared capability, with a
+    // user-owned identity (no upstream banner or sentinel to prove).
+    assert.match(main, /id: "custom"/);
+    assert.match(main, /CUSTOM_MOD/);
+    assert.match(main, /CUSTOM_ADAPTER_SCRIPT/);
+    assert.match(main, /ModArtifactIdentity::UserOwned/);
+    assert.match(main, /load_custom_bundle/);
+    // The adapter carries identity only: the logical id, never a path/URL.
+    assert.match(customAdapter, /getModBundle\("custom"\)/);
+    assert.doesNotMatch(customAdapter, /custom\.js|custom\.css/);
+    assert.doesNotMatch(
+        customAdapter,
+        /example\.invalid|https?:\/\/(?!discord\.com|canary\.discord\.com|ptb\.discord\.com)/,
+    );
+    // User-owned files are still user data: the cache-clear allowlist must
+    // never name them (docs/tests may mention them as must-survive), and
+    // restores still land them as DATA ONLY (execution happens from the
+    // profile files at the next launch, never from the archive).
+    const cacheBlock = nativeModCache.match(/pub const MOD_CACHE_FILES[^=]*=\s*&\[([\s\S]*?)\];/);
+    assert.ok(cacheBlock);
+    assert.doesNotMatch(cacheBlock[1], /custom/);
+    assert.match(nativeBackup, /custom\.js.*DATA ONLY|DATA ONLY/);
+    // Electron parity reference is untouched: the local userData files stay
+    // the source of truth there too.
+    assert.match(ipc, /ifExistsRead\(path\.join\(app\.getPath\("userData"\), "custom\.js"\)\)/);
+    assert.match(nativeBundles, /"custom\.js"/);
+    assert.match(nativeBundles, /"custom\.css"/);
+});
+
+test("the native backup facade exposes only discovery plus save plus the inspect/commit/discard trio", () => {
+    // No Electron channel name, dialog send, zip/generic member, or bundle
+    // content may exist alongside them.
     assert.match(nativeFacade, /function listBundles\(/);
     assert.match(nativeFacade, /function saveBackup\(/);
     assert.match(nativeFacade, /function inspectBackup\(/);
@@ -606,7 +641,6 @@ test("custom bundles stay inventory-only and non-executable natively", () => {
     assert.doesNotMatch(nativeFacade, /showSaveDialog/);
     assert.doesNotMatch(nativeFacade, /showOpenDialog/);
     assert.doesNotMatch(nativeFacade, /AdmZip|readBackupZipToMap|buildBackupZipBuffer/);
-    assert.match(nativeBackup, /custom\.js.*DATA ONLY|DATA ONLY/);
 });
 
 test("the native backup save preserves the Electron archive and dialog contract", () => {

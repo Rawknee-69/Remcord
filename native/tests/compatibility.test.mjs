@@ -12,6 +12,7 @@ const storagePreservation = readFileSync(
 const vencordAdapter = readFileSync(new URL("../web/mods/vencord/adapter.js", import.meta.url), "utf8");
 const shelterAdapter = readFileSync(new URL("../web/mods/shelter/adapter.js", import.meta.url), "utf8");
 const equicordAdapter = readFileSync(new URL("../web/mods/equicord/adapter.js", import.meta.url), "utf8");
+const customAdapter = readFileSync(new URL("../web/mods/custom/adapter.js", import.meta.url), "utf8");
 const testModAdapter = readFileSync(new URL("../web/mods/testmod/adapter.js", import.meta.url), "utf8");
 
 /**
@@ -69,6 +70,7 @@ function stripComments(source) {
 /** Executable/configuration content only, with comments removed. */
 const shelterAdapterCode = stripComments(shelterAdapter);
 const equicordAdapterCode = stripComments(equicordAdapter);
+const customAdapterCode = stripComments(customAdapter);
 
 function createBootstrap(capabilities, settingsBoot = defaultSettingsBoot(), hostPlatform = defaultHostPlatform()) {
     return bootstrapTemplate
@@ -296,6 +298,20 @@ const MOD_WIRE = {
         echoesModId: true,
         cssBytes: 217092,
         cssInjectionMs: 5,
+    },
+    custom: {
+        stateName: "__remcordNativeCustom",
+        adapterFlag: "__remcordNativeCustomAdapter",
+        domEvent: "remcord-native:custom-bootstrap",
+        marker: "custom-bootstrap-executed",
+        // User-owned bytes: the host reports a content digest, never a banner.
+        version: "sha256-0123456789abcdef",
+        resultEvent: "mod_bootstrap_result",
+        ackEvent: "mod_response_ack",
+        errorEvent: "mod_adapter_error",
+        echoesModId: true,
+        cssBytes: 512,
+        cssInjectionMs: 2,
     },
 };
 
@@ -1134,8 +1150,11 @@ test("an unregistered but well-formed id is refused by the host registry", async
     // The charset bound cannot know the registry, so a plausible-looking id
     // (including a file name) is dispatched and must come back as a typed
     // UNKNOWN_MOD failure. Nothing is read, and no source is substituted.
+    // The facade's propagation is id-agnostic: the host decides servability
+    // (`custom` is served since F1, so a never-registered `myplugin` stands
+    // in for the refused shape here).
     const { window } = createRuntime();
-    for (const unregistered of ["vencord.js", "shelter", "equicord", "custom", "Vencord"]) {
+    for (const unregistered of ["vencord.js", "shelter", "equicord", "myplugin", "Vencord"]) {
         const request = window.remcord.native.getModBundle(unregistered);
         const message = window.messages.filter((entry) => entry.command?.type === "mod_get_bundle").pop();
         assert.deepEqual(message.command.payload, { mod_id: unregistered });
@@ -1481,12 +1500,13 @@ for (const [modId, adapter, markerEvent] of [
 }
 
 // ---------------------------------------------------------------------------
-// Registered mod consumers (Shelter, Equicord) share this lifecycle verbatim.
-// Every assertion below runs for BOTH mods, which is what makes the shared
-// substrate's generality a tested property rather than a claim.
+// Registered mod consumers (Shelter, Equicord, Custom) share this lifecycle
+// verbatim. Every assertion below runs for ALL THREE mods, which is what
+// makes the shared substrate's generality a tested property rather than a
+// claim.
 // ---------------------------------------------------------------------------
 
-const REGISTERED_ADAPTERS = { shelter: shelterAdapter, equicord: equicordAdapter };
+const REGISTERED_ADAPTERS = { shelter: shelterAdapter, equicord: equicordAdapter, custom: customAdapter };
 
 for (const [modId, adapter] of Object.entries(REGISTERED_ADAPTERS)) {
     const wire = MOD_WIRE[modId];
@@ -1726,6 +1746,57 @@ test("Shelter's descriptor needs no CSS stage and reports null CSS metadata", ()
     assert.doesNotMatch(shelterAdapterCode, /insertCSS|css_result/);
     // But it still READS the host's CSS metadata, which is null for this mod.
     assert.match(shelterAdapterCode, /cssBytes: result\.css_bytes/);
+});
+
+test("Custom's adapter runs the shared cycle with a content-digest version", async () => {
+    // User-owned bytes carry no banner: the host versions them by content
+    // digest, and the adapter validates the digest-shaped version plus its
+    // own marker exactly like the download-published mods.
+    const { window, context } = createRuntime();
+    vm.runInContext(customAdapter, context);
+    const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+    assert.deepEqual(request.command.payload, { mod_id: "custom" });
+    dispatchBootstrap(window, request, "custom");
+    respondMod(window, request, "custom");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const state = window.__remcordNativeCustom;
+    assert.equal(state.status, "executed");
+    assert.equal(state.marker, "custom-bootstrap-executed");
+    assert.equal(state.bundleVersion, "sha256-0123456789abcdef");
+    assert.equal(state.cssBytes, 512);
+    // The host owns the CSS result, so the adapter declares no CSS event —
+    // it reports only the bootstrap verdict and the ack, like Equicord.
+    assert.doesNotMatch(customAdapterCode, /cssResultEvent/);
+    assert.doesNotMatch(customAdapterCode, /_css_result/);
+});
+
+test("Custom propagates the typed not-installed failure when its files are absent", async () => {
+    // Enabling `custom` in settings without dropping `custom.js`/`custom.css`
+    // into the profile is an honest typed failure, not a hang and not silent
+    // success: the adapter hears CUSTOM_NOT_INSTALLED from the host.
+    const { window, context } = createRuntime();
+    vm.runInContext(customAdapter, context);
+    const request = window.messages.find((message) => message.command?.type === "mod_get_bundle");
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: false,
+                payload: null,
+                error: {
+                    code: "bundle_retrieval",
+                    message: "[custom:CUSTOM_NOT_INSTALLED] custom bundles are not installed",
+                },
+            },
+        }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(window.__remcordNativeCustom.status, "failed");
+    assert.match(window.__remcordNativeCustom.error, /not installed/);
 });
 
 test("Equicord's descriptor carries a real CSS stage and stylesheet size", async () => {

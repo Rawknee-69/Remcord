@@ -14,8 +14,9 @@
 //!   (`vencord.js`, `vencord.css`, `equicord.js`, `equicord.css`,
 //!   `shelter.js`) joined onto the host-built profile root.
 //! - `custom.js` / `custom.css` are NEVER touched: they are user-owned
-//!   bundles (inventory-only elsewhere), not downloaded caches —
-//!   deleting them would destroy user data.
+//!   bundles (executed from the same profile paths by the `custom` mod
+//!   pipeline), not downloaded caches — deleting them would destroy user
+//!   data.
 //! - Links, junctions, directories, and non-regular files are skipped
 //!   (reported absent, never followed). A non-NotFound IO error fails the
 //!   whole operation closed before any settings write, naming only the
