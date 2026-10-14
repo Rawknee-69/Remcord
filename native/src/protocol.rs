@@ -2304,6 +2304,7 @@ pub struct TrayGetStateResponse {
     pub available: bool,
     pub minimize_to_tray: bool,
     pub should_hide: bool,
+}
 /// Acknowledgement for opening (or focusing) one diagnostics window
 /// (F25: WebRTC internals / GPU page). `page` echoes the closed page id
 /// (`webrtc-internals` / `gpu`) so one page's acknowledgement can never
@@ -2647,7 +2648,7 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid clipboard image url".to_owned());
                     }
                 }
-                | BridgeCommand::DiagnosticsOpenWebrtcInternals(_)
+                BridgeCommand::DiagnosticsOpenWebrtcInternals(_)
                 | BridgeCommand::DiagnosticsOpenGpuPage(_)
                 | BridgeCommand::ModClearCache(_) => {}
                 // Parameter-free by protocol (`deny_unknown_fields` already

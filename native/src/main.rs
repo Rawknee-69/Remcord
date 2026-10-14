@@ -103,22 +103,21 @@ use protocol::{
     BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
     ClipboardImageCopiedResponse, DiagnosticsInfoResponse, DiagnosticsWindowOpenedResponse,
     DownloadsFolderOpenedResponse, DownloadsListResponse, DownloadsRevealedResponse,
-    FoldersOpenedResponse, GalleryAddResponse,
-    GalleryBulkRemoveResponse, GalleryCategoriesResponse, GalleryCategoryAddResponse,
-    GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse, GalleryFileResponse,
-    GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse, GalleryUpdateResponse,
-    GalleryUsageResponse, KeybindsAddResponse, KeybindsListResponse, KeybindsRemoveResponse,
-    KeybindsToggleResponse, LocalizationStringResponse, MenusTemplateResponse, ModBundleResponse,
-    ModCacheClearedResponse, PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse,
-    PluginsListResponse, PluginsReloadResponse, PluginsRuntimeEntriesResponse,
-    PluginsRuntimeScriptResponse, PluginsSetEnabledResponse, QuickCssReadResponse,
-    QuickCssWrittenResponse, RequestTracker, RpcBlacklistResponse, RpcDetectableAddResponse,
-    RpcDetectableRemoveResponse, RpcDetectablesResponse, RpcProcessListResponse,
-    RpcProcessRefreshResponse, SettingsConfigResponse, SettingsImportedResponse,
-    SettingsMutationResponse, SettingsSetResponse, SpellcheckStateResponse, ThemeEnabledResponse,
-    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    ThemesListResponse, TrayGetStateResponse, WindowAckResponse, WindowStateResponse,
-    PROTOCOL_VERSION,
+    FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
+    GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
+    GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
+    GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse,
+    KeybindsListResponse, KeybindsRemoveResponse, KeybindsToggleResponse,
+    LocalizationStringResponse, MenusTemplateResponse, ModBundleResponse, ModCacheClearedResponse,
+    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
+    PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
+    RpcBlacklistResponse, RpcDetectableAddResponse, RpcDetectableRemoveResponse,
+    RpcDetectablesResponse, RpcProcessListResponse, RpcProcessRefreshResponse,
+    SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
+    SettingsSetResponse, SpellcheckStateResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
+    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
+    TrayGetStateResponse, WindowAckResponse, WindowStateResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -4779,6 +4778,42 @@ fn respond_downloads_err(
     }
     *response_count += 1;
     println!("[Downloads][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
+}
+
+/// Answer one diagnostics-window open request (F25): the closed page id
+/// plus which singleton path was taken. Mirrors `respond_window_ack`'s
+/// envelope discipline with the page-specific payload instead of a command
+/// echo.
+fn respond_diagnostics_window_opened(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    request_id: &str,
+    ack: diagnostics_windows::DiagnosticsWindowAck,
+    received_at: &Instant,
+) {
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.to_owned(),
+        ok: true,
+        payload: Some(BridgeResponsePayload::DiagnosticsWindowOpened(
+            DiagnosticsWindowOpenedResponse {
+                page: ack.page,
+                opened: ack.opened,
+                focused_existing: ack.focused_existing,
+            },
+        )),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    println!(
+        "[Diagnostics][Metrics] page={} opened={} request_latency_ms={:.3}",
+        ack.page,
+        ack.opened,
+        received_at.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 /// Sends one keybind success response and completes request correlation.
