@@ -55,6 +55,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_System_Threading",
+    # F27 single-instance named mutex: CreateMutexW is gated on the
+    # SECURITY_ATTRIBUTES type from Win32_Security.
+    "Win32_Security",
 ] }
 
 [dev-dependencies]

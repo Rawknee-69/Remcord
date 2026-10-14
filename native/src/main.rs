@@ -40,6 +40,7 @@ mod settings_boot;
 mod settings_import;
 mod settings_plugin;
 mod shelter_injector;
+mod single_instance;
 mod theme_import;
 mod themes;
 mod titlebar_plugin;
@@ -5776,24 +5777,67 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
-    let (settings_mods, discord_channel, screenshare_quality, prefer_hw_h264) = match load_settings(
-        &profile_path,
-    ) {
-        Ok(loaded) => (
-            loaded.snapshot.mods,
-            loaded.snapshot.channel,
-            loaded.snapshot.screenshare_quality,
-            loaded.snapshot.sdp_h264_baseline_rewrite,
-        ),
-        Err(error) => {
-            // Corrupt/unreadable settings fail closed to "no extra mods", the
-            // same parity the Quick CSS enablement already uses.
-            eprintln!(
+    let (settings_mods, discord_channel, screenshare_quality, prefer_hw_h264, allow_multi_instance) =
+        match load_settings(&profile_path) {
+            Ok(loaded) => (
+                loaded.snapshot.mods,
+                loaded.snapshot.channel,
+                loaded.snapshot.screenshare_quality,
+                loaded.snapshot.sdp_h264_baseline_rewrite,
+                loaded.snapshot.multi_instance,
+            ),
+            Err(error) => {
+                // Corrupt/unreadable settings fail closed to "no extra mods", the
+                // same parity the Quick CSS enablement already uses.
+                eprintln!(
                     "[Mod:Registry] mod enablement could not be resolved from settings; treating as none ({error})"
                 );
-            (Vec::new(), "stable".to_owned(), "default".to_owned(), true)
-        }
-    };
+                (
+                    Vec::new(),
+                    "stable".to_owned(),
+                    "default".to_owned(),
+                    true,
+                    false,
+                )
+            }
+        };
+    // F27: single-instance enforcement (Electron `requestSingleInstanceLock`
+    // parity). The guard is held for the whole process; a secondary launch
+    // with `multiInstance=false` exits here before any window is shown.
+    // Fail-closed to single-instance when enforcement itself errors.
+    let (_single_instance_guard, single_instance_action) =
+        match single_instance::enforce_startup_policy(allow_multi_instance, &profile_path) {
+            Ok((action, guard)) => (guard, action),
+            Err(error) => {
+                eprintln!("[SingleInstance] enforcement failed: {error}");
+                (None, single_instance::StartupAction::ExitAsSecondary)
+            }
+        };
+    println!(
+        "{}",
+        single_instance::format_log(
+            &single_instance_action,
+            allow_multi_instance,
+            _single_instance_guard.is_some()
+        )
+    );
+    if single_instance_action == single_instance::StartupAction::ExitAsSecondary {
+        // A primary is already running. State the intended primary
+        // behavior and whether this launch carried a deep link: with no
+        // cross-process handoff transport yet, the link cannot be
+        // delivered, and that must be visible, not silent. Only presence
+        // is logged - never the link itself.
+        let argv: Vec<String> = std::env::args().collect();
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let deep_link_present = single_instance::extract_deep_link(&borrowed).is_some();
+        let primary_should = single_instance::format_second_launch(
+            &single_instance::decide_second_launch(allow_multi_instance),
+        );
+        eprintln!(
+            "[SingleInstance] already running; exiting secondary primary_should={primary_should} deep_link_present={deep_link_present}"
+        );
+        return Ok(());
+    }
     // Release-channel entry URL, resolved once per process from the same
     // authoritative snapshot (restart-required model, redirect.html parity).
     // Hand-edited or forward-compat values fail safe to stable.
