@@ -203,12 +203,10 @@ pub fn show_custom_icon_picker() -> Result<Option<String>, String> {
         let display = result
             .GetDisplayName(SIGDN_FILESYSPATH)
             .map_err(|_| "icon picker cannot be shown".to_owned())?;
-        let text = unsafe { display.to_string().unwrap_or_default() };
-        unsafe {
-            windows::Win32::System::Com::CoTaskMemFree(Some(
-                display.0 as *const std::ffi::c_void,
-            ));
-        }
+        let text = display.to_string().unwrap_or_default();
+        windows::Win32::System::Com::CoTaskMemFree(Some(
+            display.0 as *const std::ffi::c_void,
+        ));
         if text.is_empty() {
             return Err("icon picker cannot be shown".to_owned());
         }

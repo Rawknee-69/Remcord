@@ -1412,12 +1412,10 @@ pub fn show_gallery_import_picker() -> Result<Option<Vec<std::path::PathBuf>>, G
             let display = item
                 .GetDisplayName(SIGDN_FILESYSPATH)
                 .map_err(|_| failed())?;
-            let text = unsafe { display.to_string().unwrap_or_default() };
-            unsafe {
-                windows::Win32::System::Com::CoTaskMemFree(Some(
-                    display.0 as *const std::ffi::c_void,
-                ));
-            }
+            let text = display.to_string().unwrap_or_default();
+            windows::Win32::System::Com::CoTaskMemFree(Some(
+                display.0 as *const std::ffi::c_void,
+            ));
             if text.is_empty() {
                 return Err(failed());
             }
@@ -1475,12 +1473,10 @@ pub fn show_gallery_export_dir_picker() -> Result<Option<std::path::PathBuf>, Ga
         let display = result
             .GetDisplayName(SIGDN_FILESYSPATH)
             .map_err(|_| failed())?;
-        let text = unsafe { display.to_string().unwrap_or_default() };
-        unsafe {
-            windows::Win32::System::Com::CoTaskMemFree(Some(
-                display.0 as *const std::ffi::c_void,
-            ));
-        }
+        let text = display.to_string().unwrap_or_default();
+        windows::Win32::System::Com::CoTaskMemFree(Some(
+            display.0 as *const std::ffi::c_void,
+        ));
         if text.is_empty() {
             return Err(failed());
         }

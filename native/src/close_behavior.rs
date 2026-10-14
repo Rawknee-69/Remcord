@@ -31,9 +31,13 @@ pub enum CloseAction {
 }
 
 /// Whether a usable native tray icon with a working reopen action exists.
-/// Single source of truth: `false` until a real tray is implemented. A
-/// setting name alone (e.g. Electron's `minimizeToTray`/`tray`) never
-/// counts — only an actual icon plus a tested reopen action flips this.
+/// Compile-time floor for the close policy: `false`. Runtime availability
+/// comes from the live tray worker (`tray_icon::TrayHandle` presence) —
+/// a setting name alone (e.g. Electron's `minimizeToTray`/`tray`) never
+/// counts, only an actual icon plus a tested reopen action flips the
+/// runtime bit. Call sites pass the live presence; this function remains
+/// as the documented floor plus its policy tests.
+#[allow(dead_code)]
 pub fn tray_available() -> bool {
     false
 }
