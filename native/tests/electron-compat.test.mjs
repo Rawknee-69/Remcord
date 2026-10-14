@@ -1587,3 +1587,39 @@ test("the known-broken disableAutogain caller is left untouched", () => {
     assert.match(patches, /remcord:\/\/assets\/js\/disableAutogain\.js/);
     assert.throws(() => readFileSync(new URL("../../ts-out/assets/app/js/disableAutogain.js", import.meta.url)));
 });
+
+test("F4 in-mod settings UI stays Electron-owned with no native src branch", () => {
+    // Vencord/Equicord persist page-side in localStorage; Shelter owns its
+    // plugins through its own registrar. F4 adds no host surface, so the
+    // Electron sources must still own these paths and src/ must carry no
+    // native settings-page branch.
+    const backupSection = readFileSync(
+        new URL("../../src/shelter/settings/components/BackupSection.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(backupSection, /localStorage\.getItem\("VencordSettings"\)/);
+    assert.match(backupSection, /localStorage\.getItem\("EquicordSettings"\)/);
+    assert.match(backupSection, /localStorage\.setItem\("VencordSettings"/);
+    assert.match(backupSection, /localStorage\.setItem\("EquicordSettings"/);
+    assert.match(backupSection, /shelter\.plugins\.installedPlugins/);
+    assert.match(backupSection, /shelter\.plugins\.addRemotePlugin/);
+    const editorSource = readFileSync(
+        new URL("../../src/shelter/settings/quickCssEditorSource.ts", import.meta.url),
+        "utf8",
+    );
+    assert.match(editorSource, /"vencord" \| "equicord" \| "remcord"/);
+    assert.match(editorSource, /VencordNative\?/);
+    assert.match(editorSource, /quickCss/);
+    const settingsIndex = readFileSync(new URL("../../src/shelter/settings/index.ts", import.meta.url), "utf8");
+    assert.match(settingsIndex, /remcord-native:open-quickcss-editor/);
+    // No native settings-page branch may appear in the Electron sources.
+    for (const source of [backupSection, editorSource, settingsIndex]) {
+        assert.doesNotMatch(source, /mod_settings|plugin_settings|settings_page/);
+    }
+    // The native contract pins the same shape from the host side.
+    const modSettings = readFileSync(new URL("../src/mod_settings.rs", import.meta.url), "utf8");
+    assert.match(modSettings, /VENCORD_SETTINGS_KEY/);
+    assert.match(modSettings, /EQUICORD_SETTINGS_KEY/);
+    assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
+    assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
+});

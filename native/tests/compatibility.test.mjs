@@ -5903,3 +5903,79 @@ test("the embedded stream picker script parses and carries no unspliced placehol
         assert.ok(script.includes(token), `${token} must be present`);
     }
 });
+
+// ---------------------------------------------------------------------------
+// F4: in-mod plugin settings pages (Vencord/Equicord/Shelter) need no host
+// capability. Each mod renders its own settings UI page-side once the shared
+// substrate executes its bundle; the host contributes storage reachability
+// plus the Vencord-family QuickCSS editor handoff only. These tests pin that
+// "no new surface" contract on the shipped renderer sources.
+// ---------------------------------------------------------------------------
+
+test("F4 adds no settings-page capability or wire command to the facade", () => {
+    const { window } = createRuntime();
+    // No settings-page namespace may exist alongside the closed namespaces.
+    assert.equal(window.remcord.modSettings, undefined);
+    assert.equal(window.remcord.pluginSettings, undefined);
+    assert.equal(window.remcord.settingsPage, undefined);
+    for (const capability of [
+        "mod.settings",
+        "mod.settings_page",
+        "mod_settings",
+        "plugin.settings",
+        "plugin.settings_page",
+        "plugin_settings",
+        "settings.page",
+        "settings_page",
+        "open_settings",
+    ]) {
+        assert.equal(window.remcord.native.supports(capability), false);
+    }
+    // No settings-page wire traffic may exist either.
+    assert.equal(
+        window.messages.some(
+            (message) =>
+                (message.command?.type ?? "").includes("settings_page") ||
+                (message.command?.type ?? "").includes("mod_settings") ||
+                (message.command?.type ?? "").includes("plugin_settings"),
+        ),
+        false,
+    );
+    const code = stripComments(bootstrapTemplate);
+    for (const fragment of ["mod_settings", "plugin_settings", "settings_page", "open_settings"]) {
+        assert.equal(code.includes(fragment), false, `${fragment} must not ship in the facade`);
+    }
+});
+
+test("F4 keeps the QuickCSS handoff as the only editor bridge for Vencord-family settings", () => {
+    // The handoff event name and owning modes are the contract asserted in
+    // Rust (`native/src/mod_settings.rs`): the settings plugin titles the
+    // editor and resolves storage from the mode.
+    const substrateCode = stripComments(modSubstrate);
+    assert.ok(substrateCode.includes("remcord-native:open-quickcss-editor"));
+    assert.ok(substrateCode.includes("overrideQuickCssEditor"));
+    const vencordCode = stripComments(vencordAdapter);
+    const equicordCode = stripComments(equicordAdapter);
+    assert.ok(vencordCode.includes('overrideQuickCssEditor("vencord")'));
+    assert.ok(equicordCode.includes('overrideQuickCssEditor("equicord")'));
+    // Shelter and Custom install no editor override: their settings UI has
+    // no popup-editor path to hand off.
+    assert.equal(shelterAdapterCode.includes("overrideQuickCssEditor"), false);
+    assert.equal(customAdapterCode.includes("overrideQuickCssEditor"), false);
+});
+
+test("F4 keeps mod settings storage page-side with host preservation only", () => {
+    // Vencord/Equicord persist in localStorage (owned by their bundles; the
+    // host only keeps storage reachable and snapshots its state), Shelter
+    // keeps its state in IndexedDB (no host key at all). The preservation
+    // script is the host mechanism the settings UI depends on.
+    assert.ok(storagePreservation.includes("localStorage"));
+    assert.ok(storagePreservation.includes("__remcordNativeStorageAtDocumentStart"));
+    // The adapters report the storage snapshot back to the host with the
+    // snake_case wire names; the factory carries the camelCase state.
+    const vencordCode = stripComments(vencordAdapter);
+    assert.ok(vencordCode.includes("local_storage_api"));
+    assert.ok(vencordCode.includes("settings_state"));
+    const substrateCode = stripComments(modSubstrate);
+    assert.ok(substrateCode.includes("createModAdapter"));
+});

@@ -15,6 +15,7 @@ mod graphics;
 mod localization;
 mod main_webview;
 mod mod_cache;
+mod mod_settings;
 mod mod_substrate;
 mod navigation_completed;
 mod navigation_gate;
@@ -5069,6 +5070,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map_err(|error| format!("mod descriptor is invalid: {error}"))?;
         seen_ids.push(descriptor.id);
     }
+    // F4: in-mod plugin settings pages (Vencord/Equicord/Shelter) render
+    // page-side from the executed bundles; the host adds no settings-page
+    // capability. Fail fast if a descriptor drifts from the asserted storage
+    // shape or a settings-page capability ever appears.
+    mod_settings::validate_mod_settings_contract(
+        VENCORD_MOD.settings_key,
+        EQUICORD_MOD.settings_key,
+        SHELTER_MOD.settings_key,
+        CUSTOM_MOD.settings_key,
+        BOOT_SNAPSHOT.capabilities,
+    )
+    .map_err(|error| format!("mod settings contract is invalid: {error}"))?;
     let mut web_context = WebContext::new(Some(profile_path.clone()));
     // Release blocker 4: Evergreen WebView2 Runtime prerequisite check,
     // before any WebView initialization. Supported loader lookup (default
@@ -10656,6 +10669,30 @@ mod tests {
             assert!(!descriptor.js_file.contains('/') && !descriptor.js_file.contains('\\'));
             assert!(!descriptor.js_file.contains(".."));
         }
+    }
+
+    #[test]
+    fn f4_in_mod_settings_pages_need_no_host_capability() {
+        // Vencord/Equicord/Shelter render their own settings UI page-side
+        // once the substrate executes their bundles; the host contributes
+        // storage reachability + the QuickCSS editor handoff only. This pins
+        // that contract to the registered descriptors and the boot snapshot.
+        crate::mod_settings::validate_mod_settings_contract(
+            super::VENCORD_MOD.settings_key,
+            super::EQUICORD_MOD.settings_key,
+            super::SHELTER_MOD.settings_key,
+            super::CUSTOM_MOD.settings_key,
+            super::BOOT_SNAPSHOT.capabilities,
+        )
+        .expect("F4 contract must hold for the registered mods");
+        assert_eq!(
+            crate::mod_settings::QUICKCSS_HANDOFF_EVENT,
+            "remcord-native:open-quickcss-editor"
+        );
+        assert_eq!(
+            crate::mod_settings::QUICKCSS_HANDOFF_MODES,
+            ["vencord", "equicord", "remcord"]
+        );
     }
 
     #[test]
