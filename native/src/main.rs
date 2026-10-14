@@ -5,6 +5,7 @@ mod bundles;
 mod channel;
 mod child_recovery;
 mod close_behavior;
+mod crash_reporting;
 mod css_watch;
 mod custom_bundle;
 mod diagnostics;
@@ -87,14 +88,14 @@ use protocol::{
     window_state_event_json, AppVersionResponse, BackupInspectedResponse,
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BridgeCommand,
     BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
-    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, DiagnosticsInfoResponse,
-    FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
-    GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
-    GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
-    GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse,
-    KeybindsListResponse, KeybindsRemoveResponse, KeybindsToggleResponse,
-    LocalizationStringResponse, ModBundleResponse, ModCacheClearedResponse, PingResponse,
-    PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    BridgeResponsePayload, BundleFileEntry, BundlesListResponse, CrashFolderOpenedResponse,
+    CrashListResponse, DiagnosticsInfoResponse, FoldersOpenedResponse, GalleryAddResponse,
+    GalleryBulkRemoveResponse, GalleryCategoriesResponse, GalleryCategoryAddResponse,
+    GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse, GalleryFileResponse,
+    GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse, GalleryUpdateResponse,
+    GalleryUsageResponse, KeybindsAddResponse, KeybindsListResponse, KeybindsRemoveResponse,
+    KeybindsToggleResponse, LocalizationStringResponse, ModBundleResponse, ModCacheClearedResponse,
+    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
     PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
     PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
     SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
@@ -618,6 +619,8 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "backup.discard_restore",
         "folders.open",
         "folders.open_theme",
+        "crash.list",
+        "crash.open_folder",
         "keybinds.list",
         "keybinds.add",
         "keybinds.toggle",
@@ -5377,6 +5380,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // P0.5 host-owned downloads directory. Fail fast: every download
     // decision needs this root, and a broken profile dir is fatal anyway.
     let downloads_dir = downloads::ensure_downloads_dir(&profile_path)?;
+    // F26 local-only crash reporting: the native counterpart of Electron's
+    // `crashReporter.start({ uploadToServer: false })` init. Best-effort:
+    // crash history must never block boot; every crash path re-ensures the
+    // directory on demand.
+    match crash_reporting::ensure_crash_dir(&profile_path) {
+        Ok(_) => println!("[CrashReporting] crash directory ready"),
+        Err(failure) => eprintln!("[CrashReporting][{}] {}", failure.code, failure.message),
+    }
     // Fail fast if the embedded package version ever loses its shape: the
     // capability serves this constant on every request.
     if let Err(error) = validate_version(current_app_version()) {
@@ -6543,6 +6554,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     child_process_failed_counters.record(event.kind);
                     println!("{}", process_failure::format_log(&event));
+                    // F26 crash reporting: persist the live record with the
+                    // policy outcome. This runs only for the live instance
+                    // (stale records returned above), and a persistence
+                    // failure never affects the close decision below.
+                    if let Err(failure) = crash_reporting::record_process_failure(
+                        &profile_path,
+                        &event,
+                        &child_recovery::format_log(&decision, &event),
+                    ) {
+                        eprintln!("[CrashReporting][{}] {}", failure.code, failure.message);
+                    }
                     // A confirmed child renderer exit closes and drops that
                     // child on this thread. Nothing else here closes,
                     // reloads, recreates, spends either recovery budget, or
@@ -6624,6 +6646,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 );
                             }
                         }
+                    }
+                    // F26 crash reporting: persist the main-role record with
+                    // the policy outcome. Best-effort: a persistence failure
+                    // is logged and never affects recovery state.
+                    if let Err(failure) = crash_reporting::record_process_failure(
+                        &profile_path,
+                        &event,
+                        &recovery::format_log(&decision, &event),
+                    ) {
+                        eprintln!("[CrashReporting][{}] {}", failure.code, failure.message);
                     }
                 }
             }
@@ -8354,6 +8386,111 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                                 Err(failure) => {
                                     eprintln!("[Folders][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::CrashList(_) => {
+                            // Read-only bounded inventory over the fixed
+                            // host-owned crash root. Parameter-free by
+                            // protocol: no path, filter, count, or selector
+                            // may narrow, widen, or redirect it.
+                            let request_id = request.request_id;
+                            match crash_reporting::list_crashes(&profile_path) {
+                                Ok(inventory) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::CrashList(
+                                            CrashListResponse {
+                                                available: inventory.available,
+                                                record_count: inventory.record_count,
+                                                records: inventory.records,
+                                                dump_files: inventory.dump_files,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[CrashReporting][Metrics] op=list request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[CrashReporting][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::CrashOpenFolder(_) => {
+                            // Reveal semantics (the `openCrashesFolder`
+                            // equivalent): the host reveals exactly one
+                            // fixed root. No path, URL, or selector crosses
+                            // the boundary.
+                            let request_id = request.request_id;
+                            match crash_reporting::open_crash_folder(&profile_path) {
+                                Ok(_) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::CrashFolderOpened(
+                                                CrashFolderOpenedResponse {
+                                                    location:
+                                                        crash_reporting::CRASH_LOCATION_LABEL
+                                                            .to_owned(),
+                                                },
+                                            ),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[CrashReporting][Metrics] op=reveal request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[CrashReporting][{}] {}", failure.code, failure.message);
                                     let response = BridgeResponse {
                                         version: PROTOCOL_VERSION,
                                         request_id: request_id.clone(),
@@ -13249,6 +13386,40 @@ mod tests {
         assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"dialog"));
         assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
         assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn boot_snapshot_grants_only_the_two_crash_capabilities() {
+        assert!(super::BOOT_SNAPSHOT.capabilities.contains(&"crash.list"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"crash.open_folder"));
+        // No uploader, no dump reader/writer, and no self-destruct hook may
+        // exist alongside the two scoped capabilities.
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"crash"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"crash.upload"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"crash.trigger"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_crash_facade() {
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
+        assert!(script.contains("crash_list"));
+        assert!(script.contains("crash_open_folder"));
+        assert!(script.contains("crash.list"));
+        assert!(script.contains("crash.open_folder"));
+        // The facade carries inventory metadata only: no uploader, no dump
+        // contents, no shell opener, no synchronous IPC, no self-destruct.
+        assert!(!script.contains("crash_upload"));
+        assert!(!script.contains("process.crash"));
+        assert!(!script.contains("showItemInFolder"));
+        assert!(!script.contains("ShellExecute"));
+        assert!(!script.contains("sendSync"));
     }
 
     #[test]

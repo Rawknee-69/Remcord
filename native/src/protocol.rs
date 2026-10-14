@@ -78,6 +78,8 @@ pub enum BridgeCommand {
     BundlesList(BundlesListRequest),
     FoldersOpen(FoldersOpenRequest),
     FoldersOpenTheme(FoldersOpenThemeRequest),
+    CrashList(CrashListRequest),
+    CrashOpenFolder(CrashOpenFolderRequest),
     ThemeInstallCode(ThemeInstallCodeRequest),
     ThemeWriteCss(ThemeWriteCssRequest),
     ThemeImportFiles(ThemeImportFilesRequest),
@@ -380,6 +382,23 @@ pub struct FoldersOpenRequest {
 pub struct FoldersOpenThemeRequest {
     pub id: String,
 }
+
+/// Empty request for the read-only `crash.list` capability: the host-owned
+/// bounded failure inventory. There are no renderer-supplied parameters by
+/// design: no path, no filter, no count, no selector. Any extra field is
+/// rejected, so a renderer cannot narrow, widen, or redirect the fixed
+/// crash root inventory.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrashListRequest {}
+
+/// Empty request for the `crash.open_folder` capability: reveal the fixed
+/// host-built crash root (the `openCrashesFolder` equivalent). There is
+/// deliberately NO path, URL, or directory parameter. Any extra field is
+/// rejected before any filesystem or shell work.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrashOpenFolderRequest {}
 
 /// Install request for the `themes.install_code` capability: exactly one
 /// bounded CSS text. There is deliberately NO URL, path, filename, theme
@@ -1372,6 +1391,8 @@ pub enum BridgeResponsePayload {
     BundlesList(BundlesListResponse),
     FoldersOpened(FoldersOpenedResponse),
     ThemeFolderOpened(ThemeFolderOpenedResponse),
+    CrashList(CrashListResponse),
+    CrashFolderOpened(CrashFolderOpenedResponse),
     ThemeInstalled(ThemeInstalledResponse),
     ThemeWritten(ThemeWrittenResponse),
     ThemeImported(ThemeImportedResponse),
@@ -1619,6 +1640,26 @@ pub struct FoldersOpenedResponse {
 #[derive(Serialize)]
 pub struct ThemeFolderOpenedResponse {
     pub id: String,
+}
+
+/// Inventory response for the `crash.list` capability: readiness flag, the
+/// number of records returned, newest-first fixed-shape failure records,
+/// and dump-file metadata. No path, URL, dump content, or page datum
+/// crosses the boundary.
+#[derive(Serialize)]
+pub struct CrashListResponse {
+    pub available: bool,
+    pub record_count: u64,
+    pub records: Vec<crate::crash_reporting::CrashRecord>,
+    pub dump_files: Vec<crate::crash_reporting::CrashDumpEntry>,
+}
+
+/// Reveal response for the `crash.open_folder` capability: the fixed
+/// location label echo, so the renderer can confirm which root was
+/// revealed. No path crosses the boundary.
+#[derive(Serialize)]
+pub struct CrashFolderOpenedResponse {
+    pub location: String,
 }
 
 /// Install response for the `themes.install_code` capability: the
@@ -2176,6 +2217,12 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // unknown variants never reach dispatch. No path or
                 // selector exists to shape-check.
                 BridgeCommand::FoldersOpen(_) => {}
+                // Parameter-free by protocol (`deny_unknown_fields`
+                // already rejected any renderer-supplied member), so no
+                // shape check is needed. The crash root is fixed host-side
+                // and enforced at dispatch.
+                BridgeCommand::CrashList(_) => {}
+                BridgeCommand::CrashOpenFolder(_) => {}
                 BridgeCommand::FoldersOpenTheme(payload) => {
                     // Shape check only (presence + byte cap); charset,
                     // traversal, and containment rules live in `folders`
@@ -3726,6 +3773,89 @@ mod tests {
         let open_value = serde_json::to_value(open).unwrap();
         assert_eq!(open_value["payload"]["type"], "theme_folder_opened");
         assert_eq!(open_value["payload"]["payload"]["id"], "my-theme");
+        assert!(open_value["payload"]["payload"].get("path").is_none());
+    }
+
+    #[test]
+    fn crash_commands_parse_as_closed_empty_payloads() {
+        for wire_type in ["crash_list", "crash_open_folder"] {
+            let request = format!(
+                "{{\"version\":1,\"request_id\":\"crash-1\",\"command\":{{\"type\":\"{wire_type}\",\"payload\":{{}}}}}}"
+            );
+            assert!(
+                matches!(
+                    parse_bridge_message(&request),
+                    Ok(BridgeMessage::Request(_))
+                ),
+                "{wire_type} must parse"
+            );
+            // No path, URL, filter, count, or selector may ride along.
+            let with_path = format!(
+                "{{\"version\":1,\"request_id\":\"crash-2\",\"command\":{{\"type\":\"{wire_type}\",\"payload\":{{\"path\":\"C:\\\\secret\"}}}}}}"
+            );
+            let with_url = format!(
+                "{{\"version\":1,\"request_id\":\"crash-3\",\"command\":{{\"type\":\"{wire_type}\",\"payload\":{{\"url\":\"https://attacker.invalid\"}}}}}}"
+            );
+            assert!(parse_bridge_message(&with_path).is_err());
+            assert!(parse_bridge_message(&with_url).is_err());
+        }
+        // Unknown crash commands never reach dispatch.
+        let unknown = r#"{"version":1,"request_id":"crash-4","command":{"type":"crash_upload","payload":{}}}"#;
+        assert!(parse_bridge_message(unknown).is_err());
+    }
+
+    #[test]
+    fn serializes_typed_crash_responses_without_paths() {
+        use super::{CrashFolderOpenedResponse, CrashListResponse};
+        use crate::crash_reporting::{CrashDumpEntry, CrashRecord};
+        let list = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "crash-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::CrashList(CrashListResponse {
+                available: true,
+                record_count: 1,
+                records: vec![CrashRecord {
+                    schema: crate::crash_reporting::CRASH_LOG_SCHEMA,
+                    timestamp_ms: 1_700_000_000_000,
+                    role: "main".to_owned(),
+                    kind: "RenderProcessExited".to_owned(),
+                    reason: "Crashed".to_owned(),
+                    exit_code: Some(1),
+                    recovery: "observed".to_owned(),
+                }],
+                dump_files: vec![CrashDumpEntry {
+                    name: "a1b2c3d4.dmp".to_owned(),
+                    bytes: 17,
+                }],
+            })),
+            error: None,
+        };
+        let list_value = serde_json::to_value(list).unwrap();
+        assert_eq!(list_value["payload"]["type"], "crash_list");
+        let payload = &list_value["payload"]["payload"];
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["record_count"], 1);
+        assert_eq!(payload["records"][0]["role"], "main");
+        assert_eq!(payload["records"][0]["kind"], "RenderProcessExited");
+        assert!(payload.get("path").is_none());
+        assert!(payload["records"][0].get("path").is_none());
+        assert!(payload["dump_files"][0].get("path").is_none());
+
+        let open = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "crash-2".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::CrashFolderOpened(
+                CrashFolderOpenedResponse {
+                    location: crate::crash_reporting::CRASH_LOCATION_LABEL.to_owned(),
+                },
+            )),
+            error: None,
+        };
+        let open_value = serde_json::to_value(open).unwrap();
+        assert_eq!(open_value["payload"]["type"], "crash_folder_opened");
+        assert_eq!(open_value["payload"]["payload"]["location"], "crashes");
         assert!(open_value["payload"]["payload"].get("path").is_none());
     }
 

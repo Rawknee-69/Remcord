@@ -1819,3 +1819,41 @@ test("F4 in-mod settings UI stays Electron-owned with no native src branch", () 
     assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
     assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
 });
+
+test("F26 keeps Electron crash handling intact and pins the native local-only counterpart", () => {
+    // Electron keeps every crash-dir behavior: local-only reporter init,
+    // render-crash relaunch, crash-folder reveal, and the caller-less
+    // self-destruct hook.
+    const main = readFileSync(new URL("../../src/main.ts", import.meta.url), "utf8");
+    assert.match(main, /crashReporter\.start\(\{\s*uploadToServer:\s*false\s*\}\)/);
+    assert.match(main, /render-process-gone/);
+    assert.match(main, /app\.relaunch\(\)/);
+    assert.match(ipc, /ipcMain\.on\("openCrashesFolder"/);
+    assert.match(ipc, /ipcMain\.on\("crash"/);
+    assert.match(ipc, /process\.crash\(\)/);
+    // Neither crash channel has a renderer caller or a declared contract:
+    // the bridge and the window types stay silent.
+    assert.doesNotMatch(bridge, /rash/);
+    assert.doesNotMatch(types, /openCrashesFolder/);
+    assert.doesNotMatch(types, /crash/);
+    // Native counterpart: one bounded local inventory plus one fixed-root
+    // reveal, fed by the existing process-failure observer. Recovery stays
+    // the bounded host-side reload (never a whole-app restart), and the
+    // self-destruct hook is never ported.
+    const crashModule = readFileSync(new URL("../src/crash_reporting.rs", import.meta.url), "utf8");
+    assert.match(crashModule, /pub fn list_crashes/);
+    assert.match(crashModule, /pub fn open_crash_folder/);
+    assert.match(crashModule, /pub fn record_process_failure/);
+    assert.match(crashModule, /MAX_CRASH_RECORDS/);
+    assert.match(crashModule, /CRASH_LOCATION_LABEL/);
+    const recovery = readFileSync(new URL("../src/recovery.rs", import.meta.url), "utf8");
+    assert.match(recovery, /ReloadRequested/);
+    const compat = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+    assert.match(compat, /crash_list/);
+    assert.match(compat, /crash_open_folder/);
+    assert.match(compat, /crash_folder_opened/);
+    assert.match(compat, /crash\.list/);
+    assert.match(compat, /crash\.open_folder/);
+    assert.doesNotMatch(compat, /crash_upload/);
+    assert.doesNotMatch(compat, /crash_trigger/);
+});
