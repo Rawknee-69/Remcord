@@ -32,6 +32,7 @@ mod protocol;
 mod quick_css;
 mod recovery;
 mod remcord_protocol;
+mod screenshare_media;
 mod screenshare_picker;
 mod screenshare_quality;
 mod settings;
@@ -3364,21 +3365,35 @@ fn initialization_script(
     Ok(script)
 }
 
-/// Full document-start script: the base [`initialization_script`] plus the
+/// Full document-start script: the media-hardening layer
+/// ([`screenshare_media`], F9 core) FIRST so the SDP/camera wrappers exist
+/// before any page script can bind `RTCPeerConnection` or call
+/// `getUserMedia`, then the base [`initialization_script`] (facade, boot
+/// snapshot, mod adapters, plugin loader, keybind matcher), then the
 /// host-selected screenshare capture-quality script, appended AFTER the mod
 /// adapters so capture constraining is never before (and can never perturb)
 /// the settings boot snapshot or mod bootstrap — plus the Remcord stream
 /// setup popup ([`screenshare_picker`]), appended last so it wraps outermost
 /// and its modal is the first thing a `getDisplayMedia` call reaches.
 /// `raw_mode` is normalized by the quality module (unknown values fail safe
-/// to `"default"`, which preserves existing behavior exactly).
+/// to `"default"`, which preserves existing behavior exactly);
 fn document_start_script(
     active_mods: &[&'static ModDescriptor],
     settings_boot_json: &str,
     host_platform_json: &str,
     raw_mode: &str,
+    prefer_hw_h264: bool,
 ) -> Result<String, serde_json::Error> {
-    let mut script = initialization_script(active_mods, settings_boot_json, host_platform_json)?;
+    let media = screenshare_media::screenshare_media_script(prefer_hw_h264)
+        .map_err(serde::de::Error::custom)?;
+    let mut script = String::with_capacity(media.len() + 4096);
+    script.push_str(&media);
+    script.push('\n');
+    script.push_str(&initialization_script(
+        active_mods,
+        settings_boot_json,
+        host_platform_json,
+    )?);
     let quality = screenshare_quality::screenshare_quality_script(raw_mode)
         .map_err(serde::de::Error::custom)?;
     script.push('\n');
@@ -5761,19 +5776,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Adapter selection is entirely host-controlled: the authoritative settings
     // snapshot (the same file the settings capability reads) plus an optional
     // DEV diagnostic allowlist. The renderer never participates.
-    let (settings_mods, discord_channel, screenshare_quality) = match load_settings(&profile_path) {
+    let (settings_mods, discord_channel, screenshare_quality, prefer_hw_h264) = match load_settings(
+        &profile_path,
+    ) {
         Ok(loaded) => (
             loaded.snapshot.mods,
             loaded.snapshot.channel,
             loaded.snapshot.screenshare_quality,
+            loaded.snapshot.sdp_h264_baseline_rewrite,
         ),
         Err(error) => {
             // Corrupt/unreadable settings fail closed to "no extra mods", the
             // same parity the Quick CSS enablement already uses.
             eprintln!(
-                "[Mod:Registry] mod enablement could not be resolved from settings; treating as none ({error})"
-            );
-            (Vec::new(), "stable".to_owned(), "default".to_owned())
+                    "[Mod:Registry] mod enablement could not be resolved from settings; treating as none ({error})"
+                );
+            (Vec::new(), "stable".to_owned(), "default".to_owned(), true)
         }
     };
     // Release-channel entry URL, resolved once per process from the same
@@ -6053,18 +6071,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("[Native] Bare Discord page diagnostic enabled; bridge/mod scripts are omitted");
         STORAGE_START_DIAGNOSTIC_SCRIPT.to_owned()
     } else {
-        // The capture-quality mode is host-resolved once per process from the
-        // same authoritative snapshot (restart-required model, like `channel`):
-        // unknown values fail safe to `"default"` inside the module.
+        // The capture-quality mode and the SDP H.264 rewrite are host-resolved
+        // once per process from the same authoritative snapshot
+        // (restart-required model, like `channel`): unknown quality values
+        // fail safe to `"default"` inside the module.
         println!(
             "[ScreenshareQuality] mode={}",
             screenshare_quality::normalize_mode(&screenshare_quality)
         );
+        println!("[ScreenshareMedia] prefer_hw_h264={prefer_hw_h264}");
         document_start_script(
             &active_mods,
             &settings_boot_json,
             &host_platform_json,
             &screenshare_quality,
+            prefer_hw_h264,
         )?
     };
     println!(
@@ -11259,13 +11280,24 @@ mod tests {
 
     #[test]
     fn document_start_script_appends_quality_after_adapters() {
-        // Ordering: the boot snapshot precedes adapters, the capture script
-        // follows them, and the stream setup popup is the last layer — it
-        // can never perturb snapshot/mod boot.
+        // Ordering: the media-hardening layer runs first (SDP/camera wrappers
+        // must exist before any page script binds RTCPeerConnection), then
+        // the boot snapshot precedes adapters, the capture script follows
+        // them, and the stream setup popup is the last layer — it can never
+        // perturb snapshot/mod boot.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&adapters_for(&["shelter"]), boot, platform, "balanced")
-            .expect("must build");
+        let script = document_start_script(
+            &adapters_for(&["shelter"]),
+            boot,
+            platform,
+            "balanced",
+            true,
+        )
+        .expect("must build");
+        let media_at = script
+            .find("__remcordScreenshareMedia")
+            .expect("media status present");
         let snapshot_at = script
             .find("\"settingsSource\"")
             .expect("snapshot embedded");
@@ -11276,11 +11308,24 @@ mod tests {
         let picker_at = script
             .find("__remcordStreamPicker")
             .expect("picker status present");
+        assert!(media_at < snapshot_at);
         assert!(snapshot_at < adapter_at);
         assert!(adapter_at < quality_at);
         assert!(quality_at < picker_at);
         assert!(!script.contains("__REMCORD_SCREENSHARE_QUALITY_MODE__"));
+        assert!(!script.contains("__REMCORD_SCREENSHARE_PREFER_HW_H264__"));
         assert!(script.contains("\"balanced\""));
+        assert!(script.contains("const preferHwH264 = true"));
+    }
+
+    #[test]
+    fn document_start_script_sdp_toggle_splices_the_closed_boolean() {
+        let boot = crate::settings_boot::test_fixture_json();
+        let platform = crate::app::test_fixture_json();
+        let on = document_start_script(&[], boot, platform, "default", true).expect("must build");
+        assert!(on.contains("const preferHwH264 = true"));
+        let off = document_start_script(&[], boot, platform, "default", false).expect("must build");
+        assert!(off.contains("const preferHwH264 = false"));
     }
 
     #[test]
@@ -11290,7 +11335,9 @@ mod tests {
         // stream setup popup is a separate layer and is always present.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "default").expect("must build");
+        let script =
+            document_start_script(&[], boot, platform, "default", true).expect("must build");
+        assert!(script.contains("__remcordScreenshareMedia"));
         assert!(script.contains("__remcordScreenshareQuality"));
         assert!(script.contains("__remcordStreamPicker"));
         // Picker contract anchors: last-choice record and idempotence key.
@@ -11306,7 +11353,8 @@ mod tests {
     fn document_start_script_unknown_mode_fails_safe_to_default() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "ultra-hd").expect("must build");
+        let script =
+            document_start_script(&[], boot, platform, "ultra-hd", true).expect("must build");
         assert!(script.contains("\"default\""));
         assert!(script.contains("__remcordStreamPicker"));
         assert!(
@@ -11321,14 +11369,16 @@ mod tests {
             &[],
             "{not json",
             crate::app::test_fixture_json(),
-            "default"
+            "default",
+            true
         )
         .is_err());
         assert!(document_start_script(
             &[],
             crate::settings_boot::test_fixture_json(),
             "{not json",
-            "balanced"
+            "balanced",
+            false
         )
         .is_err());
     }
