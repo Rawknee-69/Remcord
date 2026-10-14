@@ -45,6 +45,7 @@ mod themes;
 mod titlebar_plugin;
 mod user_agent;
 mod webview_runtime;
+mod window_state;
 
 use std::{
     collections::HashMap,
@@ -100,7 +101,7 @@ use protocol::{
     SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
     SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
     ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
-    PROTOCOL_VERSION,
+    WindowStateResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -111,7 +112,7 @@ use settings::{
     apply_block_power_saving, apply_plugin_state, apply_settings_set, load_settings, SettingsSetKey,
 };
 use tao::{
-    dpi::{LogicalSize, Size},
+    dpi::{LogicalPosition, LogicalSize, Size},
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
@@ -653,6 +654,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "window.drag",
         "window.toggle_fullscreen",
         "window.quit",
+        "window.get_state",
     ],
 };
 const COMPATIBILITY_SCRIPT: &str = include_str!("../web/compatibility.js");
@@ -4771,6 +4773,163 @@ fn sync_native_maximized_state(
     }
 }
 
+/// F16 debounced-save tracker: host-side persistence of the live window
+/// geometry (Electron's `queueSave` 500 ms coalescing in
+/// `src/discord/window.ts`). `pending` marks a capture that arrived
+/// inside the debounce window; it lands on the next eligible event or
+/// at shutdown. Nothing here touches the renderer.
+#[derive(Default)]
+struct WindowStateSaveTracker {
+    last_saved: Option<Instant>,
+    pending: bool,
+}
+
+/// Captures the live Tao geometry in logical DIPs plus the maximized
+/// flag. `None` when the OS reports nothing usable (bad scale factor or
+/// no position): the caller keeps the last persisted state instead of
+/// writing garbage.
+fn capture_live_window_state(
+    window: &Arc<tao::window::Window>,
+) -> Option<window_state::StoredWindowState> {
+    let scale = window.scale_factor();
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let size = window.inner_size().to_logical::<f64>(scale);
+    let position = window.outer_position().ok()?.to_logical::<f64>(scale);
+    // Tao exposes no stable display id, so the hint is the index into
+    // `available_monitors()` order (see `window_state` docs). A resized
+    // monitor list only weakens the hint; placement never trusts it
+    // alone.
+    let monitors: Vec<tao::monitor::MonitorHandle> = window.available_monitors().collect();
+    let current = window.current_monitor();
+    let display_id = current.as_ref().and_then(|active| {
+        monitors
+            .iter()
+            .position(|monitor| {
+                monitor.position() == active.position() && monitor.size() == active.size()
+            })
+            .map(|index| index as i64)
+    });
+    let display_scale_factor = current
+        .as_ref()
+        .map(|monitor| monitor.scale_factor())
+        .filter(|factor| factor.is_finite() && *factor > 0.0);
+    window_state::build_state(
+        size.width,
+        size.height,
+        position.x,
+        position.y,
+        window.is_maximized(),
+        display_id,
+        display_scale_factor,
+    )
+}
+
+/// Writes one live capture immediately. Loud on failure, never fatal:
+/// the window keeps working with the last persisted state.
+fn save_window_state_now(window: &Arc<tao::window::Window>, profile_path: &Path, reason: &str) {
+    let Some(state) = capture_live_window_state(window) else {
+        eprintln!("[WindowState] capture failed ({reason}); keeping last persisted state");
+        return;
+    };
+    match window_state::save_state(profile_path, &state) {
+        Ok(()) => println!(
+            "[WindowState] saved reason={reason} width={} height={} maximized={}",
+            state.width, state.height, state.is_maximized
+        ),
+        Err(error) => eprintln!("[WindowState] save failed ({reason}): {error}"),
+    }
+}
+
+/// Queues one debounced capture: move/resize bursts coalesce through
+/// the 500 ms window (Electron parity); the pending tail flushes on the
+/// next eligible event or at shutdown.
+fn queue_window_state_save(
+    window: &Arc<tao::window::Window>,
+    profile_path: &Path,
+    tracker: &mut WindowStateSaveTracker,
+    reason: &str,
+) {
+    let now = Instant::now();
+    if !window_state::debounce_elapsed(tracker.last_saved, now) {
+        tracker.pending = true;
+        return;
+    }
+    save_window_state_now(window, profile_path, reason);
+    tracker.last_saved = Some(now);
+    tracker.pending = false;
+}
+
+/// Flushes a capture still inside its debounce window. Called on close
+/// (Electron's `before-quit` save) so a drag immediately before quitting
+/// is never lost.
+fn flush_window_state_save(
+    window: &Arc<tao::window::Window>,
+    profile_path: &Path,
+    tracker: &mut WindowStateSaveTracker,
+    reason: &str,
+) {
+    if !tracker.pending {
+        return;
+    }
+    save_window_state_now(window, profile_path, reason);
+    tracker.last_saved = Some(Instant::now());
+    tracker.pending = false;
+}
+
+/// F16 startup restore: reopens the window where the user left it
+/// (bounds + maximized flag from `<profile>/storage/window.json`,
+/// Electron's `createWindow` + `sanitizeWindowBounds` path). First run
+/// (or a reset file) keeps the compiled-in 835x600 default. The window
+/// starts invisible, so a maximized restore never flashes (Electron's
+/// maximize-then-hide anti-flashbang is structural here).
+fn apply_stored_window_state(window: &Arc<tao::window::Window>, profile_path: &Path) {
+    let Some(record) = window_state::load_stored_record(profile_path) else {
+        return;
+    };
+    let Some(geometry) = window_state::sanitize_geometry(&record) else {
+        return;
+    };
+    let monitors: Vec<window_state::MonitorRect> = window
+        .available_monitors()
+        .enumerate()
+        .map(|(index, monitor)| {
+            let scale = monitor.scale_factor();
+            let size = monitor.size().to_logical::<f64>(scale);
+            let position = monitor.position().to_logical::<f64>(scale);
+            window_state::MonitorRect {
+                x: position.x.round() as i64,
+                y: position.y.round() as i64,
+                width: size.width.round() as i64,
+                height: size.height.round() as i64,
+                id: Some(index as i64),
+                scale_factor: if scale.is_finite() && scale > 0.0 {
+                    Some(scale)
+                } else {
+                    None
+                },
+            }
+        })
+        .collect();
+    let placement = window_state::resolve_placement(&geometry, record.display_id, &monitors);
+    if record.is_maximized {
+        window.set_maximized(true);
+    } else {
+        window.set_inner_size(Size::Logical(LogicalSize::new(
+            placement.width as f64,
+            placement.height as f64,
+        )));
+        if let (Some(x), Some(y)) = (placement.x, placement.y) {
+            window.set_outer_position(LogicalPosition::new(x as f64, y as f64));
+        }
+    }
+    println!(
+        "[WindowState] restored width={} height={} maximized={} fallback={}",
+        placement.width, placement.height, record.is_maximized, placement.used_fallback
+    );
+}
+
 /// Builds the application relaunch command for the settings-restart path.
 ///
 /// Mod adapters are resolved once at startup and baked into the WebView's
@@ -4879,6 +5038,47 @@ fn respond_window_ack(
     }
     println!(
         "[Window][Metrics] command={command} request_latency_ms={:.3}",
+        received_at.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// Responds to `window.get_state` with the persisted-or-live geometry.
+/// Always `ok: true`: the state source degrades live → stored →
+/// compiled-in defaults, so a read never fails — only the provenance
+/// changes.
+#[allow(clippy::too_many_arguments)]
+fn respond_window_state(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    request_id: &str,
+    width: i64,
+    height: i64,
+    x: i64,
+    y: i64,
+    is_maximized: bool,
+    display_id: Option<i64>,
+    received_at: &Instant,
+) {
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.to_owned(),
+        ok: true,
+        payload: Some(BridgeResponsePayload::WindowState(WindowStateResponse {
+            width,
+            height,
+            x,
+            y,
+            is_maximized,
+            display_id,
+        })),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    println!(
+        "[WindowState][Metrics] command=window_get_state request_latency_ms={:.3}",
         received_at.elapsed().as_secs_f64() * 1000.0
     );
 }
@@ -5377,6 +5577,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // P0.5 host-owned downloads directory. Fail fast: every download
     // decision needs this root, and a broken profile dir is fatal anyway.
     let downloads_dir = downloads::ensure_downloads_dir(&profile_path)?;
+    // F16 startup restore: reopen where the user left off. Runs before any
+    // window is shown; first run keeps the compiled-in default.
+    apply_stored_window_state(&window, &profile_path);
     // Fail fast if the embedded package version ever loses its shape: the
     // capability serves this constant on every request.
     if let Err(error) = validate_version(current_app_version()) {
@@ -6326,6 +6529,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // WebView slot (process-lifetime); independent of the renderer-recovery
     // budget. The environment observer provides the authoritative trigger.
     let mut browser_recovery = browser_recovery::BrowserRecovery::new();
+    // F16 debounced-save tracker: move/resize captures coalesce through
+    // the 500 ms window; the pending tail flushes at shutdown.
+    let mut window_state_save = WindowStateSaveTracker::default();
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -6365,6 +6571,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 println!("[Native] Close requested; shutting down WebView");
                 shutdown_started = true;
+                // F16: a debounced capture still inside its window must land
+                // before the loop exits (Electron's `before-quit` save).
+                flush_window_state_save(&window, &profile_path, &mut window_state_save, "close");
                 println!(
                     "[Bridge][Metrics] messages_in={incoming_messages} requests={request_count} events={event_count} responses={response_count}"
                 );
@@ -6447,6 +6656,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             Event::WindowEvent {
+                event: WindowEvent::Moved(_),
+                window_id,
+                ..
+            } => {
+                // F16 host-side capture: a drag burst coalesces through the
+                // 500 ms debounce; the pending tail flushes at shutdown.
+                // Child popouts never feed the main window's state.
+                if popup_child
+                    .as_ref()
+                    .is_some_and(|child| child.window.id() == window_id)
+                {
+                    return;
+                }
+                queue_window_state_save(&window, &profile_path, &mut window_state_save, "moved");
+            }
+            Event::WindowEvent {
                 event: WindowEvent::Resized(_),
                 ..
             } => {
@@ -6454,6 +6679,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // reported through Resized. Query the authoritative flag and
                 // emit only when it actually changed.
                 sync_native_maximized_state(&webview, &window, &mut native_window_state, "Resized");
+                // F16 host-side capture rides the same event (Electron
+                // saves on resize too).
+                queue_window_state_save(&window, &profile_path, &mut window_state_save, "resized");
             }
             Event::UserEvent(NativeEvent::PopupRequested { url, kind }) => {
                 if let Some(child) = popup_child.as_ref() {
@@ -7356,6 +7584,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             BridgeCommand::WindowMinimize(_) => {
                                 window.set_minimized(true);
+                                // F16: a minimize may precede a session
+                                // shutdown (Electron's minimize save).
+                                save_window_state_now(&window, &profile_path, "minimize");
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_minimize", &received_at);
                                 response_count += 1;
                             }
@@ -7369,6 +7600,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     println!("[Window] fullscreen=false (maximize requested)");
                                 }
                                 window.set_maximized(true);
+                                // F16: the maximized flag is persisted with
+                                // the pre-maximize bounds (Electron's
+                                // maximize/unmaximize listeners).
+                                save_window_state_now(&window, &profile_path, "maximize");
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_maximize", &received_at);
                                 response_count += 1;
                             }
@@ -7381,6 +7616,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     println!("[Window] fullscreen=false (unmaximize requested)");
                                 }
                                 window.set_maximized(false);
+                                // F16: persist the restored bounds together
+                                // with the cleared flag.
+                                save_window_state_now(&window, &profile_path, "unmaximize");
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_unmaximize", &received_at);
                                 response_count += 1;
                             }
@@ -7413,6 +7651,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     "[Window] fullscreen={}",
                                     if window.fullscreen().is_some() { "true" } else { "false" }
                                 );
+                                // F16: a fullscreen flip changes the live
+                                // geometry the next restore would read.
+                                save_window_state_now(&window, &profile_path, "toggle_fullscreen");
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_toggle_fullscreen", &received_at);
                                 response_count += 1;
                             }
@@ -7444,6 +7685,44 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     &child_navigation_counters,
                                 );
                                 respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_quit", &received_at);
+                                response_count += 1;
+                            }
+                            BridgeCommand::WindowGetState(_) => {
+                                // F16 read: the live Tao geometry is the
+                                // bounds authority, the live maximized flag
+                                // is the state authority (a maximize still
+                                // inside its debounce window must already
+                                // read maximized). Degrades stored → default,
+                                // so a read never fails — only the
+                                // provenance changes.
+                                let state = capture_live_window_state(&window)
+                                    .or_else(|| window_state::load_stored_record(&profile_path));
+                                let geometry = state
+                                    .as_ref()
+                                    .and_then(window_state::sanitize_geometry);
+                                let (width, height, x, y) = match geometry {
+                                    Some(geometry) => {
+                                        (geometry.width, geometry.height, geometry.x, geometry.y)
+                                    }
+                                    None => (
+                                        window_state::DEFAULT_WIDTH,
+                                        window_state::DEFAULT_HEIGHT,
+                                        0,
+                                        0,
+                                    ),
+                                };
+                                respond_window_state(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &request.request_id,
+                                    width,
+                                    height,
+                                    x,
+                                    y,
+                                    window.is_maximized(),
+                                    state.and_then(|state| state.display_id),
+                                    &received_at,
+                                );
                                 response_count += 1;
                             }
                             BridgeCommand::Ping(payload) => {

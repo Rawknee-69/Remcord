@@ -6654,3 +6654,104 @@ test("F4 keeps mod settings storage page-side with host preservation only", () =
     const substrateCode = stripComments(modSubstrate);
     assert.ok(substrateCode.includes("createModAdapter"));
 });
+
+test("F16 window.get_state sends the exact parameter-free wire", async () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "window.get_state"]);
+    const pending = window.remcord.native.window.getState();
+    // Top-level Electron-shaped mirror dispatches the same typed read.
+    const topPending = window.remcord.window.getState();
+    const requests = window.messages.filter((message) => message.command);
+    assert.equal(requests.length, 2);
+    const bodies = [];
+    for (const request of requests) {
+        assert.equal(request.command.type, "window_get_state");
+        assert.deepEqual(request.command.payload, {});
+        window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: request.request_id,
+                    ok: true,
+                    payload: {
+                        type: "window_state",
+                        payload: { width: 835, height: 600, x: 100, y: 100, is_maximized: false },
+                    },
+                    error: null,
+                },
+            }),
+        );
+    }
+    bodies.push(await pending, await topPending);
+    for (const body of bodies) {
+        assert.deepEqual(body, { width: 835, height: 600, x: 100, y: 100, is_maximized: false });
+    }
+});
+
+test("F16 window.get_state requires its capability and validates geometry", async () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping"]);
+    assert.throws(
+        () => window.remcord.native.window.getState(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command),
+        false,
+    );
+    const { window: gated } = createRuntime("https://discord.com", ["bridge.ping", "window.get_state"]);
+    // Fractional bounds, undersized windows, missing flags, and
+    // handle/path echoes never resolve the read.
+    for (const payload of [
+        { width: 835.5, height: 600, x: 0, y: 0, is_maximized: false },
+        { width: 100, height: 600, x: 0, y: 0, is_maximized: false },
+        { width: 835, height: 600, x: 0, y: 0 },
+        { width: 835, height: 600, x: 0, y: 0, is_maximized: false, hwnd: 1234 },
+        { width: 835, height: 600, x: 0, y: 0, is_maximized: false, path: "C:\\state" },
+        { width: 835, height: 600, x: 0, y: 0, is_maximized: false, display_id: -1 },
+    ]) {
+        const pending = gated.remcord.native.window.getState();
+        const request = gated.messages.filter((message) => message.command).at(-1);
+        gated.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: request.request_id,
+                    ok: true,
+                    payload: { type: "window_state", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /window state response schema is invalid/);
+    }
+    // The optional monitor hint resolves when the geometry is otherwise valid.
+    const hinted = gated.remcord.native.window.getState();
+    const hintedRequest = gated.messages.filter((message) => message.command).at(-1);
+    gated.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: hintedRequest.request_id,
+                ok: true,
+                payload: {
+                    type: "window_state",
+                    payload: { width: 900, height: 700, x: 50, y: 60, is_maximized: true, display_id: 0 },
+                },
+                error: null,
+            },
+        }),
+    );
+    assert.deepEqual(await hinted, { width: 900, height: 700, x: 50, y: 60, is_maximized: true, display_id: 0 });
+});
+
+test("F16 exposes no renderer-driven placement surface", () => {
+    // Geometry is host-owned: the facade offers the getState read plus the
+    // existing chrome verbs, but no setState/move/resize/setBounds method
+    // and no such wire type anywhere in the shipped script.
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "window.get_state"]);
+    for (const method of ["setState", "move", "resize", "setBounds", "setPosition", "setSize"]) {
+        assert.equal(window.remcord.native.window[method], undefined);
+    }
+    for (const wire of ["window_set_state", "window_move", "window_resize", "window_set_bounds"]) {
+        assert.equal(bootstrapTemplate.includes(wire), false);
+    }
+});

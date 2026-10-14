@@ -1819,3 +1819,39 @@ test("F4 in-mod settings UI stays Electron-owned with no native src branch", () 
     assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
     assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
 });
+
+test("F16 window-state persistence keeps Electron semantics with host-owned placement", () => {
+    // Electron owns the save/restore contract: window.json under
+    // <userData>/storage, debounced saves on move/resize, monitor-fitted
+    // restore with a primary-monitor fallback.
+    const windowState = readFileSync(new URL("../../src/common/windowState.ts", import.meta.url), "utf8");
+    assert.match(windowState, /window\.json/);
+    assert.match(windowState, /setWindowState/);
+    assert.match(windowState, /getWindowState/);
+    const windowBounds = readFileSync(new URL("../../src/common/windowBounds.ts", import.meta.url), "utf8");
+    assert.match(windowBounds, /sanitizeWindowBounds/);
+    assert.match(windowBounds, /MIN_VISIBLE_PX/);
+    const discordWindow = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(discordWindow, /saveWindowState/);
+    assert.match(discordWindow, /getStoredWindowBounds/);
+    assert.match(discordWindow, /queueSave/);
+    // The native host mirrors the file shape and the fit math, and adds
+    // exactly one parameter-free read capability. Placement stays
+    // host-owned: no setter/move/resize wire exists on either side of the
+    // bridge (Electron never exposed renderer-driven placement either).
+    const nativeWindowState = readFileSync(new URL("../src/window_state.rs", import.meta.url), "utf8");
+    assert.match(nativeWindowState, /WINDOW_FILE_NAME/);
+    assert.match(nativeWindowState, /STORAGE_DIR_NAME/);
+    assert.match(nativeWindowState, /SAVE_DEBOUNCE/);
+    assert.match(nativeWindowState, /MIN_VISIBLE_PX/);
+    assert.match(nativeWindowState, /resolve_placement/);
+    const protocol = readFileSync(new URL("../src/protocol.rs", import.meta.url), "utf8");
+    assert.match(protocol, /WindowGetState/);
+    assert.match(protocol, /window_get_state/);
+    // No setter/move/resize command variant exists (the rejection tests
+    // name the forbidden wires, so the check pins constructors, not
+    // mentions).
+    for (const variant of ["WindowSetState(", "WindowMove(", "WindowResize(", "WindowSetBounds("]) {
+        assert.equal(protocol.includes(variant), false);
+    }
+});
