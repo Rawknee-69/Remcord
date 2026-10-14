@@ -1819,3 +1819,36 @@ test("F4 in-mod settings UI stays Electron-owned with no native src branch", () 
     assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
     assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
 });
+
+test("F18 spellcheck keeps Electron session ownership with a validated native state", () => {
+    // Electron owns the session surface: webPreferences.spellcheck from
+    // getConfig("spellcheck") plus setSpellCheckerLanguages from
+    // getConfig("spellcheckLanguage"). The native side validates the same
+    // authoritative pair, splices the closed boolean + primary tag into a
+    // document-start layer, and serves the read-only state capability.
+    const electronWindow = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(electronWindow, /spellcheck: getConfig\("spellcheck"\)/);
+    assert.match(electronWindow, /setSpellCheckerLanguages\(getConfig\("spellcheckLanguage"\)\)/);
+    const nativeSpellcheck = readFileSync(new URL("../src/spellcheck.rs", import.meta.url), "utf8");
+    assert.match(nativeSpellcheck, /FALLBACK_LANGUAGE/);
+    assert.match(nativeSpellcheck, /MAX_LANGUAGES/);
+    assert.match(nativeSpellcheck, /spellcheck_script/);
+    const nativeProtocol = readFileSync(new URL("../src/protocol.rs", import.meta.url), "utf8");
+    assert.match(nativeProtocol, /SpellcheckGetState/);
+    assert.match(nativeProtocol, /SpellcheckStateResponse/);
+    const nativeMain = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    assert.match(nativeMain, /spellcheck\.get_state/);
+    assert.match(nativeMain, /spellcheck::resolve_state/);
+    const apply = readFileSync(new URL("../web/spellcheck/apply.js", import.meta.url), "utf8");
+    assert.match(apply, /__REMCORD_SPELLCHECK_ENABLED__/);
+    assert.match(apply, /__REMCORD_SPELLCHECK_LANG__/);
+    assert.match(apply, /__remcordSpellcheck/);
+    // No wider session/spell surface may exist natively: no setter, no
+    // session handle, no dictionary writer. The shipped code (before the
+    // inline test module, whose own forbidden-capability array names the
+    // absent strings) is the scanned surface.
+    const shippedMain = nativeMain.split("#[cfg(test)]")[0];
+    for (const source of [nativeProtocol, shippedMain]) {
+        assert.doesNotMatch(source, /spellcheck\.set|setSpellCheckerLanguages|addWordToSpellCheckerDictionary/);
+    }
+});

@@ -88,6 +88,7 @@ pub enum BridgeCommand {
     DiagnosticsGetInfo(DiagnosticsGetInfoRequest),
     GraphicsGetInfo(GraphicsGetInfoRequest),
     ModClearCache(ModClearCacheRequest),
+    SpellcheckGetState(SpellcheckGetStateRequest),
     BackupSave(BackupSaveRequest),
     BackupInspect(BackupInspectRequest),
     BackupCommitRestore(BackupCommitRestoreRequest),
@@ -661,6 +662,15 @@ pub struct GraphicsGetInfoRequest {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModClearCacheRequest {}
+
+/// Empty request for the read-only `spellcheck.get_state` capability (F18).
+/// Returns the validated spellcheck state from `crate::spellcheck`
+/// (enabled flag, normalized languages, primary language). There are no
+/// renderer-supplied parameters by design: no language, flag, or selector.
+/// Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpellcheckGetStateRequest {}
 
 /// Save request for the `backup.save` capability: exactly the include flags
 /// plus the bounded renderer-built client-mod envelope. There is deliberately
@@ -1382,6 +1392,7 @@ pub enum BridgeResponsePayload {
     DiagnosticsInfo(DiagnosticsInfoResponse),
     GraphicsInfo(Box<crate::graphics::GraphicsInfoResponse>),
     ModCacheCleared(ModCacheClearedResponse),
+    SpellcheckState(SpellcheckStateResponse),
     BackupSaved(BackupSavedResponse),
     BackupInspected(BackupInspectedResponse),
     BackupRestored(BackupRestoredResponse),
@@ -1851,6 +1862,17 @@ pub struct ModCacheClearedResponse {
     pub mod_cache_cleared: bool,
 }
 
+/// Validated state response for the `spellcheck.get_state` capability
+/// (F18): the closed enabled flag, the normalized language list, and the
+/// primary language. Fixed-vocabulary tags only — no paths, no raw
+/// settings text, no renderer echo.
+#[derive(Serialize)]
+pub struct SpellcheckStateResponse {
+    pub enabled: bool,
+    pub languages: Vec<String>,
+    pub primary_language: String,
+}
+
 /// Bounded save response for the `backup.save` capability: cancellation plus
 /// the final archive size. No theme ids, no paths, no filenames, no source
 /// echo, no filesystem error text — the smallest response that distinguishes
@@ -2241,7 +2263,8 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 // there is nothing to validate.
                 BridgeCommand::DiagnosticsGetInfo(_)
                 | BridgeCommand::GraphicsGetInfo(_)
-                | BridgeCommand::ModClearCache(_) => {}
+                | BridgeCommand::ModClearCache(_)
+                | BridgeCommand::SpellcheckGetState(_) => {}
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
@@ -4759,6 +4782,32 @@ mod tests {
                     "{wire} with {payload} must be rejected"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn accepts_spellcheck_get_state_without_parameters() {
+        // F18 read-only state: the empty payload parses to the typed
+        // variant; any renderer-supplied member is rejected.
+        let message = r#"{"version":1,"request_id":"spell-1","command":{"type":"spellcheck_get_state","payload":{}}}"#;
+        let parsed = parse_bridge_message(message).expect("spellcheck_get_state must parse");
+        assert!(matches!(
+            parsed,
+            BridgeMessage::Request(request)
+                if matches!(request.command, BridgeCommand::SpellcheckGetState(_))
+        ));
+        for payload in [
+            r#"{"languages":["en-US"]}"#,
+            r#"{"enabled":true}"#,
+            r#"{"path":"C:\\secret"}"#,
+        ] {
+            let hostile = format!(
+                "{{\"version\":1,\"request_id\":\"x\",\"command\":{{\"type\":\"spellcheck_get_state\",\"payload\":{payload}}}}}"
+            );
+            assert!(
+                parse_bridge_message(&hostile).is_err(),
+                "spellcheck_get_state with {payload} must be rejected"
+            );
         }
     }
 

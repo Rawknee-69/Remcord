@@ -6654,3 +6654,117 @@ test("F4 keeps mod settings storage page-side with host preservation only", () =
     const substrateCode = stripComments(modSubstrate);
     assert.ok(substrateCode.includes("createModAdapter"));
 });
+// ---------------------------------------------------------------------------
+// F18 spellcheck (native/web/spellcheck/apply.js + spellcheck.get_state).
+//
+// Electron parity: webPreferences.spellcheck from getConfig("spellcheck")
+// plus session.setSpellCheckerLanguages(getConfig("spellcheckLanguage")).
+// The host validates the pair, splices the closed boolean + primary tag as
+// JSON literals into the document-start layer, and serves the read-only
+// state capability. The renderer supplies nothing.
+// ---------------------------------------------------------------------------
+
+const spellcheckApply = readFileSync(new URL("../web/spellcheck/apply.js", import.meta.url), "utf8");
+
+function createSpellcheckRuntime(capabilities = ["bridge.ping", "spellcheck.get_state"]) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+const SPELLCHECK_FIXTURE = {
+    enabled: true,
+    languages: ["en-US", "fr-FR"],
+    primary_language: "en-US",
+};
+
+function respondSpellcheck(window, request, payload = SPELLCHECK_FIXTURE) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "spellcheck_state", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("F18 spellcheck facade exposes exactly one frozen getState member", () => {
+    const { window } = createSpellcheckRuntime();
+    assert.equal(typeof window.remcord.spellcheck.getState, "function");
+    assert.equal(Object.isFrozen(window.remcord.spellcheck), true);
+    assert.equal(window.remcord.native.supports("spellcheck.get_state"), true);
+    assert.deepEqual(Object.keys(window.remcord.spellcheck).sort(), ["getState"]);
+});
+
+test("F18 spellcheck.getState sends an exact empty payload and maps the shape", async () => {
+    const { window } = createSpellcheckRuntime();
+    const pending = window.remcord.spellcheck.getState();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "spellcheck_get_state");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "spellcheck_get_state", payload: {} });
+    respondSpellcheck(window, message);
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        enabled: true,
+        languages: ["en-US", "fr-FR"],
+        primaryLanguage: "en-US",
+    });
+});
+
+test("F18 spellcheck.getState throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createSpellcheckRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("spellcheck.get_state"), false);
+    assert.throws(
+        () => window.remcord.spellcheck.getState(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "spellcheck_get_state"),
+        false,
+    );
+});
+
+test("F18 spellcheck.getState rejects malformed states", async () => {
+    for (const payload of [
+        { ...SPELLCHECK_FIXTURE, enabled: "yes" },
+        { ...SPELLCHECK_FIXTURE, languages: "en-US" },
+        { ...SPELLCHECK_FIXTURE, primary_language: 42 },
+        { enabled: true },
+        { ...SPELLCHECK_FIXTURE, path: "C:\\secret" },
+    ]) {
+        const runtime = createSpellcheckRuntime();
+        const pending = runtime.window.remcord.spellcheck.getState();
+        const message = runtime.window.messages.find(
+            (entry) => entry.command?.type === "spellcheck_get_state",
+        );
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:response", {
+                detail: {
+                    version: 1,
+                    request_id: message.request_id,
+                    ok: true,
+                    payload: { type: "spellcheck_state", payload },
+                    error: null,
+                },
+            }),
+        );
+        await assert.rejects(pending, /spellcheck state response schema is invalid/);
+    }
+});
+
+test("F18 spellcheck apply layer is origin-gated, idempotent, and capability-free", () => {
+    assert.ok(spellcheckApply.includes("__REMCORD_SPELLCHECK_ENABLED__"));
+    assert.ok(spellcheckApply.includes("__REMCORD_SPELLCHECK_LANG__"));
+    assert.ok(spellcheckApply.includes("https://discord.com"));
+    assert.ok(spellcheckApply.includes("https://canary.discord.com"));
+    assert.ok(spellcheckApply.includes("https://ptb.discord.com"));
+    assert.ok(spellcheckApply.includes('Symbol.for("remcord.spellcheck.apply")'));
+    assert.ok(spellcheckApply.includes("__remcordSpellcheck"));
+    assert.ok(spellcheckApply.includes("MutationObserver"));
+    assert.ok(spellcheckApply.includes("spellcheck"));
+    for (const forbidden of ["fetch(", "XMLHttpRequest", "require(", "process.env", "localStorage", "indexedDB"]) {
+        assert.equal(spellcheckApply.includes(forbidden), false, `${forbidden} must not appear`);
+    }
+});
