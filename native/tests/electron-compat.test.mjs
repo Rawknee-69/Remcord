@@ -1819,3 +1819,30 @@ test("F4 in-mod settings UI stays Electron-owned with no native src branch", () 
     assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
     assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
 });
+
+test("F15 Electron menu sources stay owned with the native template as a separate path", () => {
+    // menu.ts owns the app-menu structure: five top-level menus, the
+    // keybind submenu from enabled non-global entries, and getLang
+    // labels. window.ts owns the context-menu suppression.
+    const menu = readFileSync(new URL("../../src/discord/menu.ts", import.meta.url), "utf8");
+    assert.match(menu, /export function setMenu/);
+    assert.match(menu, /menu-remcord/);
+    assert.match(menu, /keybindSubMenu/);
+    assert.match(menu, /!keybind\.global && keybind\.enabled/);
+    const window = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(window, /passedWindow\.webContents\.on\("context-menu"/);
+    assert.match(window, /event\.preventDefault\(\)/);
+    // The native template mirrors that structure host-side without
+    // touching src/: stable ids, getLang labelIds, Electron-verbatim
+    // accelerators, and a suppressed context menu.
+    const menus = readFileSync(new URL("../src/menus.rs", import.meta.url), "utf8");
+    assert.match(menus, /TOP_LEVEL_MENU_IDS/);
+    assert.match(menus, /"remcord", "edit", "view", "window", "keybind"/);
+    assert.match(menus, /keybind-mute/);
+    assert.match(menus, /Ctrl\+Shift\+I/);
+    assert.match(menus, /ContextMenuDecision::Suppress/);
+    assert.match(menus, /menus\.get_template/);
+    // No native menu branch may appear in the Electron sources.
+    assert.doesNotMatch(menu, /menus\.get_template|menus_get_template/);
+    assert.doesNotMatch(window, /menus\.get_template|menus_get_template/);
+});

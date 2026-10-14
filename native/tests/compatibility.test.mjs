@@ -6654,3 +6654,119 @@ test("F4 keeps mod settings storage page-side with host preservation only", () =
     const substrateCode = stripComments(modSubstrate);
     assert.ok(substrateCode.includes("createModAdapter"));
 });
+
+// ---------------------------------------------------------------------------
+// Native menu template (F15 core, native/src/menus.rs).
+//
+// The host mirrors Electron's setMenu() template as data (five top-level
+// menus, Keybind submenu from the validated inventory) and keeps the page
+// context menu suppressed. No menu bar is installed (frameless window, no
+// tao menu API) — the read-only menus.get_template capability is the
+// host-ownable slice.
+// ---------------------------------------------------------------------------
+
+const MENUS_CAPS = ["bridge.ping", "menus.get_template"];
+
+function createMenusRuntime(capabilities = MENUS_CAPS) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondMenus(window, request, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "menus_template", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function validMenuTemplate() {
+    return {
+        menus: [
+            { id: "remcord", labelId: "menu-remcord", items: [] },
+            { id: "edit", labelId: "menu-edit", items: [] },
+            { id: "view", labelId: "menu-view", items: [] },
+            { id: "window", labelId: "menu-window", items: [] },
+        ],
+        keybindMenu: [
+            { kind: "keybind", id: "a-1", labelId: "keybind-mute", accelerator: "Ctrl+M" },
+        ],
+        contextMenu: "suppressed",
+    };
+}
+
+test("the facade exposes a read-only native menu template and no menu surface", () => {
+    const { window } = createMenusRuntime();
+    assert.equal(typeof window.remcord.menus.getTemplate, "function");
+    assert.equal(window.remcord.native.supports("menus.get_template"), true);
+    assert.equal(window.remcord.menus.setMenu, undefined);
+    assert.equal(window.remcord.menus.showContextMenu, undefined);
+});
+
+test("menus.get_template sends an exact empty payload and resolves the template", async () => {
+    const { window } = createMenusRuntime();
+    const pending = window.remcord.menus.getTemplate();
+    const message = window.messages.find((entry) => entry.command?.type === "menus_get_template");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "menus_get_template", payload: {} });
+    respondMenus(window, message, validMenuTemplate());
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), validMenuTemplate());
+});
+
+test("menus.get_template rejects hostile template shapes", async () => {
+    const template = validMenuTemplate();
+    for (const payload of [
+        { ...template, contextMenu: "shown" },
+        { ...template, menus: [{ id: "remcord", labelId: "menu-remcord", items: [] }] },
+        {
+            ...template,
+            menus: [{ id: "evil", labelId: "menu-evil", items: [] }, ...template.menus.slice(1)],
+        },
+        {
+            ...template,
+            keybindMenu: [
+                { kind: "keybind", id: "a-1", labelId: "keybind-runJavascript", accelerator: "Ctrl+M" },
+            ],
+        },
+        {
+            ...template,
+            keybindMenu: [
+                {
+                    kind: "keybind",
+                    id: "a-1",
+                    labelId: "keybind-mute",
+                    accelerator: "Ctrl+M",
+                    js: "alert(1)",
+                },
+            ],
+        },
+        { ...template, extra: true },
+        { ...template, keybindMenu: "nope" },
+    ]) {
+        const runtime = createMenusRuntime();
+        const pending = runtime.window.remcord.menus.getTemplate();
+        const message = runtime.window.messages.find(
+            (entry) => entry.command?.type === "menus_get_template",
+        );
+        respondMenus(runtime.window, message, payload);
+        await assert.rejects(pending, /menu template response schema is invalid/);
+    }
+});
+
+test("menus.get_template throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createMenusRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("menus.get_template"), false);
+    assert.throws(
+        () => window.remcord.menus.getTemplate(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "menus_get_template"),
+        false,
+    );
+});

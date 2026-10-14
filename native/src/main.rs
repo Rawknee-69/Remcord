@@ -16,6 +16,7 @@ mod graphics;
 mod keybinds;
 mod localization;
 mod main_webview;
+mod menus;
 mod mod_cache;
 mod mod_settings;
 mod mod_substrate;
@@ -93,8 +94,8 @@ use protocol::{
     GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
     GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse,
     KeybindsListResponse, KeybindsRemoveResponse, KeybindsToggleResponse,
-    LocalizationStringResponse, ModBundleResponse, ModCacheClearedResponse, PingResponse,
-    PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    LocalizationStringResponse, MenusTemplateResponse, ModBundleResponse, ModCacheClearedResponse,
+    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
     PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
     PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
     SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
@@ -622,6 +623,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "keybinds.add",
         "keybinds.toggle",
         "keybinds.remove",
+        "menus.get_template",
         "gallery.list",
         "gallery.add_url",
         "gallery.add_link",
@@ -5419,6 +5421,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         BOOT_SNAPSHOT.capabilities,
     )
     .map_err(|error| format!("mod settings contract is invalid: {error}"))?;
+    // F15: the native menu template mirrors Electron's setMenu() as data
+    // (no menu bar is installed — frameless window, no tao menu API).
+    // Fail fast if the template drifts from the asserted shape or the
+    // context menu ever stops suppressing.
+    menus::validate_menu_contract()
+        .map_err(|error| format!("menu contract is invalid: {error}"))?;
     let mut web_context = WebContext::new(Some(profile_path.clone()));
     // Release blocker 4: Evergreen WebView2 Runtime prerequisite check,
     // before any WebView initialization. Supported loader lookup (default
@@ -8989,6 +8997,58 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::MenusGetTemplate(_) => {
+                            // Read-only Electron-mirrored template (F15):
+                            // static menus plus the Keybind submenu from
+                            // the validated inventory. A corrupt inventory
+                            // fails closed like every other reader.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match keybinds::list_keybinds(&profile_path) {
+                                Ok(entries) => {
+                                    let (menus, keybind_menu) = menus::template_parts(&entries);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::MenusTemplate(
+                                            MenusTemplateResponse {
+                                                menus,
+                                                keybind_menu,
+                                                context_menu: menus::CONTEXT_MENU_STATE.to_owned(),
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Menus][Metrics] op=get_template request_latency_ms={latency_ms:.3}"
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Menus][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::ThemeInstallCode(payload) => {
                             // Install from CSS text only: the id is derived
                             // from `@name`, the filename is fixed, and the
@@ -11866,6 +11926,31 @@ mod tests {
         // Voice actions stay flux dispatches (harmless without a call);
         // settings navigation uses the fixed path.
         assert!(crate::keybinds::KEYBIND_OPEN_SETTINGS_PATH.starts_with('/'));
+    }
+
+    #[test]
+    fn f15_menu_template_serves_the_electron_shape_without_a_menu_bar() {
+        // The read capability exists in the boot snapshot; the template
+        // carries the five Electron top-level ids in order, no localized
+        // strings (labels resolve renderer-side through getLang), and a
+        // suppressed context menu. tao 0.37 has no menu API and the
+        // window is frameless, so no menu bar is installed — the data is
+        // the host-ownable slice.
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"menus.get_template"));
+        assert_eq!(
+            crate::menus::TOP_LEVEL_MENU_IDS,
+            ["remcord", "edit", "view", "window", "keybind"]
+        );
+        assert_eq!(crate::menus::CONTEXT_MENU_STATE, "suppressed");
+        assert_eq!(
+            crate::menus::context_menu_decision("image"),
+            crate::menus::ContextMenuDecision::Suppress
+        );
+        let template = crate::menus::menu_template_json(&[]);
+        assert_eq!(template["menus"].as_array().map(|v| v.len()), Some(4));
+        assert_eq!(template["keybindMenu"].as_array().map(|v| v.len()), Some(0));
     }
 
     #[test]
