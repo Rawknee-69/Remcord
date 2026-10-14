@@ -1,4 +1,5 @@
 mod app;
+mod aux_windows;
 mod backup;
 mod browser_recovery;
 mod bundles;
