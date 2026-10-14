@@ -47,6 +47,14 @@
 use crate::permissions::{self, Decision};
 
 /// One voice/video consent flow.
+///
+/// Contract surface: enforced by the tests in this module against the
+/// production policy in [`crate::permissions`] (mic/camera) and the
+/// popup-plus-system-picker flow in [`crate::screenshare_picker`]
+/// (display). Never called at runtime by design — like
+/// `settings_import::ImportableKey::rationale`, the value is the
+/// machine-checked documentation, not a runtime branch.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentFlow {
     /// Microphone capture (`getUserMedia({ audio })`).
@@ -58,6 +66,7 @@ pub enum ConsentFlow {
 }
 
 impl ConsentFlow {
+    #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
             ConsentFlow::Mic => "mic",
@@ -69,6 +78,10 @@ impl ConsentFlow {
 
 /// Flow-level consent outcome. There is no silent-grant variant for display:
 /// the host owns no path that produces one.
+///
+/// Contract surface with the same never-at-runtime rationale as
+/// [`ConsentFlow`].
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentOutcome {
     /// Host pre-authorizes (mic/camera on trusted origins).
@@ -82,6 +95,7 @@ pub enum ConsentOutcome {
 }
 
 impl ConsentOutcome {
+    #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
             ConsentOutcome::Allow => "allow",
@@ -102,25 +116,31 @@ impl ConsentOutcome {
 ///   (A future host-side `ScreenCaptureStarting` cancel for untrusted
 ///   origins would harden this further; it must never introduce an allow
 ///   path — the tests below forbid it.)
+#[allow(dead_code)]
 pub fn expected_outcome(flow: ConsentFlow, origin: &str) -> ConsentOutcome {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
     };
     match flow {
-        ConsentFlow::Mic => match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_MICROPHONE.0, origin) {
-            Decision::Allow => ConsentOutcome::Allow,
-            Decision::Deny => ConsentOutcome::Deny,
-        },
-        ConsentFlow::Camera => match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_CAMERA.0, origin) {
-            Decision::Allow => ConsentOutcome::Allow,
-            Decision::Deny => ConsentOutcome::Deny,
-        },
+        ConsentFlow::Mic => {
+            match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_MICROPHONE.0, origin) {
+                Decision::Allow => ConsentOutcome::Allow,
+                Decision::Deny => ConsentOutcome::Deny,
+            }
+        }
+        ConsentFlow::Camera => {
+            match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_CAMERA.0, origin) {
+                Decision::Allow => ConsentOutcome::Allow,
+                Decision::Deny => ConsentOutcome::Deny,
+            }
+        }
         ConsentFlow::Display => ConsentOutcome::UserMediated,
     }
 }
 
 /// Fixed-vocabulary `[Media][Consent]` log line for one flow expectation.
 /// `origin_trusted` is the boolean classification, never the URI.
+#[allow(dead_code)]
 pub fn format_log(flow: ConsentFlow, origin_trusted: bool, outcome: ConsentOutcome) -> String {
     format!(
         "[Media][Consent] flow={} origin_trusted={origin_trusted} outcome={}",
@@ -133,14 +153,14 @@ pub fn format_log(flow: ConsentFlow, origin_trusted: bool, outcome: ConsentOutco
 mod tests {
     use super::*;
 
-    const ENTRY_ORIGINS: &[&str] = [
+    const ENTRY_ORIGINS: [&str; 4] = [
         "https://discord.com",
         "https://discord.com/app",
         "https://canary.discord.com",
         "https://ptb.discord.com",
     ];
 
-    const HOSTILE_ORIGINS: &[&str] = [
+    const HOSTILE_ORIGINS: [&str; 8] = [
         "https://evil.com",
         "https://sub.discord.com",
         "http://discord.com",
@@ -156,7 +176,10 @@ mod tests {
         // Electron `callback(true)` for `media` on Windows; native splits
         // the kind but the effect matches: allow.
         for origin in ENTRY_ORIGINS {
-            assert_eq!(expected_outcome(ConsentFlow::Mic, origin), ConsentOutcome::Allow);
+            assert_eq!(
+                expected_outcome(ConsentFlow::Mic, origin),
+                ConsentOutcome::Allow
+            );
             assert_eq!(
                 expected_outcome(ConsentFlow::Camera, origin),
                 ConsentOutcome::Allow
@@ -167,7 +190,10 @@ mod tests {
     #[test]
     fn mic_and_camera_deny_off_entry_origins() {
         for origin in HOSTILE_ORIGINS {
-            assert_eq!(expected_outcome(ConsentFlow::Mic, origin), ConsentOutcome::Deny);
+            assert_eq!(
+                expected_outcome(ConsentFlow::Mic, origin),
+                ConsentOutcome::Deny
+            );
             assert_eq!(
                 expected_outcome(ConsentFlow::Camera, origin),
                 ConsentOutcome::Deny
