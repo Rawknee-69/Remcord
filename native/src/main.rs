@@ -48,7 +48,6 @@ mod quick_css;
 mod recovery;
 mod remcord_protocol;
 mod screenshare_media;
-mod screenshare_picker;
 mod screenshare_quality;
 mod settings;
 mod settings_boot;
@@ -3462,9 +3461,10 @@ fn initialization_script(
 /// carry the host language before the user types, then the
 /// host-selected screenshare capture-quality script, appended AFTER the mod
 /// adapters so capture constraining is never before (and can never perturb)
-/// the settings boot snapshot or mod bootstrap — plus the Remcord stream
-/// setup popup ([`screenshare_picker`]), appended last so it wraps outermost
-/// and its modal is the first thing a `getDisplayMedia` call reaches.
+/// the settings boot snapshot or mod bootstrap. There is intentionally no
+/// Remcord stream setup popup: Discord's own Go Live modal collects quality,
+/// and the WebView2/OS system picker commits the concrete source
+/// (WebView2 exposes no source-injection API, so a silent grant is impossible).
 /// `raw_mode` is normalized by the quality module (unknown values fail safe
 /// to `"default"`, which preserves existing behavior exactly); the
 /// spellcheck pair is normalized by the spellcheck module (F18: Electron
@@ -3507,8 +3507,6 @@ fn document_start_script(
         .map_err(serde::de::Error::custom)?;
     script.push('\n');
     script.push_str(&quality);
-    script.push('\n');
-    script.push_str(&screenshare_picker::screenshare_picker_script());
     Ok(script)
 }
 
@@ -13840,8 +13838,9 @@ mod tests {
         // must exist before any page script binds RTCPeerConnection), then
         // the boot snapshot precedes adapters, the spellcheck layer follows
         // the adapters (editable roots carry the host language before the
-        // user types), the capture script follows it, and the stream setup
-        // popup is the last layer — it can never perturb snapshot/mod boot.
+        // user types), and the capture script follows it last — it can never
+        // perturb snapshot/mod boot. No Remcord stream setup popup ships:
+        // Discord's Go Live modal plus the OS system picker own the flow.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
         let script = document_start_script(
@@ -13868,14 +13867,13 @@ mod tests {
         let quality_at = script
             .find("__remcordScreenshareQuality")
             .expect("quality status present");
-        let picker_at = script
-            .find("__remcordStreamPicker")
-            .expect("picker status present");
+        assert!(!script.contains("__remcordStreamPicker"), "picker must not ship");
+        assert!(!script.contains("__remcordStreamPrefs"), "picker prefs must not ship");
+        assert!(!script.contains("remcord.screenshare.pickerPatch"), "picker patch must not ship");
         assert!(media_at < snapshot_at);
         assert!(snapshot_at < adapter_at);
         assert!(adapter_at < spell_at);
         assert!(spell_at < quality_at);
-        assert!(quality_at < picker_at);
         assert!(!script.contains("__REMCORD_SCREENSHARE_QUALITY_MODE__"));
         assert!(!script.contains("__REMCORD_SCREENSHARE_PREFER_HW_H264__"));
         assert!(!script.contains("__REMCORD_SPELLCHECK_ENABLED__"));
@@ -13931,8 +13929,8 @@ mod tests {
     #[test]
     fn document_start_script_default_mode_is_capture_inert() {
         // Default quality preserves existing behavior exactly: the quality
-        // segment publishes status but contributes no capture wrapper. The
-        // stream setup popup is a separate layer and is always present.
+        // segment publishes status but contributes no capture wrapper. No
+        // stream setup popup ships: Discord's modal plus the OS picker own it.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
         let script =
@@ -13941,10 +13939,10 @@ mod tests {
         assert!(script.contains("__remcordScreenshareMedia"));
         assert!(script.contains("__remcordSpellcheck"));
         assert!(script.contains("__remcordScreenshareQuality"));
-        assert!(script.contains("__remcordStreamPicker"));
-        // Picker contract anchors: last-choice record and idempotence key.
-        assert!(script.contains("__remcordStreamPrefs"));
-        assert!(script.contains("remcord.screenshare.pickerPatch"));
+        assert!(!script.contains("__remcordStreamPicker"), "picker must not ship");
+        // Picker contract anchors must be gone with the popup.
+        assert!(!script.contains("__remcordStreamPrefs"));
+        assert!(!script.contains("remcord.screenshare.pickerPatch"));
         assert!(
             !script.contains("[Remcord][ScreenshareQuality] capture constrained"),
             "default quality must contribute no capture wrapper"
@@ -13959,7 +13957,7 @@ mod tests {
             document_start_script(&[], boot, platform, "ultra-hd", true, true, "en-US", false)
                 .expect("must build");
         assert!(script.contains("\"default\""));
-        assert!(script.contains("__remcordStreamPicker"));
+        assert!(!script.contains("__remcordStreamPicker"), "picker must not ship");
         assert!(
             !script.contains("[Remcord][ScreenshareQuality] capture constrained"),
             "unknown quality mode must contribute no capture wrapper"

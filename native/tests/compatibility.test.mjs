@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -6712,29 +6712,11 @@ test("the renderer cannot replace the host snapshot or shim before plugin execut
     assert.equal(window.remcord.platform, "win32");
 });
 
-test("the embedded stream picker script parses and carries no unspliced placeholder", () => {
-    // Regression guard: a syntax error in the Rust-embedded picker script
-    // kills the ENTIRE document-start bundle (settings boot, mod adapters,
-    // quality wrapper, titlebar plugin). Parsing here without executing
-    // catches that class before it ships.
-    const rust = readFileSync(new URL("../src/screenshare_picker.rs", import.meta.url), "utf8");
-    const marker = 'const SCREENSHARE_PICKER_SCRIPT: &str = r#"';
-    const start = rust.indexOf(marker);
-    assert.notEqual(start, -1, "picker script constant must exist");
-    let end = -1;
-    for (let i = start + marker.length; i < rust.length - 1; i++) {
-        if (rust[i] === '"' && rust[i + 1] === "#") {
-            end = i;
-            break;
-        }
-    }
-    assert.notEqual(end, -1, "raw string terminator must exist");
-    const script = rust.slice(start + marker.length, end);
-    assert.doesNotThrow(() => new vm.Script(script), "picker script must parse");
-    assert.ok(!script.includes("__REMCORD_"), "no unspliced placeholder may ship");
-    for (const token of ["__remcordStreamPicker", "NotAllowedError", "displaySurface", "data-rmc-sp"]) {
-        assert.ok(script.includes(token), `${token} must be present`);
-    }
+test("no Remcord stream setup popup ships in the document-start bundle", () => {
+    // Discord's own Go Live modal plus the OS system picker own the flow.
+    // The native setup popup was removed: its module must be gone so no
+    // getDisplayMedia wrapper can intercept before the system picker.
+    assert.ok(!existsSync(new URL("../src/screenshare_picker.rs", import.meta.url)));
 });
 
 // ---------------------------------------------------------------------------

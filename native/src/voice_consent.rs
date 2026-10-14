@@ -20,13 +20,12 @@
 //!   child popup (`main.rs` popup builder), and re-attached after browser
 //!   recovery. Electron's undifferentiated `media` allow splits into the
 //!   two WebView2 kinds; the effect on Windows is identical (allow).
-//! - Display: [`crate::screenshare_picker`] shows the Discord-styled setup
-//!   popup on every `getDisplayMedia` call on the entry origins (cancel
-//!   rejects with `NotAllowedError`, like a dismissed picker) and the OS
+//! - Display: Discord's own Go Live modal collects quality, then the OS
 //!   system picker commits the concrete source. There is deliberately NO
-//!   host-side silent-grant path (no `ScreenCaptureStarting` allow handler
-//!   exists anywhere under `native/`), so display capture is ALWAYS
-//!   user-mediated: success with an explicit pick, or denial by cancel.
+//!   Remcord setup popup and NO host-side silent-grant path (no
+//!   `ScreenCaptureStarting` allow handler exists anywhere under `native/`),
+//!   so display capture is ALWAYS user-mediated: success with an explicit
+//!   pick in Discord's modal plus the OS picker, or denial by cancel.
 //!
 //! Deliberate, documented differences from Electron:
 //! - The darwin `askForMediaAccess` round-trip has no native counterpart
@@ -50,10 +49,9 @@ use crate::permissions::{self, Decision};
 ///
 /// Contract surface: enforced by the tests in this module against the
 /// production policy in [`crate::permissions`] (mic/camera) and the
-/// popup-plus-system-picker flow in [`crate::screenshare_picker`]
-/// (display). Never called at runtime by design — like
-/// `settings_import::ImportableKey::rationale`, the value is the
-/// machine-checked documentation, not a runtime branch.
+/// Discord-modal-plus-OS-picker flow (display). Never called at runtime
+/// by design — like [`crate::settings_import::ImportableKey::rationale`],
+/// the value is the machine-checked documentation, not a runtime branch.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentFlow {
@@ -89,7 +87,7 @@ pub enum ConsentOutcome {
     /// Host pre-denies (mic/camera off trusted origins).
     Deny,
     /// No host pre-decision exists: consent is collected in the open —
-    /// the setup popup plus the OS system picker (display). The user
+    /// Discord's Go Live modal plus the OS system picker (display). The user
     /// picks a source (grant) or cancels (`NotAllowedError`).
     UserMediated,
 }
@@ -109,8 +107,8 @@ impl ConsentOutcome {
 /// - Mic/camera delegate to [`permissions::decide`] (single source of
 ///   truth; never re-implemented here).
 /// - Display is [`ConsentOutcome::UserMediated`] for EVERY origin: the
-///   setup popup is origin-gated defense-in-depth, but the binding
-///   constraint is structural — no silent-grant path exists host-side, so
+///   binding constraint is structural — no silent-grant path exists
+///   host-side (WebView2 exposes no source-injection API), so
 ///   an unattended grant is impossible and a hostile origin can at most
 ///   reach the OS picker, which still demands an explicit user pick.
 ///   (A future host-side `ScreenCaptureStarting` cancel for untrusted
@@ -283,8 +281,8 @@ mod tests {
         // No enforcement surface of its own: no window calls, no WebView2
         // state writes, no settings I/O, no bridge, no script execution,
         // no filesystem, no fetch, no capture machinery. Enforcement lives
-        // in permissions.rs (mic/camera) and screenshare_picker.rs plus
-        // the OS picker (display); this module only states expectations.
+        // in permissions.rs (mic/camera) and the OS picker (display);
+        // this module only states expectations.
         for forbidden in [
             "SetState",
             "SavesInProfile",

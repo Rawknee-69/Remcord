@@ -21,9 +21,8 @@
 //!
 //! WebView2 offers no `desktopCapturer` equivalent and no display-media
 //! request handler: source enumeration, the source picker commit, and
-//! loopback audio stay owned by the system picker plus the existing
-//! `screenshare_picker` setup popup. Venmic is Linux-only and has no
-//! Windows path. This module ports exactly the two platform-agnostic media
+//! loopback audio stay owned by the OS system picker. Venmic is Linux-only
+//! and has no Windows path. This module ports exactly the two platform-agnostic media
 //! patches above — the slice of F9 that is both real and host-ownable.
 //!
 //! Safety properties (all pinned by tests):

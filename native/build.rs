@@ -425,7 +425,7 @@ struct InjectorPluginSpec {
 /// by the host from build-embedded artifacts (claiming those ids here would
 /// double-register them), and `remcord-screenshare` needs the Electron
 /// screenshare IPC surface its `onLoad` calls unconditionally (deferred with
-/// F9 screenshare parity; the native picker owns `getDisplayMedia`).
+/// F9 screenshare parity; Discord's modal plus the OS picker own `getDisplayMedia`).
 const INJECTOR_PLUGIN_SPECS: &[InjectorPluginSpec] = &[
     InjectorPluginSpec {
         injector_id: "remcord-arrpc",

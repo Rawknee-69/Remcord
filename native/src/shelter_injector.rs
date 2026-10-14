@@ -37,8 +37,8 @@
 //! - `"remcord-screenshare"` is EXCLUDED: its `onLoad` calls the Electron
 //!   `window.remcord.screenshare.getSources` IPC surface unconditionally,
 //!   which does not exist natively (deferred with F9 screenshare parity;
-//!   the native picker owns `getDisplayMedia`). Including it would
-//!   guarantee a loud load failure on every launch.
+//!   Discord's Go Live modal plus the OS system picker own `getDisplayMedia`).
+//!   Including it would guarantee a loud load failure on every launch.
 //! - The touch-bar entry is darwin-only upstream; native is Windows-only.
 //! - The declaration is a top-level `const` (Electron parity for the
 //!   wrapper shape), evaluated once per document ahead of the Shelter
