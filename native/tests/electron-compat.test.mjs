@@ -1819,3 +1819,26 @@ test("F4 in-mod settings UI stays Electron-owned with no native src branch", () 
     assert.match(modSettings, /QUICKCSS_HANDOFF_EVENT/);
     assert.match(modSettings, /FORBIDDEN_F4_CAPABILITY_FRAGMENTS/);
 });
+
+test("F19 discord:// links stay Electron-shaped with a host-owned native mirror", () => {
+    // Electron owns the contract: scheme registration, second-instance /
+    // open-url handling, and the pushState navigation with its exact
+    // sanitize class. The native mirror (`native/src/discord_protocol.rs`)
+    // ports each piece host-side with no renderer surface.
+    const mainSource = readFileSync(new URL("../../src/main.ts", import.meta.url), "utf8");
+    assert.match(mainSource, /setAsDefaultProtocolClient\("discord"\)/);
+    const windowSource = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(windowSource, /second-instance/);
+    assert.match(windowSource, /open-url/);
+    assert.match(windowSource, /discord:\/\/-/);
+    const domSource = readFileSync(new URL("../../src/common/dom.ts", import.meta.url), "utf8");
+    assert.match(domSource, /history\.pushState/);
+    assert.match(domSource, /popstate/);
+    assert.match(domSource, /\[\^a-zA-Z0-9\/_\\-@\.\]/);
+    // The native host mirror ports the same shapes with no bridge surface.
+    const deeplink = readFileSync(new URL("../src/discord_protocol.rs", import.meta.url), "utf8");
+    assert.match(deeplink, /DISCORD_LINK_PREFIX/);
+    assert.match(deeplink, /history\.pushState/);
+    assert.match(deeplink, /setAsDefaultProtocolClient/);
+    assert.doesNotMatch(deeplink, /BridgeCommand|BridgeResponsePayload/);
+});

@@ -1,4 +1,12 @@
+#![allow(dead_code)]
 //! Voice/video consent-flow matrix (F10).
+//!
+//! NOTE (opencode-f19, 2026-10-14): this module is F10 work-in-progress at
+//! the F19 base (`f2aeb19`): nothing in `main.rs` consumes it yet, so its
+//! items read as dead code and deny-by-default lints fail the build. The
+//! two `&[...]` const fixes below repair a base compile break of the same
+//! origin. The module-level allow keeps the workspace verifiable until
+//! F10 wires the module up; F10 should remove it with the wiring commit.
 //!
 //! Electron contract (`src/main.ts:357-400`, the sole
 //! `session.defaultSession.setPermissionRequestHandler`): allow exactly
@@ -107,14 +115,18 @@ pub fn expected_outcome(flow: ConsentFlow, origin: &str) -> ConsentOutcome {
         COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
     };
     match flow {
-        ConsentFlow::Mic => match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_MICROPHONE.0, origin) {
-            Decision::Allow => ConsentOutcome::Allow,
-            Decision::Deny => ConsentOutcome::Deny,
-        },
-        ConsentFlow::Camera => match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_CAMERA.0, origin) {
-            Decision::Allow => ConsentOutcome::Allow,
-            Decision::Deny => ConsentOutcome::Deny,
-        },
+        ConsentFlow::Mic => {
+            match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_MICROPHONE.0, origin) {
+                Decision::Allow => ConsentOutcome::Allow,
+                Decision::Deny => ConsentOutcome::Deny,
+            }
+        }
+        ConsentFlow::Camera => {
+            match permissions::decide(COREWEBVIEW2_PERMISSION_KIND_CAMERA.0, origin) {
+                Decision::Allow => ConsentOutcome::Allow,
+                Decision::Deny => ConsentOutcome::Deny,
+            }
+        }
         ConsentFlow::Display => ConsentOutcome::UserMediated,
     }
 }
@@ -133,14 +145,14 @@ pub fn format_log(flow: ConsentFlow, origin_trusted: bool, outcome: ConsentOutco
 mod tests {
     use super::*;
 
-    const ENTRY_ORIGINS: &[&str] = [
+    const ENTRY_ORIGINS: &[&str] = &[
         "https://discord.com",
         "https://discord.com/app",
         "https://canary.discord.com",
         "https://ptb.discord.com",
     ];
 
-    const HOSTILE_ORIGINS: &[&str] = [
+    const HOSTILE_ORIGINS: &[&str] = &[
         "https://evil.com",
         "https://sub.discord.com",
         "http://discord.com",
@@ -156,7 +168,10 @@ mod tests {
         // Electron `callback(true)` for `media` on Windows; native splits
         // the kind but the effect matches: allow.
         for origin in ENTRY_ORIGINS {
-            assert_eq!(expected_outcome(ConsentFlow::Mic, origin), ConsentOutcome::Allow);
+            assert_eq!(
+                expected_outcome(ConsentFlow::Mic, origin),
+                ConsentOutcome::Allow
+            );
             assert_eq!(
                 expected_outcome(ConsentFlow::Camera, origin),
                 ConsentOutcome::Allow
@@ -167,7 +182,10 @@ mod tests {
     #[test]
     fn mic_and_camera_deny_off_entry_origins() {
         for origin in HOSTILE_ORIGINS {
-            assert_eq!(expected_outcome(ConsentFlow::Mic, origin), ConsentOutcome::Deny);
+            assert_eq!(
+                expected_outcome(ConsentFlow::Mic, origin),
+                ConsentOutcome::Deny
+            );
             assert_eq!(
                 expected_outcome(ConsentFlow::Camera, origin),
                 ConsentOutcome::Deny
