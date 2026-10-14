@@ -1,0 +1,65 @@
+# F31 native code signing (opt-in). NEW file — the existing Electron
+# package/release flow in package.yml is untouched.
+#
+# Signing is a post-build step over the native installer artifacts
+# (native/installer/build-installer.ps1 output). This workflow never signs by
+# default: it validates policy + scripts and audits current signatures. Pass
+# sign=true with certificate secrets configured to actually sign, and
+# require-signed=true to fail the run on unsigned/untrusted artifacts.
+name: Native code signing (opt-in)
+
+on:
+    workflow_dispatch:
+        inputs:
+            sign:
+                description: "Attempt signing when certificate secrets are present"
+                type: boolean
+                default: false
+            require-signed:
+                description: "Fail the run if any required artifact is unsigned or untrusted"
+                type: boolean
+                default: false
+
+jobs:
+    native-sign:
+        runs-on: windows-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6
+
+            - name: Validate signing policy
+              run: node --test native/tests/signing-policy.test.mjs
+
+            - name: Audit artifact signatures
+              shell: pwsh
+              run: >
+                pwsh -NoProfile -File native/installer/signing/Confirm-ArtifactSignatures.ps1
+                -RequireSigned:${{ inputs.require-signed }}
+
+            - name: Install AzureSignTool (only when Azure signing is configured)
+              if: ${{ inputs.sign && secrets.AZURE_TRUSTED_SIGNING_ENDPOINT != '' }}
+              run: dotnet tool install --global AzureSignTool
+              shell: pwsh
+
+            - name: Sign native artifacts
+              if: ${{ inputs.sign }}
+              shell: pwsh
+              env:
+                WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+                WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+                AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+                AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+                AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+                AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+                AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+                AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+              run: >
+                pwsh -NoProfile -File native/installer/signing/Invoke-CodeSigning.ps1
+                -Required:${{ inputs.require-signed }}
+
+            - name: Confirm signatures after signing
+              if: ${{ inputs.sign }}
+              shell: pwsh
+              run: >
+                pwsh -NoProfile -File native/installer/signing/Confirm-ArtifactSignatures.ps1
+                -RequireSigned:${{ inputs.require-signed }}
