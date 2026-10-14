@@ -63,6 +63,13 @@
 //! Privacy: log lines carry only fixed vocabulary plus booleans — no URIs,
 //! page data, or user content.
 
+//! Dead code by construction: the single-window shell creates no second
+//! window and persists no setup state through this module, so no shipped
+//! caller consumes this policy yet. Every item is pinned by the unit tests
+//! below and consumed by the deferred multi-window implementer, which is why
+//! this allow lives at module scope instead of on individual items.
+#![allow(dead_code)]
+
 use crate::settings::{SettingsSnapshot, SettingsSource};
 
 /// Electron splash window width (`src/splash/main.ts`).
@@ -324,38 +331,43 @@ mod tests {
     use super::*;
 
     fn snapshot_with(mods: &[&str], skip_splash: bool, done_setup: bool) -> SettingsSnapshot {
-        let mut snapshot = SettingsSnapshot::default();
-        snapshot.mods = mods.iter().map(|entry| entry.to_string()).collect();
-        snapshot.skip_splash = skip_splash;
-        snapshot.done_setup = done_setup;
-        snapshot
+        SettingsSnapshot {
+            mods: mods.iter().map(|entry| entry.to_string()).collect(),
+            skip_splash,
+            done_setup,
+            ..SettingsSnapshot::default()
+        }
     }
 
     #[test]
     fn splash_spec_matches_electron_main() {
-        // Traced from src/splash/main.ts, not inferred.
-        assert_eq!(SPLASH_WIDTH, 300);
-        assert_eq!(SPLASH_HEIGHT, 350);
-        assert!(SPLASH_FRAMELESS);
-        assert_eq!(SPLASH_BACKGROUND, "#202225");
-        assert_eq!(SPLASH_TITLE_KEY, "splash-title");
+        // Traced from src/splash/main.ts, not inferred. Bound to locals:
+        // clippy's assertions_on_constants rejects asserting on consts.
+        let (width, height) = (SPLASH_WIDTH, SPLASH_HEIGHT);
+        let (frameless, background, title) =
+            (SPLASH_FRAMELESS, SPLASH_BACKGROUND, SPLASH_TITLE_KEY);
+        assert_eq!((width, height), (300, 350));
+        assert!(frameless);
+        assert_eq!(background, "#202225");
+        assert_eq!(title, "splash-title");
     }
 
     #[test]
     fn setup_spec_matches_electron_main() {
         // Traced from src/setup/main.ts, not inferred.
-        assert_eq!(SETUP_WIDTH, 840);
-        assert_eq!(SETUP_HEIGHT, 720);
-        assert!(!SETUP_RESIZABLE);
-        assert!(!SETUP_MAXIMIZABLE);
-        assert_eq!(SETUP_TITLE_KEY, "setup-windowTitle");
+        let (width, height) = (SETUP_WIDTH, SETUP_HEIGHT);
+        let (resizable, maximizable, title) = (SETUP_RESIZABLE, SETUP_MAXIMIZABLE, SETUP_TITLE_KEY);
+        assert_eq!((width, height), (840, 720));
+        assert!(!resizable);
+        assert!(!maximizable);
+        assert_eq!(title, "setup-windowTitle");
     }
 
     #[test]
     fn css_editor_spec_matches_electron_main() {
         // Traced from src/cssEditor/main.ts, not inferred.
-        assert_eq!(CSS_EDITOR_WIDTH, 800);
-        assert_eq!(CSS_EDITOR_HEIGHT, 600);
+        let (width, height) = (CSS_EDITOR_WIDTH, CSS_EDITOR_HEIGHT);
+        assert_eq!((width, height), (800, 600));
     }
 
     #[test]
