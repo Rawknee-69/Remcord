@@ -88,6 +88,7 @@ pub enum BridgeCommand {
     QuickCssWrite(QuickCssWriteRequest),
     DiagnosticsGetInfo(DiagnosticsGetInfoRequest),
     GraphicsGetInfo(GraphicsGetInfoRequest),
+    ClipboardCopyImage(ClipboardCopyImageRequest),
     ModClearCache(ModClearCacheRequest),
     BackupSave(BackupSaveRequest),
     BackupInspect(BackupInspectRequest),
@@ -752,6 +753,18 @@ pub struct DiagnosticsGetInfoRequest {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphicsGetInfoRequest {}
+
+/// Copy request for the `clipboard.copy_image` capability (F17): exactly
+/// one `http`/`https` image URL. The host downloads and decodes the bytes
+/// itself; the renderer never supplies bytes, paths, dimensions, or
+/// selectors. Shape-checked here (presence + byte cap + scheme); the
+/// content rules (raster MIME, size, decodability) live in `clipboard` and
+/// are re-enforced at dispatch. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipboardCopyImageRequest {
+    pub url: String,
+}
 
 /// Empty request for the `mod.clear_cache` capability. Deletes the five
 /// host-managed downloaded bundle caches and resets the stored `modCache`
@@ -1499,6 +1512,7 @@ pub enum BridgeResponsePayload {
     QuickCssWritten(QuickCssWrittenResponse),
     DiagnosticsInfo(DiagnosticsInfoResponse),
     GraphicsInfo(Box<crate::graphics::GraphicsInfoResponse>),
+    ClipboardImageCopied(ClipboardImageCopiedResponse),
     ModCacheCleared(ModCacheClearedResponse),
     BackupSaved(BackupSavedResponse),
     BackupInspected(BackupInspectedResponse),
@@ -2031,6 +2045,19 @@ pub struct DiagnosticsInfoResponse {
     pub mods: Vec<String>,
 }
 
+/// Copy outcome for the `clipboard.copy_image` capability (F17), in
+/// Electron's `{ok, item} | {ok, error}` spirit with a typed echo: `{ok,
+/// width, height} | {ok, error}`. Typed failures resolve (never reject)
+/// so the page can toast the reason; `error` carries only the
+/// fixed-vocabulary code. Dimensions echo the placed bitmap.
+#[derive(Serialize)]
+pub struct ClipboardImageCopiedResponse {
+    pub ok: bool,
+    pub width: u32,
+    pub height: u32,
+    pub error: Option<String>,
+}
+
 /// Outcome response for the `mod.clear_cache` capability: which
 /// host-managed cache files were deleted plus whether a stored `modCache`
 /// map existed and was reset. Fixed allowlisted names only — no paths.
@@ -2462,6 +2489,21 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::GraphicsGetInfo(_)
                 | BridgeCommand::ModClearCache(_)
                 | BridgeCommand::TrayGetState(_) => {}
+                // Clipboard image copy (F17): shape check only (presence +
+                // byte cap + http(s) scheme); the content rules (raster
+                // MIME, byte/pixel caps, WIC decodability) live in
+                // `clipboard` and are re-enforced at dispatch.
+                BridgeCommand::ClipboardCopyImage(payload) => {
+                    if payload.url.trim().is_empty()
+                        || payload.url.len() > crate::clipboard::MAX_CLIPBOARD_IMAGE_URL_BYTES
+                    {
+                        return Err("invalid clipboard image url".to_owned());
+                    }
+                    let lower = payload.url.to_ascii_lowercase();
+                    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                        return Err("invalid clipboard image url".to_owned());
+                    }
+                }
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
                 // is needed. The picker configuration plus the archive,
@@ -5365,6 +5407,84 @@ mod tests {
                 "tray_get_state with {payload} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn clipboard_copy_image_parses_one_http_url_and_rejects_the_rest() {
+        // The F17 image copy takes exactly one http(s) URL: the host
+        // downloads the bytes itself, so bytes, paths, dimensions, and
+        // selectors can never parse.
+        let request = r#"{"version":1,"request_id":"clip-1","command":{"type":"clipboard_copy_image","payload":{"url":"https://cdn.discordapp.com/attachments/a/b.png"}}}"#;
+        let parsed = parse_bridge_message(request).expect("valid clipboard copy must parse");
+        match parsed {
+            BridgeMessage::Request(request) => match request.command {
+                BridgeCommand::ClipboardCopyImage(payload) => {
+                    assert_eq!(
+                        payload.url,
+                        "https://cdn.discordapp.com/attachments/a/b.png"
+                    );
+                }
+                other => panic!("must dispatch to ClipboardCopyImage, got {other:?}"),
+            },
+            BridgeMessage::Event(_) => panic!("clipboard_copy_image must parse as a request"),
+        }
+        for hostile in [
+            // Empty / blank.
+            r#"{"version":1,"request_id":"clip-2","command":{"type":"clipboard_copy_image","payload":{"url":""}}}"#,
+            r#"{"version":1,"request_id":"clip-3","command":{"type":"clipboard_copy_image","payload":{"url":"   "}}}"#,
+            // Non-web schemes and bare hosts.
+            r#"{"version":1,"request_id":"clip-4","command":{"type":"clipboard_copy_image","payload":{"url":"ftp://example.com/i.png"}}}"#,
+            r#"{"version":1,"request_id":"clip-5","command":{"type":"clipboard_copy_image","payload":{"url":"file:///C:/pic.png"}}}"#,
+            r#"{"version":1,"request_id":"clip-6","command":{"type":"clipboard_copy_image","payload":{"url":"javascript:alert(1)"}}}"#,
+            r#"{"version":1,"request_id":"clip-7","command":{"type":"clipboard_copy_image","payload":{"url":"data:image/png;base64,iVBOR"}}}"#,
+            r#"{"version":1,"request_id":"clip-8","command":{"type":"clipboard_copy_image","payload":{"url":"example.com/i.png"}}}"#,
+            // Renderer-supplied bytes/paths/dimensions can never parse.
+            r#"{"version":1,"request_id":"clip-9","command":{"type":"clipboard_copy_image","payload":{"url":"https://example.com/i.png","bytes":"aGVsbG8="}}}"#,
+            r#"{"version":1,"request_id":"clip-10","command":{"type":"clipboard_copy_image","payload":{"url":"https://example.com/i.png","path":"C:\\pic.png"}}}"#,
+            r#"{"version":1,"request_id":"clip-11","command":{"type":"clipboard_copy_image","payload":{"url":"https://example.com/i.png","width":64}}}"#,
+        ] {
+            assert!(
+                parse_bridge_message(hostile).is_err(),
+                "{hostile} must be rejected"
+            );
+        }
+        // Overlong URLs are rejected, never truncated.
+        let long = format!(
+            "{{\"version\":1,\"request_id\":\"clip-12\",\"command\":{{\"type\":\"clipboard_copy_image\",\"payload\":{{\"url\":\"https://example.com/{}.png\"}}}}}}",
+            "a".repeat(2500)
+        );
+        assert!(parse_bridge_message(&long).is_err());
+    }
+
+    #[test]
+    fn serializes_a_typed_clipboard_image_copied_response() {
+        use super::ClipboardImageCopiedResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "clip-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::ClipboardImageCopied(
+                ClipboardImageCopiedResponse {
+                    ok: true,
+                    width: 64,
+                    height: 48,
+                    error: None,
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "clipboard_image_copied");
+        assert_eq!(value["payload"]["payload"]["ok"], true);
+        assert_eq!(value["payload"]["payload"]["width"], 64);
+        assert_eq!(value["payload"]["payload"]["height"], 48);
+        assert!(
+            value["payload"]["payload"].get("error").is_none()
+                || value["payload"]["payload"]["error"].is_null()
+        );
+        assert!(value["payload"]["payload"].get("bytes").is_none());
+        assert!(value["payload"]["payload"].get("path").is_none());
+        assert!(value["payload"]["payload"].get("url").is_none());
     }
 
     #[test]
