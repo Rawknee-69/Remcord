@@ -1877,3 +1877,115 @@ test("F19 discord:// links stay Electron-shaped with a host-owned native mirror"
     assert.match(deeplink, /setAsDefaultProtocolClient/);
     assert.doesNotMatch(deeplink, /BridgeCommand|BridgeResponsePayload/);
 });
+
+test("F11 keeps the Electron rpc bridge, worker, and stores intact", () => {
+    // The preload rpc surface stays exactly as the Games page and Shelter
+    // consume it: fire-and-forget sends plus synchronous reads. The native
+    // shell adds async paths alongside (never rewrites these members).
+    assert.match(bridge, /refreshProcessList:\s*\(\)\s*=>\s*ipcRenderer\.send\("refreshProcessList"\)/);
+    assert.match(bridge, /getProcessList:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getProcessList"\)/);
+    assert.match(bridge, /addDetectable:\s*\(detectable:\s*Game\)\s*=>\s*ipcRenderer\.send\("addDetectable", detectable\)/);
+    assert.match(bridge, /removeDetectable:\s*\(id:\s*string\)\s*=>\s*ipcRenderer\.send\("removeDetectable", id\)/);
+    assert.match(bridge, /getDetectables:\s*\(\)\s*=>\s*ipcRenderer\.sendSync\("getDetectables"\)/);
+    assert.match(bridge, /getBlacklist:\s*\(\)\s*=>\s*rpcBlacklistCache\.get\(\)/);
+    assert.match(bridge, /blacklistGame:\s*\(name:\s*string,\s*id:\s*number\)\s*=>\s*\{/);
+    assert.match(bridge, /unblacklistGame:\s*\(id:\s*number\)\s*=>\s*\{/);
+    // The declared contract keeps the synchronous rpc reads.
+    assert.match(types, /getProcessList:\s*\(\)\s*=>\s*ProcessInfo\[\]/);
+    assert.match(types, /refreshProcessList:\s*\(\)\s*=>\s*void/);
+    assert.match(types, /getDetectables:\s*\(\)\s*=>\s*GameList/);
+    assert.match(types, /getBlacklist:\s*\(\)\s*=>\s*DetectedGame\[\]/);
+    // The main handlers stay: sync reads, mutations returning the new list
+    // plus the rpcBlacklistUpdated broadcast, and the detectable controls.
+    assert.match(ipc, /ipcMain\.on\("getRpcBlacklist"/);
+    assert.match(ipc, /ipcMain\.on\("blacklistGame"/);
+    assert.match(ipc, /ipcMain\.on\("unblacklistGame"/);
+    assert.match(ipc, /passedWindow\.webContents\.send\("rpcBlacklistUpdated", blacklist\)/);
+    assert.match(ipc, /ipcMain\.on\("getProcessList"/);
+    assert.match(ipc, /ipcMain\.on\("refreshProcessList"/);
+    assert.match(ipc, /ipcMain\.on\("getDetectables"/);
+    assert.match(ipc, /ipcMain\.on\("addDetectable"/);
+    assert.match(ipc, /ipcMain\.on\("removeDetectable"/);
+});
+
+test("F11 keeps the arRPC worker protocol and scan-settings resolution", () => {
+    // The worker keeps its defaults, its activity/invite protocol, and its
+    // on-demand process-list answer. The native shell resolves the same
+    // settings host-side (never edits this worker).
+    const rpcWorker = readFileSync(new URL("../../src/rpc.ts", import.meta.url), "utf8");
+    assert.match(rpcWorker, /processScanning:\s*true/);
+    assert.match(rpcWorker, /windowsLegacyScanning:\s*false/);
+    assert.match(rpcWorker, /scanInterval:\s*5000/);
+    assert.match(rpcWorker, /RPC\.on\("activity"/);
+    assert.match(rpcWorker, /RPC\.on\("invite"/);
+    assert.match(rpcWorker, /refreshProcessList/);
+    assert.match(rpcWorker, /type:\s*"processList"/);
+    const rpcProcess = readFileSync(new URL("../../src/discord/rpcProcess.ts", import.meta.url), "utf8");
+    assert.match(rpcProcess, /MIN_SCAN_INTERVAL_MS\s*=\s*1000/);
+    assert.match(rpcProcess, /DEFAULT_SCAN_INTERVAL_MS\s*=\s*5000/);
+    assert.match(rpcProcess, /rawInterval\s*>=\s*MIN_SCAN_INTERVAL_MS/);
+    assert.match(rpcProcess, /export function startRPC/);
+    assert.match(rpcProcess, /export function stopRPC/);
+    assert.match(rpcProcess, /export function refreshProcessList/);
+    // The filesystem stores keep their exact semantics: tolerant blacklist
+    // reads with id dedupe, file-backed detectables.
+    const blacklist = readFileSync(new URL("../../src/common/blacklistGame.ts", import.meta.url), "utf8");
+    assert.match(blacklist, /blacklist\.json/);
+    assert.match(blacklist, /BLACKLIST_CACHE_TTL/);
+    assert.match(blacklist, /if \(list\.some\(\(e\) => e\.id === entryId\)\) return;/);
+    const detectables = readFileSync(new URL("../../src/common/detectables.ts", import.meta.url), "utf8");
+    assert.match(detectables, /detectables\.json/);
+    assert.match(detectables, /export function addDetectable/);
+    assert.match(detectables, /export function removeDetectable/);
+    // Shelter's hot presence path keeps the optional sync blacklist lookup
+    // (the native facade serves it from a seeded cache, so this line works
+    // unchanged under both shells).
+    const shelterRpc = readFileSync(new URL("../../src/shelter/rpc/index.ts", import.meta.url), "utf8");
+    assert.match(shelterRpc, /window\.remcord\.rpc\?\.getBlacklist\?\.\(\) \?\? \[\]/);
+});
+
+test("F11 keeps the Games page Electron-owned with a native EmptyState gate", () => {
+    // The page stays synchronous Electron calls behind isNativeWebView()
+    // guards; natively it renders the EmptyState. The native shell exposes
+    // async rpc capabilities for the F11b rewire (never edits this page).
+    const gamesPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/RegisteredGamesPage.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(gamesPage, /window\.remcord\.rpc\.refreshProcessList\(\)/);
+    assert.match(gamesPage, /window\.remcord\.rpc\.getDetectables\(\)/);
+    assert.match(gamesPage, /window\.remcord\.rpc\.getProcessList\(\)/);
+    assert.match(gamesPage, /window\.remcord\.rpc\.getBlacklist\(\)/);
+    assert.match(gamesPage, /isNativeWebView\(\)/);
+    assert.match(gamesPage, /games-empty/);
+    // The native host surface behind the future rewire exists with the
+    // Electron-named capabilities and no socket surface.
+    const arrpc = readFileSync(new URL("../src/arrpc.rs", import.meta.url), "utf8");
+    assert.match(arrpc, /pub fn load_blacklist/);
+    assert.match(arrpc, /pub fn add_blacklist_game/);
+    assert.match(arrpc, /pub fn remove_blacklist_game/);
+    assert.match(arrpc, /pub fn load_detectables/);
+    assert.match(arrpc, /pub fn add_detectable/);
+    assert.match(arrpc, /pub fn remove_detectable/);
+    assert.match(arrpc, /pub fn enumerate_processes/);
+    assert.match(arrpc, /pub fn resolve_rpc_settings/);
+    assert.doesNotMatch(arrpc, /TcpListener|TcpStream|tungstenite|tokio|std::net/);
+});
+
+test("F11 enables the four scanner keys through the native settings path", () => {
+    // The host allowlist, the facade allowlist, and the TS writable list
+    // agree on the four arRPC keys (restart-required model, like channel).
+    const settingsRs = readFileSync(new URL("../src/settings.rs", import.meta.url), "utf8");
+    for (const key of ["InviteWebsocket", "ProcessScanning", "WindowsLegacyScanning", "ScanInterval"]) {
+        assert.match(settingsRs, new RegExp(`\\b${key}\\b`), `${key} must be allowlisted host-side`);
+    }
+    assert.match(settingsRs, /ScanInterval\(u64\)/);
+    const compat = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+    for (const key of ["invite_websocket", "process_scanning", "windows_legacy_scanning", "scan_interval"]) {
+        assert.ok(compat.includes(`"${key}"`), `${key} must be allowlisted facade-side`);
+    }
+    const settingsTs = readFileSync(new URL("../../src/shelter/settings/settings.ts", import.meta.url), "utf8");
+    for (const key of ["inviteWebsocket", "processScanning", "windowsLegacyScanning", "scanInterval"]) {
+        assert.ok(settingsTs.includes(`"${key}"`), `${key} must be writable natively`);
+    }
+});

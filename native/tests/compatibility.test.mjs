@@ -6794,3 +6794,475 @@ test("F19 exposes no deeplink capability: discord:// navigation stays host-only"
         assert.equal(code.includes(fragment), false, `${fragment} must not ship in the facade`);
     }
 });
+const rpcDelivery = readFileSync(new URL("../web/arrpc/delivery.js", import.meta.url), "utf8");
+
+// ---------------------------------------------------------------------------
+// arRPC presence (F11 core).
+//
+// Electron-named rpc members over host-owned game state. The blacklist ALSO
+// serves a synchronous seeded-cache read (preload-cache parity) so Shelter's
+// hot `rpc.getBlacklist()` inside `listen()` keeps working; everything else
+// is async with typed outcomes. No socket, fetch, or invoke surface exists:
+// the Discord-protocol listener stays deferred (F11b).
+// ---------------------------------------------------------------------------
+
+const RPC_CAPS = [
+    "bridge.ping",
+    "rpc.get_process_list",
+    "rpc.refresh_process_list",
+    "rpc.get_detectables",
+    "rpc.add_detectable",
+    "rpc.remove_detectable",
+    "rpc.get_blacklist",
+    "rpc.blacklist_game",
+    "rpc.unblacklist_game",
+];
+
+function createRpcRuntime(capabilities = RPC_CAPS) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondRpc(window, request, type, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type, payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondRpcSeed(window, entries = []) {
+    const seed = window.messages.find((entry) => entry.command?.type === "rpc_get_blacklist");
+    assert.ok(seed, "the facade must seed the blacklist cache at document start");
+    assert.deepEqual(seed.command, { type: "rpc_get_blacklist", payload: {} });
+    respondRpc(window, seed, "rpc_blacklist", { entries });
+}
+
+const MODAL_GAME = {
+    name: "My Game",
+    executables: [{ name: "game.exe", is_launcher: false, os: "win32" }],
+    id: "123456",
+    aliases: ["mg"],
+    hook: false,
+    overlay: true,
+    overlay_compatibility_hook: false,
+    overlay_methods: null,
+    overlay_warn: false,
+    themes: ["dark"],
+};
+
+test("the facade exposes Electron-named rpc members and no socket surface", () => {
+    const { window } = createRpcRuntime();
+    for (const member of [
+        "getProcessList",
+        "refreshProcessList",
+        "getDetectables",
+        "addDetectable",
+        "removeDetectable",
+        "getBlacklist",
+        "blacklistGame",
+        "unblacklistGame",
+    ]) {
+        assert.equal(typeof window.remcord.rpc[member], "function", `${member} must exist`);
+    }
+    assert.equal(Object.isFrozen(window.remcord.rpc), true);
+    for (const capability of RPC_CAPS.slice(1)) {
+        assert.equal(window.remcord.native.supports(capability), true);
+    }
+    const code = stripComments(bootstrapTemplate);
+    for (const fragment of ["WebSocket", "fetch(", "XMLHttpRequest", "socket.io", "6463"]) {
+        assert.equal(code.includes(fragment), false, `${fragment} must not ship in the facade`);
+    }
+});
+
+test("rpc.get_process_list sends an exact empty payload and resolves tuples", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window);
+    const pending = window.remcord.rpc.getProcessList();
+    const message = window.messages.find((entry) => entry.command?.type === "rpc_get_process_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "rpc_get_process_list", payload: {} });
+    respondRpc(window, message, "rpc_process_list", {
+        processes: [
+            [4, "C:\\System", []],
+            [1234, "C:\\Games\\game.exe", []],
+        ],
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), [
+        [4, "C:\\System", []],
+        [1234, "C:\\Games\\game.exe", []],
+    ]);
+});
+
+test("rpc.get_process_list rejects malformed inventories", async () => {
+    for (const payload of [
+        { processes: "nope" },
+        { processes: [[4, "C:\\x.exe", [], "extra"]] },
+        { processes: [[4, 7, []]] },
+        { processes: [[4, "C:\\x.exe", "args"]] },
+        { processes: [], extra: true },
+    ]) {
+        const runtime = createRpcRuntime();
+        respondRpcSeed(runtime.window);
+        const pending = runtime.window.remcord.rpc.getProcessList();
+        const message = runtime.window.messages.find(
+            (entry) => entry.command?.type === "rpc_get_process_list",
+        );
+        respondRpc(runtime.window, message, "rpc_process_list", payload);
+        await assert.rejects(pending, /process list response schema is invalid/);
+    }
+});
+
+test("rpc.refresh_process_list resolves confirmation", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window);
+    const pending = window.remcord.rpc.refreshProcessList();
+    const message = window.messages.find((entry) => entry.command?.type === "rpc_refresh_process_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "rpc_refresh_process_list", payload: {} });
+    respondRpc(window, message, "rpc_process_refresh", { refreshed: true, count: 231 });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { refreshed: true, count: 231 });
+    const bad = createRpcRuntime();
+    respondRpcSeed(bad.window);
+    const pending2 = bad.window.remcord.rpc.refreshProcessList();
+    const message2 = bad.window.messages.find(
+        (entry) => entry.command?.type === "rpc_refresh_process_list",
+    );
+    respondRpc(bad.window, message2, "rpc_process_refresh", { refreshed: true, count: -1 });
+    await assert.rejects(pending2, /process refresh response schema is invalid/);
+});
+
+test("rpc.get_detectables resolves the validated inventory", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window);
+    const pending = window.remcord.rpc.getDetectables();
+    const message = window.messages.find((entry) => entry.command?.type === "rpc_get_detectables");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "rpc_get_detectables", payload: {} });
+    respondRpc(window, message, "rpc_detectables", { detectables: [MODAL_GAME] });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), [MODAL_GAME]);
+    const bad = createRpcRuntime();
+    respondRpcSeed(bad.window);
+    const pending2 = bad.window.remcord.rpc.getDetectables();
+    const message2 = bad.window.messages.find((entry) => entry.command?.type === "rpc_get_detectables");
+    respondRpc(bad.window, message2, "rpc_detectables", { detectables: [{ name: "no-id" }] });
+    await assert.rejects(pending2, /detectables response schema is invalid/);
+});
+
+test("rpc.add_detectable sends the closed game shape and resolves the outcome", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window);
+    const pending = window.remcord.rpc.addDetectable(MODAL_GAME);
+    const message = window.messages.find((entry) => entry.command?.type === "rpc_add_detectable");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "rpc_add_detectable", payload: { detectable: MODAL_GAME } });
+    respondRpc(window, message, "rpc_add_detectable", { ok: true, error: null });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { ok: true, error: null });
+});
+
+test("rpc.add_detectable refuses hostile shapes before dispatch", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window);
+    await assert.rejects(window.remcord.rpc.addDetectable("nope"), /object/);
+    await assert.rejects(window.remcord.rpc.addDetectable({ ...MODAL_GAME, id: "" }), /game id/);
+    await assert.rejects(window.remcord.rpc.addDetectable({ ...MODAL_GAME, id: "x".repeat(65) }), /game id/);
+    await assert.rejects(window.remcord.rpc.addDetectable({ ...MODAL_GAME, name: "" }), /game name/);
+    await assert.rejects(window.remcord.rpc.addDetectable({ ...MODAL_GAME, executables: [] }), /executables/);
+    await assert.rejects(
+        window.remcord.rpc.addDetectable({
+            ...MODAL_GAME,
+            executables: [{ name: "x.exe", is_launcher: false, os: "plan9" }],
+        }),
+        /os must be/,
+    );
+    await assert.rejects(
+        window.remcord.rpc.addDetectable({ ...MODAL_GAME, path: "C:\\evil" }),
+        /not allowlisted/,
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "rpc_add_detectable"),
+        false,
+    );
+});
+
+test("rpc.remove_detectable sends id-only requests with typed outcomes", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window);
+    const pending = window.remcord.rpc.removeDetectable("123456");
+    const message = window.messages.find((entry) => entry.command?.type === "rpc_remove_detectable");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "rpc_remove_detectable", payload: { id: "123456" } });
+    respondRpc(window, message, "rpc_remove_detectable", { ok: true });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { ok: true });
+    await assert.rejects(window.remcord.rpc.removeDetectable(""), /non-empty string/);
+    await assert.rejects(window.remcord.rpc.removeDetectable("x".repeat(65)), /64 bytes/);
+    await assert.rejects(window.remcord.rpc.removeDetectable(7), /non-empty string/);
+});
+
+test("rpc.getBlacklist is synchronous and seeds from the host", async () => {
+    const { window } = createRpcRuntime();
+    // Before the seed resolves the answer is honestly [] (never a throw).
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), []);
+    respondRpcSeed(window, [{ name: "G", id: 7 }]);
+    // The seed converges on a microtask; one macrotask guarantees it ran.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
+        { name: "G", id: 7 },
+    ]);
+    // Copies, not live references: mutating the answer cannot poison the cache.
+    const first = window.remcord.rpc.getBlacklist();
+    first.push({ name: "evil", id: 8 });
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
+        { name: "G", id: 7 },
+    ]);
+});
+
+test("the blacklist broadcast converges the cache without a round trip", () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window, [{ name: "G", id: 7 }]);
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-blacklist-updated", {
+            detail: { version: 1, entries: [{ name: "H", id: 9 }] },
+        }),
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
+        { name: "H", id: 9 },
+    ]);
+    // A misshapen broadcast never clobbers the cache.
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-blacklist-updated", {
+            detail: { version: 1, entries: "nope" },
+        }),
+    );
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-blacklist-updated", { detail: null }),
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
+        { name: "H", id: 9 },
+    ]);
+});
+
+test("rpc.blacklist_game/unblacklist_game send closed shapes and converge the cache", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window, []);
+    const pending = window.remcord.rpc.blacklistGame("Some Game", 123);
+    const message = window.messages.find((entry) => entry.command?.type === "rpc_blacklist_game");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "rpc_blacklist_game",
+        payload: { name: "Some Game", id: 123 },
+    });
+    respondRpc(window, message, "rpc_blacklist", { entries: [{ name: "Some Game", id: 123 }] });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), [{ name: "Some Game", id: 123 }]);
+    // The synchronous read converges from the mutation response.
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), [
+        { name: "Some Game", id: 123 },
+    ]);
+    const unpending = window.remcord.rpc.unblacklistGame(123);
+    const unmessage = window.messages.find((entry) => entry.command?.type === "rpc_unblacklist_game");
+    assert.deepEqual(unmessage.command, { type: "rpc_unblacklist_game", payload: { id: 123 } });
+    respondRpc(window, unmessage, "rpc_blacklist", { entries: [] });
+    assert.deepEqual(JSON.parse(JSON.stringify(await unpending)), []);
+    assert.deepEqual(JSON.parse(JSON.stringify(window.remcord.rpc.getBlacklist())), []);
+});
+
+test("rpc mutations refuse hostile shapes before dispatch", async () => {
+    const { window } = createRpcRuntime();
+    respondRpcSeed(window);
+    await assert.rejects(window.remcord.rpc.blacklistGame("", 1), /non-empty string/);
+    await assert.rejects(window.remcord.rpc.blacklistGame("x".repeat(257), 1), /256 bytes/);
+    await assert.rejects(window.remcord.rpc.blacklistGame("G", 1.5), /safe integer/);
+    await assert.rejects(window.remcord.rpc.blacklistGame("G", "7"), /safe integer/);
+    await assert.rejects(window.remcord.rpc.unblacklistGame(Number.MAX_SAFE_INTEGER + 1), /safe integer/);
+    assert.equal(
+        window.messages.some(
+            (message) =>
+                message.command?.type === "rpc_blacklist_game" ||
+                message.command?.type === "rpc_unblacklist_game",
+        ),
+        false,
+    );
+});
+
+test("rpc capabilities throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
+    const { window } = createRpcRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("rpc.get_blacklist"), false);
+    assert.throws(
+        () => window.remcord.rpc.getBlacklist(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.rpc.getProcessList(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.rpc.blacklistGame("G", 1),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => (message.command?.type ?? "").startsWith("rpc_")),
+        false,
+    );
+});
+
+test("settings.set carries the arRPC scanner keys end to end", async () => {
+    const { window } = createSettingsSetRuntime();
+    for (const [key, value] of [
+        ["invite_websocket", true],
+        ["process_scanning", false],
+        ["windows_legacy_scanning", true],
+        ["scan_interval", 10000],
+    ]) {
+        const pending = window.remcord.settings.set(key, value);
+        const message = window.messages.find(
+            (entry) => entry.command?.type === "settings_set" && entry.command.payload.key === key,
+        );
+        assert.ok(message, `${key} must dispatch`);
+        assert.deepEqual(message.command, { type: "settings_set", payload: { key, value } });
+        respondSettingsSet(window, message, key, value);
+        assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { key, value });
+    }
+});
+
+test("settings.set refuses out-of-range scan intervals without sending", async () => {
+    const { window } = createSettingsSetRuntime();
+    await assert.rejects(window.remcord.settings.set("scan_interval", 999), /1000\.\.600000/);
+    await assert.rejects(window.remcord.settings.set("scan_interval", 600001), /1000\.\.600000/);
+    await assert.rejects(window.remcord.settings.set("scan_interval", 1.5), /safe integer/);
+    await assert.rejects(window.remcord.settings.set("scan_interval", "5000"), /safe integer/);
+    await assert.rejects(window.remcord.settings.set("scan_interval", true), /safe integer/);
+    await assert.rejects(window.remcord.settings.set("process_scanning", 1), /boolean/);
+    // The dispatcher echoes the same range: a hostile host echo rejects.
+    const pending = window.remcord.settings.set("scan_interval", 5000);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_set");
+    respondSettingsSet(window, message, "scan_interval", 5);
+    await assert.rejects(pending, /settings set response schema is invalid/);
+});
+
+// ---------------------------------------------------------------------------
+// arRPC delivery bridge (F11 core, native/web/arrpc/delivery.js).
+//
+// Document-start presence forwarding: host activity events reach
+// `window.remcordRPC.listen` (installed by the Shelter RPC plugin) exactly
+// like Electron's executeJavaScript call; invite codes are recorded
+// (bounded) for the F11b UI. Origin-gated, idempotent, no bridge/fetch/
+// storage/eval surface.
+// ---------------------------------------------------------------------------
+
+function createDeliveryRuntime(origin = "https://discord.com", capabilities = RPC_CAPS) {
+    const runtime = createRuntime(origin, capabilities);
+    vm.runInContext(rpcDelivery, runtime.context);
+    return runtime;
+}
+
+test("the delivery bridge publishes status and forwards activity to the RPC plugin", () => {
+    const runtime = createDeliveryRuntime();
+    assert.deepEqual(JSON.parse(JSON.stringify(runtime.window.__remcordRpcDelivery)), {
+        installed: true,
+    });
+    const seen = [];
+    runtime.window.remcordRPC = {
+        listen(message) {
+            seen.push(message);
+        },
+    };
+    const activity = { application_id: 123, name: "G", assets: {} };
+    runtime.window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-activity", { detail: { version: 1, activity } }),
+    );
+    assert.equal(seen.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(seen[0])), { activity });
+});
+
+test("the delivery bridge drops pulses without a plugin and records invites", () => {
+    const runtime = createDeliveryRuntime();
+    // No remcordRPC installed: the pulse drops without throwing.
+    runtime.window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-activity", {
+            detail: { version: 1, activity: { application_id: 1 } },
+        }),
+    );
+    assert.equal(runtime.window.__remcordLastInvite, undefined);
+    // Malformed details never reach the plugin and never throw.
+    runtime.window.remcordRPC = {
+        listen() {
+            throw new Error("must not be called");
+        },
+    };
+    for (const detail of [null, {}, { version: 2, activity: {} }, { version: 1 }, { version: 1, activity: 7 }]) {
+        runtime.window.dispatchEvent(new FakeCustomEvent("remcord-native:rpc-activity", { detail }));
+    }
+    runtime.window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-invite", { detail: { version: 1, code: "abc-DEF_123" } }),
+    );
+    assert.equal(runtime.window.__remcordLastInvite.code, "abc-DEF_123");
+    assert.equal(typeof runtime.window.__remcordLastInvite.at, "number");
+    // Hostile invite codes are refused.
+    for (const code of ["", "has space", "semi;colon", "x".repeat(65)]) {
+        runtime.window.dispatchEvent(
+            new FakeCustomEvent("remcord-native:rpc-invite", { detail: { version: 1, code } }),
+        );
+    }
+    assert.equal(runtime.window.__remcordLastInvite.code, "abc-DEF_123");
+});
+
+test("the delivery bridge is origin-gated and idempotent", () => {
+    const offOrigin = createDeliveryRuntime("https://evil.example");
+    assert.equal(offOrigin.window.__remcordRpcDelivery, undefined);
+    const seen = [];
+    offOrigin.window.remcordRPC = {
+        listen(message) {
+            seen.push(message);
+        },
+    };
+    offOrigin.window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-activity", {
+            detail: { version: 1, activity: { application_id: 1 } },
+        }),
+    );
+    assert.equal(seen.length, 0);
+    // A second evaluation installs nothing twice: exactly one forward.
+    const runtime = createDeliveryRuntime();
+    vm.runInContext(rpcDelivery, runtime.context);
+    const forwarded = [];
+    runtime.window.remcordRPC = {
+        listen(message) {
+            forwarded.push(message);
+        },
+    };
+    runtime.window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:rpc-activity", {
+            detail: { version: 1, activity: { application_id: 2 } },
+        }),
+    );
+    assert.equal(forwarded.length, 1);
+});
+
+test("the delivery script carries no forbidden surfaces", () => {
+    const code = stripComments(rpcDelivery);
+    for (const forbidden of [
+        "postMessage",
+        "fetch(",
+        "eval(",
+        "Function(",
+        "localStorage",
+        "sessionStorage",
+        "indexedDB",
+        "XMLHttpRequest",
+        "WebSocket",
+        "innerHTML",
+        "require(",
+        "executeJavaScript",
+        "http://",
+    ]) {
+        assert.equal(code.includes(forbidden), false, `${forbidden} must not ship in delivery`);
+    }
+    assert.ok(code.includes("remcord-native:rpc-activity"));
+    assert.ok(code.includes("remcord-native:rpc-invite"));
+    assert.ok(code.includes("__remcordNativeRpcDelivery"));
+});

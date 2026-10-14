@@ -277,6 +277,13 @@
         "csp",
         "quick_css",
         "channel",
+        // arRPC scanner keys (F11): the three flags apply bools, the
+        // interval applies bounded milliseconds. All take effect on next
+        // launch (restart-required model, like channel/csp/mods).
+        "invite_websocket",
+        "process_scanning",
+        "windows_legacy_scanning",
+        "scan_interval",
     ];
     // Exact wire types the host echoes in `window_ack` responses. The echo
     // must be one of these; an acknowledgement for any other (or missing)
@@ -324,6 +331,20 @@
             if (typeof value !== "string" || !SETTINGS_VALID_CHANNELS.includes(value)) {
                 return Promise.reject(new TypeError("value must be one of the supported release channels"));
             }
+        } else if (
+            key === "invite_websocket" ||
+            key === "process_scanning" ||
+            key === "windows_legacy_scanning"
+        ) {
+            if (typeof value !== "boolean") {
+                return Promise.reject(new TypeError("value must be a boolean for this key"));
+            }
+        } else if (key === "scan_interval") {
+            if (!Number.isSafeInteger(value) || value < 1000 || value > 600000) {
+                return Promise.reject(
+                    new TypeError("value must be a safe integer of 1000..600000 milliseconds"),
+                );
+            }
         } else if (typeof value !== "boolean") {
             return Promise.reject(new TypeError("value must be a boolean for this key"));
         }
@@ -349,9 +370,22 @@
                         ? typeof payload.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
                             ? payload.value
                             : undefined
-                        : typeof payload.value === "boolean"
-                          ? payload.value
-                          : undefined;
+                        : key === "invite_websocket" ||
+                            key === "process_scanning" ||
+                            key === "windows_legacy_scanning" ||
+                            key === "scan_interval"
+                          ? key === "scan_interval"
+                            ? Number.isSafeInteger(payload.value) &&
+                              payload.value >= 1000 &&
+                              payload.value <= 600000
+                              ? payload.value
+                              : undefined
+                            : typeof payload.value === "boolean"
+                              ? payload.value
+                              : undefined
+                          : typeof payload.value === "boolean"
+                            ? payload.value
+                            : undefined;
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -559,6 +593,228 @@
         // Id only: the host removes the entry and re-registers. Unknown
         // ids resolve { ok: false } without writing.
         return request({ type: "keybinds_remove", payload: { id } }, timeoutMs);
+    }
+
+    // arRPC presence (F11 core): game-state reads plus blacklist/detectable
+    // mutations over the host-owned stores. Method names mirror the Electron
+    // bridge (`window.remcord.rpc.*`); outcomes are async with typed shapes.
+    // The blacklist ALSO serves a synchronous read (`getBlacklist`) from a
+    // document-start-seeded local cache — Electron's preload-cache parity —
+    // so Shelter's hot `rpc.getBlacklist()` call inside `listen()` keeps
+    // working without an async rewrite. Mutations and the host broadcast
+    // (`remcord-native:rpc-blacklist-updated`) converge the cache.
+    const MAX_RPC_PROCESSES = 2048;
+    const MAX_RPC_BLACKLIST_ENTRIES = 512;
+    const MAX_RPC_DETECTABLES = 256;
+    const MAX_RPC_NAME_BYTES = 256;
+    const MAX_RPC_DETECTABLE_ID_BYTES = 64;
+    const RPC_OS_VALUES = ["win32", "linux", "darwin"];
+
+    let rpcBlacklistCache = [];
+    let rpcBlacklistLoaded = false;
+
+    function sanitizeBlacklistEntries(entries) {
+        if (!Array.isArray(entries)) return null;
+        const clean = [];
+        for (const entry of entries) {
+            if (clean.length >= MAX_RPC_BLACKLIST_ENTRIES) break;
+            if (!entry || typeof entry !== "object") continue;
+            if (typeof entry.name !== "string" || entry.name.length === 0) continue;
+            if (!Number.isSafeInteger(entry.id)) continue;
+            clean.push({ name: entry.name.slice(0, MAX_RPC_NAME_BYTES), id: entry.id });
+        }
+        return clean;
+    }
+
+    function seedRpcBlacklistCache() {
+        try {
+            requireCapability("rpc.get_blacklist");
+        } catch {
+            return;
+        }
+        request({ type: "rpc_get_blacklist", payload: {} }, 5000).then(
+            // The central response dispatcher resolves the validated
+            // entries array (never the envelope).
+            (entries) => {
+                const clean = sanitizeBlacklistEntries(entries);
+                if (clean !== null) {
+                    rpcBlacklistCache = clean;
+                    rpcBlacklistLoaded = true;
+                }
+            },
+            () => {
+                rpcBlacklistCache = [];
+            },
+        );
+    }
+
+    // Synchronous cached read (Electron parity): the hot presence path never
+    // blocks on a bridge round trip. Before the seed resolves the answer is
+    // honestly [] ("nothing blacklisted yet"), never a throw.
+    function getRpcBlacklist() {
+        requireCapability("rpc.get_blacklist");
+        return rpcBlacklistCache.map((entry) => ({ name: entry.name, id: entry.id }));
+    }
+
+    function checkRpcTimeout(timeoutMs) {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return "timeout must be a positive finite number";
+        }
+        return null;
+    }
+
+    function checkRpcAppId(id) {
+        if (!Number.isSafeInteger(id)) {
+            return "id must be a safe integer app id";
+        }
+        return null;
+    }
+
+    function getProcessList(timeoutMs = 5000) {
+        requireCapability("rpc.get_process_list");
+        const badTimeout = checkRpcTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Parameter-free by protocol: the host owns enumeration (live
+        // ToolHelp snapshot, sorted by pid) and bounds. Entries resolve as
+        // arRPC ProcessInfo tuples [pid, exe_path, args] (args always []).
+        // The central response dispatcher validates the inventory shape.
+        return request({ type: "rpc_get_process_list", payload: {} }, timeoutMs);
+    }
+
+    function refreshProcessList(timeoutMs = 5000) {
+        requireCapability("rpc.refresh_process_list");
+        const badTimeout = checkRpcTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Same live scan as the read, resolving confirmation instead of
+        // Electron's fire-and-forget void. The central response dispatcher
+        // validates the `{refreshed, count}` shape.
+        return request({ type: "rpc_refresh_process_list", payload: {} }, timeoutMs);
+    }
+
+    function getDetectables(timeoutMs = 5000) {
+        requireCapability("rpc.get_detectables");
+        const badTimeout = checkRpcTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Parameter-free by protocol: the host owns the store and the
+        // validation. Entries carry validated game objects only; the
+        // central response dispatcher validates the inventory shape.
+        return request({ type: "rpc_get_detectables", payload: {} }, timeoutMs);
+    }
+
+    function checkDetectable(game) {
+        if (!game || typeof game !== "object" || Array.isArray(game)) {
+            return "game must be an object";
+        }
+        // Closed shape (host parity): the renderer cannot smuggle a future
+        // arRPC field, path, URL, or selector past validation.
+        const DETECTABLE_KEYS = [
+            "id",
+            "name",
+            "executables",
+            "aliases",
+            "hook",
+            "overlay",
+            "overlay_compatibility_hook",
+            "overlay_methods",
+            "overlay_warn",
+            "themes",
+        ];
+        for (const key of Object.keys(game)) {
+            if (!DETECTABLE_KEYS.includes(key)) return `game member ${key} is not allowlisted`;
+        }
+        if (
+            typeof game.id !== "string" ||
+            game.id.length === 0 ||
+            textEncoder.encode(game.id).length > MAX_RPC_DETECTABLE_ID_BYTES
+        ) {
+            return "game id must be a non-empty string of at most 64 bytes";
+        }
+        if (
+            typeof game.name !== "string" ||
+            game.name.length === 0 ||
+            textEncoder.encode(game.name).length > MAX_RPC_NAME_BYTES
+        ) {
+            return "game name must be a non-empty string of at most 256 bytes";
+        }
+        if (!Array.isArray(game.executables) || game.executables.length === 0 || game.executables.length > 64) {
+            return "game executables must be a non-empty array of at most 64 entries";
+        }
+        for (const exe of game.executables) {
+            if (!exe || typeof exe !== "object") return "game executable must be an object";
+            if (
+                typeof exe.name !== "string" ||
+                exe.name.length === 0 ||
+                textEncoder.encode(exe.name).length > MAX_RPC_NAME_BYTES
+            ) {
+                return "game executable name must be a non-empty string of at most 256 bytes";
+            }
+            if (typeof exe.is_launcher !== "boolean") return "game executable is_launcher must be a boolean";
+            if (typeof exe.os !== "string" || !RPC_OS_VALUES.includes(exe.os)) {
+                return "game executable os must be win32, linux, or darwin";
+            }
+        }
+        return null;
+    }
+
+    function addDetectable(game, timeoutMs = 5000) {
+        requireCapability("rpc.add_detectable");
+        const badGame = checkDetectable(game);
+        if (badGame) return Promise.reject(new TypeError(badGame));
+        const badTimeout = checkRpcTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // One game object only: the host validates the closed shape and
+        // appends the canonical rebuilt value. No path, URL, id override,
+        // or destination may be supplied. The central response dispatcher
+        // validates the typed `{ok, error}` outcome.
+        return request({ type: "rpc_add_detectable", payload: { detectable: game } }, timeoutMs);
+    }
+
+    function removeDetectable(id, timeoutMs = 5000) {
+        requireCapability("rpc.remove_detectable");
+        if (typeof id !== "string" || id.length === 0 || textEncoder.encode(id).length > 64) {
+            return Promise.reject(new TypeError("id must be a non-empty string of at most 64 bytes"));
+        }
+        const badTimeout = checkRpcTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Id only: the host filters its own store. Unknown ids resolve
+        // { ok: false } without writing. The central response dispatcher
+        // validates the `{ok}` outcome.
+        return request({ type: "rpc_remove_detectable", payload: { id } }, timeoutMs);
+    }
+
+    function blacklistGame(name, id, timeoutMs = 5000) {
+        requireCapability("rpc.blacklist_game");
+        if (typeof name !== "string" || name.length === 0 || textEncoder.encode(name).length > 256) {
+            return Promise.reject(new TypeError("name must be a non-empty string of at most 256 bytes"));
+        }
+        const badId = checkRpcAppId(id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        const badTimeout = checkRpcTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Name plus numeric app id only: the host normalizes, dedupes by id,
+        // persists, and returns the new list. The local cache converges from
+        // the dispatcher-validated response (like the synchronous Electron
+        // read) and from the host broadcast for every other document.
+        return request({ type: "rpc_blacklist_game", payload: { name, id } }, timeoutMs).then((entries) => {
+            rpcBlacklistCache = entries.map((entry) => ({ name: entry.name, id: entry.id }));
+            rpcBlacklistLoaded = true;
+            return getRpcBlacklist();
+        });
+    }
+
+    function unblacklistGame(id, timeoutMs = 5000) {
+        requireCapability("rpc.unblacklist_game");
+        const badId = checkRpcAppId(id);
+        if (badId) return Promise.reject(new TypeError(badId));
+        const badTimeout = checkRpcTimeout(timeoutMs);
+        if (badTimeout) return Promise.reject(new TypeError(badTimeout));
+        // Id only: the host filters its own store and returns the new list.
+        // The local cache converges like the save path above.
+        return request({ type: "rpc_unblacklist_game", payload: { id } }, timeoutMs).then((entries) => {
+            rpcBlacklistCache = entries.map((entry) => ({ name: entry.name, id: entry.id }));
+            rpcBlacklistLoaded = true;
+            return getRpcBlacklist();
+        });
     }
 
     // Read-only host facts for the debug/GPU copy actions: app version,
@@ -1745,7 +2001,11 @@
                       ? typeof payload?.value === "string" && SETTINGS_VALID_CSP_MODES.includes(payload.value)
                       : payload?.key === "channel"
                         ? typeof payload?.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
-                        : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
+                        : payload?.key === "scan_interval"
+                          ? Number.isSafeInteger(payload?.value) &&
+                            payload.value >= 1000 &&
+                            payload.value <= 600000
+                          : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -1840,6 +2100,99 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "rpc_process_list") {
+            const payload = response.payload.payload;
+            // Live-enumerated arRPC ProcessInfo tuples [pid, exe_path, args]
+            // (args always []). Pids and exe names only — no command lines,
+            // window titles, or usernames may ride along.
+            const processesValid =
+                Array.isArray(payload?.processes) &&
+                payload.processes.length <= MAX_RPC_PROCESSES &&
+                payload.processes.every(
+                    (entry) =>
+                        Array.isArray(entry) &&
+                        entry.length === 3 &&
+                        typeof entry[0] === "number" &&
+                        typeof entry[1] === "string" &&
+                        textEncoder.encode(entry[1]).length <= 1024 &&
+                        Array.isArray(entry[2]),
+                );
+            if (!payload || Object.keys(payload).length !== 1 || !processesValid) {
+                request.reject(new Error("Native process list response schema is invalid"));
+                return;
+            }
+            request.resolve(payload.processes);
+        } else if (response.ok === true && response.payload?.type === "rpc_process_refresh") {
+            const payload = response.payload.payload;
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                payload.refreshed !== true ||
+                !Number.isSafeInteger(payload.count) ||
+                payload.count < 0
+            ) {
+                request.reject(new Error("Native process refresh response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "rpc_detectables") {
+            const payload = response.payload.payload;
+            // Validated custom detectable game objects in stored order.
+            const detectablesValid =
+                Array.isArray(payload?.detectables) &&
+                payload.detectables.length <= MAX_RPC_DETECTABLES &&
+                payload.detectables.every(
+                    (entry) => entry && typeof entry === "object" && typeof entry.id === "string",
+                );
+            if (!payload || Object.keys(payload).length !== 1 || !detectablesValid) {
+                request.reject(new Error("Native detectables response schema is invalid"));
+                return;
+            }
+            request.resolve(payload.detectables);
+        } else if (response.ok === true && response.payload?.type === "rpc_add_detectable") {
+            const payload = response.payload.payload;
+            // Typed save outcome: success carries no echo (the inventory
+            // re-read owns display state), failure carries the code.
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok
+                    ? payload.error !== undefined && payload.error !== null
+                    : typeof payload.error !== "string")
+            ) {
+                request.reject(new Error("Native detectable save response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "rpc_remove_detectable") {
+            const payload = response.payload.payload;
+            if (!payload || Object.keys(payload).length !== 1 || typeof payload.ok !== "boolean") {
+                request.reject(new Error("Native detectable removal response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "rpc_blacklist") {
+            const payload = response.payload.payload;
+            // The full validated list (Electron's handlers return it for the
+            // cache update + broadcast). Strict shape: a misshapen list
+            // rejects instead of clobbering the seeded cache.
+            const blacklistValid =
+                Array.isArray(payload?.entries) &&
+                payload.entries.length <= MAX_RPC_BLACKLIST_ENTRIES &&
+                payload.entries.every(
+                    (entry) =>
+                        entry &&
+                        typeof entry === "object" &&
+                        typeof entry.name === "string" &&
+                        entry.name.length > 0 &&
+                        textEncoder.encode(entry.name).length <= MAX_RPC_NAME_BYTES &&
+                        Number.isSafeInteger(entry.id),
+                );
+            if (!payload || Object.keys(payload).length !== 1 || !blacklistValid) {
+                request.reject(new Error("Native blacklist response schema is invalid"));
+                return;
+            }
+            request.resolve(payload.entries);
         } else if (response.ok === true && response.payload?.type === "localization_string") {
             const payload = response.payload.payload;
             if (
@@ -2617,6 +2970,25 @@
         }
     });
 
+    // arRPC blacklist broadcast convergence (Electron's
+    // `rpcBlacklistUpdated` parity): every successful host mutation emits
+    // this event, so documents that did not perform the mutation converge
+    // without re-reading. Entries are re-validated before replacing the
+    // cache; a misshapen broadcast never clobbers it.
+    window.addEventListener("remcord-native:rpc-blacklist-updated", (event) => {
+        const detail = event?.detail;
+        if (!detail || typeof detail !== "object") return;
+        if (detail.version !== protocolVersion) return;
+        const clean = sanitizeBlacklistEntries(detail.entries);
+        if (clean === null) return;
+        rpcBlacklistCache = clean;
+        rpcBlacklistLoaded = true;
+    });
+    // Seed the synchronous blacklist cache from the host (Electron's
+    // preload-cache parity). Fire-and-forget: the hot path serves the cache
+    // (honestly [] until the seed resolves) and never blocks.
+    seedRpcBlacklistCache();
+
     const native = Object.freeze({
         ping,
         getModBundle,
@@ -2886,6 +3258,20 @@
     // Client-mod cache wipe only: an exact empty payload in, the fixed
     // allowlist outcome out. User-owned bundles can never be selected.
     const mod = Object.freeze({ clearCache: clearModCache });
+    // arRPC game state only: live process inventory, custom detectables,
+    // and the blacklist over host-owned stores. `getBlacklist` is the
+    // synchronous seeded-cache read (Electron parity for Shelter's hot
+    // presence path); every other member is async with typed outcomes.
+    const rpc = Object.freeze({
+        getProcessList,
+        refreshProcessList,
+        getDetectables,
+        addDetectable,
+        removeDetectable,
+        getBlacklist: getRpcBlacklist,
+        blacklistGame,
+        unblacklistGame,
+    });
     // Runtime plugin management only: bounded inventory in, id+boolean
     // flips and id-only reloads with Electron-parity { ok } outcomes out.
     // Folder opening reuses the typed folders.open capability on the fixed
@@ -2934,6 +3320,7 @@
             diagnostics,
             graphics,
             mod,
+            rpc,
             settingsBoot,
             translations: settingsBootSnapshot.i18n,
             restart: bootRestart,

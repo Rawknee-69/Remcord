@@ -1,4 +1,5 @@
 mod app;
+mod arrpc;
 mod backup;
 mod browser_recovery;
 mod bundles;
@@ -100,6 +101,8 @@ use protocol::{
     PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
     PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
     PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
+    RpcBlacklistResponse, RpcDetectableAddResponse, RpcDetectableRemoveResponse,
+    RpcDetectablesResponse, RpcProcessListResponse, RpcProcessRefreshResponse,
     SettingsConfigResponse, SettingsImportedResponse, SettingsMutationResponse,
     SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
     ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
@@ -625,6 +628,14 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "keybinds.add",
         "keybinds.toggle",
         "keybinds.remove",
+        "rpc.get_process_list",
+        "rpc.refresh_process_list",
+        "rpc.get_detectables",
+        "rpc.add_detectable",
+        "rpc.remove_detectable",
+        "rpc.get_blacklist",
+        "rpc.blacklist_game",
+        "rpc.unblacklist_game",
         "gallery.list",
         "gallery.add_url",
         "gallery.add_link",
@@ -675,6 +686,10 @@ const PLUGIN_LOADER_SCRIPT: &str = include_str!("../web/plugins/loader.js");
 /// menu-accelerator path for focused-app-only keybinds (F8 core). Always
 /// injected (see [`initialization_script`]).
 const KEYBIND_MATCHER_SCRIPT: &str = include_str!("../web/keybinds/matcher.js");
+/// arRPC presence delivery bridge: forwards host-delivered activity pulses
+/// to `window.remcordRPC.listen` (F11 core). Always injected (see
+/// [`initialization_script`]).
+const RPC_DELIVERY_SCRIPT: &str = include_str!("../web/arrpc/delivery.js");
 
 /// The renderer adapter for one registered mod, or `None` for a descriptor
 /// with no adapter file (a registry entry must always carry one).
@@ -3370,10 +3385,15 @@ fn initialization_script(
     // matching Electron's preload order (mods, then plugins). The keybind
     // matcher (F8) runs last: it only observes keydown and reports matches,
     // so it can never perturb mod bootstrap, plugin loading, or settings.
+    // The arRPC delivery bridge (F11) runs after the matcher: it only
+    // observes host presence events and forwards them, so it can never
+    // perturb anything before it.
     script.push('\n');
     script.push_str(PLUGIN_LOADER_SCRIPT);
     script.push('\n');
     script.push_str(KEYBIND_MATCHER_SCRIPT);
+    script.push('\n');
+    script.push_str(RPC_DELIVERY_SCRIPT);
     Ok(script)
 }
 
@@ -4648,6 +4668,60 @@ fn respond_keybinds_err(
     println!("[Keybinds][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
 }
 
+/// Sends one arRPC success response and completes request correlation.
+/// Shared by every `rpc.*` dispatch arm so the eight operations cannot
+/// drift in envelope shape, correlation, or metrics logging.
+fn respond_rpc_ok(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    payload: BridgeResponsePayload,
+    metric: &str,
+    latency_ms: f64,
+) {
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: true,
+        payload: Some(payload),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Rpc][Metrics] {metric} request_latency_ms={latency_ms:.3}");
+}
+
+/// Sends one arRPC typed failure: path-free code plus message, same
+/// envelope discipline as every other capability.
+fn respond_rpc_err(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    code: &'static str,
+    message: String,
+    latency_ms: f64,
+) {
+    eprintln!("[Rpc][{code}] {message}");
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: false,
+        payload: None,
+        error: Some(BridgeError { code, message }),
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Rpc][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
+}
+
 /// Re-validates one keybind firing and executes its stored action.
 /// `from_hotkey` selects the expected scope: worker firings must name
 /// global entries, matcher reports must name non-global ones — a cross
@@ -4765,6 +4839,27 @@ fn send_window_state_event(webview: &WebView, focused: bool, maximized: bool) {
     }
 }
 
+/// Delivers one typed `rpc-blacklist-updated` host event to the renderer
+/// (Electron's `rpcBlacklistUpdated` broadcast parity). The facade replaces
+/// its document-start-seeded cache from this event, so every document
+/// converges without re-reading. Callers invoke this after every successful
+/// blacklist mutation.
+fn send_rpc_blacklist_event(webview: &WebView, entries: &[arrpc::RpcBlacklistEntry]) {
+    match arrpc::rpc_blacklist_event_json(entries) {
+        Ok(detail) => match serde_json::to_string(&detail) {
+            Ok(serialized) => {
+                let script = format!(
+                    "window.dispatchEvent(new CustomEvent('remcord-native:rpc-blacklist-updated', {{ detail: JSON.parse({serialized}) }}));"
+                );
+                if let Err(error) = webview.evaluate_script(&script) {
+                    eprintln!("[Rpc] Could not deliver blacklist update to renderer: {error}");
+                }
+            }
+            Err(error) => eprintln!("[Rpc] Could not serialize blacklist update: {error}"),
+        },
+        Err(error) => eprintln!("[Rpc] Could not build blacklist update: {error}"),
+    }
+}
 /// Re-queries the native maximized flag and emits a `window_state` event only
 /// when it differs from the tracked state. Used after maximize/unmaximize
 /// commands and `Resized` events. Focused state is never queried here: it
@@ -6072,6 +6167,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Hand-edited or forward-compat values fail safe to stable.
     let discord_url = channel::resolve_channel_url(&discord_channel);
     println!("[Channel] channel={discord_channel} url={discord_url}");
+    // arRPC scanner settings, resolved once per process from the same
+    // authoritative snapshot (restart-required model, `rpcProcess.ts`
+    // parity). The Discord-protocol listener itself stays deferred (F11b);
+    // this logs the resolved cadence the future source will scan with.
+    let rpc_settings = load_settings(&profile_path)
+        .map(|loaded| arrpc::resolve_rpc_settings(&loaded.snapshot))
+        .unwrap_or(arrpc::RpcServerSettings {
+            process_scanning: true,
+            windows_legacy_scanning: false,
+            scan_interval_ms: arrpc::DEFAULT_SCAN_INTERVAL_MS,
+        });
+    // `processScanning: false` disables enumeration-driven detection at the
+    // future source; the inventory capabilities below stay live regardless
+    // (explicit reads, never background scans). A corrupt/hand-edited
+    // sub-floor interval already fell back to the default inside the
+    // resolver; the log states what runs.
+    println!(
+        "[Rpc] process_scanning={} windows_legacy_scanning={} scan_interval_ms={}",
+        rpc_settings.process_scanning,
+        rpc_settings.windows_legacy_scanning,
+        rpc_settings.scan_interval_ms
+    );
     let mod_override = std::env::var(MOD_ADAPTER_OVERRIDE_ENV).ok();
     let active_mods = resolve_active_mods(&settings_mods, mod_override.as_deref());
     for descriptor in KNOWN_MODS {
@@ -9388,6 +9505,238 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::RpcGetProcessList(_) => {
+                            // Live enumeration per call (no stale
+                            // worker-side cache): the inventory is the
+                            // current ToolHelp snapshot, sorted by pid.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match arrpc::enumerate_processes() {
+                                Ok(entries) => respond_rpc_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::RpcProcessList(RpcProcessListResponse {
+                                        processes: arrpc::process_tuples(&entries),
+                                    }),
+                                    "op=process_list",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_rpc_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::RpcRefreshProcessList(_) => {
+                            // Same live scan, resolving confirmation
+                            // instead of Electron's fire-and-forget void.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match arrpc::enumerate_processes() {
+                                Ok(entries) => respond_rpc_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::RpcProcessRefresh(
+                                        RpcProcessRefreshResponse {
+                                            refreshed: true,
+                                            count: entries.len(),
+                                        },
+                                    ),
+                                    "op=refresh_process_list",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_rpc_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::RpcGetDetectables(_) => {
+                            // Host-owned custom detectables inventory.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match arrpc::load_detectables(&profile_path) {
+                                Ok(detectables) => respond_rpc_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::RpcDetectables(RpcDetectablesResponse {
+                                        detectables,
+                                    }),
+                                    "op=detectables",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_rpc_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::RpcAddDetectable(payload) => {
+                            // Validated save (Electron pushes blindly);
+                            // failures resolve typed so the UI can toast.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match arrpc::add_detectable(&profile_path, &payload.detectable) {
+                                Ok(_) => respond_rpc_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::RpcDetectableAdd(
+                                        RpcDetectableAddResponse { ok: true, error: None },
+                                    ),
+                                    "op=add_detectable",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_rpc_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::RpcDetectableAdd(
+                                        RpcDetectableAddResponse {
+                                            ok: false,
+                                            error: Some(failure.code.to_owned()),
+                                        },
+                                    ),
+                                    "op=add_detectable",
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::RpcRemoveDetectable(payload) => {
+                            // Filter by string id; unknown ids resolve
+                            // `{ok: false}` without a second read.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match arrpc::remove_detectable(&profile_path, &payload.id) {
+                                Ok(removed) => respond_rpc_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::RpcDetectableRemove(
+                                        RpcDetectableRemoveResponse { ok: removed },
+                                    ),
+                                    "op=remove_detectable",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_rpc_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::RpcGetBlacklist(_) => {
+                            // Tolerant read (missing/corrupt → `[]`):
+                            // infallible by contract, like Electron.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            respond_rpc_ok(
+                                &webview,
+                                &mut request_tracker,
+                                &mut response_count,
+                                request_id,
+                                BridgeResponsePayload::RpcBlacklist(RpcBlacklistResponse {
+                                    entries: arrpc::load_blacklist(&profile_path),
+                                }),
+                                "op=blacklist",
+                                latency_ms,
+                            );
+                        }
+                        BridgeCommand::RpcBlacklistGame(payload) => {
+                            // Normalize + dedupe by id, persist, return
+                            // the new list, and broadcast it so every
+                            // document converges (Electron parity).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match arrpc::add_blacklist_game(
+                                &profile_path,
+                                &payload.name,
+                                payload.id,
+                            ) {
+                                Ok(entries) => {
+                                    send_rpc_blacklist_event(&webview, &entries);
+                                    respond_rpc_ok(
+                                        &webview,
+                                        &mut request_tracker,
+                                        &mut response_count,
+                                        request_id,
+                                        BridgeResponsePayload::RpcBlacklist(RpcBlacklistResponse {
+                                            entries,
+                                        }),
+                                        "op=blacklist_game",
+                                        latency_ms,
+                                    );
+                                }
+                                Err(failure) => respond_rpc_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::RpcUnblacklistGame(payload) => {
+                            // Filter by id, persist, return the new list,
+                            // and broadcast it (Electron parity).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match arrpc::remove_blacklist_game(&profile_path, payload.id) {
+                                Ok(entries) => {
+                                    send_rpc_blacklist_event(&webview, &entries);
+                                    respond_rpc_ok(
+                                        &webview,
+                                        &mut request_tracker,
+                                        &mut response_count,
+                                        request_id,
+                                        BridgeResponsePayload::RpcBlacklist(RpcBlacklistResponse {
+                                            entries,
+                                        }),
+                                        "op=unblacklist_game",
+                                        latency_ms,
+                                    );
+                                }
+                                Err(failure) => respond_rpc_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
                         BridgeCommand::ThemeInstallCode(payload) => {
                             // Install from CSS text only: the id is derived
                             // from `@name`, the filename is fixed, and the
@@ -12265,6 +12614,37 @@ mod tests {
         // Voice actions stay flux dispatches (harmless without a call);
         // settings navigation uses the fixed path.
         assert!(crate::keybinds::KEYBIND_OPEN_SETTINGS_PATH.starts_with('/'));
+    }
+
+    #[test]
+    fn f11_arrpc_presence_serves_state_without_a_socket_server() {
+        // The eight game-state capabilities exist in the boot snapshot; the
+        // delivery bridge ships in the document-start script; the
+        // Discord-protocol WebSocket listener stays deferred (F11b) — no
+        // socket, fetch, or invoke capability is granted alongside.
+        for capability in [
+            "rpc.get_process_list",
+            "rpc.refresh_process_list",
+            "rpc.get_detectables",
+            "rpc.add_detectable",
+            "rpc.remove_detectable",
+            "rpc.get_blacklist",
+            "rpc.blacklist_game",
+            "rpc.unblacklist_game",
+        ] {
+            assert!(super::BOOT_SNAPSHOT.capabilities.contains(&capability));
+        }
+        assert!(super::RPC_DELIVERY_SCRIPT.contains("remcord-native:rpc-activity"));
+        assert!(super::RPC_DELIVERY_SCRIPT.contains("remcordRPC"));
+        assert!(super::RPC_DELIVERY_SCRIPT.contains("__remcordNativeRpcDelivery"));
+        // Scan settings resolve from the snapshot with the worker floor.
+        let resolved =
+            crate::arrpc::resolve_rpc_settings(&crate::settings::SettingsSnapshot::default());
+        assert!(resolved.process_scanning);
+        assert_eq!(resolved.scan_interval_ms, 5_000);
+        for capability in ["socket", "websocket", "fetch", "invoke", "filesystem"] {
+            assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&capability));
+        }
     }
 
     #[test]
