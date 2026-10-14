@@ -660,6 +660,33 @@ pub fn apply_settings_set(
     })
 }
 
+/// Merge validated Electron-import fields into the native document.
+///
+/// Narrow twin of [`apply_settings_set`] for the F7 copy-only import: the
+/// caller (`settings_import.rs`) has already validated every value against
+/// the exact rules the native consumers enforce, so this function only
+/// owns the merge mechanics — authoritative load first (missing file
+/// starts from defaults, corrupt file is an error that is never
+/// overwritten), insert of exactly the supplied fields, unknown future
+/// keys preserved byte-for-value, atomic temp+rename persistence. Field
+/// names are the exact `settings.json` document keys; an empty field list
+/// still persists (normalizing a defaults-shaped file) and reports its
+/// byte length.
+pub(crate) fn merge_imported_fields(
+    profile_dir: &Path,
+    fields: &[(&str, serde_json::Value)],
+) -> Result<usize, String> {
+    let load = load_settings(profile_dir)?;
+    let mut document = load_document_for_write(profile_dir, load)?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| "settings file is invalid: top-level JSON must be an object".to_owned())?;
+    for (key, value) in fields {
+        object.insert(key.to_string(), value.clone());
+    }
+    persist_settings_document(profile_dir, &document)
+}
+
 /// Result of one plugin enablement mutation. `plugin_id` echoes the
 /// validated id and `enabled` the persisted state (which equals the request,
 /// including the idempotent same-state no-op). `source` is always

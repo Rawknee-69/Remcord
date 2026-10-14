@@ -480,7 +480,6 @@ Deliberate Electron differences (hardening, not regressions): closed enum instea
 The five settings-UI actions dispatch to the native capabilities when the WebView2 shell grants them, keeping the Electron `send` path otherwise. Shared helpers in `src/shelter/settings/settings.ts` (`revealFolderNative("storage" | "themes" | "plugins")`, `openThemeFolderNative(id)`) reuse the existing `isNativeWebView()` check plus a namespace function-presence gate — no second detection mechanism — and return `true` when native handled the action, so each call site executes exactly one path. The theme id passes through verbatim; validation stays host-owned. Rejections are swallowed after a path-free `console.warn` (fire-and-forget parity with Electron's silent `send`, but never an unhandled rejection and never a path in the UI). Native-only surface stays in local minimal interfaces per the `setBlockPowerSavingInVoiceChat`/`getVersion` precedent, so `remcordWindow.d.ts` is unchanged. Wired callers: `SettingsPage.tsx` (storage), `ThemesPage.tsx` (themes), `PluginsPage.tsx` toolbar + empty-state (plugins), `ThemesCard.tsx` per-theme folder (id). The gallery `Open` button calls `window.remcord.gallery.openRoot()` directly (the gallery namespace owns it; the shared helper needs no gallery variant). The main IPC handlers, bridge mappings, and declared `void` contracts are untouched.
 
 ## Gallery disk cache (F5 core)
-
 F5 core migrates the Gallery persistence surface — save/browse/search/categories/disk usage/inline preview plus one folder reveal — to thirteen typed capabilities under `window.remcord.gallery` with Electron-identical method names and result shapes, so `GalleryPage.tsx` calls the same methods natively. Only the three dialog-backed actions stay Electron-only until the F5b dialog slice: `importDialog` (host multi-file picker), `exportItems` (host directory picker + copy), and `pickRoot` (host directory picker + migration). Their facade methods exist for signature parity but their capabilities are absent, so they throw `UNSUPPORTED_CAPABILITY` honestly and the page gates those buttons with disabled states instead of dead calls.
 
 ### Electron chain (unchanged)
@@ -511,6 +510,37 @@ renderer await window.remcord.gallery.addUrl(url, meta?)
 `gallery.add_link` is the same minus the download (metadata-only). `gallery.remove` / `gallery.bulk_remove` take ids only (2000 cap, invalid skipped) and delete cached files only inside the gallery root. `gallery.update` takes id + title/categories only (unknown members dropped facade-side, mirroring Electron's patch read; `deny_unknown_fields` would reject them host-side). `gallery.categories` resolves the bare array (Electron parity). `gallery.category_add` / `category_rename` resolve `{ok} | {ok, error}`; `category_remove` always `{ok: true}` once persisted (Electron parity). `gallery.usage` measures bytes/files/items from the filesystem. `gallery.file` resolves `{ok, base64, mime, fileName} | {ok, error}` with the 48 MiB transport cap (larger files play via `sourceUrl`). `gallery.root` reports the fixed label `"gallery"` (never an absolute path). `gallery.openRoot` reveals the fixed gallery root through the shared `folders.open` capability.
 
 Deliberate Electron differences (hardening, not regressions): fixed root (Electron's custom `galleryRoot` + migration deferred to F5b); bounded items (20,000), categories (512), index (64 MiB), media (48 MiB per file, the preview transport cap Electron already enforces), downloads (60 s, 5 redirects); corrupt indexes fail closed instead of resetting to empty (a silent library wipe is worse than a typed error); symlinks/junctions/non-regular files never followed or served; index writes are atomic (temp + rename); non-http(s) URLs refused before any network or filesystem work; renderer input is data only (ids, URLs, names, meta, patches) — never a path. No new dependencies: base64 uses a tested in-module encoder.
+
+## Settings import from the Electron profile (F7)
+
+F7 migrates nothing automatically — there is no startup scan, no timer, no first-run prompt. One explicit button in the Settings backup panel (`ElectronImportButton`, native-only) drives one parameter-free typed capability `settings.import_electron` (wire `settings_import_electron`, facade `window.remcord.settings.importElectron()`), and the host copies validated preferences from the fixed Electron source `%APPDATA%\Remcord\storage\settings.json` into the native profile. The Electron file is opened read-only and never written, moved, or deleted; only the native `<profile>/storage/settings.json` is written, through the same authoritative-load + atomic-persist path as every other settings mutation.
+
+### Electron chain (unchanged)
+
+`src/common/config.ts::getConfigLocation` builds `<userData>/storage/settings.json` (roaming `%APPDATA%\Remcord` on Windows); the document is a flat JSON object with the exact camelCase keys of `src/@types/settings.d.ts` and the defaults in `config.ts`. Electron itself has no cross-profile import — asserted. The native release profile (`%LOCALAPPDATA%\Remcord`) is a different root by construction (`profile.rs`), so the two files can never alias.
+
+### Native chain
+
+```text
+renderer clicks Import (confirm modal) → importElectronSettingsNative()
+  → requireCapability("settings.import_electron") or sync UNSUPPORTED_CAPABILITY throw
+  → parameter-free {"type":"settings_import_electron","payload":{}} request
+     (any source path/URL/key list/value member host-rejected)
+  → host: fixed %APPDATA%\Remcord\storage\settings.json (bounded 256 KiB
+     read-only read; links/non-regular files refused; missing → typed
+     NOT_FOUND; corrupt → typed INVALID — never a reset of anything)
+  → host: per-key validation against the exact native-consumer rules,
+     valid keys merge into the native document (unknown future keys
+     preserved), atomic persist
+  → validated settings_imported { applied, skipped } (key names only)
+  → facade resolves { applied, skipped, restartRequired } (restart flag
+     when mods/channel/csp applied); UI toasts counts + raises the restart
+     banner when flagged; quickCss flips re-push the managed style live
+```
+
+Importable keys (23): `mods`, `csp`, `channel` (exact unions, restart-requiring), `supportBannerDismissed`, `showExperimentalPluginMenu`, `extendedPluginAbilities`, `quickCss` (bools), eleven pure-preference bools (`spellcheck`, `smoothScroll`, `autoScroll`, `mobileMode`, `skipSplash`, `sleepInBackground`, `popoutPiP`, `bounceOnPing`, `useSystemCssEditor`, `minimizeToTray`, `disableAutogain`), plus validated `spellcheckLanguage` (≤16 tags), `scanInterval` (1000–600000 ms), `overlayButtonColor` (hex), `noBundleUpdates` (ValidMods), `pluginStates` (≤256 id→bool entries).
+
+Deliberately excluded: window chrome (`windowStyle`, `transparency`, `windowMaterial` — native chrome differs), `tray` (F13 missing), `performanceMode` (engine differs), lifecycle (`hardwareAcceleration`, `startMinimized`, `multiInstance`, `doneSetup`, `automaticUpdates`), network routing (`proxyMode`, `proxyRules`, `proxyBypassRules`, `proxyPacScript` — machine-specific), process args (`additionalArguments` — unsafe), paths (`customIcon`, `galleryRoot`), code URLs (`customJsBundle`, `customCssBundle`), `keybinds` (F8, carries JS), `audio` (voice surfaces), `modCache` (re-fetched), platform keys (`vaapi`, `useMacSystemPicker`, `sdpH264BaselineRewrite`), arRPC keys (`inviteWebsocket`, `processScanning`, `windowsLegacyScanning`, `scanInterval` excepted as bounded persistence only — F11 deferred), and ephemeral keys (`"0"`, `ignoreProtocolWarning`). Absent keys keep native values; present-but-invalid keys are skipped and named, never guessed.
 
 ## Theme install capability (Phase D Step 3a)
 

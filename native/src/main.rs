@@ -35,6 +35,7 @@ mod screenshare_picker;
 mod screenshare_quality;
 mod settings;
 mod settings_boot;
+mod settings_import;
 mod settings_plugin;
 mod shelter_injector;
 mod theme_import;
@@ -93,9 +94,9 @@ use protocol::{
     PluginStorageWriteResponse, PluginsListResponse, PluginsReloadResponse,
     PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse, PluginsSetEnabledResponse,
     QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker, SettingsConfigResponse,
-    SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse,
-    ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse,
-    WindowAckResponse, PROTOCOL_VERSION,
+    SettingsImportedResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
+    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
+    ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
@@ -596,6 +597,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "settings.get_config",
         "settings.set_block_power_saving_in_voice_chat",
         "settings.set",
+        "settings.import_electron",
         "localization.get_lang",
         "app.get_version",
         "plugin_storage.read",
@@ -7387,6 +7389,85 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::SettingsImportElectron(_) => {
+                            // Copy-only import from the Electron profile:
+                            // the source path is fixed host-side
+                            // (%APPDATA%\Remcord\storage\settings.json),
+                            // the Electron file is read-only and never
+                            // written, and only validated allowlisted keys
+                            // merge into the native document. Runs once per
+                            // explicit request — never at startup, never on
+                            // a timer. A quickCss flip re-pushes the managed
+                            // style live, like the settings.set path.
+                            let request_id = request.request_id;
+                            let outcome = std::env::var("APPDATA")
+                                .map_err(|_| {
+                                    settings_import::SettingsImportFailure {
+                                        code: "ELECTRON_SETTINGS_NOT_FOUND",
+                                        message: "the Electron app profile is unavailable".to_owned(),
+                                    }
+                                })
+                                .and_then(|appdata| {
+                                    settings_import::electron_settings_path_from_appdata(&appdata)
+                                })
+                                .and_then(|source| settings_import::read_electron_settings(&source))
+                                .and_then(|document| {
+                                    settings_import::import_electron_settings(&profile_path, &document)
+                                });
+                            match outcome {
+                                Ok(summary) => {
+                                    if summary.applied.iter().any(|key| key == "quickCss") {
+                                        repush_quick_css(
+                                            &webview,
+                                            &profile_path,
+                                            &mut last_quickcss_injected,
+                                            &mut last_quickcss_css,
+                                        );
+                                    }
+                                    let applied = summary.applied.len();
+                                    let skipped = summary.skipped.len();
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::SettingsImported(
+                                            SettingsImportedResponse {
+                                                applied: summary.applied,
+                                                skipped: summary.skipped,
+                                            },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Settings][Import] applied={applied} skipped={skipped} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Settings][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::LocalizationGetLang(payload) => {
                             // The key shape was validated by the protocol
                             // parser; re-check defensively before lookup.
@@ -11215,6 +11296,47 @@ mod tests {
             crate::mod_settings::QUICKCSS_HANDOFF_MODES,
             ["vencord", "equicord", "remcord"]
         );
+    }
+
+    #[test]
+    fn f7_settings_import_is_copy_only_with_a_documented_allowlist() {
+        // Copy-only, never auto-migrate: the capability exists in the boot
+        // snapshot, the source path is fixed host-side, every allowlisted
+        // key carries a rationale, and restart-requiring keys are named so
+        // the UI can raise the restart banner.
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"settings.import_electron"));
+        assert!(!crate::settings_import::IMPORTABLE_KEYS.is_empty());
+        for entry in crate::settings_import::IMPORTABLE_KEYS {
+            assert!(!entry.key.is_empty());
+            assert!(
+                !entry.rationale.is_empty(),
+                "{} must document why it is safe",
+                entry.key
+            );
+        }
+        assert_eq!(
+            crate::settings_import::RESTART_REQUIRED_KEYS,
+            ["mods", "channel", "csp"]
+        );
+        // Dangerous shapes are structurally absent from the allowlist.
+        for forbidden in [
+            "windowStyle",
+            "additionalArguments",
+            "customIcon",
+            "galleryRoot",
+            "keybinds",
+            "proxyMode",
+            "customJsBundle",
+        ] {
+            assert!(
+                !crate::settings_import::IMPORTABLE_KEYS
+                    .iter()
+                    .any(|entry| entry.key == forbidden),
+                "{forbidden} must never be importable"
+            );
+        }
     }
 
     #[test]

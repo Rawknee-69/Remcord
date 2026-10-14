@@ -1651,6 +1651,36 @@ test("F5 gallery keeps the Electron store contract with a natively-gated page", 
     assert.match(compat, /getFile: getGalleryFile/);
 });
 
+test("F7 settings import stays copy-only with no Electron auto-migration", () => {
+    // The Electron app never migrates settings between profiles: no
+    // cross-profile import call may exist on its side (the internal
+    // startMinimized boolean migration is unrelated and stays), and the
+    // native copy-only path must not add one either. The Electron settings
+    // shape (config.ts defaults + settings.d.ts keys) stays the import
+    // reference; the native UI triggers exactly one explicit capability.
+    const config = readFileSync(new URL("../../src/common/config.ts", import.meta.url), "utf8");
+    assert.doesNotMatch(config, /importElectron|import.*profile|migrat.*profile|profile.*migrat/i);
+    const settingsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/SettingsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    assert.match(settingsPage, /isNativeSettingsImportAvailable\(\)/);
+    assert.match(settingsPage, /importElectronSettingsNative\(\)/);
+    assert.match(settingsPage, /markRestartRequired\(\)/);
+    // Explicit button + confirm only: no import call outside the guarded
+    // button component, no startup/timer import anywhere in src/.
+    assert.doesNotMatch(config, /settings_import_electron/);
+    const settings = readFileSync(new URL("../../src/shelter/settings/settings.ts", import.meta.url), "utf8");
+    assert.match(settings, /export function isNativeSettingsImportAvailable/);
+    assert.match(settings, /export async function importElectronSettingsNative/);
+    // The native contract pins the same shape from the host side.
+    const nativeImport = readFileSync(new URL("../src/settings_import.rs", import.meta.url), "utf8");
+    assert.match(nativeImport, /IMPORTABLE_KEYS/);
+    assert.match(nativeImport, /RESTART_REQUIRED_KEYS/);
+    assert.match(nativeImport, /copy-only|Copy-only/);
+    assert.doesNotMatch(nativeImport, /std::fs::write\([^)]*appdata|electron.*write/i);
+});
+
 test("F6 backup UI drives the native inspect/commit/discard flow with a working preview modal", () => {
     // D4-3: BackupSection routes save through the shared saveBackup helper
     // (same signature/shape both shells) and restore through the native

@@ -65,6 +65,7 @@ pub enum BridgeCommand {
     SettingsGetConfig(SettingsGetConfigRequest),
     SettingsSetBlockPowerSaving(SettingsSetBlockPowerSavingRequest),
     SettingsSet(SettingsSetRequest),
+    SettingsImportElectron(SettingsImportElectronRequest),
     LocalizationGetLang(LocalizationGetLangRequest),
     AppGetVersion(AppGetVersionRequest),
     PluginStorageRead(PluginStorageReadRequest),
@@ -170,6 +171,16 @@ pub fn validate_vencord_css_mod_id(mod_id: &Option<String>) -> Result<(), String
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsGetConfigRequest {}
+
+/// Empty request for the `settings.import_electron` capability: copies the
+/// validated Electron-profile preferences into the native profile. There
+/// is deliberately NO source path, URL, key list, or value parameter: the
+/// host builds the fixed `%APPDATA%\Remcord\storage\settings.json` source
+/// itself and applies exactly its own allowlist. Any extra field is
+/// rejected, so a renderer cannot select, narrow, or redirect the import.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsImportElectronRequest {}
 
 /// The single allowlisted `settings.set_block_power_saving_in_voice_chat`
 /// mutation parameter: the new boolean value. There is deliberately NO key,
@@ -1290,6 +1301,7 @@ pub enum BridgeResponsePayload {
     SettingsConfig(Box<SettingsConfigResponse>),
     SettingsMutation(SettingsMutationResponse),
     SettingsSet(SettingsSetResponse),
+    SettingsImported(SettingsImportedResponse),
     LocalizationString(LocalizationStringResponse),
     AppVersion(AppVersionResponse),
     PluginStorageRead(PluginStorageReadResponse),
@@ -1408,6 +1420,16 @@ pub struct SettingsSetResponse {
     pub value: SettingsSetValue,
     pub source: &'static str,
     pub payload_bytes: usize,
+}
+
+/// Validated response for the copy-only `settings.import_electron`
+/// capability: which allowlisted keys were applied and which were
+/// present-but-invalid (skipped). Key names only — never values, never
+/// paths: the UI re-reads display state through `settings.get_config`.
+#[derive(Serialize)]
+pub struct SettingsImportedResponse {
+    pub applied: Vec<String>,
+    pub skipped: Vec<String>,
 }
 
 /// Single localized string response. `value` is `""` for a missing key
@@ -1966,6 +1988,11 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                         return Err("invalid settings set mutation".to_owned());
                     }
                 }
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
+                // is needed. The source path and the key allowlist live in
+                // `settings_import` and are enforced at dispatch.
+                BridgeCommand::SettingsImportElectron(_) => {}
                 BridgeCommand::LocalizationGetLang(payload) => {
                     if payload.key.is_empty() || payload.key.len() > MAX_LANG_KEY_BYTES {
                         return Err("invalid localization key".to_owned());
@@ -3670,6 +3697,50 @@ mod tests {
             parse_bridge_message(&wire("gallery_import_dialog", "{}")).is_err(),
             "F5b dialog wires do not exist"
         );
+    }
+
+    #[test]
+    fn settings_import_electron_parses_parameter_free() {
+        let request = r#"{"version":1,"request_id":"import-1","command":{"type":"settings_import_electron","payload":{}}}"#;
+        assert!(matches!(
+            parse_bridge_message(request),
+            Ok(BridgeMessage::Request(_))
+        ));
+        // No source path, URL, key list, or value may ride along: the host
+        // owns the fixed source and the allowlist.
+        for hostile in [
+            r#"{"version":1,"request_id":"import-2","command":{"type":"settings_import_electron","payload":{"path":"C:\\x"}}}"#,
+            r#"{"version":1,"request_id":"import-3","command":{"type":"settings_import_electron","payload":{"url":"https://attacker.invalid/s.json"}}}"#,
+            r#"{"version":1,"request_id":"import-4","command":{"type":"settings_import_electron","payload":{"keys":["mods"]}}}"#,
+            r#"{"version":1,"request_id":"import-5","command":{"type":"settings_import_electron","payload":{"values":{"mods":[]}}}}"#,
+        ] {
+            assert!(parse_bridge_message(hostile).is_err());
+        }
+    }
+
+    #[test]
+    fn serializes_a_typed_settings_imported_response() {
+        use super::SettingsImportedResponse;
+        let response = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "import-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::SettingsImported(
+                SettingsImportedResponse {
+                    applied: vec!["mods".to_owned(), "csp".to_owned()],
+                    skipped: vec!["channel".to_owned()],
+                },
+            )),
+            error: None,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["payload"]["type"], "settings_imported");
+        assert_eq!(
+            value["payload"]["payload"]["applied"],
+            serde_json::json!(["mods", "csp"])
+        );
+        assert!(value["payload"]["payload"].get("values").is_none());
+        assert!(value["payload"]["payload"].get("path").is_none());
     }
 
     #[test]

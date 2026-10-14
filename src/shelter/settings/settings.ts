@@ -1078,6 +1078,57 @@ export async function discardRestoreNative(): Promise<boolean> {
     }
 }
 
+/**
+ * Minimal native settings-import shape. `remcordWindow.d.ts` stays
+ * Electron-shaped (no import member); the result shape is described only
+ * here, at the single import call site that consumes it.
+ */
+interface NativeSettingsImport {
+    importElectron?: () => Promise<unknown>;
+}
+
+/** True when the native copy-only settings import is the active path.
+/// Gated on the existing `isNativeWebView` environment check AND function
+/// presence — no second detection mechanism. */
+export function isNativeSettingsImportAvailable(): boolean {
+    if (!isNativeWebView()) return false;
+    const settings = (window.remcord as unknown as { settings?: NativeSettingsImport }).settings;
+    return typeof settings?.importElectron === "function";
+}
+
+export interface ElectronImportResult {
+    applied: string[];
+    skipped: string[];
+    restartRequired: boolean;
+}
+
+/**
+ * Native copy-only settings import: the host reads the fixed Electron
+ * profile settings file and merges validated preferences into the native
+ * profile. Parameter-free by protocol — the renderer selects nothing.
+ * Resolves key-name lists plus whether a restart-requiring key
+ * (mods/channel/csp) was applied. Rejects on transport failure; the
+ * caller toasts. Never auto-runs: call only from the explicit import
+ * button.
+ */
+export async function importElectronSettingsNative(): Promise<ElectronImportResult> {
+    const settings = (window.remcord as unknown as { settings?: NativeSettingsImport }).settings;
+    const run = settings?.importElectron;
+    if (typeof run !== "function") throw new Error("[Remcord] Native settings import is unavailable.");
+    const result = (await run()) as { applied?: unknown; skipped?: unknown; restartRequired?: unknown };
+    if (
+        !result ||
+        !Array.isArray(result.applied) ||
+        !result.applied.every((key): key is string => typeof key === "string") ||
+        !Array.isArray(result.skipped) ||
+        !result.skipped.every((key): key is string => typeof key === "string") ||
+        typeof result.restartRequired !== "boolean"
+    ) {
+        throw new Error("[Remcord] Native settings import returned an invalid result.");
+    }
+    return { applied: result.applied, skipped: result.skipped, restartRequired: result.restartRequired };
+}
+
 /** User-facing preview of one held staged restore (normalized, never throwing). */
 export interface NativeRestorePreview {
     includes: Record<string, boolean>;

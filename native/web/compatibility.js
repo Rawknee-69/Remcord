@@ -366,6 +366,70 @@
         });
     }
 
+    // Exact importable preference keys (settings_import.rs parity). The
+    // response echoes subsets of this list only; anything else is rejected.
+    // Restart-requiring keys mirror RESTART_REQUIRED_KEYS so the UI can
+    // raise the restart banner without a second round trip.
+    const SETTINGS_IMPORT_KEYS = [
+        "mods",
+        "csp",
+        "channel",
+        "supportBannerDismissed",
+        "showExperimentalPluginMenu",
+        "extendedPluginAbilities",
+        "quickCss",
+        "spellcheck",
+        "smoothScroll",
+        "autoScroll",
+        "mobileMode",
+        "skipSplash",
+        "sleepInBackground",
+        "popoutPiP",
+        "bounceOnPing",
+        "useSystemCssEditor",
+        "minimizeToTray",
+        "disableAutogain",
+        "spellcheckLanguage",
+        "scanInterval",
+        "overlayButtonColor",
+        "noBundleUpdates",
+        "pluginStates",
+    ];
+    const SETTINGS_IMPORT_RESTART_KEYS = ["mods", "channel", "csp"];
+
+    function importElectronSettings(timeoutMs = 30000) {
+        requireCapability("settings.import_electron");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host builds the fixed Electron
+        // source path itself and applies exactly its own allowlist. No
+        // source path, URL, key list, or value may be supplied. Copy-only:
+        // the Electron file is never written, and the import runs once
+        // per explicit call — never at startup.
+        return request({ type: "settings_import_electron", payload: {} }, timeoutMs).then((payload) => {
+            const listsValid =
+                payload &&
+                Object.keys(payload).length === 2 &&
+                Array.isArray(payload.applied) &&
+                Array.isArray(payload.skipped) &&
+                payload.applied.length + payload.skipped.length <= SETTINGS_IMPORT_KEYS.length &&
+                [...payload.applied, ...payload.skipped].every(
+                    (key) => typeof key === "string" && SETTINGS_IMPORT_KEYS.includes(key),
+                ) &&
+                new Set([...payload.applied, ...payload.skipped]).size ===
+                    payload.applied.length + payload.skipped.length;
+            if (!listsValid) {
+                throw new Error("Native settings import response schema is invalid");
+            }
+            return {
+                applied: [...payload.applied],
+                skipped: [...payload.skipped],
+                restartRequired: payload.applied.some((key) => SETTINGS_IMPORT_RESTART_KEYS.includes(key)),
+            };
+        });
+    }
+
     function getVersion(timeoutMs = 5000) {
         requireCapability("app.get_version");
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -1571,6 +1635,26 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "settings_imported") {
+            const payload = response.payload.payload;
+            // Key names only: applied/skipped must be disjoint subsets of
+            // the import allowlist. No values, no paths may ride along —
+            // the UI re-reads display state through settings.get_config.
+            const keysValid =
+                payload &&
+                Object.keys(payload).length === 2 &&
+                Array.isArray(payload.applied) &&
+                Array.isArray(payload.skipped) &&
+                [...payload.applied, ...payload.skipped].every(
+                    (key) => typeof key === "string" && SETTINGS_IMPORT_KEYS.includes(key),
+                ) &&
+                new Set([...payload.applied, ...payload.skipped]).size ===
+                    payload.applied.length + payload.skipped.length;
+            if (!keysValid) {
+                request.reject(new Error("Native settings import response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "localization_string") {
             const payload = response.payload.payload;
             if (
@@ -2545,6 +2629,7 @@
         setBlockPowerSavingInVoiceChat,
         set: setSetting,
         setLang: bootSetLang,
+        importElectron: importElectronSettings,
     });
     const themesShim = Object.freeze({
         installFromCode: installThemeFromCode,

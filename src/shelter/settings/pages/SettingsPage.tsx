@@ -19,11 +19,14 @@ import { TextBoxItem } from "../components/TextBoxItem.jsx";
 import {
     clearNativeModCache,
     copyNativeDiagnostics,
+    importElectronSettingsNative,
     isMinWindowsVersion,
+    isNativeSettingsImportAvailable,
     isNativeSettingsSetAvailable,
     isNativeWebView,
     isRestartRequiredSignal,
     isSettingWritableNatively,
+    markRestartRequired,
     revealFolderNative,
     setBlockPowerSavingInVoiceChat,
     setConfig,
@@ -34,7 +37,7 @@ import classes from "./SettingsPage.module.css";
 
 const {
     plugin: { store },
-    ui: { SwitchItem, Header, HeaderTags, Button, ButtonSizes, TextBox },
+    ui: { SwitchItem, Header, HeaderTags, Button, ButtonSizes, TextBox, openConfirmationModal, showToast },
 } = shelter;
 
 const noBundleUpdates = (settings: Settings) => {
@@ -51,6 +54,65 @@ const noBundleUpdates = (settings: Settings) => {
 const nativeOff = (key: string) => isNativeWebView() && !isSettingWritableNatively(key);
 
 type PanelId = "backup" | "mods" | "lookAndFeel" | "behaviour" | "power" | "rpc" | "networking" | "advanced";
+
+/** Native-only explicit import of validated preferences from the Electron
+ * app profile (F7). Copy-only: the host reads the fixed Electron settings
+ * file and merges allowlisted keys into the native profile; the Electron
+ * app is never written and the import never auto-runs. A confirm modal
+ * guards the overwrite; the restart banner raises when a
+ * restart-requiring key (mods/channel/csp) was applied. */
+function ElectronImportButton() {
+    const t = store.i18n;
+    const [busy, setBusy] = createSignal(false);
+
+    function runImport() {
+        if (busy()) return;
+        openConfirmationModal({
+            header: () => t["settings-importElectronTitle"] ?? "Import from the Electron app?",
+            body: () =>
+                t["settings-importElectronBody"] ??
+                "Copies your preferences (mods, channel, appearance toggles) from the installed Electron Remcord into this app. The Electron app itself is never changed.",
+            type: "danger",
+            confirmText: t["settings-importElectronConfirm"] ?? "Import",
+            cancelText: t["settings-restartLater"] ?? "Later",
+        }).then(
+            () => {
+                setBusy(true);
+                void importElectronSettingsNative().then(
+                    (result) => {
+                        setBusy(false);
+                        if (result.restartRequired) markRestartRequired();
+                        showToast({
+                            title: t["settings-importElectronDone"] ?? "Import complete",
+                            content:
+                                result.applied.length > 0
+                                    ? `${result.applied.length} copied${result.skipped.length > 0 ? `, ${result.skipped.length} skipped (${result.skipped.slice(0, 5).join(", ")})` : ""}`
+                                    : (t["settings-importElectronEmpty"] ??
+                                      "Nothing to import — no Electron settings found or all values already match."),
+                            duration: 5000,
+                        });
+                    },
+                    () => {
+                        setBusy(false);
+                        showToast({
+                            title: t["settings-importElectronFailed"] ?? "Import failed",
+                            content:
+                                t["settings-importElectronFailedBody"] ?? "The Electron settings could not be read.",
+                            duration: 5000,
+                        });
+                    },
+                );
+            },
+            () => {},
+        );
+    }
+
+    return (
+        <Button size={ButtonSizes.LARGE} onClick={runImport} disabled={busy()}>
+            {t["settings-importElectron"] ?? "Import from Electron app"}
+        </Button>
+    );
+}
 
 export function SettingsPage() {
     const [query, setQuery] = createSignal("");
@@ -261,6 +323,14 @@ export function SettingsPage() {
                 <SearchableSetting keywords={panelKeywords.backup}>
                     <BackupSection embedded />
                 </SearchableSetting>
+                {/* Native-only copy-only import from the Electron profile
+                    (F7): explicit button, confirm modal, result toast. Never
+                    auto-runs; the Electron app is never written. */}
+                <Show when={isNativeSettingsImportAvailable()}>
+                    <SearchableSetting keywords={["import", "electron", "migrate"]}>
+                        <ElectronImportButton />
+                    </SearchableSetting>
+                </Show>
             </SettingsPanel>
 
             <SettingsPanel

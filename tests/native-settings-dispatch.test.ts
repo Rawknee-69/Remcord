@@ -941,3 +941,74 @@ test("native mod cache wipe rejects a misshapen host outcome", async () => {
         restoreConsole();
     }
 });
+
+test("native settings import gates on runtime plus function presence", async () => {
+    installGlobals({ settingsImpl: {} });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeSettingsImportAvailable(), false);
+    } finally {
+        restoreConsole();
+    }
+    installGlobals({ runtime: "webview2", settingsImpl: {} });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeSettingsImportAvailable(), false);
+    } finally {
+        restoreConsole();
+    }
+    let calls = 0;
+    installGlobals({
+        runtime: "webview2",
+        settingsImpl: {
+            importElectron: () => {
+                calls += 1;
+                return Promise.resolve({
+                    applied: ["mods", "csp"],
+                    skipped: ["channel"],
+                    restartRequired: true,
+                });
+            },
+        },
+    });
+    try {
+        const helpers = await loadHelpers();
+        assert.equal(helpers.isNativeSettingsImportAvailable(), true);
+        assert.deepEqual(await helpers.importElectronSettingsNative(), {
+            applied: ["mods", "csp"],
+            skipped: ["channel"],
+            restartRequired: true,
+        });
+        assert.equal(calls, 1);
+    } finally {
+        restoreConsole();
+    }
+});
+
+test("native settings import rejects misshapen host outcomes", async () => {
+    for (const outcome of [
+        { applied: ["mods"], skipped: [] },
+        { applied: [], skipped: [], restartRequired: "yes" },
+        { applied: [42], skipped: [], restartRequired: false },
+        "imported",
+        null,
+    ]) {
+        installGlobals({
+            runtime: "webview2",
+            settingsImpl: { importElectron: () => Promise.resolve(outcome) },
+        });
+        try {
+            const helpers = await loadHelpers();
+            await assert.rejects(helpers.importElectronSettingsNative(), /invalid result|unavailable/);
+        } finally {
+            restoreConsole();
+        }
+    }
+    installGlobals({ runtime: "webview2", settingsImpl: {} });
+    try {
+        const helpers = await loadHelpers();
+        await assert.rejects(helpers.importElectronSettingsNative(), /unavailable/);
+    } finally {
+        restoreConsole();
+    }
+});

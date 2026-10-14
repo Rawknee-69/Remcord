@@ -831,6 +831,101 @@ test("settings.set rejects malformed set responses", async () => {
     await assert.rejects(pending3, /settings set response schema is invalid/);
 });
 
+// ---------------------------------------------------------------------------
+// Settings import from the Electron profile (F7 core).
+//
+// Copy-only, never auto-migrate: the facade sends a parameter-free typed
+// request (the host builds the fixed Electron source path itself), and
+// resolves key-name lists plus whether a restart-requiring key applied.
+// ---------------------------------------------------------------------------
+
+function createSettingsImportRuntime(
+    capabilities = ["bridge.ping", "settings.get_config", "settings.import_electron"],
+) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondSettingsImported(window, request, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "settings_imported", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes a parameter-free settings import and no path surface", () => {
+    const { window } = createSettingsImportRuntime();
+    assert.equal(typeof window.remcord.settings.importElectron, "function");
+    assert.equal(Object.isFrozen(window.remcord.settings), true);
+    assert.equal(window.remcord.native.supports("settings.import_electron"), true);
+    // No path, URL, key-list, or value-taking member may exist alongside.
+    assert.equal(window.remcord.settings.importPath, undefined);
+    assert.equal(window.remcord.settings.importFile, undefined);
+});
+
+test("settings.import_electron sends an exact empty payload and resolves key lists", async () => {
+    const { window } = createSettingsImportRuntime();
+    const pending = window.remcord.settings.importElectron();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "settings_import_electron");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "settings_import_electron", payload: {} });
+    respondSettingsImported(window, message, { applied: ["mods", "csp"], skipped: ["channel"] });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        applied: ["mods", "csp"],
+        skipped: ["channel"],
+        restartRequired: true,
+    });
+    // No restart-requiring key: no restart flag.
+    const second = createSettingsImportRuntime();
+    const pending2 = second.window.remcord.settings.importElectron();
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "settings_import_electron");
+    respondSettingsImported(second.window, message2, { applied: ["spellcheck"], skipped: [] });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending2)), {
+        applied: ["spellcheck"],
+        skipped: [],
+        restartRequired: false,
+    });
+});
+
+test("settings.import_electron throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createSettingsImportRuntime(["bridge.ping", "settings.get_config"]);
+    assert.equal(window.remcord.native.supports("settings.import_electron"), false);
+    assert.throws(
+        () => window.remcord.settings.importElectron(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "settings_import_electron"),
+        false,
+    );
+});
+
+test("settings.import_electron rejects hostile key lists without paths", async () => {
+    // Unknown keys, duplicates across lists, values, and paths are all
+    // refused: only disjoint subsets of the allowlist resolve.
+    for (const payload of [
+        { applied: ["windowStyle"], skipped: [] },
+        { applied: ["mods"], skipped: ["mods"] },
+        { applied: ["mods", "channel"], skipped: [], values: { mods: ["vencord"] } },
+        { applied: ["mods"], skipped: [], path: "C:\\x" },
+        { applied: "mods", skipped: [] },
+        { applied: [], skipped: ["additionalArguments"] },
+    ]) {
+        const runtime = createSettingsImportRuntime();
+        const pending = runtime.window.remcord.settings.importElectron();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "settings_import_electron");
+        respondSettingsImported(runtime.window, message, payload);
+        await assert.rejects(pending, /settings import response schema is invalid/);
+    }
+});
+
 test("initializes a frozen compatibility facade with the boot snapshot", () => {
     const { window } = createRuntime();
     assert.ok(window.remcord);
