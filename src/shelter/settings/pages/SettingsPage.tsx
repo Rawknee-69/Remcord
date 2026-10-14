@@ -498,13 +498,17 @@ export function SettingsPage() {
                         />
                     </SearchableSetting>
                 </Show>
-                <Show when={window.remcord.platform === "darwin"}>
+                <Show when={window.remcord.platform === "darwin" || (window.remcord.platform === "win32" && isNativeWebView())}>
                     <SearchableSetting keywords={[t["settings-bounceOnPing"], t["settings-bounceOnPing-desc"]]}>
                         <SwitchItem
-                            note={nativeNote(t["settings-bounceOnPing-desc"], "bounceOnPing")}
+                            note={
+                                isNativeWebView() && window.remcord.platform === "win32"
+                                    ? "Flashes the taskbar button when a mention arrives."
+                                    : nativeNote(t["settings-bounceOnPing-desc"], "bounceOnPing")
+                            }
                             value={settings.bounceOnPing}
                             disabled={nativeOff("bounceOnPing")}
-                            onChange={(e: boolean) => setConfig("bounceOnPing", e, true)}
+                            onChange={(e: boolean) => setConfig("bounceOnPing", e)}
                         >
                             {t["settings-bounceOnPing"]}
                         </SwitchItem>
@@ -580,7 +584,7 @@ export function SettingsPage() {
                         note={nativeNote(t["settings-MultiInstance-desc"], "multiInstance")}
                         value={settings.multiInstance}
                         disabled={nativeOff("multiInstance")}
-                        onChange={(e: boolean) => setConfig("multiInstance", e)}
+                        onChange={(e: boolean) => setConfig("multiInstance", e, true)}
                     >
                         {t["settings-MultiInstance"]}
                     </SwitchItem>
@@ -1210,13 +1214,27 @@ export function SettingsPage() {
                     <SearchableSetting keywords={[t["settings-openCustomIconDialog"], "icon"]}>
                         <Button
                             size={ButtonSizes.MAX}
-                            disabled={isNativeWebView()}
-                            title={
-                                isNativeWebView()
-                                    ? (t["settings-nativeUnsupported"] ?? "Not available in the native Remcord app")
-                                    : undefined
-                            }
-                            onClick={window.remcord.settings.openCustomIconDialog}
+                            onClick={() => {
+                                // Native WebView2 serves the host-owned
+                                // `.ico`/`.png` picker through
+                                // `window.set_custom_icon`; Electron keeps the
+                                // original dialog call.
+                                if (isNativeWebView() && typeof window.remcord.window.setCustomIcon === "function") {
+                                    void window.remcord.window
+                                        .setCustomIcon()
+                                        .then((res) => {
+                                            const outcome = res as { ok?: boolean };
+                                            if (outcome?.ok !== true) {
+                                                showToast({ title: "Custom icon not set", duration: 2500 });
+                                            }
+                                        })
+                                        .catch(() =>
+                                            showToast({ title: "Custom icon not set", duration: 2500 }),
+                                        );
+                                    return;
+                                }
+                                if (!isNativeWebView()) window.remcord.settings.openCustomIconDialog();
+                            }}
                         >
                             {t["settings-openCustomIconDialog"]}
                         </Button>

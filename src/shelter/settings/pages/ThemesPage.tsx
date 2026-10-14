@@ -4,7 +4,7 @@ import type { ThemeManifest } from "../../../@types/themeManifest.js";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
 import { ThemesCard } from "../components/ThemesCard.jsx";
-import { openQuickCssEditorModal } from "../quickCssEditor.jsx";
+import { openQuickCssRespectingSystem } from "../quickCssEditor.jsx";
 import {
     importNativeThemes,
     isNativeThemeImportAvailable,
@@ -153,10 +153,10 @@ export function ThemesPage() {
     function handleOpenQuickCss() {
         // Native WebView2 edits inside Discord through the Remcord editor
         // modal (the upstream about:blank popup flow is dead under the
-        // native managed-child popup policy); Electron keeps the original
-        // popup call.
+        // native managed-child popup policy), honoring useSystemCssEditor;
+        // Electron keeps the original popup call.
         if (nativeMode()) {
-            void openQuickCssEditorModal("remcord").catch(() =>
+            void openQuickCssRespectingSystem("remcord").catch(() =>
                 console.warn("[Remcord] Could not open the QuickCSS editor in the native shell."),
             );
             return;

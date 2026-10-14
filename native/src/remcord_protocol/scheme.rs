@@ -106,6 +106,30 @@ pub fn create_environment(
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
     let options = build_environment_options();
+    // Performance presets + scroll/cache toggles (Electron `flags.ts` /
+    // `main.ts` parity): pure Chromium switches composed from the
+    // authoritative snapshot once per process (restart-required model).
+    // Unreadable settings fail closed to compiled-in defaults (hardware
+    // acceleration on), never to an empty switch set the user did not pick.
+    let snapshot = crate::settings::load_settings(profile_dir)
+        .map(|loaded| loaded.snapshot)
+        .unwrap_or_default();
+    let perf_args = crate::performance_flags::resolve_extra_args(
+        &snapshot.performance_mode,
+        snapshot.hardware_acceleration,
+        snapshot.smooth_scroll,
+        snapshot.auto_scroll,
+        snapshot.disable_http_cache,
+    );
+    let mut extra_args = ADDITIONAL_BROWSER_ARGUMENTS.to_owned();
+    if !perf_args.is_empty() {
+        println!(
+            "[Performance] mode={} extra_args={perf_args}",
+            snapshot.performance_mode
+        );
+        extra_args.push(' ');
+        extra_args.push_str(&perf_args);
+    }
     // F21 proxy support: the host's own proxy settings (plus the
     // `HTTPS_PROXY` environment) extend the base additional-args string.
     // Renderer input never reaches this path; unreadable settings fail
@@ -114,12 +138,10 @@ pub fn create_environment(
     // by `proxy_startup_args`.
     let proxy = crate::net_filter::proxy_startup_args(profile_dir);
     if proxy.configured {
-        unsafe {
-            options.set_additional_browser_arguments(format!(
-                "{}{}",
-                ADDITIONAL_BROWSER_ARGUMENTS, proxy.args
-            ));
-        }
+        extra_args.push_str(&proxy.args);
+    }
+    unsafe {
+        options.set_additional_browser_arguments(extra_args);
     }
     let (tx, rx) = std::sync::mpsc::channel();
     unsafe {

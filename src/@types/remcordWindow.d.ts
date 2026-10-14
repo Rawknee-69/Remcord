@@ -34,6 +34,8 @@ export interface RemcordWindow {
         quit: () => void;
         maximized: () => boolean;
         isNormal: () => boolean;
+        /** Native shell only: host-owned icon picker. Absent in Electron. */
+        setCustomIcon?: () => Promise<{ ok: boolean }>;
     };
     electron: string;
     getLang: (toGet: string) => Promise<string>;
@@ -120,6 +122,7 @@ export interface RemcordWindow {
         addUrl: (url: string, meta?: Record<string, unknown>) => Promise<Record<string, unknown>>;
         addLink: (url: string, meta?: Record<string, unknown>) => Promise<Record<string, unknown>>;
         importDialog: (meta?: Record<string, unknown>) => Promise<Record<string, unknown>>;
+        importFiles: () => Promise<Record<string, unknown>>;
         remove: (id: string) => Promise<{ ok: boolean }>;
         bulkRemove: (ids: string[]) => Promise<{ removed: number }>;
         update: (id: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>;

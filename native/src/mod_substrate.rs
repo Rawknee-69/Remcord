@@ -370,6 +370,7 @@ fn cached_or_downloaded_asset(
     url: &str,
     max_bytes: usize,
     kind: &str,
+    updates_frozen: bool,
 ) -> Result<Vec<u8>, String> {
     let path = profile.join(file_name);
     if path.exists() {
@@ -384,6 +385,15 @@ fn cached_or_downloaded_asset(
         return Ok(bytes);
     }
 
+    // `noBundleUpdates` (Electron modloader parity): a listed mod serves
+    // its disk cache only and never hits the network. A missing/empty
+    // cache is a typed miss, not a download.
+    if updates_frozen {
+        return Err(format!(
+            "[{}] {file_name} has bundle updates disabled and no usable cache",
+            descriptor.id
+        ));
+    }
     let bytes = download_mod_asset(agent, descriptor, url, max_bytes, kind)?;
     let temp_path = profile.join(format!("{file_name}.tmp"));
     fs::write(&temp_path, &bytes).map_err(|error| {
@@ -408,9 +418,14 @@ fn cached_or_downloaded_asset(
 /// bytes live in host-built profile-root files served by `custom_bundle`,
 /// never at a download URL, so routing one through the downloader would be
 /// a bug even though the placeholder URL could never resolve.
+///
+/// `updates_frozen` mirrors `noBundleUpdates` (Electron modloader parity):
+/// a frozen mod serves its disk cache only — a missing cache is a typed
+/// miss, never a download.
 pub fn load_mod_bundle(
     descriptor: &ModDescriptor,
     profile: std::path::PathBuf,
+    updates_frozen: bool,
 ) -> Result<ModBundle, String> {
     if matches!(descriptor.identity, ModArtifactIdentity::UserOwned) {
         return Err(format!(
@@ -430,6 +445,7 @@ pub fn load_mod_bundle(
         descriptor.js_url,
         descriptor.max_js_bytes,
         "JS bundle",
+        updates_frozen,
     )?;
     let css = match descriptor.css {
         Some(css) => Some(cached_or_downloaded_asset(
@@ -440,6 +456,7 @@ pub fn load_mod_bundle(
             css.url,
             css.max_bytes,
             "CSS bundle",
+            updates_frozen,
         )?),
         None => None,
     };
@@ -1444,9 +1461,32 @@ mod tests {
         let error = load_mod_bundle(
             &user_owned_descriptor(),
             std::env::temp_dir().join("remcord-user-owned-never"),
+            false,
         )
         .expect_err("UserOwned must never download");
         assert!(error.contains("local profile files"));
+    }
+
+    #[test]
+    fn frozen_bundle_updates_serve_cache_only_never_network() {
+        // `noBundleUpdates` parity: with no disk cache and updates frozen,
+        // the loader reports a typed miss BEFORE any download attempt, so
+        // this test is hermetic (no network even though the descriptor has
+        // real upstream URLs).
+        let profile = std::env::temp_dir().join(format!(
+            "remcord-frozen-never-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time must be available")
+                .as_nanos()
+        ));
+        let error = load_mod_bundle(&headerless_descriptor(), profile, true)
+            .expect_err("frozen updates with no cache must miss");
+        assert!(
+            error.contains("bundle updates disabled"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -91,6 +91,12 @@ const EMBEDDED_ICO: &[u8] = include_bytes!("../../build/icon.ico");
 /// Copy of `build/icon.png` compiled into the binary (same rationale).
 const EMBEDDED_PNG: &[u8] = include_bytes!("../../build/icon.png");
 
+/// The embedded rebranded PNG bytes for runtime consumers (tray icon,
+/// window icon) that must not read the repo or install directory.
+pub fn embedded_png_bytes() -> &'static [u8] {
+    EMBEDDED_PNG
+}
+
 /// PNG file signature (8 bytes).
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 

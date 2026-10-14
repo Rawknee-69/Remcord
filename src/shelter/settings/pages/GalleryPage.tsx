@@ -411,10 +411,21 @@ export function GalleryPage() {
     }
 
     function importFiles() {
-        // Native WebView2 has no host file picker yet (F5b dialog slice);
-        // the facade throws UNSUPPORTED_CAPABILITY honestly if reached.
+        // Native WebView2 serves the host multi-file picker plus bounded
+        // ingestion through `gallery.importFiles`; Electron keeps the
+        // original `importDialog` call.
         if (isNativeWebView()) {
-            showToast({ title: "Import needs the desktop app", duration: 2500 });
+            void window.remcord.gallery
+                .importFiles()
+                .then((res) => {
+                    const summary = res as { imported?: number; skipped?: number };
+                    if (typeof summary?.imported === "number" && summary.imported > 0) refresh();
+                    showToast({
+                        title: `Imported ${summary?.imported ?? 0} file(s)${(summary?.skipped ?? 0) > 0 ? `, ${summary.skipped} skipped` : ""}`,
+                        duration: 3000,
+                    });
+                })
+                .catch(() => showToast({ title: "Import failed", duration: 2500 }));
             return;
         }
         const ctx = shelterContext();
@@ -627,7 +638,21 @@ export function GalleryPage() {
                     <Show
                         when={!isNativeWebView()}
                         fallback={
-                            <Button size={ButtonSizes.SMALL} disabled title="Copying to a folder needs the desktop app">
+                            <Button
+                                size={ButtonSizes.SMALL}
+                                onClick={() =>
+                                    void window.remcord.gallery
+                                        .exportItems([...selected()])
+                                        .then((res) => {
+                                            const summary = res as { exported?: number; skipped?: number };
+                                            showToast({
+                                                title: `Copied ${summary?.exported ?? 0} file(s)${(summary?.skipped ?? 0) > 0 ? `, ${summary.skipped} skipped` : ""}`,
+                                                duration: 3000,
+                                            });
+                                        })
+                                        .catch(() => showToast({ title: "Copy failed", duration: 2500 }))
+                                }
+                            >
                                 Copy to folder
                             </Button>
                         }

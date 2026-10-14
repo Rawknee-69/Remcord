@@ -119,7 +119,8 @@ test("the closed settings.set allowlist is a deliberate separate path", () => {
     assert.match(shelterSettings, /export function isNativeSettingsSetAvailable/);
     assert.match(shelterSettings, /export async function setNativeSetting/);
     // Seven wire keys: mods, three side-effect-free flags, csp, quickCss,
-    // and channel (each with a traced native consumer).
+    // and channel (each with a traced native consumer), plus the
+    // settings-enablement batch (each with a traced host consumer).
     assert.match(shelterSettings, /mods: "mods"/);
     assert.match(shelterSettings, /supportBannerDismissed: "support_banner_dismissed"/);
     assert.match(shelterSettings, /showExperimentalPluginMenu: "show_experimental_plugin_menu"/);
@@ -127,8 +128,10 @@ test("the closed settings.set allowlist is a deliberate separate path", () => {
     assert.match(shelterSettings, /csp: "csp"/);
     assert.match(shelterSettings, /quickCss: "quick_css"/);
     assert.match(shelterSettings, /channel: "channel"/);
-    // No Electron-only or unsafe key may enter the map.
-    assert.doesNotMatch(shelterSettings, /minimizeToTray|proxyRules|customIcon|additionalArguments|keybinds/);
+    assert.match(shelterSettings, /minimizeToTray: "minimize_to_tray"/);
+    assert.match(shelterSettings, /proxyRules: "proxy_rules"/);
+    // Unsafe keys stay out: renderer-supplied CLI, icon paths, code.
+    assert.doesNotMatch(shelterSettings, /customIcon|additionalArguments|keybinds/);
     // toggleMod keeps the mutual-exclusion shape and branches per shell.
     assert.match(shelterSettings, /setNativeSetting\("mods", next, true\)/);
     assert.match(shelterSettings, /setConfig\("mods", next\)/);
@@ -1140,7 +1143,7 @@ test("no src caller uses the native theme import path", () => {
         "utf8",
     );
     for (const source of [bridge, ipc, types, themesCard]) {
-        assert.doesNotMatch(source, /importFiles/);
+        assert.doesNotMatch(source, /themes\.importFiles/);
         assert.doesNotMatch(source, /themes\.import_files/);
         assert.doesNotMatch(source, /theme_import_files/);
     }
@@ -2333,4 +2336,48 @@ test("F27 multi-instance parity: Electron lock decision, native enforcement", ()
     assert.match(nativeSettings, /pub multi_instance: bool/);
     const electronConfig = readFileSync(new URL("../../src/common/config.ts", import.meta.url), "utf8");
     assert.match(electronConfig, /multiInstance: false/);
+});
+
+test("settings enablement parity: presets, switches, and tray/chrome owners", () => {
+    // Performance presets mirror flags.ts tables; the switch names below
+    // must stay byte-identical on both sides.
+    const flags = readFileSync(new URL("../../src/common/flags.ts", import.meta.url), "utf8");
+    for (const token of [
+        "enable-gpu-rasterization",
+        "force_high_performance_gpu",
+        "disable-background-timer-throttling",
+        "webrtc-hw-encoding",
+        "PlatformH264CbpEncoding",
+        "disk-cache-size",
+    ]) {
+        assert.match(flags, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
+    const nativePerf = readFileSync(new URL("../src/performance_flags.rs", import.meta.url), "utf8");
+    for (const token of [
+        "enable-gpu-rasterization",
+        "force_high_performance_gpu",
+        "disable-background-timer-throttling",
+        "webrtc-hw-encoding",
+        "PlatformH264CbpEncoding",
+    ]) {
+        assert.ok(nativePerf.includes(token), `${token} must be ported`);
+    }
+    // Single-instance switches mirror main.ts appendSwitch names.
+    const nativePerfSwitches = nativePerf;
+    assert.ok(nativePerfSwitches.includes("--disable-gpu"));
+    assert.ok(nativePerfSwitches.includes("--disable-smooth-scrolling"));
+    assert.ok(nativePerfSwitches.includes("--disable-http-cache"));
+    assert.ok(nativePerfSwitches.includes("MiddleClickAutoscroll"));
+    // Mobile UA mirrors window.ts exactly.
+    const discordWindow = readFileSync(new URL("../../src/discord/window.ts", import.meta.url), "utf8");
+    assert.match(discordWindow, /Nexus 5 Build\/MRA58N/);
+    const nativeUa = readFileSync(new URL("../src/user_agent.rs", import.meta.url), "utf8");
+    assert.ok(nativeUa.includes("Nexus 5 Build/MRA58N"));
+    // Tray + chrome owners exist natively with Electron-named models.
+    const nativeTray = readFileSync(new URL("../src/tray_icon.rs", import.meta.url), "utf8");
+    assert.ok(nativeTray.includes("Shell_NotifyIconW"));
+    const nativeChrome = readFileSync(new URL("../src/window_chrome.rs", import.meta.url), "utf8");
+    assert.ok(nativeChrome.includes("DwmSetWindowAttribute"));
+    // No renderer-driven placement or arbitrary switches anywhere.
+    assert.ok(!nativePerf.includes("additionalArguments"));
 });

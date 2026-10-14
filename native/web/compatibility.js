@@ -284,6 +284,35 @@
         "process_scanning",
         "windows_legacy_scanning",
         "scan_interval",
+        // Native-shell settings with real host consumers: plain bools apply
+        // as-is (the host owns the effect); enums apply closed vocabularies;
+        // proxy strings apply bounded printable ASCII; arrays apply bounded
+        // closed-shape lists. Restart/note semantics live host-side.
+        "hardware_acceleration",
+        "smooth_scroll",
+        "auto_scroll",
+        "spellcheck",
+        "multi_instance",
+        "disable_autogain",
+        "disable_http_cache",
+        "mobile_mode",
+        "use_system_css_editor",
+        "popout_pip",
+        "minimize_to_tray",
+        "bounce_on_ping",
+        "sdp_h264_baseline_rewrite",
+        "start_minimized",
+        "tray",
+        "window_style",
+        "transparency",
+        "window_material",
+        "performance_mode",
+        "proxy_mode",
+        "proxy_rules",
+        "proxy_pac_script",
+        "proxy_bypass_rules",
+        "no_bundle_updates",
+        "spellcheck_language",
     ];
     // Exact wire types the host echoes in `window_ack` responses. The echo
     // must be one of these; an acknowledgement for any other (or missing)
@@ -313,6 +342,48 @@
     // The renderer cannot invent a channel or smuggle a URL through this
     // capability.
     const SETTINGS_VALID_CHANNELS = ["stable", "canary", "ptb"];
+    // Closed vocabularies for the native-shell enum settings (Electron
+    // settings.d.ts parity). The renderer cannot invent a mode.
+    const SETTINGS_VALID_START_MINIMIZED = ["off", "minimized", "tray"];
+    const SETTINGS_VALID_TRAY_ICONS = [
+        "dynamic",
+        "dsc-tray",
+        "clsc-dsc-tray",
+        "ac_plug_colored",
+        "ac_white_plug",
+        "ac_white_plug_hollow",
+        "ac_black_plug",
+        "ac_black_plug_hollow",
+        "disabled",
+    ];
+    const SETTINGS_VALID_WINDOW_STYLES = ["default", "native", "overlay", "transparent", "legacy", "rebrand"];
+    const SETTINGS_VALID_TRANSPARENCY = ["universal", "modern", "none"];
+    const SETTINGS_VALID_WINDOW_MATERIALS = ["mica", "tabbed", "acrylic", "none"];
+    const SETTINGS_VALID_PERFORMANCE_MODES = [
+        "battery",
+        "dynamic",
+        "performance",
+        "balanced",
+        "memory",
+        "voip",
+        "latency",
+        "smoothScreenshare",
+        "none",
+    ];
+    const SETTINGS_VALID_PROXY_MODES = ["system", "direct", "fixed_servers", "pac_script", "auto_detect"];
+    const MAX_SETTINGS_PROXY_RULES_BYTES = 1024;
+    const MAX_SETTINGS_PAC_URL_BYTES = 2048;
+    const MAX_SETTINGS_LANG_TAG_BYTES = 35;
+    const MAX_SETTINGS_LANGUAGES = 16;
+
+    function isPrintableAscii(value) {
+        if (typeof value !== "string" || value.length === 0) return false;
+        for (let index = 0; index < value.length; index += 1) {
+            const code = value.charCodeAt(index);
+            if (code < 0x20 || code >= 0x7f) return false;
+        }
+        return true;
+    }
 
     function setSetting(key, value, timeoutMs = 5000) {
         requireCapability("settings.set");
@@ -342,6 +413,90 @@
         } else if (key === "scan_interval") {
             if (!Number.isSafeInteger(value) || value < 1000 || value > 600000) {
                 return Promise.reject(new TypeError("value must be a safe integer of 1000..600000 milliseconds"));
+            }
+        } else if (
+            key === "hardware_acceleration" ||
+            key === "smooth_scroll" ||
+            key === "auto_scroll" ||
+            key === "spellcheck" ||
+            key === "multi_instance" ||
+            key === "disable_autogain" ||
+            key === "disable_http_cache" ||
+            key === "mobile_mode" ||
+            key === "use_system_css_editor" ||
+            key === "popout_pip" ||
+            key === "minimize_to_tray" ||
+            key === "bounce_on_ping" ||
+            key === "sdp_h264_baseline_rewrite"
+        ) {
+            if (typeof value !== "boolean") {
+                return Promise.reject(new TypeError("value must be a boolean for this key"));
+            }
+        } else if (key === "start_minimized") {
+            if (typeof value !== "string" || !SETTINGS_VALID_START_MINIMIZED.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported start modes"));
+            }
+        } else if (key === "tray") {
+            if (typeof value !== "string" || !SETTINGS_VALID_TRAY_ICONS.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported tray icons"));
+            }
+        } else if (key === "window_style") {
+            if (typeof value !== "string" || !SETTINGS_VALID_WINDOW_STYLES.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported window styles"));
+            }
+        } else if (key === "transparency") {
+            if (typeof value !== "string" || !SETTINGS_VALID_TRANSPARENCY.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported transparency modes"));
+            }
+        } else if (key === "window_material") {
+            if (typeof value !== "string" || !SETTINGS_VALID_WINDOW_MATERIALS.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported window materials"));
+            }
+        } else if (key === "performance_mode") {
+            if (typeof value !== "string" || !SETTINGS_VALID_PERFORMANCE_MODES.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported performance modes"));
+            }
+        } else if (key === "proxy_mode") {
+            if (typeof value !== "string" || !SETTINGS_VALID_PROXY_MODES.includes(value)) {
+                return Promise.reject(new TypeError("value must be one of the supported proxy modes"));
+            }
+        } else if (key === "proxy_rules" || key === "proxy_bypass_rules") {
+            if (
+                typeof value !== "string" ||
+                textEncoder.encode(value).length > MAX_SETTINGS_PROXY_RULES_BYTES ||
+                !isPrintableAscii(value)
+            ) {
+                return Promise.reject(new TypeError("value must be a bounded printable-ASCII server list"));
+            }
+        } else if (key === "proxy_pac_script") {
+            const lower = typeof value === "string" ? value.toLowerCase() : "";
+            if (
+                typeof value !== "string" ||
+                textEncoder.encode(value).length > MAX_SETTINGS_PAC_URL_BYTES ||
+                !(lower.startsWith("http://") || lower.startsWith("https://"))
+            ) {
+                return Promise.reject(new TypeError("value must be a bounded http(s) PAC URL"));
+            }
+        } else if (key === "no_bundle_updates") {
+            if (
+                !Array.isArray(value) ||
+                value.length > MAX_SETTINGS_MODS_ENTRIES ||
+                !value.every((entry) => typeof entry === "string" && SETTINGS_VALID_MODS.includes(entry))
+            ) {
+                return Promise.reject(new TypeError("value must be an array of known mod ids"));
+            }
+        } else if (key === "spellcheck_language") {
+            if (
+                !Array.isArray(value) ||
+                value.length > MAX_SETTINGS_LANGUAGES ||
+                !value.every(
+                    (entry) =>
+                        typeof entry === "string" &&
+                        entry.length > 0 &&
+                        textEncoder.encode(entry).length <= MAX_SETTINGS_LANG_TAG_BYTES,
+                )
+            ) {
+                return Promise.reject(new TypeError("value must be an array of bounded language tags"));
             }
         } else if (typeof value !== "boolean") {
             return Promise.reject(new TypeError("value must be a boolean for this key"));
@@ -379,9 +534,80 @@
                               : typeof payload.value === "boolean"
                                 ? payload.value
                                 : undefined
-                          : typeof payload.value === "boolean"
-                            ? payload.value
-                            : undefined;
+                          : key === "start_minimized"
+                            ? typeof payload.value === "string" &&
+                              SETTINGS_VALID_START_MINIMIZED.includes(payload.value)
+                                ? payload.value
+                                : undefined
+                            : key === "tray"
+                              ? typeof payload.value === "string" && SETTINGS_VALID_TRAY_ICONS.includes(payload.value)
+                                  ? payload.value
+                                  : undefined
+                              : key === "window_style"
+                                ? typeof payload.value === "string" &&
+                                  SETTINGS_VALID_WINDOW_STYLES.includes(payload.value)
+                                    ? payload.value
+                                    : undefined
+                                : key === "transparency"
+                                  ? typeof payload.value === "string" &&
+                                    SETTINGS_VALID_TRANSPARENCY.includes(payload.value)
+                                      ? payload.value
+                                      : undefined
+                                  : key === "window_material"
+                                    ? typeof payload.value === "string" &&
+                                      SETTINGS_VALID_WINDOW_MATERIALS.includes(payload.value)
+                                        ? payload.value
+                                        : undefined
+                                    : key === "performance_mode"
+                                      ? typeof payload.value === "string" &&
+                                        SETTINGS_VALID_PERFORMANCE_MODES.includes(payload.value)
+                                          ? payload.value
+                                          : undefined
+                                      : key === "proxy_mode"
+                                        ? typeof payload.value === "string" &&
+                                          SETTINGS_VALID_PROXY_MODES.includes(payload.value)
+                                            ? payload.value
+                                            : undefined
+                                        : key === "proxy_rules" || key === "proxy_bypass_rules"
+                                          ? typeof payload.value === "string" &&
+                                            textEncoder.encode(payload.value).length <=
+                                              MAX_SETTINGS_PROXY_RULES_BYTES &&
+                                            isPrintableAscii(payload.value)
+                                              ? payload.value
+                                              : undefined
+                                          : key === "proxy_pac_script"
+                                            ? typeof payload.value === "string" &&
+                                              textEncoder.encode(payload.value).length <=
+                                                MAX_SETTINGS_PAC_URL_BYTES &&
+                                              (payload.value.toLowerCase().startsWith("http://") ||
+                                                payload.value.toLowerCase().startsWith("https://"))
+                                                ? payload.value
+                                                : undefined
+                                            : key === "no_bundle_updates"
+                                              ? Array.isArray(payload.value) &&
+                                                payload.value.length <= MAX_SETTINGS_MODS_ENTRIES &&
+                                                payload.value.every(
+                                                    (entry) =>
+                                                        typeof entry === "string" &&
+                                                        SETTINGS_VALID_MODS.includes(entry),
+                                                )
+                                                  ? payload.value
+                                                  : undefined
+                                              : key === "spellcheck_language"
+                                                ? Array.isArray(payload.value) &&
+                                                  payload.value.length <= MAX_SETTINGS_LANGUAGES &&
+                                                  payload.value.every(
+                                                      (entry) =>
+                                                          typeof entry === "string" &&
+                                                          entry.length > 0 &&
+                                                          textEncoder.encode(entry).length <=
+                                                            MAX_SETTINGS_LANG_TAG_BYTES,
+                                                  )
+                                                    ? payload.value
+                                                    : undefined
+                                                : typeof payload.value === "boolean"
+                                                  ? payload.value
+                                                  : undefined;
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -424,6 +650,23 @@
         "overlayButtonColor",
         "noBundleUpdates",
         "pluginStates",
+        "hardwareAcceleration",
+        "multiInstance",
+        "disableHttpCache",
+        "sdpH264BaselineRewrite",
+        "inviteWebsocket",
+        "processScanning",
+        "windowsLegacyScanning",
+        "startMinimized",
+        "tray",
+        "windowStyle",
+        "transparency",
+        "windowMaterial",
+        "performanceMode",
+        "proxyMode",
+        "proxyRules",
+        "proxyBypassRules",
+        "proxyPacScript",
     ];
     const SETTINGS_IMPORT_RESTART_KEYS = ["mods", "channel", "csp"];
 
@@ -957,6 +1200,23 @@
         return request({ type: "mod_clear_cache", payload: {} }, timeoutMs);
     }
 
+    // System CSS editor handoff (`useSystemCssEditor` parity with Electron
+    // shell open-path behavior): opens the host-owned QuickCSS file in the
+    // OS-associated editor. Parameter-free by protocol — the file is fixed
+    // host-side and no path crosses either direction.
+    function openSystemCssEditor(timeoutMs = 10000) {
+        requireCapability("css_editor.open_system");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "css_editor_open_system", payload: {} }, timeoutMs).then((payload) => {
+            if (!payload || payload.opened !== true) {
+                throw new Error("Native CSS editor response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
     // Spellcheck state readout (F18): Electron `webPreferences.spellcheck`
     // + `session.setSpellCheckerLanguages` parity. Parameter-free by
     // protocol: the host validates the authoritative settings pair
@@ -1366,11 +1626,29 @@
     }
 
     function importGalleryDialog(_meta, _timeoutMs = 120_000) {
-        // F5b dialog slice: no host file picker exists yet, so the
-        // capability is absent and this throws UNSUPPORTED_CAPABILITY
-        // honestly. The Gallery page gates the Import button natively.
+        // Host-owned multi-file picker plus bounded ingestion: an exact
+        // empty payload in, the ingested/skipped counts plus new ids out.
+        // No paths, names, or URLs cross either direction.
         requireCapability("gallery.import_files");
-        return Promise.reject(new Error("unreachable"));
+        const timeoutMs = _timeoutMs;
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "gallery_import_files", payload: {} }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                !Number.isSafeInteger(payload.imported) ||
+                payload.imported < 0 ||
+                !Number.isSafeInteger(payload.skipped) ||
+                payload.skipped < 0 ||
+                !Array.isArray(payload.ids) ||
+                !payload.ids.every((entry) => typeof entry === "string")
+            ) {
+                throw new Error("Native gallery import response schema is invalid");
+            }
+            return payload;
+        });
     }
 
     function removeGalleryItem(id, timeoutMs = 5000) {
@@ -1492,12 +1770,30 @@
         return openFolder("gallery").then(() => undefined);
     }
 
-    function exportGalleryItems(_ids, _timeoutMs = 120_000) {
-        // F5b dialog slice: no host directory picker exists yet, so the
-        // capability is absent and this throws UNSUPPORTED_CAPABILITY
-        // honestly. The Gallery page gates the Copy-to-folder button.
+    function exportGalleryItems(ids, _timeoutMs = 120_000) {
+        // Host-owned folder picker plus bounded copy-out over item ids:
+        // exported/skipped counts out. No paths cross either direction.
         requireCapability("gallery.export_items");
-        return Promise.reject(new Error("unreachable"));
+        if (!Array.isArray(ids) || ids.length === 0 || ids.length > 200 || !ids.every((id) => typeof id === "string")) {
+            return Promise.reject(new TypeError("ids must be a non-empty array of at most 200 id strings"));
+        }
+        const timeoutMs = _timeoutMs;
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "gallery_export_items", payload: { ids } }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                !Number.isSafeInteger(payload.exported) ||
+                payload.exported < 0 ||
+                !Number.isSafeInteger(payload.skipped) ||
+                payload.skipped < 0
+            ) {
+                throw new Error("Native gallery export response schema is invalid");
+            }
+            return payload;
+        });
     }
 
     function getGalleryFile(id, timeoutMs = 30_000) {
@@ -2260,7 +2556,57 @@
                         ? typeof payload?.value === "string" && SETTINGS_VALID_CHANNELS.includes(payload.value)
                         : payload?.key === "scan_interval"
                           ? Number.isSafeInteger(payload?.value) && payload.value >= 1000 && payload.value <= 600000
-                          : SETTINGS_SET_KEYS.includes(payload?.key) && typeof payload?.value === "boolean";
+                          : payload?.key === "start_minimized"
+                            ? typeof payload?.value === "string" &&
+                              SETTINGS_VALID_START_MINIMIZED.includes(payload.value)
+                            : payload?.key === "tray"
+                              ? typeof payload?.value === "string" && SETTINGS_VALID_TRAY_ICONS.includes(payload.value)
+                              : payload?.key === "window_style"
+                                ? typeof payload?.value === "string" &&
+                                  SETTINGS_VALID_WINDOW_STYLES.includes(payload.value)
+                                : payload?.key === "transparency"
+                                  ? typeof payload?.value === "string" &&
+                                    SETTINGS_VALID_TRANSPARENCY.includes(payload.value)
+                                  : payload?.key === "window_material"
+                                    ? typeof payload?.value === "string" &&
+                                      SETTINGS_VALID_WINDOW_MATERIALS.includes(payload.value)
+                                    : payload?.key === "performance_mode"
+                                      ? typeof payload?.value === "string" &&
+                                        SETTINGS_VALID_PERFORMANCE_MODES.includes(payload.value)
+                                      : payload?.key === "proxy_mode"
+                                        ? typeof payload?.value === "string" &&
+                                          SETTINGS_VALID_PROXY_MODES.includes(payload.value)
+                                        : payload?.key === "proxy_rules" || payload?.key === "proxy_bypass_rules"
+                                          ? typeof payload?.value === "string" &&
+                                            textEncoder.encode(payload.value).length <=
+                                              MAX_SETTINGS_PROXY_RULES_BYTES &&
+                                            isPrintableAscii(payload.value)
+                                          : payload?.key === "proxy_pac_script"
+                                            ? typeof payload?.value === "string" &&
+                                              textEncoder.encode(payload.value).length <=
+                                                MAX_SETTINGS_PAC_URL_BYTES &&
+                                              (payload.value.toLowerCase().startsWith("http://") ||
+                                                payload.value.toLowerCase().startsWith("https://"))
+                                            : payload?.key === "no_bundle_updates"
+                                              ? Array.isArray(payload?.value) &&
+                                                payload.value.length <= MAX_SETTINGS_MODS_ENTRIES &&
+                                                payload.value.every(
+                                                    (entry) =>
+                                                        typeof entry === "string" &&
+                                                        SETTINGS_VALID_MODS.includes(entry),
+                                                )
+                                              : payload?.key === "spellcheck_language"
+                                                ? Array.isArray(payload?.value) &&
+                                                  payload.value.length <= MAX_SETTINGS_LANGUAGES &&
+                                                  payload.value.every(
+                                                      (entry) =>
+                                                          typeof entry === "string" &&
+                                                          entry.length > 0 &&
+                                                          textEncoder.encode(entry).length <=
+                                                            MAX_SETTINGS_LANG_TAG_BYTES,
+                                                  )
+                                                : SETTINGS_SET_KEYS.includes(payload?.key) &&
+                                                  typeof payload?.value === "boolean";
             if (
                 !payload ||
                 Object.keys(payload).length !== 4 ||
@@ -2622,6 +2968,14 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "css_editor_system_opened") {
+            const payload = response.payload.payload;
+            // Launch ack only: no path crosses either direction.
+            if (!payload || Object.keys(payload).length !== 1 || payload.opened !== true) {
+                request.reject(new Error("Native CSS editor response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "plugin_storage_read") {
             const payload = response.payload.payload;
             if (
@@ -2766,6 +3120,38 @@
                 payload.removed < 0
             ) {
                 request.reject(new Error("Native gallery bulk removal response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_import_files") {
+            const payload = response.payload.payload;
+            // Counts plus new ids only: no paths or names may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 3 ||
+                !Number.isSafeInteger(payload.imported) ||
+                payload.imported < 0 ||
+                !Number.isSafeInteger(payload.skipped) ||
+                payload.skipped < 0 ||
+                !Array.isArray(payload.ids) ||
+                !payload.ids.every((entry) => typeof entry === "string")
+            ) {
+                request.reject(new Error("Native gallery import response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_export_items") {
+            const payload = response.payload.payload;
+            // Counts only: no paths may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 2 ||
+                !Number.isSafeInteger(payload.exported) ||
+                payload.exported < 0 ||
+                !Number.isSafeInteger(payload.skipped) ||
+                payload.skipped < 0
+            ) {
+                request.reject(new Error("Native gallery export response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -3219,6 +3605,14 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "window_custom_icon_set") {
+            const payload = response.payload.payload;
+            // Applied flag only: no path crosses either direction.
+            if (!payload || Object.keys(payload).length !== 1 || typeof payload.ok !== "boolean") {
+                request.reject(new Error("Native custom icon response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "badge_state") {
             const payload = response.payload.payload;
             // Overlay snapshot only: the closed kind plus the bounded
@@ -3570,6 +3964,21 @@
                 requireCapability("window.get_state");
                 return request({ type: "window_get_state", payload: {} });
             },
+            // Custom window icon (host-owned `.ico`/`.png` picker): an
+            // exact empty payload in, the applied flag out. No path, URL,
+            // or bytes cross either direction.
+            setCustomIcon(timeoutMs = 120_000) {
+                requireCapability("window.set_custom_icon");
+                if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+                    return Promise.reject(new TypeError("timeout must be a positive finite number"));
+                }
+                return request({ type: "window_set_custom_icon", payload: {} }, timeoutMs).then((payload) => {
+                    if (!payload || typeof payload.ok !== "boolean") {
+                        throw new Error("Native custom icon response schema is invalid");
+                    }
+                    return payload;
+                });
+            },
             // Synchronous local-state reads — NO synchronous native bridge
             // call, NO polling. Seeded from boot snapshot and converged by
             // the typed window_state host event.
@@ -3632,6 +4041,7 @@
         addUrl: addGalleryUrl,
         addLink: addGalleryLink,
         importDialog: importGalleryDialog,
+        importFiles: importGalleryDialog,
         remove: removeGalleryItem,
         bulkRemove: bulkRemoveGalleryItems,
         update: updateGalleryItem,
@@ -3797,6 +4207,9 @@
     // Client-mod cache wipe only: an exact empty payload in, the fixed
     // allowlist outcome out. User-owned bundles can never be selected.
     const mod = Object.freeze({ clearCache: clearModCache });
+    // System CSS editor handoff only: an exact empty payload in, the launch
+    // ack out. The file is fixed host-side.
+    const cssEditor = Object.freeze({ openSystem: openSystemCssEditor });
     // Native menu template only (F15): an exact empty payload in, the
     // Electron-mirrored template out. No menu bar is installed (frameless
     // window, no tao menu API); labels resolve through getLang.
@@ -3852,6 +4265,7 @@
                 toggleFullscreen: native.window.toggleFullscreen,
                 quit: native.window.quit,
                 getState: native.window.getState,
+                setCustomIcon: native.window.setCustomIcon,
                 maximized: native.window.maximized,
                 isNormal: native.window.isNormal,
             }),
@@ -3871,6 +4285,7 @@
             graphics,
             tray,
             mod,
+            cssEditor,
             menus,
             rpc,
             spellcheck,

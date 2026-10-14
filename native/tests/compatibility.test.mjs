@@ -8367,3 +8367,154 @@ test("crash responses reject hostile or malformed payloads without resolving", a
     respondCrashList(window, listMessage, hostile);
     await assert.rejects(listPending, /crash inventory response schema is invalid/);
 });
+
+test("settings.set carries the native-shell bool, enum, and array keys end to end", async () => {
+    const { window } = createSettingsSetRuntime();
+    const cases = [
+        ["hardware_acceleration", false],
+        ["bounce_on_ping", true],
+        ["tray", "disabled"],
+        ["window_material", "acrylic"],
+        ["performance_mode", "balanced"],
+        ["proxy_mode", "direct"],
+        ["proxy_rules", "http://127.0.0.1:8080"],
+        ["proxy_pac_script", "https://example.invalid/proxy.pac"],
+        ["no_bundle_updates", ["shelter"]],
+        ["spellcheck_language", ["en-US"]],
+    ];
+    for (const [key, value] of cases) {
+        const pending = window.remcord.settings.set(key, value);
+        const message = window.messages.filter((entry) => entry.command?.type === "settings_set").at(-1);
+        assert.ok(message);
+        assert.deepEqual(message.command, { type: "settings_set", payload: { key, value } });
+        respondSettingsSet(window, message, key, value);
+        assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { key, value });
+    }
+});
+
+test("settings.set rejects hostile native-shell values client-side without sending", async () => {
+    const { window } = createSettingsSetRuntime();
+    const before = window.messages.filter((entry) => entry.command?.type === "settings_set").length;
+    const hostile = [
+        ["tray", "ministry"],
+        ["proxy_mode", "socks"],
+        ["hardware_acceleration", "yes"],
+        ["no_bundle_updates", ["shelter", "../escape"]],
+        ["spellcheck_language", ["en-US", "x".repeat(36)]],
+        ["proxy_pac_script", "file:///etc/passwd"],
+        ["bogus_key", true],
+    ];
+    for (const [key, value] of hostile) {
+        await assert.rejects(window.remcord.settings.set(key, value), TypeError);
+    }
+    assert.equal(
+        window.messages.filter((entry) => entry.command?.type === "settings_set").length,
+        before,
+    );
+});
+
+test("css_editor.openSystem sends the exact empty payload and resolves the ack", async () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "css_editor.open_system"]);
+    assert.equal(typeof window.remcord.cssEditor.openSystem, "function");
+    assert.equal(Object.isFrozen(window.remcord.cssEditor), true);
+    const pending = window.remcord.cssEditor.openSystem();
+    const message = window.messages.find((entry) => entry.command?.type === "css_editor_open_system");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "css_editor_open_system", payload: {} });
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: true,
+                payload: { type: "css_editor_system_opened", payload: { opened: true } },
+                error: null,
+            },
+        }),
+    );
+    assert.deepEqual(await pending, { opened: true });
+});
+
+test("css_editor.openSystem throws UNSUPPORTED_CAPABILITY when the snapshot denies it", () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("css_editor.open_system"), false);
+    assert.throws(
+        () => window.remcord.cssEditor.openSystem(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((entry) => entry.command?.type === "css_editor_open_system"),
+        false,
+    );
+});
+
+test("gallery.import_files sends the exact empty payload and resolves counts plus ids", async () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "gallery.import_files"]);
+    const pending = window.remcord.gallery.importFiles();
+    const message = window.messages.find((entry) => entry.command?.type === "gallery_import_files");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "gallery_import_files", payload: {} });
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: true,
+                payload: {
+                    type: "gallery_import_files",
+                    payload: { imported: 2, skipped: 1, ids: ["a", "b"] },
+                },
+                error: null,
+            },
+        }),
+    );
+    assert.deepEqual(await pending, { imported: 2, skipped: 1, ids: ["a", "b"] });
+});
+
+test("gallery.export_items sends bounded ids and resolves counts", async () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "gallery.export_items"]);
+    const pending = window.remcord.gallery.exportItems(["a", "b"]);
+    const message = window.messages.find((entry) => entry.command?.type === "gallery_export_items");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "gallery_export_items", payload: { ids: ["a", "b"] } });
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: true,
+                payload: { type: "gallery_export_items", payload: { exported: 2, skipped: 0 } },
+                error: null,
+            },
+        }),
+    );
+    assert.deepEqual(await pending, { exported: 2, skipped: 0 });
+    await assert.rejects(window.remcord.gallery.exportItems([]), TypeError);
+    await assert.rejects(window.remcord.gallery.exportItems("a"), TypeError);
+    await assert.rejects(
+        window.remcord.gallery.exportItems(new Array(201).fill("a")),
+        TypeError,
+    );
+});
+
+test("window.setCustomIcon sends the exact empty payload and resolves the flag", async () => {
+    const { window } = createRuntime("https://discord.com", ["bridge.ping", "window.set_custom_icon"]);
+    assert.equal(typeof window.remcord.native.window.setCustomIcon, "function");
+    const pending = window.remcord.native.window.setCustomIcon();
+    const message = window.messages.find((entry) => entry.command?.type === "window_set_custom_icon");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "window_set_custom_icon", payload: {} });
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: message.request_id,
+                ok: true,
+                payload: { type: "window_custom_icon_set", payload: { ok: true } },
+                error: null,
+            },
+        }),
+    );
+    assert.deepEqual(await pending, { ok: true });
+    assert.equal(window.remcord.window.setCustomIcon, window.remcord.native.window.setCustomIcon);
+});

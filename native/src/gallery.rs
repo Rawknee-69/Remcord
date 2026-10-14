@@ -405,6 +405,226 @@ fn entry_present(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
+/// Maximum files ingested per import request (picker multi-select can
+/// return more; the excess counts as skipped, never fails the batch).
+pub const MAX_IMPORT_FILES: usize = 32;
+
+/// Maximum items copied per export request.
+pub const MAX_EXPORT_ITEMS: usize = 200;
+
+/// Summary of one local-file import: counts plus the new item ids
+/// (newest first) so the UI can refresh and select.
+pub struct GalleryImportSummary {
+    pub imported: usize,
+    pub skipped: usize,
+    pub ids: Vec<String>,
+}
+
+/// Summary of one folder export: copied vs skipped (link-only items,
+/// missing files, and over-cap selections skip loudly).
+pub struct GalleryExportSummary {
+    pub exported: usize,
+    pub skipped: usize,
+}
+
+/// Kind + MIME for an imported file by extension (closed map; unknown
+/// extensions store as generic files, never guessed content).
+fn import_kind_for_extension(ext: &str) -> (GalleryKind, &'static str) {
+    match ext {
+        "png" => (GalleryKind::Image, "image/png"),
+        "jpg" | "jpeg" => (GalleryKind::Image, "image/jpeg"),
+        "gif" => (GalleryKind::Image, "image/gif"),
+        "webp" => (GalleryKind::Image, "image/webp"),
+        "bmp" => (GalleryKind::Image, "image/bmp"),
+        "avif" => (GalleryKind::Image, "image/avif"),
+        "svg" => (GalleryKind::Image, "image/svg+xml"),
+        "mp4" => (GalleryKind::Video, "video/mp4"),
+        "webm" => (GalleryKind::Video, "video/webm"),
+        "mov" => (GalleryKind::Video, "video/quicktime"),
+        "mkv" => (GalleryKind::Video, "video/x-matroska"),
+        _ => (GalleryKind::File, "application/octet-stream"),
+    }
+}
+
+/// Unique file name inside `dir`: the sanitized base name, suffixed with
+/// ` (2)`, ` (3)`, … on collision (bounded attempts, then a typed error).
+fn unique_file_name(dir: &std::path::Path, base: &str) -> Option<String> {
+    if !dir.join(base).exists() {
+        return Some(base.to_owned());
+    }
+    let (stem, ext) = match base.rfind('.') {
+        Some(dot) if dot > 0 => (&base[..dot], &base[dot..]),
+        _ => (base, ""),
+    };
+    for n in 2..=999 {
+        let candidate = format!("{stem} ({n}){ext}");
+        if candidate.len() > 128 {
+            return None;
+        }
+        if !dir.join(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Ingests local files into the gallery (the `Import files` button).
+/// Host-driven: `paths` come from the host file picker, never the
+/// renderer. Each entry is validated (regular file, bounded bytes),
+/// copied under a unique sanitized name, and indexed newest-first.
+/// Individual failures skip loudly; only storage/index failures fail the
+/// batch. Directories, links, and oversize files never enter the store.
+pub fn import_local_files(
+    profile_dir: &Path,
+    paths: &[std::path::PathBuf],
+) -> Result<GalleryImportSummary, GalleryFailure> {
+    let dir = gallery_files_dir(profile_dir);
+    std::fs::create_dir_all(&dir).map_err(|_| unavailable("storage"))?;
+    let mut index = load_gallery_index(profile_dir)?;
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut ids = Vec::new();
+    for path in paths.iter().take(MAX_IMPORT_FILES) {
+        // Never follow links; directories are not files.
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => meta,
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if meta.len() > MAX_MEDIA_BYTES as u64 {
+            skipped += 1;
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let (kind, mime) = import_kind_for_extension(&ext);
+        let base = safe_file_name(
+            &path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file"),
+        );
+        let name = match unique_file_name(&dir, &base) {
+            Some(name) => name,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if std::fs::copy(path, dir.join(&name)).is_err() {
+            skipped += 1;
+            continue;
+        }
+        let stored = match std::fs::symlink_metadata(dir.join(&name)) {
+            Ok(meta) => meta.len(),
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let title = slice_chars(
+            &path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("file"),
+            256,
+        );
+        let item = GalleryItem {
+            id: create_gallery_id(now_ms()),
+            kind,
+            source_url: String::new(),
+            title,
+            file_name: name.clone(),
+            local_file: format!("{FILES_DIR_NAME}/{name}"),
+            size_bytes: stored,
+            mime: mime.to_owned(),
+            guild_id: String::new(),
+            guild_name: String::new(),
+            channel_id: String::new(),
+            channel_name: String::new(),
+            author_name: String::new(),
+            message_id: String::new(),
+            saved_at_ms: now_ms(),
+            categories: Vec::new(),
+        };
+        if index.items.len() >= MAX_ITEMS {
+            let _ = std::fs::remove_file(dir.join(&name));
+            skipped += 1;
+            continue;
+        }
+        ids.push(item.id.clone());
+        index.items.insert(0, item);
+        imported += 1;
+    }
+    skipped += paths.len().saturating_sub(MAX_IMPORT_FILES);
+    persist_gallery_index(profile_dir, &index)?;
+    Ok(GalleryImportSummary {
+        imported,
+        skipped,
+        ids,
+    })
+}
+
+/// Copies gallery items into a host-chosen directory (the `Copy to folder`
+/// button). `dest_dir` comes from the host folder picker and is re-checked
+/// (must exist, must be a directory); link-only items and missing files
+/// skip loudly. Destination collisions get unique names; nothing is ever
+/// overwritten.
+pub fn export_items_to_dir(
+    profile_dir: &Path,
+    ids: &[String],
+    dest_dir: &Path,
+) -> Result<GalleryExportSummary, GalleryFailure> {
+    let dest_meta = std::fs::symlink_metadata(dest_dir).map_err(|_| {
+        failure(
+            "EXPORT_DESTINATION_INVALID",
+            "export destination is not available",
+        )
+    })?;
+    if !dest_meta.is_dir() {
+        return Err(failure(
+            "EXPORT_DESTINATION_INVALID",
+            "export destination is not a folder",
+        ));
+    }
+    let index = load_gallery_index(profile_dir)?;
+    let mut exported = 0usize;
+    let mut skipped = 0usize;
+    for id in ids.iter().take(MAX_EXPORT_ITEMS) {
+        let Some(item) = index.items.iter().find(|item| item.id == *id) else {
+            skipped += 1;
+            continue;
+        };
+        if item.local_file.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let Some(source) = resolve_gallery_file(profile_dir, &item.local_file) else {
+            skipped += 1;
+            continue;
+        };
+        let name = match unique_file_name(dest_dir, &item.file_name) {
+            Some(name) => name,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if std::fs::copy(&source, dest_dir.join(&name)).is_err() {
+            skipped += 1;
+            continue;
+        }
+        exported += 1;
+    }
+    skipped += ids.len().saturating_sub(MAX_EXPORT_ITEMS);
+    Ok(GalleryExportSummary { exported, skipped })
+}
+
 /// Resolves a stored `files/<name>` reference against the gallery root.
 /// Anything that is not exactly one bare file name under `files/`, or
 /// that is missing / not a regular file / a link, resolves to `None`
@@ -1123,6 +1343,165 @@ pub fn encode_base64(bytes: &[u8]) -> String {
         });
     }
     out
+}
+
+/// Host file pickers for gallery import/export (Common Item Dialog,
+/// STA-worker only — never the WebView/UI thread).
+///
+/// Import shows an image/video/all-files multi-select; export shows a
+/// folder picker. Both return `Ok(None)` on user dismissal (normal control
+/// flow, never an error) and a fixed-vocabulary failure otherwise. The
+/// caller (STA worker in `main.rs`) owns COM init; every COM call below is
+/// unsafe by windows-crate contract under that guarantee.
+#[cfg(target_os = "windows")]
+pub fn show_gallery_import_picker() -> Result<Option<Vec<std::path::PathBuf>>, GalleryFailure> {
+    use windows::{
+        core::HSTRING,
+        Win32::{
+            System::Com::{CoCreateInstance, CLSCTX_ALL},
+            UI::Shell::{
+                Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT,
+                FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH,
+            },
+        },
+    };
+    let dialog: IFileOpenDialog = unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) }
+        .map_err(|_| failure("IMPORT_FAILED", "gallery import picker cannot be shown"))?;
+    let failed = || failure("IMPORT_FAILED", "gallery import picker cannot be shown");
+    unsafe {
+        dialog
+            .SetTitle(&HSTRING::from("Import files to Gallery"))
+            .map_err(|_| failed())?;
+        dialog
+            .SetOkButtonLabel(&HSTRING::from("Import"))
+            .map_err(|_| failed())?;
+        let images_name = HSTRING::from("Images and videos");
+        let images_spec =
+            HSTRING::from("*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.mp4;*.webm;*.mov;*.mkv");
+        let all_name = HSTRING::from("All files");
+        let all_spec = HSTRING::from("*.*");
+        let specs = [
+            COMDLG_FILTERSPEC {
+                pszName: windows::core::PCWSTR(images_name.as_ptr()),
+                pszSpec: windows::core::PCWSTR(images_spec.as_ptr()),
+            },
+            COMDLG_FILTERSPEC {
+                pszName: windows::core::PCWSTR(all_name.as_ptr()),
+                pszSpec: windows::core::PCWSTR(all_spec.as_ptr()),
+            },
+        ];
+        dialog.SetFileTypes(&specs).map_err(|_| failed())?;
+        let options = dialog.GetOptions().map_err(|_| failed())?;
+        dialog
+            .SetOptions(options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST)
+            .map_err(|_| failed())?;
+        match dialog.Show(None) {
+            Ok(()) => {}
+            Err(error) => {
+                if error.code() == windows::core::HRESULT::from_win32(1223) {
+                    return Ok(None);
+                }
+                return Err(failed());
+            }
+        }
+        let results = dialog.GetResults().map_err(|_| failed())?;
+        let count = results.GetCount().map_err(|_| failed())?;
+        let mut selected = Vec::new();
+        for index in 0..count {
+            let item = results.GetItemAt(index).map_err(|_| failed())?;
+            let display = item
+                .GetDisplayName(SIGDN_FILESYSPATH)
+                .map_err(|_| failed())?;
+            let text = unsafe { display.to_string().unwrap_or_default() };
+            unsafe {
+                windows::Win32::System::Com::CoTaskMemFree(Some(
+                    display.0 as *const std::ffi::c_void,
+                ));
+            }
+            if text.is_empty() {
+                return Err(failed());
+            }
+            selected.push(std::path::PathBuf::from(text));
+            if selected.len() >= MAX_IMPORT_FILES {
+                break;
+            }
+        }
+        if selected.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(selected))
+        }
+    }
+}
+
+/// Host folder picker for gallery export (directory-pick mode). Same
+/// contract as the import picker: `Ok(None)` on dismissal.
+#[cfg(target_os = "windows")]
+pub fn show_gallery_export_dir_picker() -> Result<Option<std::path::PathBuf>, GalleryFailure> {
+    use windows::{
+        core::HSTRING,
+        Win32::{
+            System::Com::{CoCreateInstance, CLSCTX_ALL},
+            UI::Shell::{
+                FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+                FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+            },
+        },
+    };
+    let dialog: IFileOpenDialog = unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) }
+        .map_err(|_| failure("EXPORT_FAILED", "gallery export picker cannot be shown"))?;
+    let failed = || failure("EXPORT_FAILED", "gallery export picker cannot be shown");
+    unsafe {
+        dialog
+            .SetTitle(&HSTRING::from("Copy gallery items to folder"))
+            .map_err(|_| failed())?;
+        dialog
+            .SetOkButtonLabel(&HSTRING::from("Copy here"))
+            .map_err(|_| failed())?;
+        let options = dialog.GetOptions().map_err(|_| failed())?;
+        dialog
+            .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST)
+            .map_err(|_| failed())?;
+        match dialog.Show(None) {
+            Ok(()) => {}
+            Err(error) => {
+                if error.code() == windows::core::HRESULT::from_win32(1223) {
+                    return Ok(None);
+                }
+                return Err(failed());
+            }
+        }
+        let result = dialog.GetResult().map_err(|_| failed())?;
+        let display = result
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .map_err(|_| failed())?;
+        let text = unsafe { display.to_string().unwrap_or_default() };
+        unsafe {
+            windows::Win32::System::Com::CoTaskMemFree(Some(
+                display.0 as *const std::ffi::c_void,
+            ));
+        }
+        if text.is_empty() {
+            return Err(failed());
+        }
+        Ok(Some(std::path::PathBuf::from(text)))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn show_gallery_import_picker() -> Result<Option<Vec<std::path::PathBuf>>, GalleryFailure> {
+    Err(failure(
+        "IMPORT_FAILED",
+        "gallery import is not supported on this platform",
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn show_gallery_export_dir_picker() -> Result<Option<std::path::PathBuf>, GalleryFailure> {
+    Err(failure(
+        "EXPORT_FAILED",
+        "gallery export is not supported on this platform",
+    ))
 }
 
 #[cfg(test)]

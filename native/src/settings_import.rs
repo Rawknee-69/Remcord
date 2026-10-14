@@ -183,6 +183,74 @@ pub const IMPORTABLE_KEYS: &[ImportableKey] = &[
         rationale: "exact ValidMods members",
     },
     ImportableKey {
+        key: "hardwareAcceleration",
+        rationale: "pure preference bool; selects WebView2 GPU switches",
+    },
+    ImportableKey {
+        key: "multiInstance",
+        rationale: "pure preference bool; selects the single-instance gate",
+    },
+    ImportableKey {
+        key: "disableHttpCache",
+        rationale: "pure preference bool; selects a Chromium cache switch",
+    },
+    ImportableKey {
+        key: "sdpH264BaselineRewrite",
+        rationale: "pure preference bool; gates the SDP rewrite layer",
+    },
+    ImportableKey {
+        key: "inviteWebsocket",
+        rationale: "pure preference bool; read by the arRPC milestone",
+    },
+    ImportableKey {
+        key: "processScanning",
+        rationale: "pure preference bool; read by the arRPC milestone",
+    },
+    ImportableKey {
+        key: "windowsLegacyScanning",
+        rationale: "pure preference bool; read by the arRPC milestone",
+    },
+    ImportableKey {
+        key: "startMinimized",
+        rationale: "exact launch-visibility mode",
+    },
+    ImportableKey {
+        key: "tray",
+        rationale: "exact tray icon value",
+    },
+    ImportableKey {
+        key: "windowStyle",
+        rationale: "exact window chrome style",
+    },
+    ImportableKey {
+        key: "transparency",
+        rationale: "exact transparency mode",
+    },
+    ImportableKey {
+        key: "windowMaterial",
+        rationale: "exact backdrop material",
+    },
+    ImportableKey {
+        key: "performanceMode",
+        rationale: "exact GPU/CPU preset name",
+    },
+    ImportableKey {
+        key: "proxyMode",
+        rationale: "exact proxy mode",
+    },
+    ImportableKey {
+        key: "proxyRules",
+        rationale: "bounded printable-ASCII server list",
+    },
+    ImportableKey {
+        key: "proxyBypassRules",
+        rationale: "bounded printable-ASCII bypass list",
+    },
+    ImportableKey {
+        key: "proxyPacScript",
+        rationale: "bounded http(s) PAC URL",
+    },
+    ImportableKey {
         key: "pluginStates",
         rationale: "bounded plugin-id to bool map",
     },
@@ -313,7 +381,14 @@ pub fn extract_importable_values(
             | "bounceOnPing"
             | "useSystemCssEditor"
             | "minimizeToTray"
-            | "disableAutogain" => raw.as_bool().map(serde_json::Value::Bool),
+            | "disableAutogain"
+            | "hardwareAcceleration"
+            | "multiInstance"
+            | "disableHttpCache"
+            | "sdpH264BaselineRewrite"
+            | "inviteWebsocket"
+            | "processScanning"
+            | "windowsLegacyScanning" => raw.as_bool().map(serde_json::Value::Bool),
             "spellcheckLanguage" => raw.as_array().and_then(|entries| {
                 if entries.len() > MAX_SPELLCHECK_LANGUAGES {
                     return None;
@@ -332,6 +407,53 @@ pub fn extract_importable_values(
                 .as_u64()
                 .filter(|ms| (*ms >= MIN_SCAN_INTERVAL_MS) && (*ms <= MAX_SCAN_INTERVAL_MS))
                 .map(serde_json::Value::from),
+            "startMinimized" => raw
+                .as_str()
+                .filter(|mode| crate::settings::VALID_START_MINIMIZED_MODES.contains(mode))
+                .map(|mode| serde_json::Value::String(mode.to_owned())),
+            "tray" => raw
+                .as_str()
+                .filter(|icon| crate::settings::VALID_TRAY_ICONS.contains(icon))
+                .map(|icon| serde_json::Value::String(icon.to_owned())),
+            "windowStyle" => raw
+                .as_str()
+                .filter(|style| crate::settings::VALID_WINDOW_STYLES.contains(style))
+                .map(|style| serde_json::Value::String(style.to_owned())),
+            "transparency" => raw
+                .as_str()
+                .filter(|mode| crate::settings::VALID_TRANSPARENCY_MODES.contains(mode))
+                .map(|mode| serde_json::Value::String(mode.to_owned())),
+            "windowMaterial" => raw
+                .as_str()
+                .filter(|material| crate::settings::VALID_WINDOW_MATERIALS.contains(material))
+                .map(|material| serde_json::Value::String(material.to_owned())),
+            "performanceMode" => raw
+                .as_str()
+                .filter(|mode| crate::settings::VALID_PERFORMANCE_MODES.contains(mode))
+                .map(|mode| serde_json::Value::String(mode.to_owned())),
+            "proxyMode" => raw
+                .as_str()
+                .filter(|mode| crate::settings::VALID_PROXY_MODES.contains(mode))
+                .map(|mode| serde_json::Value::String(mode.to_owned())),
+            "proxyRules" | "proxyBypassRules" => raw.as_str().and_then(|rules| {
+                if rules.len() > crate::settings::MAX_PROXY_RULES_BYTES
+                    || rules.is_empty()
+                    || !rules.bytes().all(|byte| byte >= 0x20 && byte < 0x7F)
+                {
+                    return None;
+                }
+                Some(serde_json::Value::String(rules.to_owned()))
+            }),
+            "proxyPacScript" => raw.as_str().and_then(|url| {
+                if url.len() > crate::settings::MAX_PAC_URL_BYTES {
+                    return None;
+                }
+                let lower = url.to_ascii_lowercase();
+                if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                    return None;
+                }
+                Some(serde_json::Value::String(url.to_owned()))
+            }),
             "overlayButtonColor" => raw
                 .as_str()
                 .filter(|color| is_hex_color(color))
@@ -517,12 +639,12 @@ mod tests {
         assert!(keys.contains(&"spellcheckLanguage"));
         assert!(keys.contains(&"noBundleUpdates"));
         assert!(keys.contains(&"pluginStates"));
-        assert!(!keys.contains(&"windowStyle"));
+        assert!(keys.contains(&"windowStyle"));
+        assert!(keys.contains(&"proxyMode"));
         assert!(!keys.contains(&"additionalArguments"));
         assert!(!keys.contains(&"customIcon"));
         assert!(!keys.contains(&"galleryRoot"));
         assert!(!keys.contains(&"keybinds"));
-        assert!(!keys.contains(&"proxyMode"));
         assert!(skipped.is_empty());
     }
 

@@ -1,6 +1,7 @@
 mod app;
 mod app_icon;
 mod arrpc;
+mod audio_processing;
 mod aux_windows;
 mod backup;
 mod badge;
@@ -12,6 +13,7 @@ mod clipboard;
 mod close_behavior;
 mod crash_reporting;
 mod css_watch;
+mod css_editor;
 mod custom_bundle;
 mod dev_hooks;
 mod diagnostics;
@@ -35,6 +37,7 @@ mod navigation_gate;
 mod net_filter;
 mod new_window;
 mod permissions;
+mod performance_flags;
 mod plugin_storage;
 mod plugins;
 mod process_failure;
@@ -58,9 +61,11 @@ mod theme_import;
 mod themes;
 mod titlebar_plugin;
 mod tray;
+mod tray_icon;
 mod user_agent;
 mod voice_consent;
 mod webview_runtime;
+mod window_chrome;
 mod window_state;
 
 use std::{
@@ -105,12 +110,13 @@ use protocol::{
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse,
     BadgeStateResponse, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage,
     BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
-    ClipboardImageCopiedResponse, CrashFolderOpenedResponse, CrashListResponse,
+    ClipboardImageCopiedResponse, CrashFolderOpenedResponse, CrashListResponse, CssEditorSystemOpenedResponse,
     DiagnosticsInfoResponse, DiagnosticsWindowOpenedResponse, DownloadsFolderOpenedResponse,
     DownloadsListResponse, DownloadsRevealedResponse, FoldersOpenedResponse, GalleryAddResponse,
     GalleryBulkRemoveResponse, GalleryCategoriesResponse, GalleryCategoryAddResponse,
-    GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse, GalleryFileResponse,
-    GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse, GalleryUpdateResponse,
+    GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse, GalleryExportItemsResponse,
+    GalleryFileResponse,
+    GalleryImportFilesResponse, GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse, GalleryUpdateResponse,
     GalleryUsageResponse, KeybindsAddResponse, KeybindsListResponse, KeybindsRemoveResponse,
     KeybindsToggleResponse, LocalizationStringResponse, MenusTemplateResponse, ModBundleResponse,
     ModCacheClearedResponse, PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse,
@@ -121,7 +127,8 @@ use protocol::{
     RpcProcessRefreshResponse, SettingsConfigResponse, SettingsImportedResponse,
     SettingsMutationResponse, SettingsSetResponse, SpellcheckStateResponse, ThemeEnabledResponse,
     ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
-    ThemesListResponse, TrayGetStateResponse, WindowAckResponse, WindowStateResponse,
+    ThemesListResponse, TrayGetStateResponse, WindowAckResponse, WindowCustomIconSetResponse,
+    WindowStateResponse,
     PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
@@ -138,6 +145,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
+#[cfg(target_os = "windows")]
+use tao::platform::windows::WindowExtWindows;
 use theme_import::{
     import_from_paths, show_import_picker, FileImportOutcome, PickerOutcome, ThemeImportFailure,
     ThemeImportSummary,
@@ -640,6 +649,8 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "gallery.usage",
         "gallery.file",
         "gallery.root",
+        "gallery.import_files",
+        "gallery.export_items",
         "downloads.list",
         "downloads.open_folder",
         "downloads.reveal",
@@ -655,6 +666,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "diagnostics.open_gpu_page",
         "graphics.get_info",
         "clipboard.copy_image",
+        "css_editor.open_system",
         "mod.clear_cache",
         "spellcheck.get_state",
         "badge.get_state",
@@ -667,6 +679,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "window.toggle_fullscreen",
         "window.quit",
         "window.get_state",
+        "window.set_custom_icon",
         "tray.get_state",
     ],
 };
@@ -3153,6 +3166,31 @@ enum NativeEvent {
         received_at: Instant,
         result: Result<ThemeImportSummary, ThemeImportFailure>,
     },
+    /// Completed gallery file import from the dedicated STA gallery
+    /// worker. The worker owns the modal multi-file picker plus the
+    /// bounded ingestion; counts plus new ids (never paths) arrive here.
+    GalleryImportReady {
+        request_id: String,
+        received_at: Instant,
+        result: Result<gallery::GalleryImportSummary, gallery::GalleryFailure>,
+    },
+    /// Completed gallery folder export from the dedicated STA gallery
+    /// worker. The worker owns the modal folder picker plus the bounded
+    /// copy-out; counts (never paths) arrive here.
+    GalleryExportReady {
+        request_id: String,
+        received_at: Instant,
+        result: Result<gallery::GalleryExportSummary, gallery::GalleryFailure>,
+    },
+    /// Completed custom-icon pick from the dedicated STA window worker.
+    /// The worker owns the modal file dialog only; the picked path (never
+    /// validated there beyond dialog filters) arrives here for host
+    /// validation, persistence, and live application.
+    WindowCustomIconReady {
+        request_id: String,
+        received_at: Instant,
+        result: Result<Option<String>, String>,
+    },
     /// Completed backup save from the dedicated STA save worker. The worker
     /// owns collection, ZIP creation, the modal dialog, and the final write,
     /// so the WebView/UI thread never blocks; the bounded outcome
@@ -3251,6 +3289,13 @@ enum NativeEvent {
     DiscordDeeplink {
         path: String,
     },
+    /// Tray menu "Open Remcord" (or left-click): show and focus the main
+    /// window. Sent by the tray worker thread; all window work stays on the
+    /// main thread.
+    TrayRestore,
+    /// Tray menu "Quit Remcord": take the existing orderly shutdown path.
+    /// Sent by the tray worker thread.
+    TrayQuit,
 }
 
 fn is_discord_uri(uri: &Uri) -> bool {
@@ -3334,7 +3379,10 @@ fn apply_startup_visibility(window: &tao::window::Window, mode: StartupVisibilit
                     "[Window] startMinimized is \"tray\" but the tray icon is disabled; the window will stay hidden with no tray."
                 );
             }
-            // Stay hidden; there is no native tray icon yet to reveal from.
+            // Hide to tray (Electron `setSkipTaskbar(true)` + hide parity):
+            // the tray worker owns the reopen action.
+            let _ = window.set_skip_taskbar(true);
+            window.set_visible(false);
         }
     }
 }
@@ -3430,11 +3478,20 @@ fn document_start_script(
     prefer_hw_h264: bool,
     spellcheck_enabled: bool,
     spellcheck_lang: &str,
+    disable_autogain: bool,
 ) -> Result<String, serde_json::Error> {
     let media = screenshare_media::screenshare_media_script(prefer_hw_h264)
         .map_err(serde::de::Error::custom)?;
     let mut script = String::with_capacity(media.len() + 4096);
     script.push_str(&media);
+    // Microphone AGC kill switch (`disableAutogain`): wraps getUserMedia
+    // alongside the media-hardening layer so the constraint lands before
+    // any page script can bind the original.
+    if disable_autogain {
+        let autogain = audio_processing::autogain_script().map_err(serde::de::Error::custom)?;
+        script.push('\n');
+        script.push_str(&autogain);
+    }
     script.push('\n');
     script.push_str(&initialization_script(
         active_mods,
@@ -4358,6 +4415,46 @@ struct ThemeImportJob {
     proxy: EventLoopProxy<NativeEvent>,
 }
 
+/// Name of the dedicated STA worker thread that owns the gallery import
+/// file picker plus bounded ingestion, and the gallery export folder
+/// picker plus bounded copy-out. The modal dialogs must never run on the
+/// WebView/UI thread: COM is initialized exactly once for this thread
+/// (STA, as the Common Item Dialog requires — never once per request),
+/// and jobs run sequentially for determinism and bounded memory.
+const GALLERY_WORKER_NAME: &str = "remcord-gallery-sta";
+
+/// One gallery import/export job for the dedicated STA worker thread. The
+/// renderer supplies only validated item ids (export); the picker
+/// configuration, profile path, and destination are all host-owned.
+struct GalleryJob {
+    request_id: String,
+    received_at: Instant,
+    profile: PathBuf,
+    kind: GalleryJobKind,
+    proxy: EventLoopProxy<NativeEvent>,
+}
+
+/// Gallery worker job kind: dialog-backed import or id-list export.
+enum GalleryJobKind {
+    Import,
+    Export { ids: Vec<String> },
+}
+
+/// Name of the dedicated STA worker thread that owns the custom-icon
+/// file dialog. The modal dialog must never run on the WebView/UI thread:
+/// COM is initialized exactly once for this thread (STA, as the Common
+/// Item Dialog requires). Validation, persistence, and live application
+/// happen on the event loop when the picked path comes back.
+const WINDOW_WORKER_NAME: &str = "remcord-window-sta";
+
+/// One custom-icon picker job for the dedicated STA worker thread. The
+/// renderer supplies nothing: the dialog configuration is host-owned.
+struct WindowIconJob {
+    request_id: String,
+    received_at: Instant,
+    proxy: EventLoopProxy<NativeEvent>,
+}
+
 /// Name of the dedicated STA worker thread that owns the backup save dialog
 /// plus collection, ZIP creation, and the final write. The modal dialog must
 /// never run on the WebView/UI thread: COM is initialized exactly once for
@@ -5005,6 +5102,27 @@ struct NativeWindowState {
 
 /// Delivers one typed `window_state` host event to the renderer. Callers must
 /// invoke this only when the effective state actually changed.
+/// Flash the taskbar button until the window comes to the foreground
+/// (`bounceOnPing` Windows analogue of Electron's macOS dock bounce).
+/// Best-effort: a failed flash logs and never fails boot or dispatch.
+#[cfg(target_os = "windows")]
+fn flash_taskbar_button(window: &tao::window::Window) {
+    use tao::platform::windows::WindowExtWindows;
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG},
+    };
+    let mut info = FLASHWINFO::default();
+    info.cbSize = std::mem::size_of::<FLASHWINFO>() as u32;
+    info.hwnd = HWND(window.hwnd() as _);
+    info.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+    info.uCount = 0;
+    info.dwTimeout = 0;
+    unsafe {
+        let _ = FlashWindowEx(&mut info);
+    }
+}
+
 fn send_window_state_event(webview: &WebView, focused: bool, maximized: bool) {
     let detail = window_state_event_json(focused, maximized);
     match serde_json::to_string(&detail) {
@@ -5798,19 +5916,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoopBuilder::<NativeEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    let window = WindowBuilder::new()
-        .with_title("Remcord")
-        .with_inner_size(Size::Logical(LogicalSize::new(835.0, 600.0)))
-        .with_min_inner_size(Size::Logical(LogicalSize::new(400.0, 300.0)))
-        .with_decorations(false)
-        .with_visible(false)
-        .build(&event_loop)?;
-    // Keep a reference to the Tao window for native window chrome
-    // operations (visible, minimize, maximize, focus, state queries).
-    // The WebView is built on this window, but the WebView API does not
-    // expose the Tao window directly, so we hold an Arc.
-    let window = Arc::new(window);
-    let window_for_webview = Arc::clone(&window);
+    // The main window is built AFTER settings load (see below): chrome
+    // selection (decorations, transparency, icon) reads the authoritative
+    // snapshot, and transparency is a build-time flag in tao.
 
     // Release blocker 2: the profile root is resolved per build, never
     // hardcoded. Debug takes the isolated DEV profile; release takes
@@ -5863,9 +5971,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // P0.5 host-owned downloads directory. Fail fast: every download
     // decision needs this root, and a broken profile dir is fatal anyway.
     let downloads_dir = downloads::ensure_downloads_dir(&profile_path)?;
-    // F16 startup restore: reopen where the user left off. Runs before any
-    // window is shown; first run keeps the compiled-in default.
-    apply_stored_window_state(&window, &profile_path);
+    // (Window build + F16 restore moved below: chrome selection reads the
+    // settings snapshot, which loads further down.)
     // F19 `discord://` protocol links (Electron: `setAsDefaultProtocolClient`
     // + `second-instance`/`open-url` + `navigateTo`). The OS scheme always
     // (re)registers the running executable; registration never fails boot.
@@ -6246,6 +6353,230 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         eprintln!("[Backup][Save] could not start the save worker: {error}");
     }
+    // Dedicated STA worker for gallery import/export: the modal file and
+    // folder pickers plus the bounded ingestion/copy-out run sequentially
+    // here so the WebView/UI thread never blocks. COM is initialized
+    // exactly once for this thread (STA, as the Common Item Dialog
+    // requires); the typed outcome comes back as GalleryImportReady /
+    // GalleryExportReady on the event loop.
+    let (gallery_tx, gallery_rx) = std::sync::mpsc::channel::<GalleryJob>();
+    if let Err(error) = thread::Builder::new()
+        .name(GALLERY_WORKER_NAME.to_owned())
+        .spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                let com_init = unsafe {
+                    windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                    )
+                };
+                if com_init.is_err() {
+                    eprintln!(
+                        "[Gallery] STA COM initialization failed; import/export jobs will fail closed"
+                    );
+                }
+                let com_owned = com_init == windows::core::HRESULT(0);
+                while let Ok(job) = gallery_rx.recv() {
+                    match job.kind {
+                        GalleryJobKind::Import => {
+                            let result = match gallery::show_gallery_import_picker() {
+                                Ok(None) => {
+                                    println!("[Gallery][Import] picker dismissed by the user");
+                                    Ok(gallery::GalleryImportSummary {
+                                        imported: 0,
+                                        skipped: 0,
+                                        ids: Vec::new(),
+                                    })
+                                }
+                                Ok(Some(paths)) => {
+                                    let picked = paths.len();
+                                    match gallery::import_local_files(&job.profile, &paths) {
+                                        Ok(summary) => {
+                                            println!(
+                                                "[Gallery][Import] picked={picked} imported={} skipped={}",
+                                                summary.imported, summary.skipped
+                                            );
+                                            Ok(summary)
+                                        }
+                                        Err(failure) => {
+                                            eprintln!(
+                                                "[Gallery][Import:{}] {}",
+                                                failure.code, failure.message
+                                            );
+                                            Err(failure)
+                                        }
+                                    }
+                                }
+                                Err(failure) => {
+                                    eprintln!(
+                                        "[Gallery][Import:{}] {}",
+                                        failure.code, failure.message
+                                    );
+                                    Err(failure)
+                                }
+                            };
+                            queue_event(
+                                &job.proxy,
+                                NativeEvent::GalleryImportReady {
+                                    request_id: job.request_id,
+                                    received_at: job.received_at,
+                                    result,
+                                },
+                            );
+                        }
+                        GalleryJobKind::Export { ids } => {
+                            let result = match gallery::show_gallery_export_dir_picker() {
+                                Ok(None) => {
+                                    println!("[Gallery][Export] picker dismissed by the user");
+                                    Ok(gallery::GalleryExportSummary {
+                                        exported: 0,
+                                        skipped: 0,
+                                    })
+                                }
+                                Ok(Some(dir)) => {
+                                    match gallery::export_items_to_dir(&job.profile, &ids, &dir) {
+                                        Ok(summary) => {
+                                            println!(
+                                                "[Gallery][Export] exported={} skipped={}",
+                                                summary.exported, summary.skipped
+                                            );
+                                            Ok(summary)
+                                        }
+                                        Err(failure) => {
+                                            eprintln!(
+                                                "[Gallery][Export:{}] {}",
+                                                failure.code, failure.message
+                                            );
+                                            Err(failure)
+                                        }
+                                    }
+                                }
+                                Err(failure) => {
+                                    eprintln!(
+                                        "[Gallery][Export:{}] {}",
+                                        failure.code, failure.message
+                                    );
+                                    Err(failure)
+                                }
+                            };
+                            queue_event(
+                                &job.proxy,
+                                NativeEvent::GalleryExportReady {
+                                    request_id: job.request_id,
+                                    received_at: job.received_at,
+                                    result,
+                                },
+                            );
+                        }
+                    }
+                }
+                if com_owned {
+                    unsafe {
+                        windows::Win32::System::Com::CoUninitialize();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                while let Ok(job) = gallery_rx.recv() {
+                    let failure = gallery::GalleryFailure {
+                        code: "GALLERY_UNSUPPORTED_PLATFORM",
+                        message: "gallery import/export is not supported on this platform"
+                            .to_owned(),
+                    };
+                    match job.kind {
+                        GalleryJobKind::Import => queue_event(
+                            &job.proxy,
+                            NativeEvent::GalleryImportReady {
+                                request_id: job.request_id,
+                                received_at: job.received_at,
+                                result: Err(failure),
+                            },
+                        ),
+                        GalleryJobKind::Export { .. } => queue_event(
+                            &job.proxy,
+                            NativeEvent::GalleryExportReady {
+                                request_id: job.request_id,
+                                received_at: job.received_at,
+                                result: Err(failure),
+                            },
+                        ),
+                    }
+                }
+            }
+        })
+    {
+        eprintln!("[Gallery] could not start the gallery worker: {error}");
+    }
+    // Dedicated STA worker for the custom-icon file dialog: the modal
+    // `.ico`/`.png` picker runs sequentially here so the WebView/UI thread
+    // never blocks. COM is initialized exactly once for this thread (STA,
+    // as the Common Item Dialog requires); the picked path (or dismissal)
+    // comes back as WindowCustomIconReady, and validation, persistence, and
+    // live application happen on the event loop.
+    let (window_icon_tx, window_icon_rx) = std::sync::mpsc::channel::<WindowIconJob>();
+    if let Err(error) = thread::Builder::new()
+        .name(WINDOW_WORKER_NAME.to_owned())
+        .spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                let com_init = unsafe {
+                    windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                    )
+                };
+                if com_init.is_err() {
+                    eprintln!(
+                        "[WindowChrome] STA COM initialization failed; icon jobs will fail closed"
+                    );
+                }
+                let com_owned = com_init == windows::core::HRESULT(0);
+                while let Ok(job) = window_icon_rx.recv() {
+                    let result = match window_chrome::show_custom_icon_picker() {
+                        Ok(None) => {
+                            println!("[WindowChrome] icon picker dismissed by the user");
+                            Ok(None)
+                        }
+                        Ok(Some(path)) => {
+                            println!("[WindowChrome] icon picked (path withheld)");
+                            Ok(Some(path))
+                        }
+                        Err(message) => Err(message),
+                    };
+                    queue_event(
+                        &job.proxy,
+                        NativeEvent::WindowCustomIconReady {
+                            request_id: job.request_id,
+                            received_at: job.received_at,
+                            result,
+                        },
+                    );
+                }
+                if com_owned {
+                    unsafe {
+                        windows::Win32::System::Com::CoUninitialize();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                while let Ok(job) = window_icon_rx.recv() {
+                    queue_event(
+                        &job.proxy,
+                        NativeEvent::WindowCustomIconReady {
+                            request_id: job.request_id,
+                            received_at: job.received_at,
+                            result: Err("custom icon is not supported on this platform".to_owned()),
+                        },
+                    );
+                }
+            }
+        })
+    {
+        eprintln!("[WindowChrome] could not start the icon worker: {error}");
+    }
     // Dedicated STA worker for backup restores: the modal open dialog, the
     // bounded archive read, full validation, staging, and the commit with
     // rollback run sequentially here so the WebView/UI thread never blocks.
@@ -6372,6 +6703,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         spellcheck_enabled,
         spellcheck_languages,
         allow_multi_instance,
+        mobile_mode,
     ) = match load_settings(&profile_path) {
         Ok(loaded) => (
             loaded.snapshot.mods,
@@ -6381,6 +6713,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             loaded.snapshot.spellcheck,
             loaded.snapshot.spellcheck_language,
             loaded.snapshot.multi_instance,
+            loaded.snapshot.mobile_mode,
         ),
         Err(error) => {
             // Corrupt/unreadable settings fail closed to "no extra mods", the
@@ -6395,6 +6728,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 true,
                 true,
                 vec!["en-US".to_owned()],
+                false,
                 false,
             )
         }
@@ -6439,6 +6773,77 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         return Ok(());
     }
+    // Main window construction, AFTER settings load: chrome selection
+    // (decorations, transparency, icon) reads the authoritative snapshot,
+    // and transparency is a tao build-time flag. Keep a reference for
+    // native window chrome operations (visible, minimize, maximize, focus,
+    // state queries); the WebView is built on this window, but the WebView
+    // API does not expose the Tao window directly, so we hold an Arc.
+    let chrome_snapshot = load_settings(&profile_path)
+        .map(|loaded| loaded.snapshot)
+        .unwrap_or_default();
+    let chrome = window_chrome::resolve_window_chrome(
+        &chrome_snapshot.window_style,
+        &chrome_snapshot.transparency,
+        &chrome_snapshot.window_material,
+        &chrome_snapshot.custom_icon,
+    );
+    println!(
+        "[WindowChrome] style={} transparency={} material={:?} decorations={} transparent={} icon={}",
+        chrome_snapshot.window_style,
+        chrome_snapshot.transparency,
+        chrome.material,
+        chrome.decorations,
+        chrome.transparent,
+        if chrome.icon_rgba.is_some() { "custom-or-embedded" } else { "default" },
+    );
+    let mut window_builder = WindowBuilder::new()
+        .with_title("Remcord")
+        .with_inner_size(Size::Logical(LogicalSize::new(835.0, 600.0)))
+        .with_min_inner_size(Size::Logical(LogicalSize::new(400.0, 300.0)))
+        .with_decorations(chrome.decorations)
+        .with_transparent(chrome.transparent)
+        .with_visible(false);
+    if let Some((rgba, width, height)) = chrome.icon_rgba {
+        match tao::window::Icon::from_rgba(rgba, width, height) {
+            Ok(icon) => {
+                window_builder = window_builder.with_window_icon(Some(icon));
+            }
+            Err(error) => eprintln!("[WindowChrome] window icon rejected: {error}"),
+        }
+    }
+    let window = Arc::new(window_builder.build(&event_loop)?);
+    let window_for_webview = Arc::clone(&window);
+    // DWM backdrop material applies to the live HWND (best-effort).
+    #[cfg(target_os = "windows")]
+    {
+        use tao::platform::windows::WindowExtWindows;
+        window_chrome::apply_backdrop_material(window.hwnd(), chrome.material);
+    }
+    // F16 startup restore: reopen where the user left off. Runs before any
+    // window is shown; first run keeps the compiled-in default.
+    apply_stored_window_state(&window, &profile_path);
+    // System tray (Electron `createTray` parity): a real OS icon when the
+    // mode is not `disabled`. Failure is never fatal — close quits and
+    // startup shows, exactly like the no-tray path.
+    let tray_handle: Option<tray_icon::TrayHandle> =
+        if crate::tray::resolve_tray_mode(&chrome_snapshot.tray)
+            != crate::tray::TrayMode::Disabled
+        {
+            match tray_icon::spawn_tray(proxy.clone()) {
+                Ok(handle) => {
+                    println!("[Tray] OS icon running mode={}", chrome_snapshot.tray);
+                    Some(handle)
+                }
+                Err(reason) => {
+                    eprintln!("[Tray] {reason}; continuing without a tray icon");
+                    None
+                }
+            }
+        } else {
+            println!("[Tray] disabled by settings");
+            None
+        };
     // Release-channel entry URL, resolved once per process from the same
     // authoritative snapshot (restart-required model, redirect.html parity).
     // Hand-edited or forward-compat values fail safe to stable.
@@ -6750,6 +7155,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             prefer_hw_h264,
             spellcheck_state.enabled,
             &spellcheck_state.primary_language,
+            chrome_snapshot.disable_autogain,
         )?
     };
     println!(
@@ -6797,6 +7203,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             ipc_proxy_for_builder,
             load_proxy_for_builder,
             popup_proxy_for_builder,
+            mobile_mode,
+            chrome.transparent,
             main_instance_id,
         );
         builder.build(&window_for_webview)?
@@ -7444,6 +7852,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ipc_proxy.clone(),
                         load_proxy.clone(),
                         popup_proxy.clone(),
+                        mobile_mode,
+                        chrome.transparent,
                         main_instance_id,
                     );
                     webview = builder.build(&window_for_webview).expect("failed to build replacement WebView");
@@ -7816,6 +8226,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Err(error) => eprintln!("[Deeplink] link refused: {error}"),
                 }
             }
+            Event::UserEvent(NativeEvent::TrayRestore) => {
+                // Tray menu "Open Remcord" / left-click: show and focus the
+                // main window (Electron `revealWindow` parity).
+                window.set_visible(true);
+                let _ = window.set_skip_taskbar(false);
+                if window.is_minimized() {
+                    window.set_minimized(false);
+                }
+                window.set_focus();
+                println!("[Tray] window restored from tray");
+            }
+            Event::UserEvent(NativeEvent::TrayQuit) => {
+                // Tray menu "Quit Remcord": the existing orderly shutdown
+                // path (metrics, observer detach, ControlFlow::Exit).
+                println!("[Tray] quit requested from tray");
+                #[cfg(target_os = "windows")]
+                perform_orderly_shutdown(
+                    &mut *control_flow,
+                    &mut shutdown_started,
+                    &main_process_failed_counters,
+                    &child_process_failed_counters,
+                    &main_navigation_counters,
+                    &child_navigation_counters,
+                    &mut main_process_failed,
+                    &mut main_navigation_completed,
+                    &mut popup_child,
+                    &mut env_browser_exited_token,
+                    &webview_env,
+                );
+                #[cfg(not(target_os = "windows"))]
+                perform_orderly_shutdown(
+                    &mut *control_flow,
+                    &mut shutdown_started,
+                    &main_process_failed_counters,
+                    &child_process_failed_counters,
+                    &main_navigation_counters,
+                    &child_navigation_counters,
+                );
+            }
             Event::UserEvent(NativeEvent::LiveCssSignal(signal)) => {
                 // Raw watcher event: bump the epoch and arm exactly one
                 // debounce timer per burst. The timer re-reads authoritative
@@ -8081,6 +8530,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Ok(()) => match request.command {
                             BridgeCommand::WindowShow(_) => {
                                 window.set_visible(true);
+                                let _ = window.set_skip_taskbar(false);
                                 if window.is_minimized() {
                                     window.set_minimized(false);
                                 }
@@ -8090,25 +8540,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             BridgeCommand::WindowHide(_) => {
                                 // The titlebar × sends hide when
-                                // minimizeToTray=true, but no native tray
-                                // icon exists to reopen from: hiding would
-                                // strand the app running with no visible
-                                // window. With no usable tray every close
-                                // takes the orderly quit path instead,
-                                // regardless of minimizeToTray. Minimize,
-                                // maximize/restore, and explicit quit are
-                                // untouched.
-                                let action = close_behavior::decide(
-                                    true,
-                                    close_behavior::tray_available(),
-                                );
+                                // minimizeToTray=true; with a usable tray the
+                                // window hides and reopens from the icon,
+                                // otherwise every close takes the orderly
+                                // quit path (never strand the app).
+                                // Minimize, maximize/restore, and explicit
+                                // quit are untouched.
+                                let tray_up = tray_handle.is_some();
+                                let action = close_behavior::decide(true, tray_up);
                                 println!(
                                     "{}",
-                                    close_behavior::format_log(&action, true, close_behavior::tray_available())
+                                    close_behavior::format_log(&action, true, tray_up)
                                 );
                                 match action {
                                     close_behavior::CloseAction::Hide => {
                                         window.set_visible(false);
+                                        let _ = window.set_skip_taskbar(true);
                                         respond_window_ack(&webview, &mut request_tracker, &request.request_id, "window_hide", &received_at);
                                         response_count += 1;
                                     }
@@ -8283,6 +8730,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     &received_at,
                                 );
                                 response_count += 1;
+                            }
+                            BridgeCommand::WindowSetCustomIcon(_) => {
+                                // Host-owned `.ico`/`.png` picker on the
+                                // window STA worker; the picked path comes
+                                // back as WindowCustomIconReady for host
+                                // validation, persistence, and live
+                                // application. The renderer waits with the
+                                // long-operation timeout.
+                                let icon_request_id = request.request_id.clone();
+                                let job = WindowIconJob {
+                                    request_id: icon_request_id.clone(),
+                                    received_at,
+                                    proxy: proxy.clone(),
+                                };
+                                if window_icon_tx.send(job).is_err() {
+                                    eprintln!("[WindowChrome][ICON_UNAVAILABLE] icon worker is unavailable");
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: icon_request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: "ICON_UNAVAILABLE",
+                                            message: "custom icon is unavailable".to_owned(),
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&icon_request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
                             }
                             BridgeCommand::Ping(payload) => {
                             let request_id = request.request_id;
@@ -9480,6 +9959,73 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     failure.message,
                                     latency_ms,
                                 ),
+                            }
+                        }
+                        BridgeCommand::GalleryImportFiles(_) => {
+                            // Host-owned multi-file picker plus bounded
+                            // ingestion on the gallery STA worker; the typed
+                            // summary comes back as GalleryImportReady, so
+                            // the WebView/UI thread never blocks. The
+                            // renderer waits with the long-operation timeout
+                            // (picker stays open as long as the user needs).
+                            let gallery_request_id = request.request_id.clone();
+                            let job = GalleryJob {
+                                request_id: gallery_request_id.clone(),
+                                received_at,
+                                profile: profile_path.clone(),
+                                kind: GalleryJobKind::Import,
+                                proxy: proxy.clone(),
+                            };
+                            if gallery_tx.send(job).is_err() {
+                                eprintln!("[Gallery][Import:IMPORT_UNAVAILABLE] gallery worker is unavailable");
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: gallery_request_id.clone(),
+                                    ok: false,
+                                    payload: None,
+                                    error: Some(BridgeError {
+                                        code: "IMPORT_UNAVAILABLE",
+                                        message: "gallery import is unavailable".to_owned(),
+                                    }),
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&gallery_request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
+                            }
+                        }
+                        BridgeCommand::GalleryExportItems(payload) => {
+                            // Host-owned folder picker plus bounded copy-out
+                            // on the gallery STA worker; the summary comes
+                            // back as GalleryExportReady. Ids are
+                            // shape-checked at parse; unknown ids skip at
+                            // dispatch (never an error).
+                            let gallery_request_id = request.request_id.clone();
+                            let job = GalleryJob {
+                                request_id: gallery_request_id.clone(),
+                                received_at,
+                                profile: profile_path.clone(),
+                                kind: GalleryJobKind::Export { ids: payload.ids.clone() },
+                                proxy: proxy.clone(),
+                            };
+                            if gallery_tx.send(job).is_err() {
+                                eprintln!("[Gallery][Export:EXPORT_UNAVAILABLE] gallery worker is unavailable");
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: gallery_request_id.clone(),
+                                    ok: false,
+                                    payload: None,
+                                    error: Some(BridgeError {
+                                        code: "EXPORT_UNAVAILABLE",
+                                        message: "gallery export is unavailable".to_owned(),
+                                    }),
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&gallery_request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
                             }
                         }
                         BridgeCommand::GalleryUpdate(payload) => {
@@ -10890,6 +11436,57 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::CssEditorOpenSystem(_) => {
+                            // System CSS editor handoff (`useSystemCssEditor`
+                            // parity with Electron `shell.openPath()`): the
+                            // host opens its own QuickCSS file in the
+                            // OS-associated editor. Failures resolve typed
+                            // (never reject) so the UI can toast.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match css_editor::open_system_editor(&profile_path) {
+                                Ok(()) => {
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::CssEditorSystemOpened(
+                                                CssEditorSystemOpenedResponse { opened: true },
+                                            ),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                                Err(failure) => {
+                                    eprintln!("[CssEditor][{}]", failure.code());
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code(),
+                                            message: "system CSS editor could not be opened"
+                                                .to_owned(),
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                            println!(
+                                "[CssEditor][Metrics] op=open_system request_latency_ms={latency_ms:.3}"
+                            );
+                        }
                         BridgeCommand::GraphicsGetInfo(_) => {
                             // CDP-backed graphics report: the two fixed probes
                             // (`System.getInfo`, `Browser.getVersion`) are
@@ -11506,6 +12103,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 let profile = profile_path.clone();
                                 let cache_ref = Arc::clone(&bundle_cache);
                                 let worker_request_id = request_id.clone();
+                                // `noBundleUpdates` (Electron modloader
+                                // parity): a listed mod serves cache only.
+                                // Resolved once per request from the
+                                // authoritative snapshot; unreadable settings
+                                // fail open to updating (never strand the
+                                // user on a corrupt file).
+                                let updates_frozen =
+                                    crate::settings::load_settings(&profile_path)
+                                        .map(|loaded| {
+                                            loaded
+                                                .snapshot
+                                                .no_bundle_updates
+                                                .iter()
+                                                .any(|id| id == descriptor.id)
+                                        })
+                                        .unwrap_or(false);
                                 if let Err(error) = thread::Builder::new()
                                     .name(format!("remcord-{}-bundle", descriptor.id))
                                     .spawn(move || {
@@ -11513,7 +12126,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         let result = if is_user_owned {
                                             load_custom_bundle(&descriptor, profile)
                                         } else {
-                                            load_mod_bundle(&descriptor, profile)
+                                            load_mod_bundle(&descriptor, profile, updates_frozen)
                                         };
                                         if let Ok(ref bundle) = result {
                                             if !is_user_owned {
@@ -11810,6 +12423,191 @@ fn main() -> Result<(), Box<dyn Error>> {
                             error: Some(BridgeError {
                                 code: failure.code,
                                 message: failure.message,
+                            }),
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::GalleryImportReady {
+                request_id,
+                received_at,
+                result,
+            }) => {
+                // Cancellation resolves zero counts (the user dismissed the
+                // picker — normal control flow, never a rejection).
+                match result {
+                    Ok(summary) => {
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: true,
+                            payload: Some(BridgeResponsePayload::GalleryImportFiles(
+                                GalleryImportFilesResponse {
+                                    imported: summary.imported,
+                                    skipped: summary.skipped,
+                                    ids: summary.ids,
+                                },
+                            )),
+                            error: None,
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                        println!(
+                            "[Gallery][Import] imported={} skipped={} request_latency_ms={:.3}",
+                            summary.imported,
+                            summary.skipped,
+                            received_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    Err(failure) => {
+                        eprintln!("[Gallery][Import:{}] {}", failure.code, failure.message);
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: false,
+                            payload: None,
+                            error: Some(BridgeError {
+                                code: failure.code,
+                                message: failure.message,
+                            }),
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::GalleryExportReady {
+                request_id,
+                received_at,
+                result,
+            }) => {
+                match result {
+                    Ok(summary) => {
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: true,
+                            payload: Some(BridgeResponsePayload::GalleryExportItems(
+                                GalleryExportItemsResponse {
+                                    exported: summary.exported,
+                                    skipped: summary.skipped,
+                                },
+                            )),
+                            error: None,
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                        println!(
+                            "[Gallery][Export] exported={} skipped={} request_latency_ms={:.3}",
+                            summary.exported,
+                            summary.skipped,
+                            received_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    Err(failure) => {
+                        eprintln!("[Gallery][Export:{}] {}", failure.code, failure.message);
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: false,
+                            payload: None,
+                            error: Some(BridgeError {
+                                code: failure.code,
+                                message: failure.message,
+                            }),
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                    }
+                }
+            }
+            Event::UserEvent(NativeEvent::WindowCustomIconReady {
+                request_id,
+                received_at,
+                result,
+            }) => {
+                // Dismissal resolves `{ok: false}` quietly (normal control
+                // flow); a picked path is host-validated, persisted, and
+                // applied live. Only fixed-vocabulary codes cross.
+                let outcome = match result {
+                    Ok(None) => {
+                        println!("[WindowChrome] icon picker dismissed by the user");
+                        Ok(false)
+                    }
+                    Ok(Some(path)) => match window_chrome::validate_icon_path(&path) {
+                        Some(valid) => match crate::settings::apply_custom_icon(&profile_path, &valid) {
+                            Ok(_) => {
+                                match window_chrome::window_icon_from_file(&valid) {
+                                    Some(icon) => {
+                                        window.set_window_icon(Some(icon));
+                                        println!("[WindowChrome] custom icon applied live");
+                                    }
+                                    None => eprintln!("[WindowChrome] validated icon would not decode"),
+                                }
+                                Ok(true)
+                            }
+                            Err(message) => {
+                                eprintln!("[WindowChrome] custom icon persist failed: {message}");
+                                Err("ICON_PERSIST_FAILED")
+                            }
+                        },
+                        None => {
+                            eprintln!("[WindowChrome] picked icon failed validation");
+                            Err("ICON_INVALID")
+                        }
+                    },
+                    Err(_) => {
+                        eprintln!("[WindowChrome] icon picker failed");
+                        Err("ICON_UNAVAILABLE")
+                    }
+                };
+                match outcome {
+                    Ok(applied) => {
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: true,
+                            payload: Some(BridgeResponsePayload::WindowCustomIconSet(
+                                WindowCustomIconSetResponse { ok: applied },
+                            )),
+                            error: None,
+                        };
+                        send_bridge_response(&webview, &response);
+                        if let Err(error) = request_tracker.complete(&request_id) {
+                            eprintln!("[Bridge] correlation failure after response: {error}");
+                        }
+                        response_count += 1;
+                        println!(
+                            "[WindowChrome] ok={applied} request_latency_ms={:.3}",
+                            received_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    Err(code) => {
+                        let response = BridgeResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id: request_id.clone(),
+                            ok: false,
+                            payload: None,
+                            error: Some(BridgeError {
+                                code,
+                                message: "custom icon could not be set".to_owned(),
                             }),
                         };
                         send_bridge_response(&webview, &response);
@@ -12648,6 +13446,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     };
                                     badge_state = next.with_overlay(applied);
                                     println!("{}", badge::format_log(&badge_state));
+                                    // `bounceOnPing` (Windows analogue of
+                                    // Electron's macOS `app.dock.bounce()`):
+                                    // a fresh mention flashes the taskbar
+                                    // button until foreground. Best-effort
+                                    // and read per event so a settings flip
+                                    // applies without restart.
+                                    #[cfg(target_os = "windows")]
+                                    if matches!(next.kind, badge::BadgeKind::Mention) {
+                                        let ping = crate::settings::load_settings(&profile_path)
+                                            .map(|loaded| loaded.snapshot.bounce_on_ping)
+                                            .unwrap_or(false);
+                                        if ping {
+                                            flash_taskbar_button(&window);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -13038,6 +13851,7 @@ mod tests {
             true,
             true,
             "en-US",
+            false,
         )
         .expect("must build");
         let media_at = script
@@ -13075,10 +13889,10 @@ mod tests {
     fn document_start_script_sdp_toggle_splices_the_closed_boolean() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let on = document_start_script(&[], boot, platform, "default", true, true, "en-US")
+        let on = document_start_script(&[], boot, platform, "default", true, true, "en-US", false)
             .expect("must build");
         assert!(on.contains("const preferHwH264 = true"));
-        let off = document_start_script(&[], boot, platform, "default", false, true, "en-US")
+        let off = document_start_script(&[], boot, platform, "default", false, true, "en-US", false)
             .expect("must build");
         assert!(off.contains("const preferHwH264 = false"));
     }
@@ -13089,15 +13903,15 @@ mod tests {
         // hostile language falls back to en-US and can never cross raw.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let on = document_start_script(&[], boot, platform, "default", true, true, "fr-FR")
+        let on = document_start_script(&[], boot, platform, "default", true, true, "fr-FR", false)
             .expect("must build");
         assert!(on.contains("const spellcheckEnabled = true"));
         assert!(on.contains("const spellcheckLang = \"fr-FR\""));
-        let off = document_start_script(&[], boot, platform, "default", true, false, "en-US")
+        let off = document_start_script(&[], boot, platform, "default", true, false, "en-US", false)
             .expect("must build");
         assert!(off.contains("const spellcheckEnabled = false"));
         let hostile =
-            document_start_script(&[], boot, platform, "default", true, true, "../escape")
+            document_start_script(&[], boot, platform, "default", true, true, "../escape", false)
                 .expect("must build");
         assert!(hostile.contains("const spellcheckLang = \"en-US\""));
         assert!(!hostile.contains("../escape"));
@@ -13110,7 +13924,7 @@ mod tests {
         // stream setup popup is a separate layer and is always present.
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "default", true, true, "en-US")
+        let script = document_start_script(&[], boot, platform, "default", true, true, "en-US", false)
             .expect("must build");
         assert!(script.contains("__remcordScreenshareMedia"));
         assert!(script.contains("__remcordSpellcheck"));
@@ -13129,7 +13943,7 @@ mod tests {
     fn document_start_script_unknown_mode_fails_safe_to_default() {
         let boot = crate::settings_boot::test_fixture_json();
         let platform = crate::app::test_fixture_json();
-        let script = document_start_script(&[], boot, platform, "ultra-hd", true, true, "en-US")
+        let script = document_start_script(&[], boot, platform, "ultra-hd", true, true, "en-US", false)
             .expect("must build");
         assert!(script.contains("\"default\""));
         assert!(script.contains("__remcordStreamPicker"));
@@ -13148,7 +13962,8 @@ mod tests {
             "default",
             true,
             true,
-            "en-US"
+            "en-US",
+            false,
         )
         .is_err());
         assert!(document_start_script(
@@ -13158,9 +13973,25 @@ mod tests {
             "balanced",
             false,
             true,
-            "en-US"
+            "en-US",
+            false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn document_start_script_autogain_toggle_splices_the_wrapper() {
+        // `disableAutogain` wraps getUserMedia to force autoGainControl off;
+        // the default build carries no wrapper (behavior exactly current).
+        let boot = crate::settings_boot::test_fixture_json();
+        let platform = crate::app::test_fixture_json();
+        let on = document_start_script(&[], boot, platform, "default", true, true, "en-US", true)
+            .expect("must build");
+        assert!(on.contains("remcord.disableAutogain"));
+        assert!(on.contains("autoGainControl: false"));
+        let off = document_start_script(&[], boot, platform, "default", true, true, "en-US", false)
+            .expect("must build");
+        assert!(!off.contains("remcord.disableAutogain"));
     }
 
     #[test]
@@ -13604,14 +14435,14 @@ mod tests {
             crate::settings_import::RESTART_REQUIRED_KEYS,
             ["mods", "channel", "csp"]
         );
-        // Dangerous shapes are structurally absent from the allowlist.
+        // Dangerous shapes are structurally absent from the allowlist
+        // (windowStyle/proxyMode graduated to validated enums; the rest
+        // stay out: CLI injection, icon paths, custom roots, code).
         for forbidden in [
-            "windowStyle",
             "additionalArguments",
             "customIcon",
             "galleryRoot",
             "keybinds",
-            "proxyMode",
             "customJsBundle",
         ] {
             assert!(
@@ -13884,6 +14715,7 @@ mod tests {
         let error = crate::mod_substrate::load_mod_bundle(
             &CUSTOM_MOD,
             std::env::temp_dir().join("remcord-custom-never"),
+            false,
         )
         .expect_err("UserOwned must never download");
         assert!(error.contains("local profile files"));
@@ -14957,6 +15789,7 @@ mod tests {
             if *capability == "themes.write_css"
                 || *capability == "quickcss.read"
                 || *capability == "quickcss.write"
+                || *capability == "css_editor.open_system"
             {
                 continue;
             }

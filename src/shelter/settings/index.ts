@@ -14,7 +14,7 @@ import { PluginsPage } from "./pages/PluginsPage.jsx";
 import { RegisteredGamesPage } from "./pages/RegisteredGamesPage.jsx";
 import { SettingsPage } from "./pages/SettingsPage.jsx";
 import { ThemesPage } from "./pages/ThemesPage.jsx";
-import { openQuickCssEditorModal } from "./quickCssEditor.jsx";
+import { openQuickCssRespectingSystem } from "./quickCssEditor.jsx";
 import type { QuickCssEditorMode } from "./quickCssEditorSource.js";
 import {
     disposeSettingsScrollRestoration,
@@ -122,5 +122,5 @@ function quickCssEditorHandoff(event: Event) {
     const mode = detail?.mode;
     if (mode !== "vencord" && mode !== "equicord" && mode !== "remcord") return;
     event.preventDefault();
-    void openQuickCssEditorModal(mode as QuickCssEditorMode);
+    void openQuickCssRespectingSystem(mode as QuickCssEditorMode);
 }

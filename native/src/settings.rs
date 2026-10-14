@@ -936,7 +936,24 @@ pub fn apply_block_power_saving(
     })
 }
 
-/// Apply one allowlisted `settings.set` mutation.
+/// Apply one validated custom-icon path (`window.set_custom_icon`).
+/// Same ownership semantics as [`apply_block_power_saving`]: authoritative
+/// load, unknown keys preserved, atomic persistence. The path was
+/// validated by the caller (host dialog + extension/size/decodability
+/// checks); this function only owns the merge mechanics. Returns the
+/// serialized byte length.
+pub fn apply_custom_icon(profile_dir: &Path, path: &str) -> Result<usize, String> {
+    let load = load_settings(profile_dir)?;
+    let mut document = load_document_for_write(profile_dir, load)?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| "settings file is invalid: top-level JSON must be an object".to_owned())?;
+    object.insert(
+        "customIcon".to_owned(),
+        serde_json::Value::String(path.to_owned()),
+    );
+    persist_settings_document(profile_dir, &document)
+}
 ///
 /// Closed twin of [`apply_block_power_saving`] for the [`SettingsSetKey`]
 /// allowlist: the key is an enum (unknown keys never parse) and the value

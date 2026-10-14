@@ -33,6 +33,16 @@ pub fn validate_user_agent_override(raw: &str) -> Option<String> {
     Some(trimmed.to_owned())
 }
 
+/// Mobile layout user agent: Electron parity (`src/discord/window.ts`
+/// `mobileMode` branch). Exact Android Nexus string Electron serves so
+/// Discord renders its hidden mobile layout.
+pub const MOBILE_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.5005.149 Mobile Safari/537.36";
+
+/// Resolve the settings-driven mobile UA. `None` means desktop behavior.
+pub fn resolve_mobile_user_agent(mobile_mode: bool) -> Option<String> {
+    mobile_mode.then(|| MOBILE_USER_AGENT.to_owned())
+}
+
 /// Resolve the effective override from the environment. `None` means
 /// current behavior (unset, blank, or invalid — the last case logs once
 /// to stderr so a typo is visible instead of silent).

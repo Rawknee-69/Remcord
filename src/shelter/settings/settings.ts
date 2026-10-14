@@ -168,6 +168,41 @@ export const NATIVE_WRITABLE_SETTING_KEYS: ReadonlyArray<string> = [
     "processScanning",
     "windowsLegacyScanning",
     "scanInterval",
+    // Native-shell settings with real host consumers (restart-required
+    // unless noted): Chromium switches (hardwareAcceleration,
+    // smoothScroll, autoScroll, disableHttpCache, performanceMode),
+    // document layers (spellcheck, spellcheckLanguage, disableAutogain —
+    // live on next document), startup policy (multiInstance, minimizeToTray
+    // with tray, startMinimized, tray, windowStyle, transparency,
+    // windowMaterial, mobileMode), shell integrations (useSystemCssEditor,
+    // popoutPiP — new popouts only), attention (bounceOnPing), network
+    // (proxyMode, proxyRules, proxyPacScript, proxyBypassRules), and bundle
+    // updating (noBundleUpdates).
+    "hardwareAcceleration",
+    "smoothScroll",
+    "autoScroll",
+    "spellcheck",
+    "spellcheckLanguage",
+    "multiInstance",
+    "disableAutogain",
+    "disableHttpCache",
+    "mobileMode",
+    "useSystemCssEditor",
+    "popoutPiP",
+    "minimizeToTray",
+    "bounceOnPing",
+    "sdpH264BaselineRewrite",
+    "startMinimized",
+    "tray",
+    "windowStyle",
+    "transparency",
+    "windowMaterial",
+    "performanceMode",
+    "proxyMode",
+    "proxyRules",
+    "proxyPacScript",
+    "proxyBypassRules",
+    "noBundleUpdates",
 ];
 
 /** True when `key` has a native persistence path (closed allowlist). */
@@ -208,7 +243,32 @@ function setConfigNative<K extends keyof Settings>(key: K, value: Settings[K], s
         key === "inviteWebsocket" ||
         key === "processScanning" ||
         key === "windowsLegacyScanning" ||
-        key === "scanInterval"
+        key === "scanInterval" ||
+        key === "hardwareAcceleration" ||
+        key === "smoothScroll" ||
+        key === "autoScroll" ||
+        key === "spellcheck" ||
+        key === "spellcheckLanguage" ||
+        key === "multiInstance" ||
+        key === "disableAutogain" ||
+        key === "disableHttpCache" ||
+        key === "mobileMode" ||
+        key === "useSystemCssEditor" ||
+        key === "popoutPiP" ||
+        key === "minimizeToTray" ||
+        key === "bounceOnPing" ||
+        key === "sdpH264BaselineRewrite" ||
+        key === "startMinimized" ||
+        key === "tray" ||
+        key === "windowStyle" ||
+        key === "transparency" ||
+        key === "windowMaterial" ||
+        key === "performanceMode" ||
+        key === "proxyMode" ||
+        key === "proxyRules" ||
+        key === "proxyPacScript" ||
+        key === "proxyBypassRules" ||
+        key === "noBundleUpdates"
     ) {
         const previous = store.settings[key];
         (store.settings as Record<string, unknown>)[key as string] = value;
@@ -279,7 +339,32 @@ export type NativeSettingsSetKey =
     | "inviteWebsocket"
     | "processScanning"
     | "windowsLegacyScanning"
-    | "scanInterval";
+    | "scanInterval"
+    | "hardwareAcceleration"
+    | "smoothScroll"
+    | "autoScroll"
+    | "spellcheck"
+    | "spellcheckLanguage"
+    | "multiInstance"
+    | "disableAutogain"
+    | "disableHttpCache"
+    | "mobileMode"
+    | "useSystemCssEditor"
+    | "popoutPiP"
+    | "minimizeToTray"
+    | "bounceOnPing"
+    | "sdpH264BaselineRewrite"
+    | "startMinimized"
+    | "tray"
+    | "windowStyle"
+    | "transparency"
+    | "windowMaterial"
+    | "performanceMode"
+    | "proxyMode"
+    | "proxyRules"
+    | "proxyPacScript"
+    | "proxyBypassRules"
+    | "noBundleUpdates";
 
 /** Wire keys for the closed native `settings.set` capability. */
 const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
@@ -294,6 +379,31 @@ const NATIVE_SETTINGS_SET_WIRE_KEY: Record<NativeSettingsSetKey, string> = {
     processScanning: "process_scanning",
     windowsLegacyScanning: "windows_legacy_scanning",
     scanInterval: "scan_interval",
+    hardwareAcceleration: "hardware_acceleration",
+    smoothScroll: "smooth_scroll",
+    autoScroll: "auto_scroll",
+    spellcheck: "spellcheck",
+    spellcheckLanguage: "spellcheck_language",
+    multiInstance: "multi_instance",
+    disableAutogain: "disable_autogain",
+    disableHttpCache: "disable_http_cache",
+    mobileMode: "mobile_mode",
+    useSystemCssEditor: "use_system_css_editor",
+    popoutPiP: "popout_pip",
+    minimizeToTray: "minimize_to_tray",
+    bounceOnPing: "bounce_on_ping",
+    sdpH264BaselineRewrite: "sdp_h264_baseline_rewrite",
+    startMinimized: "start_minimized",
+    tray: "tray",
+    windowStyle: "window_style",
+    transparency: "transparency",
+    windowMaterial: "window_material",
+    performanceMode: "performance_mode",
+    proxyMode: "proxy_mode",
+    proxyRules: "proxy_rules",
+    proxyPacScript: "proxy_pac_script",
+    proxyBypassRules: "proxy_bypass_rules",
+    noBundleUpdates: "no_bundle_updates",
 };
 
 /** Minimal native `settings.set` shape (closed allowlist, key echo + value). */
@@ -434,6 +544,39 @@ interface NativeDiagnosticsNamespace {
 
 interface NativeModNamespace {
     clearCache: () => Promise<NativeModCacheOutcome>;
+}
+
+interface NativeCssEditorNamespace {
+    openSystem: () => Promise<{ opened: boolean }>;
+}
+
+function nativeCssEditor(): NativeCssEditorNamespace | undefined {
+    if (!isNativeWebView()) return undefined;
+    const cssEditor = (window.remcord as unknown as { cssEditor?: NativeCssEditorNamespace }).cssEditor;
+    if (!cssEditor || typeof cssEditor.openSystem !== "function") return undefined;
+    return cssEditor;
+}
+
+/** True when the native system-CSS-editor handoff is the active path. */
+export function isNativeCssEditorAvailable(): boolean {
+    return nativeCssEditor() !== undefined;
+}
+
+/**
+ * Open the host-owned QuickCSS file in the OS-associated editor
+ * (`useSystemCssEditor` parity). Resolves true when the host launched the
+ * editor; rejects with a path-free Error otherwise.
+ */
+export async function openSystemCssEditor(): Promise<boolean> {
+    const namespace = nativeCssEditor();
+    if (!namespace) throw new Error("[Remcord] Native system CSS editor is unavailable.");
+    try {
+        const outcome = await namespace.openSystem();
+        if (!isRecord(outcome) || outcome.opened !== true) throw new Error("invalid outcome");
+        return true;
+    } catch {
+        throw new Error("[Remcord] Could not open the system CSS editor in the native shell.");
+    }
 }
 
 function nativeDiagnostics(): NativeDiagnosticsNamespace | undefined {

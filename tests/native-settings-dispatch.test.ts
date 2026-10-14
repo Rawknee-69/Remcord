@@ -103,18 +103,44 @@ test("native writability allowlist is exactly the host-supported keys", async ()
             "processScanning",
             "windowsLegacyScanning",
             "scanInterval",
+            // Native-shell keys with traced host consumers.
+            "hardwareAcceleration",
+            "smoothScroll",
+            "autoScroll",
+            "spellcheck",
+            "spellcheckLanguage",
+            "multiInstance",
+            "disableAutogain",
+            "disableHttpCache",
+            "mobileMode",
+            "useSystemCssEditor",
+            "popoutPiP",
+            "minimizeToTray",
+            "bounceOnPing",
+            "sdpH264BaselineRewrite",
+            "startMinimized",
+            "tray",
+            "windowStyle",
+            "transparency",
+            "windowMaterial",
+            "performanceMode",
+            "proxyMode",
+            "proxyRules",
+            "proxyPacScript",
+            "proxyBypassRules",
+            "noBundleUpdates",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), true, `${key} must be writable`);
         }
         for (const key of [
-            "windowStyle",
-            "transparency",
             "audio",
-            "proxyMode",
             "keybinds",
-            "minimizeToTray",
-            "noBundleUpdates",
             "modCache",
+            "additionalArguments",
+            "automaticUpdates",
+            "sleepInBackground",
+            "skipSplash",
+            "autoHideMenuBar",
         ]) {
             assert.equal(helpers.isSettingWritableNatively(key), false, `${key} must be disabled`);
         }
@@ -128,16 +154,16 @@ test("native unsupported key is discarded honestly", async () => {
     try {
         const helpers = await loadHelpers();
         assert.equal(helpers.isRestartRequired, false);
-        helpers.setConfig("windowStyle", "native", true);
+        helpers.setConfig("audio", { loopbackType: "loopback" }, true);
         await tick();
         // No store mutation, no restart request, no Electron call, one warning.
-        assert.equal(storeSettings().windowStyle, undefined);
+        assert.equal(storeSettings().audio, undefined);
         assert.equal(helpers.isRestartRequired, false);
         assert.equal(helpers.isRestartRequiredSignal(), false);
         assert.deepEqual(calls.electronSetConfig, []);
         assert.deepEqual(calls.nativeSet, []);
         assert.equal(calls.warnings.length, 1);
-        assert.match(calls.warnings[0]!, /windowStyle.*not supported/);
+        assert.match(calls.warnings[0]!, /audio.*not supported/);
     } finally {
         restoreConsole();
     }
@@ -491,7 +517,7 @@ test("unsupported settings stay disabled instead of rendering a broken control",
     installGlobals({});
     try {
         const helpers = await loadHelpers();
-        for (const key of ["windowStyle", "keybinds", "noBundleUpdates", "modCache"]) {
+        for (const key of ["audio", "keybinds", "modCache", "additionalArguments"]) {
             assert.equal(helpers.isSettingWritableNatively(key), false, `${key} must be disabled natively`);
         }
         assert.equal(helpers.isSettingWritableNatively("mods"), true);

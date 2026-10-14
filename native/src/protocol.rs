@@ -91,6 +91,7 @@ pub enum BridgeCommand {
     DiagnosticsGetInfo(DiagnosticsGetInfoRequest),
     GraphicsGetInfo(GraphicsGetInfoRequest),
     ClipboardCopyImage(ClipboardCopyImageRequest),
+    CssEditorOpenSystem(CssEditorOpenSystemRequest),
     DiagnosticsOpenWebrtcInternals(DiagnosticsOpenWebrtcInternalsRequest),
     DiagnosticsOpenGpuPage(DiagnosticsOpenGpuPageRequest),
     ModClearCache(ModClearCacheRequest),
@@ -109,6 +110,8 @@ pub enum BridgeCommand {
     GalleryAddLink(GalleryAddLinkRequest),
     GalleryRemove(GalleryRemoveRequest),
     GalleryBulkRemove(GalleryBulkRemoveRequest),
+    GalleryImportFiles(GalleryImportFilesRequest),
+    GalleryExportItems(GalleryExportItemsRequest),
     GalleryUpdate(GalleryUpdateRequest),
     GalleryCategories(GalleryCategoriesRequest),
     GalleryCategoryAdd(GalleryCategoryAddRequest),
@@ -136,6 +139,7 @@ pub enum BridgeCommand {
     WindowDrag(WindowDragRequest),
     WindowToggleFullscreen(WindowToggleFullscreenRequest),
     WindowQuit(WindowQuitRequest),
+    WindowSetCustomIcon(WindowSetCustomIconRequest),
     WindowGetState(WindowGetStateRequest),
     TrayGetState(TrayGetStateRequest),
     BadgeGetState(BadgeGetStateRequest),
@@ -625,6 +629,22 @@ pub struct GalleryRemoveRequest {
     pub id: String,
 }
 
+/// Import request for the `gallery.import_files` capability: the host
+/// shows its own multi-file picker, so the request carries no parameters
+/// by design (no paths, names, or URLs). Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryImportFilesRequest {}
+
+/// Export request for the `gallery.export_items` capability: item ids
+/// only (at most 200 are honored). The destination comes from the host
+/// folder picker, never the renderer. Invalid ids skip at dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryExportItemsRequest {
+    pub ids: Vec<String>,
+}
+
 /// Bulk removal request for the `gallery.bulk_remove` capability: item
 /// ids only (at most 2000 are honored, mirroring Electron's slice).
 /// Invalid ids are skipped, never dispatched.
@@ -866,6 +886,14 @@ pub struct DiagnosticsOpenWebrtcInternalsRequest {}
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsOpenGpuPageRequest {}
 
+/// Open request for the `css_editor.open_system` capability: reveal the
+/// host-owned QuickCSS file in the OS-associated editor (`useSystemCssEditor`
+/// parity with Electron `shell.openPath()`). Parameter-free by design: the
+/// file is fixed host-side. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CssEditorOpenSystemRequest {}
+
 /// Empty request for the `mod.clear_cache` capability. Deletes the five
 /// host-managed downloaded bundle caches and resets the stored `modCache`
 /// map (`crate::mod_cache`). There are no renderer-supplied parameters by
@@ -1000,6 +1028,14 @@ pub struct WindowToggleFullscreenRequest {}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowQuitRequest {}
+
+/// Icon request for the `window.set_custom_icon` capability: the host
+/// shows its own `.ico`/`.png` file dialog, so the request carries no
+/// parameters by design (no path, URL, or bytes). Any extra field is
+/// rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowSetCustomIconRequest {}
 
 /// Empty request for the `window.get_state` capability (F16): read the
 /// persisted window geometry plus the live maximized flag. The renderer
@@ -1662,6 +1698,7 @@ pub enum BridgeResponsePayload {
     DiagnosticsInfo(DiagnosticsInfoResponse),
     GraphicsInfo(Box<crate::graphics::GraphicsInfoResponse>),
     ClipboardImageCopied(ClipboardImageCopiedResponse),
+    CssEditorSystemOpened(CssEditorSystemOpenedResponse),
     ModCacheCleared(ModCacheClearedResponse),
     SpellcheckState(SpellcheckStateResponse),
     BackupSaved(BackupSavedResponse),
@@ -1672,6 +1709,8 @@ pub enum BridgeResponsePayload {
     GalleryAdd(GalleryAddResponse),
     GalleryRemove(GalleryRemoveResponse),
     GalleryBulkRemove(GalleryBulkRemoveResponse),
+    GalleryImportFiles(GalleryImportFilesResponse),
+    GalleryExportItems(GalleryExportItemsResponse),
     GalleryUpdate(GalleryUpdateResponse),
     GalleryCategories(GalleryCategoriesResponse),
     GalleryCategoryAdd(GalleryCategoryAddResponse),
@@ -1698,6 +1737,7 @@ pub enum BridgeResponsePayload {
     DiagnosticsWindowOpened(DiagnosticsWindowOpenedResponse),
     WindowAck(WindowAckResponse),
     WindowState(WindowStateResponse),
+    WindowCustomIconSet(WindowCustomIconSetResponse),
     TrayState(TrayGetStateResponse),
 }
 
@@ -2112,6 +2152,24 @@ pub struct GalleryBulkRemoveResponse {
     pub removed: usize,
 }
 
+/// Import response for the `gallery.import_files` capability: ingested vs
+/// skipped file counts plus the new item ids (newest first). Counts only —
+/// no paths or names cross the boundary.
+#[derive(Serialize)]
+pub struct GalleryImportFilesResponse {
+    pub imported: usize,
+    pub skipped: usize,
+    pub ids: Vec<String>,
+}
+
+/// Export response for the `gallery.export_items` capability: copied vs
+/// skipped counts. No paths cross the boundary.
+#[derive(Serialize)]
+pub struct GalleryExportItemsResponse {
+    pub exported: usize,
+    pub skipped: usize,
+}
+
 /// Update response for the `gallery.update` capability, in Electron's
 /// `{ok, item} | {ok, error}` shape.
 #[derive(Serialize)]
@@ -2267,6 +2325,21 @@ pub struct CrashListResponse {
 #[derive(Serialize)]
 pub struct CrashFolderOpenedResponse {
     pub location: String,
+}
+
+/// Outcome response for the `css_editor.open_system` capability: whether
+/// the OS editor was launched. No path crosses the boundary.
+#[derive(Serialize)]
+pub struct CssEditorSystemOpenedResponse {
+    pub opened: bool,
+}
+
+/// Outcome response for the `window.set_custom_icon` capability: whether
+/// a validated icon file was picked and applied. No path crosses the
+/// boundary.
+#[derive(Serialize)]
+pub struct WindowCustomIconSetResponse {
+    pub ok: bool,
 }
 
 /// Outcome response for the `mod.clear_cache` capability: which
@@ -2730,7 +2803,8 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::TrayGetState(_)
                 | BridgeCommand::SpellcheckGetState(_)
                 | BridgeCommand::DiagnosticsOpenWebrtcInternals(_)
-                | BridgeCommand::DiagnosticsOpenGpuPage(_) => {}
+                | BridgeCommand::DiagnosticsOpenGpuPage(_)
+                | BridgeCommand::CssEditorOpenSystem(_) => {}
                 // Clipboard image copy (F17): shape check only (presence +
                 // byte cap + http(s) scheme); the content rules (raster
                 // MIME, byte/pixel caps, WIC decodability) live in
@@ -2770,7 +2844,8 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::WindowDrag(_)
                 | BridgeCommand::WindowToggleFullscreen(_)
                 | BridgeCommand::WindowQuit(_)
-                | BridgeCommand::WindowGetState(_) => {}
+                | BridgeCommand::WindowGetState(_)
+                | BridgeCommand::WindowSetCustomIcon(_) => {}
                 // Badge state is parameter-free by protocol
                 // (`deny_unknown_fields` already rejected any
                 // renderer-supplied member: no title, window id, handle,
@@ -2893,6 +2968,14 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 BridgeCommand::GalleryBulkRemove(payload) => {
                     if payload.ids.is_empty() || payload.ids.len() > 4096 {
                         return Err("invalid gallery bulk removal".to_owned());
+                    }
+                }
+                BridgeCommand::GalleryImportFiles(_) => {}
+                BridgeCommand::GalleryExportItems(payload) => {
+                    if payload.ids.is_empty()
+                        || payload.ids.len() > crate::gallery::MAX_EXPORT_ITEMS
+                    {
+                        return Err("invalid gallery export".to_owned());
                     }
                 }
                 BridgeCommand::GalleryUpdate(payload) => {
@@ -3901,7 +3984,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_all_nine_window_commands_without_parameters() {
+    fn accepts_all_ten_window_commands_without_parameters() {
         // Each typed window command carries an exact empty payload: no
         // window id, handle, coordinate, style, message, or process member
         // exists to supply.
@@ -3915,6 +3998,7 @@ mod tests {
             ("window_toggle_fullscreen", "win-7"),
             ("window_quit", "win-8"),
             ("window_get_state", "win-9"),
+            ("window_set_custom_icon", "win-10"),
         ] {
             let message = format!(
                 "{{\"version\":1,\"request_id\":\"{request_id}\",\"command\":{{\"type\":\"{wire}\",\"payload\":{{}}}}}}"
@@ -3937,6 +4021,7 @@ mod tests {
                 }
                 "window_quit" => matches!(command, BridgeCommand::WindowQuit(_)),
                 "window_get_state" => matches!(command, BridgeCommand::WindowGetState(_)),
+                "window_set_custom_icon" => matches!(command, BridgeCommand::WindowSetCustomIcon(_)),
                 _ => unreachable!(),
             };
             assert!(expected, "{wire} must dispatch to its own typed variant");

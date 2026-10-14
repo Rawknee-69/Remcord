@@ -67,6 +67,12 @@ windows = { version = "0.62", features = [
     # ToolHelp32 snapshots only (pid + exe path). No handle, module, or
     # thread enumeration is enabled.
     "Win32_System_Diagnostics_ToolHelp",
+    # Settings-driven power behavior: execution-state control (block power
+    # saving in voice chat), battery-state reads (dynamic performance
+    # preset), and DWM backdrop material (window chrome). No policy or
+    # shutdown work — process-local calls only.
+    "Win32_System_Power",
+    "Win32_Graphics_Dwm",
 ] }
 
 [dev-dependencies]
