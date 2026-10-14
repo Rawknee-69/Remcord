@@ -4755,6 +4755,155 @@ test("gallery usage/root/categories resolve bounded host facts", async () => {
     assert.deepEqual(JSON.parse(JSON.stringify(await cats)), [{ name: "clips", color: "#5865f2", createdAt: 1 }]);
 });
 
+// ---------------------------------------------------------------------------
+// Downloads manager contract (F23).
+//
+// Read-only inventory plus shell reveal over the host-owned downloads
+// root. The silent-save policy is unchanged: no dialog, no save entry
+// point, no path in either direction — list/openFolder take no
+// parameters, reveal takes one bare file name.
+// ---------------------------------------------------------------------------
+
+const DOWNLOADS_CAPS = ["bridge.ping", "downloads.list", "downloads.open_folder", "downloads.reveal"];
+
+function createDownloadsRuntime(capabilities = DOWNLOADS_CAPS) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondDownloads(window, request, type, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type, payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+test("the facade exposes the scoped downloads namespace and nothing else", () => {
+    const { window } = createDownloadsRuntime();
+    assert.deepEqual(Object.keys(window.remcord.downloads).sort(), ["list", "openFolder", "reveal"]);
+    assert.equal(Object.isFrozen(window.remcord.downloads), true);
+    for (const capability of DOWNLOADS_CAPS.slice(1)) {
+        assert.equal(window.remcord.native.supports(capability), true);
+    }
+    // No save entry point, dialog, picker, path opener, or shell surface.
+    assert.equal(window.remcord.downloads.save, undefined);
+    assert.equal(window.remcord.downloads.saveAs, undefined);
+    assert.equal(window.remcord.downloads.openPath, undefined);
+    assert.equal(window.remcord.downloads.dialog, undefined);
+    assert.equal(window.remcord.downloads.shell, undefined);
+});
+
+test("downloads.list sends an exact empty payload and resolves the inventory", async () => {
+    const { window } = createDownloadsRuntime();
+    const pending = window.remcord.downloads.list();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "downloads_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "downloads_list", payload: {} });
+    respondDownloads(window, message, "downloads_list", {
+        files: [{ name: "report.txt", bytes: 5, modified_ms: 1700000000000 }],
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), {
+        files: [{ name: "report.txt", bytes: 5, modified_ms: 1700000000000 }],
+    });
+});
+
+test("downloads.list rejects hostile inventories", async () => {
+    for (const payload of [
+        { files: [{ name: "../evil.txt", bytes: 1, modified_ms: 1 }] },
+        { files: [{ name: "C:\\evil.txt", bytes: 1, modified_ms: 1 }] },
+        { files: [{ name: "ok.txt", bytes: 1, modified_ms: 1, path: "C:\\x" }] },
+        { files: [{ name: "ok.txt", bytes: 1, modified_ms: 1, url: "https://x/y" }] },
+        { files: [{ name: "ok.txt", bytes: 1, modified_ms: 1, data: "x" }] },
+        { files: [{ name: "", bytes: 1, modified_ms: 1 }] },
+        { files: [{ name: "ok.txt", bytes: -1, modified_ms: 1 }] },
+        { files: [{ name: "ok.txt", bytes: 1, modified_ms: -1 }] },
+        { files: "nope" },
+        { files: [], extra: true },
+    ]) {
+        const runtime = createDownloadsRuntime();
+        const pending = runtime.window.remcord.downloads.list();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "downloads_list");
+        respondDownloads(runtime.window, message, "downloads_list", payload);
+        await assert.rejects(pending, /downloads list response schema is invalid/);
+    }
+});
+
+test("downloads.openFolder reveals the fixed root and resolves the label", async () => {
+    const { window } = createDownloadsRuntime();
+    const pending = window.remcord.downloads.openFolder();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "downloads_open_folder");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "downloads_open_folder", payload: {} });
+    respondDownloads(window, message, "downloads_folder_opened", { location: "downloads" });
+    assert.equal(await pending, "downloads");
+});
+
+test("downloads.openFolder rejects a mismatched or pathed label", async () => {
+    for (const payload of [{ location: "gallery" }, { location: "downloads", path: "C:\\x" }, {}]) {
+        const runtime = createDownloadsRuntime();
+        const pending = runtime.window.remcord.downloads.openFolder();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "downloads_open_folder");
+        respondDownloads(runtime.window, message, "downloads_folder_opened", payload);
+        await assert.rejects(pending, /downloads response schema is invalid/);
+    }
+});
+
+test("downloads.reveal sends a bare name and resolves the echo", async () => {
+    const { window } = createDownloadsRuntime();
+    const pending = window.remcord.downloads.reveal("report.txt");
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "downloads_reveal");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "downloads_reveal", payload: { name: "report.txt" } });
+    respondDownloads(window, message, "downloads_revealed", { name: "report.txt" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { name: "report.txt" });
+});
+
+test("downloads.reveal validates the name before dispatch", async () => {
+    const { window } = createDownloadsRuntime();
+    for (const bad of ["", "a/b.txt", "a\\b.txt", "C:\\x.txt", 42, null, "n".repeat(257)]) {
+        await assert.rejects(window.remcord.downloads.reveal(bad), /name must be/);
+    }
+    assert.equal(window.messages.filter((entry) => entry.command?.type === "downloads_reveal").length, 0);
+});
+
+test("downloads.reveal rejects a mismatched echo or pathed name", async () => {
+    const runtime = createDownloadsRuntime();
+    const pending = runtime.window.remcord.downloads.reveal("report.txt");
+    const message = runtime.window.messages.find((entry) => entry.command?.type === "downloads_reveal");
+    respondDownloads(runtime.window, message, "downloads_revealed", { name: "other.txt" });
+    await assert.rejects(pending, /downloads response schema is invalid/);
+
+    const second = createDownloadsRuntime();
+    const pending2 = second.window.remcord.downloads.reveal("report.txt");
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "downloads_reveal");
+    respondDownloads(second.window, message2, "downloads_revealed", { name: "report.txt", path: "C:\\x" });
+    await assert.rejects(pending2, /downloads response schema is invalid/);
+});
+
+test("downloads methods throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
+    const { window } = createDownloadsRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("downloads.list"), false);
+    assert.equal(window.remcord.native.supports("downloads.open_folder"), false);
+    assert.equal(window.remcord.native.supports("downloads.reveal"), false);
+    const unsupported = (error) => error.code === "UNSUPPORTED_CAPABILITY";
+    assert.throws(() => window.remcord.downloads.list(), unsupported);
+    assert.throws(() => window.remcord.downloads.openFolder(), unsupported);
+    assert.throws(() => window.remcord.downloads.reveal("report.txt"), unsupported);
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "downloads_list"),
+        false,
+    );
+});
+
 function createDiagnosticsRuntime(capabilities = ["bridge.ping", "diagnostics.get_info", "mod.clear_cache"]) {
     return createRuntime("https://discord.com", capabilities);
 }

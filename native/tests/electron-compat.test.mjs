@@ -1651,6 +1651,61 @@ test("F5 gallery keeps the Electron store contract with a natively-gated page", 
     assert.match(compat, /getFile: getGalleryFile/);
 });
 
+test("F23 downloads manager adds a read-only inventory with Electron owning no download surface", () => {
+    // Electron registers no will-download / download-item / downloadURL
+    // handler anywhere (Chromium default Save dialog), so there is no
+    // Electron download-manager IPC, store, or page to mirror — the
+    // native manager is additive over the hardened silent-save policy.
+    for (const file of ["src/main.ts", "src/discord/window.ts", "src/discord/ipc.ts"]) {
+        const source = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
+        assert.doesNotMatch(source, /will-download/);
+        assert.doesNotMatch(source, /download-item/);
+        assert.doesNotMatch(source, /downloadURL/);
+    }
+    // The silent-save core is untouched: sanitized names, no overwrite,
+    // host-owned fixed root, no renderer save entry point.
+    const nativeDownloads = readFileSync(new URL("../src/downloads.rs", import.meta.url), "utf8");
+    assert.match(nativeDownloads, /decide_download/);
+    assert.match(nativeDownloads, /DOWNLOADS_DIR_NAME/);
+    assert.match(nativeDownloads, /sanitize_filename/);
+    // The manager owns only inventory plus shell reveal in its new
+    // module: no dialog, no picker, no save path, no network.
+    const nativeManager = readFileSync(new URL("../src/download_manager.rs", import.meta.url), "utf8");
+    assert.match(nativeManager, /list_downloads/);
+    assert.match(nativeManager, /resolve_download_file/);
+    assert.match(nativeManager, /DOWNLOADS_LOCATION_LABEL/);
+    assert.match(nativeManager, /canonical_downloads_dir/);
+    const shippedManager = nativeManager
+        .slice(0, nativeManager.indexOf("#[cfg(test)]"))
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n");
+    assert.doesNotMatch(shippedManager, /showSaveDialog|showOpenDialog|Command::new|std::process/);
+    // The wire carries three typed commands and display metadata only.
+    const nativeProtocol = readFileSync(new URL("../src/protocol.rs", import.meta.url), "utf8");
+    for (const wire of ["DownloadsList", "DownloadsOpenFolder", "DownloadsReveal"]) {
+        assert.match(nativeProtocol, new RegExp(`\\b${wire}\\b`), `${wire} must be a typed command`);
+    }
+    const nativeMain = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+    const shippedMain = nativeMain.slice(0, nativeMain.indexOf("#[cfg(test)]"));
+    for (const capability of ["downloads.list", "downloads.open_folder", "downloads.reveal"]) {
+        assert.match(shippedMain, new RegExp(`"${capability.replace(/\./g, "\\.")}"`), `${capability} must be granted`);
+    }
+    assert.doesNotMatch(shippedMain, /"downloads\.save"/);
+    // The facade exposes exactly list/openFolder/reveal with no save,
+    // dialog, or path surface.
+    const compat = readFileSync(new URL("../web/compatibility.js", import.meta.url), "utf8");
+    assert.match(compat, /const downloads = Object\.freeze/);
+    assert.match(compat, /list: listDownloads/);
+    assert.match(compat, /openFolder: openDownloadsFolder/);
+    assert.match(compat, /reveal: revealDownload/);
+    assert.match(compat, /downloads_list/);
+    assert.match(compat, /downloads_open_folder/);
+    assert.match(compat, /downloads_reveal/);
+    assert.doesNotMatch(compat, /downloads\.save/);
+    assert.doesNotMatch(compat, /showSaveDialog/);
+});
+
 test("F8 keybind execution runs validated entries with runJavascript structurally excluded", () => {
     // Electron registers enabled+global entries as system hotkeys and
     // serves enabled non-global ones as menu accelerators; runAction runs

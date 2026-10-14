@@ -1455,6 +1455,69 @@
         return request({ type: "gallery_file", payload: { id } }, timeoutMs);
     }
 
+    // Downloads manager (F23): read-only inventory plus shell reveal over
+    // the host-owned <profile>/downloads/ directory. The silent-save
+    // policy is unchanged (no dialog, no save entry point, no path in
+    // either direction); the renderer supplies at most one bare file
+    // name, and the host re-validates it with byte-exact equality.
+    const MAX_DOWNLOAD_LIST_ENTRIES = 500;
+    const MAX_DOWNLOAD_NAME_BYTES = 256;
+
+    function listDownloads(timeoutMs = 5000) {
+        requireCapability("downloads.list");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Parameter-free by protocol: the host owns the root, the
+        // enumeration, the newest-first ordering, and the bounds. No
+        // path, selector, URL, or filter may be supplied.
+        return request({ type: "downloads_list", payload: {} }, timeoutMs);
+    }
+
+    function openDownloadsFolder(timeoutMs = 5000) {
+        requireCapability("downloads.open_folder");
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Reveal semantics on the one fixed host root (the Explorer
+        // behavior folders.open provides for its four roots): the
+        // response echoes the fixed "downloads" label so the caller can
+        // confirm the target.
+        return request({ type: "downloads_open_folder", payload: {} }, timeoutMs).then((payload) => {
+            if (payload.location !== "downloads") {
+                throw new Error("Native downloads response schema is invalid");
+            }
+            return payload.location;
+        });
+    }
+
+    function revealDownload(name, timeoutMs = 5000) {
+        requireCapability("downloads.reveal");
+        if (
+            typeof name !== "string" ||
+            name.length === 0 ||
+            textEncoder.encode(name).length > MAX_DOWNLOAD_NAME_BYTES
+        ) {
+            return Promise.reject(new TypeError("name must be a non-empty string of at most 256 UTF-8 bytes"));
+        }
+        if (name.includes("/") || name.includes("\\")) {
+            return Promise.reject(new TypeError("name must be a bare file name"));
+        }
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        // Bare file name only: the host re-sanitizes with byte-exact
+        // equality, resolves under its own root, and enforces canonical
+        // containment before revealing. The response echoes the validated
+        // name so one file's reveal can never resolve another file's call.
+        return request({ type: "downloads_reveal", payload: { name } }, timeoutMs).then((payload) => {
+            if (payload.name !== name) {
+                throw new Error("Native downloads response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
     // Maximum inventoried themes per response and maximum single display
     // string, mirroring the host bounds. A hostile themes directory cannot
     // widen the bridge response past these.
@@ -2742,6 +2805,61 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "downloads_list") {
+            const payload = response.payload.payload;
+            // Display metadata only (name/bytes/modified_ms),
+            // newest-first, bounded host-side. No path, URL, content, or
+            // error text may ride along.
+            const filesValid =
+                Array.isArray(payload?.files) &&
+                payload.files.length <= MAX_DOWNLOAD_LIST_ENTRIES &&
+                payload.files.every(
+                    (entry) =>
+                        entry &&
+                        typeof entry.name === "string" &&
+                        entry.name.length > 0 &&
+                        textEncoder.encode(entry.name).length <= MAX_DOWNLOAD_NAME_BYTES &&
+                        !entry.name.includes("/") &&
+                        !entry.name.includes("\\") &&
+                        Number.isSafeInteger(entry.bytes) &&
+                        entry.bytes >= 0 &&
+                        Number.isSafeInteger(entry.modified_ms) &&
+                        entry.modified_ms >= 0 &&
+                        entry.path === undefined &&
+                        entry.url === undefined &&
+                        entry.data === undefined,
+                );
+            if (!payload || Object.keys(payload).length !== 1 || !filesValid) {
+                request.reject(new Error("Native downloads list response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "downloads_folder_opened") {
+            const payload = response.payload.payload;
+            // Fixed location-label echo only; an absolute path never
+            // crosses.
+            if (!payload || Object.keys(payload).length !== 1 || payload.location !== "downloads") {
+                request.reject(new Error("Native downloads response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "downloads_revealed") {
+            const payload = response.payload.payload;
+            // Validated name echo only; no path may ride along.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                typeof payload.name !== "string" ||
+                payload.name.length === 0 ||
+                textEncoder.encode(payload.name).length > MAX_DOWNLOAD_NAME_BYTES ||
+                payload.name.includes("/") ||
+                payload.name.includes("\\") ||
+                payload.path !== undefined
+            ) {
+                request.reject(new Error("Native downloads response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "theme_folder_opened") {
             const payload = response.payload.payload;
             if (
@@ -3390,6 +3508,11 @@
         exportItems: exportGalleryItems,
         getFile: getGalleryFile,
     });
+    // Downloads manager only: read-only inventory plus shell reveal over
+    // the host-owned downloads root. No save entry point, no dialog, no
+    // path surface: list and openFolder take no parameters, reveal takes
+    // one bare file name.
+    const downloads = Object.freeze({ list: listDownloads, openFolder: openDownloadsFolder, reveal: revealDownload });
     // Theme installation only: CSS text in, bounded metadata out. No URL,
     // path, dialog, picker, editor, or list surface.
     // Theme CSS replacement only: validated id plus CSS text in, bounded
@@ -3599,6 +3722,7 @@
             backup,
             folders,
             gallery,
+            downloads,
             themes: themesShim,
             quickcss: quickcssShim,
             diagnostics,

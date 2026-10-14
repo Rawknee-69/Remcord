@@ -121,6 +121,9 @@ pub enum BridgeCommand {
     RpcGetBlacklist(RpcGetBlacklistRequest),
     RpcBlacklistGame(RpcBlacklistGameRequest),
     RpcUnblacklistGame(RpcUnblacklistGameRequest),
+    DownloadsList(DownloadsListRequest),
+    DownloadsOpenFolder(DownloadsOpenFolderRequest),
+    DownloadsReveal(DownloadsRevealRequest),
     WindowShow(WindowShowRequest),
     WindowHide(WindowHideRequest),
     WindowMinimize(WindowMinimizeRequest),
@@ -715,6 +718,33 @@ pub struct RpcBlacklistGameRequest {
 #[serde(deny_unknown_fields)]
 pub struct RpcUnblacklistGameRequest {
     pub id: i64,
+}
+/// Empty request for the read-only `downloads.list` manager capability:
+/// newest-first inventory of the host-owned downloads dir. There is
+/// deliberately NO path, root, selector, URL, or filter: the host owns
+/// the root, enumeration, ordering, and bounds. Any extra field is
+/// rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadsListRequest {}
+
+/// Empty request for the `downloads.open_folder` manager capability:
+/// reveals the fixed host-owned downloads root (same reveal semantics as
+/// `folders.open`). There is deliberately NO path, URL, directory name,
+/// or selector. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadsOpenFolderRequest {}
+
+/// Reveal request for the `downloads.reveal` manager capability: exactly
+/// one already-sanitized file NAME. There is deliberately NO path, URL,
+/// id, or destination: the host re-sanitizes the name with byte-exact
+/// equality, joins it onto its own downloads root, and enforces
+/// canonical containment. Charset and length are re-checked at dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadsRevealRequest {
+    pub name: String,
 }
 
 /// Empty request for the `quickcss.read` editor capability: returns the
@@ -1563,6 +1593,9 @@ pub enum BridgeResponsePayload {
     GalleryUsage(GalleryUsageResponse),
     GalleryFile(GalleryFileResponse),
     GalleryRoot(GalleryRootResponse),
+    DownloadsList(DownloadsListResponse),
+    DownloadsFolderOpened(DownloadsFolderOpenedResponse),
+    DownloadsRevealed(DownloadsRevealedResponse),
     KeybindsList(KeybindsListResponse),
     KeybindsAdd(KeybindsAddResponse),
     KeybindsToggle(KeybindsToggleResponse),
@@ -2057,6 +2090,31 @@ pub struct GalleryFileResponse {
 #[derive(Serialize)]
 pub struct GalleryRootResponse {
     pub root: String,
+}
+
+/// Read-only inventory response for the `downloads.list` manager
+/// capability: display metadata only (`name`, `bytes`, `modified_ms`),
+/// newest-first. No paths, no URLs, no contents, no filesystem error
+/// text.
+#[derive(Serialize)]
+pub struct DownloadsListResponse {
+    pub files: Vec<crate::download_manager::DownloadEntry>,
+}
+
+/// Reveal response for the `downloads.open_folder` manager capability:
+/// the fixed location-label echo, so the renderer can confirm which root
+/// was revealed. No path crosses the boundary.
+#[derive(Serialize)]
+pub struct DownloadsFolderOpenedResponse {
+    pub location: &'static str,
+}
+
+/// Reveal response for the `downloads.reveal` manager capability: the
+/// validated name echo, so one file's reveal can never resolve another
+/// file's call. No path crosses the boundary.
+#[derive(Serialize)]
+pub struct DownloadsRevealedResponse {
+    pub name: String,
 }
 
 /// Read response for the `quickcss.read` editor capability: the fixed file
@@ -2601,7 +2659,9 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 BridgeCommand::GalleryList(_)
                 | BridgeCommand::GalleryCategories(_)
                 | BridgeCommand::GalleryUsage(_)
-                | BridgeCommand::GalleryRoot(_) => {}
+                | BridgeCommand::GalleryRoot(_)
+                | BridgeCommand::DownloadsList(_)
+                | BridgeCommand::DownloadsOpenFolder(_) => {}
                 // Keybinds: shape check only (presence + byte caps); the
                 // accelerator grammar, id charset, action allowlist, and
                 // inventory bounds live in `keybinds` and are re-enforced
@@ -2691,6 +2751,17 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 BridgeCommand::GalleryFile(payload) => {
                     if !gallery_id_shape_valid(&payload.id) {
                         return Err("invalid gallery id".to_owned());
+                    }
+                }
+                BridgeCommand::DownloadsReveal(payload) => {
+                    // Shape check only (presence + byte cap); the
+                    // byte-exact sanitize round trip, existence, and
+                    // containment rules live in `download_manager` and are
+                    // re-enforced at dispatch.
+                    if payload.name.is_empty()
+                        || payload.name.len() > crate::download_manager::MAX_DOWNLOAD_NAME_BYTES
+                    {
+                        return Err("invalid download name".to_owned());
                     }
                 }
                 BridgeCommand::GalleryBulkRemove(payload) => {
@@ -4207,6 +4278,107 @@ mod tests {
         assert_eq!(open_value["payload"]["type"], "theme_folder_opened");
         assert_eq!(open_value["payload"]["payload"]["id"], "my-theme");
         assert!(open_value["payload"]["payload"].get("path").is_none());
+    }
+
+    #[test]
+    fn downloads_commands_parse_with_closed_shapes() {
+        fn wire(wire_type: &str, payload: &str) -> String {
+            format!("{{\"version\":1,\"request_id\":\"d\",\"command\":{{\"type\":\"{wire_type}\",\"payload\":{payload}}}}}")
+        }
+        // Parameter-free inventory and folder reveal.
+        for wire_type in ["downloads_list", "downloads_open_folder"] {
+            assert!(
+                matches!(
+                    parse_bridge_message(&wire(wire_type, "{}")),
+                    Ok(BridgeMessage::Request(_))
+                ),
+                "{wire_type} must parse"
+            );
+            assert!(
+                parse_bridge_message(&wire(wire_type, "{\"path\":\"C:\\\\x\"}")).is_err(),
+                "{wire_type} must refuse paths"
+            );
+        }
+        // Name-only reveal.
+        assert!(matches!(
+            parse_bridge_message(&wire("downloads_reveal", "{\"name\":\"report.txt\"}")),
+            Ok(BridgeMessage::Request(_))
+        ));
+        let empty = wire("downloads_reveal", "{}");
+        let oversized = wire(
+            "downloads_reveal",
+            &format!("{{\"name\":\"{}\"}}", "n".repeat(257)),
+        );
+        let with_path = wire(
+            "downloads_reveal",
+            "{\"name\":\"report.txt\",\"path\":\"C:\\\\x\"}",
+        );
+        assert!(parse_bridge_message(&empty).is_err());
+        assert!(parse_bridge_message(&oversized).is_err());
+        assert!(parse_bridge_message(&with_path).is_err());
+    }
+
+    #[test]
+    fn serializes_typed_downloads_responses_without_paths() {
+        use super::{
+            DownloadsFolderOpenedResponse, DownloadsListResponse, DownloadsRevealedResponse,
+        };
+        let list = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "downloads-1".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::DownloadsList(
+                DownloadsListResponse {
+                    files: vec![crate::download_manager::DownloadEntry {
+                        name: "report.txt".to_owned(),
+                        bytes: 5,
+                        modified_ms: 1,
+                    }],
+                },
+            )),
+            error: None,
+        };
+        let list_value = serde_json::to_value(list).unwrap();
+        assert_eq!(list_value["payload"]["type"], "downloads_list");
+        assert_eq!(
+            list_value["payload"]["payload"]["files"][0]["name"],
+            "report.txt"
+        );
+        assert!(list_value["payload"]["payload"]["files"][0]
+            .get("path")
+            .is_none());
+
+        let opened = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "downloads-2".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::DownloadsFolderOpened(
+                DownloadsFolderOpenedResponse {
+                    location: crate::download_manager::DOWNLOADS_LOCATION_LABEL,
+                },
+            )),
+            error: None,
+        };
+        let opened_value = serde_json::to_value(opened).unwrap();
+        assert_eq!(opened_value["payload"]["type"], "downloads_folder_opened");
+        assert_eq!(opened_value["payload"]["payload"]["location"], "downloads");
+        assert!(opened_value["payload"]["payload"].get("path").is_none());
+
+        let revealed = BridgeResponse {
+            version: PROTOCOL_VERSION,
+            request_id: "downloads-3".to_owned(),
+            ok: true,
+            payload: Some(BridgeResponsePayload::DownloadsRevealed(
+                DownloadsRevealedResponse {
+                    name: "report.txt".to_owned(),
+                },
+            )),
+            error: None,
+        };
+        let revealed_value = serde_json::to_value(revealed).unwrap();
+        assert_eq!(revealed_value["payload"]["type"], "downloads_revealed");
+        assert_eq!(revealed_value["payload"]["payload"]["name"], "report.txt");
+        assert!(revealed_value["payload"]["payload"].get("path").is_none());
     }
 
     #[test]

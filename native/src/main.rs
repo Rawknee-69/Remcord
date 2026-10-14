@@ -12,6 +12,7 @@ mod css_watch;
 mod custom_bundle;
 mod diagnostics;
 mod discord_protocol;
+mod download_manager;
 mod downloads;
 mod environment_observer;
 mod folders;
@@ -98,7 +99,8 @@ use protocol::{
     BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse,
     BadgeStateResponse, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage,
     BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
-    ClipboardImageCopiedResponse, DiagnosticsInfoResponse, FoldersOpenedResponse,
+    ClipboardImageCopiedResponse, DiagnosticsInfoResponse, DownloadsFolderOpenedResponse,
+    DownloadsListResponse, DownloadsRevealedResponse, FoldersOpenedResponse,
     GalleryAddResponse, GalleryBulkRemoveResponse, GalleryCategoriesResponse,
     GalleryCategoryAddResponse, GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse,
     GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse,
@@ -657,6 +659,9 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "gallery.usage",
         "gallery.file",
         "gallery.root",
+        "downloads.list",
+        "downloads.open_folder",
+        "downloads.reveal",
         "themes.install_code",
         "themes.write_css",
         "themes.import_files",
@@ -4643,6 +4648,61 @@ fn respond_gallery_err(
     }
     *response_count += 1;
     println!("[Gallery][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
+}
+
+/// Sends one downloads-manager success response and completes request
+/// correlation. Shared by the three `downloads.*` dispatch arms so the
+/// inventory, folder reveal, and file reveal cannot drift in envelope
+/// shape, correlation, or metrics logging.
+fn respond_downloads_ok(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    payload: BridgeResponsePayload,
+    metric: &str,
+    latency_ms: f64,
+) {
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: true,
+        payload: Some(payload),
+        error: None,
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Downloads][Metrics] {metric} request_latency_ms={latency_ms:.3}");
+}
+
+/// Sends one downloads-manager typed failure: path-free code plus
+/// message, same envelope discipline as every other capability.
+fn respond_downloads_err(
+    webview: &WebView,
+    request_tracker: &mut RequestTracker,
+    response_count: &mut u64,
+    request_id: String,
+    code: &'static str,
+    message: String,
+    latency_ms: f64,
+) {
+    eprintln!("[Downloads][{code}] {message}");
+    let response = BridgeResponse {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        ok: false,
+        payload: None,
+        error: Some(BridgeError { code, message }),
+    };
+    send_bridge_response(webview, &response);
+    if let Err(error) = request_tracker.complete(&request_id) {
+        eprintln!("[Bridge] correlation failure after response: {error}");
+    }
+    *response_count += 1;
+    println!("[Downloads][Metrics] op=error code={code} request_latency_ms={latency_ms:.3}");
 }
 
 /// Sends one keybind success response and completes request correlation.
@@ -9386,6 +9446,117 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 "op=root",
                                 latency_ms,
                             );
+                        }
+                        BridgeCommand::DownloadsList(_) => {
+                            // Read-only inventory of the host downloads
+                            // dir: display metadata only, newest-first,
+                            // bounded host-side. No path, selector, URL,
+                            // or filter crosses in either direction.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match download_manager::list_downloads(&profile_path) {
+                                Ok(files) => respond_downloads_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::DownloadsList(DownloadsListResponse {
+                                        files,
+                                    }),
+                                    "op=list",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_downloads_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::DownloadsOpenFolder(_) => {
+                            // Reveal semantics (showItemInFolder
+                            // equivalent) on the one fixed host root: the
+                            // renderer selects nothing, the host resolves
+                            // and contains the directory itself.
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            match download_manager::canonical_downloads_dir(&profile_path)
+                                .and_then(|dir| {
+                                    reveal_folder(&dir).map_err(|_| {
+                                        download_manager::DownloadFailure {
+                                            code: "REVEAL_FAILED",
+                                            message: "downloads reveal failed".to_owned(),
+                                        }
+                                    })
+                                }) {
+                                Ok(_) => respond_downloads_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::DownloadsFolderOpened(
+                                        DownloadsFolderOpenedResponse {
+                                            location:
+                                                download_manager::DOWNLOADS_LOCATION_LABEL,
+                                        },
+                                    ),
+                                    "op=open_folder",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_downloads_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
+                        }
+                        BridgeCommand::DownloadsReveal(payload) => {
+                            // Exactly one already-sanitized file name: the
+                            // host re-validates byte-exact equality,
+                            // resolves under its own root, enforces
+                            // canonical containment, and reveals the file
+                            // (parent opens with the file selected).
+                            let request_id = request.request_id;
+                            let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+                            let name = payload.name;
+                            match download_manager::resolve_download_file(&profile_path, &name)
+                                .and_then(|file| {
+                                    download_manager::reveal_download_file(&file).map_err(
+                                        |_| download_manager::DownloadFailure {
+                                            code: "REVEAL_FAILED",
+                                            message: "download reveal failed".to_owned(),
+                                        },
+                                    )
+                                }) {
+                                Ok(_) => respond_downloads_ok(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    BridgeResponsePayload::DownloadsRevealed(
+                                        DownloadsRevealedResponse { name },
+                                    ),
+                                    "op=reveal",
+                                    latency_ms,
+                                ),
+                                Err(failure) => respond_downloads_err(
+                                    &webview,
+                                    &mut request_tracker,
+                                    &mut response_count,
+                                    request_id,
+                                    failure.code,
+                                    failure.message,
+                                    latency_ms,
+                                ),
+                            }
                         }
                         BridgeCommand::KeybindsList(_) => {
                             // Validated inventory, metadata only. Entries
@@ -14537,6 +14708,56 @@ mod tests {
         // The DEV-only probe must stay behind its documented env flag and
         // must never run unconditionally.
         assert_eq!(super::FOLDERS_SMOKE_ENV, "REMCORD_NATIVE_FOLDERS_SMOKE");
+    }
+
+    #[test]
+    fn boot_snapshot_grants_only_the_three_downloads_capabilities() {
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"downloads.list"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"downloads.open_folder"));
+        assert!(super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"downloads.reveal"));
+        // No generic download saver, dialog, picker, path opener, or
+        // shell surface may exist alongside the three scoped
+        // capabilities. The silent-save policy stays host-only with no
+        // renderer save entry point.
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"downloads"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"downloads.save"));
+        assert!(!super::BOOT_SNAPSHOT
+            .capabilities
+            .contains(&"downloads.open_path"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"dialog"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"filesystem"));
+        assert!(!super::BOOT_SNAPSHOT.capabilities.contains(&"invoke"));
+    }
+
+    #[test]
+    fn initialization_script_exposes_namespaced_downloads_facade() {
+        let script = initialization_script(
+            &[],
+            crate::settings_boot::test_fixture_json(),
+            crate::app::test_fixture_json(),
+        )
+        .unwrap();
+        assert!(script.contains("downloads_list"));
+        assert!(script.contains("downloads_open_folder"));
+        assert!(script.contains("downloads_reveal"));
+        assert!(script.contains("downloads.list"));
+        assert!(script.contains("downloads.open_folder"));
+        assert!(script.contains("downloads.reveal"));
+        // The facade carries a fixed label plus one bare name only: no
+        // path opener, no save entry point, no dialog/picker, no
+        // synchronous IPC.
+        assert!(!script.contains("downloads.save"));
+        assert!(!script.contains("openPath("));
+        assert!(!script.contains("showSaveDialog"));
+        assert!(!script.contains("sendSync"));
     }
 
     #[test]
