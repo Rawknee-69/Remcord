@@ -1,5 +1,6 @@
 mod app;
 mod arrpc;
+mod aux_windows;
 mod backup;
 mod badge;
 mod browser_recovery;
