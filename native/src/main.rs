@@ -94,17 +94,17 @@ use process_failure::ProcessFailedEvent;
 use protocol::{
     parse_bridge_message, validate_mod_bundle_id, validate_vencord_css_mod_id,
     window_state_event_json, AppVersionResponse, BackupInspectedResponse,
-    BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse, BadgeStateResponse,
-    BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest,
-    BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
-    ClipboardImageCopiedResponse,
-    DiagnosticsInfoResponse, FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
-    GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
-    GalleryCategoryRenameResponse, GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse,
-    GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse,
-    KeybindsListResponse, KeybindsRemoveResponse, KeybindsToggleResponse,
-    LocalizationStringResponse, MenusTemplateResponse, ModBundleResponse, ModCacheClearedResponse,
-    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    BackupRestoreDiscardedResponse, BackupRestoredResponse, BackupSavedResponse,
+    BadgeStateResponse, BridgeCommand, BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage,
+    BridgeRequest, BridgeResponse, BridgeResponsePayload, BundleFileEntry, BundlesListResponse,
+    ClipboardImageCopiedResponse, DiagnosticsInfoResponse, FoldersOpenedResponse,
+    GalleryAddResponse, GalleryBulkRemoveResponse, GalleryCategoriesResponse,
+    GalleryCategoryAddResponse, GalleryCategoryRemoveResponse, GalleryCategoryRenameResponse,
+    GalleryFileResponse, GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse,
+    GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse, KeybindsListResponse,
+    KeybindsRemoveResponse, KeybindsToggleResponse, LocalizationStringResponse,
+    MenusTemplateResponse, ModBundleResponse, ModCacheClearedResponse, PingResponse,
+    PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
     PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
     PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
     RpcBlacklistResponse, RpcDetectableAddResponse, RpcDetectableRemoveResponse,
@@ -13072,6 +13072,9 @@ mod tests {
         let template = crate::menus::menu_template_json(&[]);
         assert_eq!(template["menus"].as_array().map(|v| v.len()), Some(4));
         assert_eq!(template["keybindMenu"].as_array().map(|v| v.len()), Some(0));
+    }
+
+    #[test]
     fn f20_badge_reports_titles_without_renderer_surface() {
         // The read-only state capability exists in the boot snapshot; the
         // title observer ships in the document-start script with the entry

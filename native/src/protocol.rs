@@ -1954,6 +1954,7 @@ pub struct MenusTemplateResponse {
     pub menus: Vec<serde_json::Value>,
     pub keybind_menu: Vec<serde_json::Value>,
     pub context_menu: String,
+}
 /// Read-only overlay-state response for the `badge.get_state` capability:
 /// the parsed kind, the mention count (only for `mention`), the applied
 /// asset file (only when a badge shows), and whether the last taskbar
@@ -2585,7 +2586,7 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::WindowToggleFullscreen(_)
                 | BridgeCommand::WindowQuit(_)
                 | BridgeCommand::WindowGetState(_) => {}
-                | BridgeCommand::WindowQuit(_) => {}
+                BridgeCommand::WindowQuit(_) => {}
                 // Badge state is parameter-free by protocol
                 // (`deny_unknown_fields` already rejected any
                 // renderer-supplied member: no title, window id, handle,
