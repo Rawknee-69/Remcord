@@ -69,6 +69,11 @@ pub enum BridgeCommand {
     AppGetVersion(AppGetVersionRequest),
     PluginStorageRead(PluginStorageReadRequest),
     PluginStorageWrite(PluginStorageWriteRequest),
+    PluginsList(PluginsListRequest),
+    PluginsSetEnabled(PluginsSetEnabledRequest),
+    PluginsReload(PluginsReloadRequest),
+    PluginsGetRuntimeEntries(PluginsGetRuntimeEntriesRequest),
+    PluginsGetRuntimeScript(PluginsGetRuntimeScriptRequest),
     BundlesList(BundlesListRequest),
     FoldersOpen(FoldersOpenRequest),
     FoldersOpenTheme(FoldersOpenThemeRequest),
@@ -253,6 +258,71 @@ pub struct PluginStorageWriteRequest {
     pub plugin_id: String,
     pub relative_path: String,
     pub data: String,
+}
+
+/// Empty request for the read-only `plugins.list` inventory capability.
+/// Returns one display entry per valid manifest under the host-owned
+/// plugins root, in sorted directory order. There is deliberately NO path,
+/// root, selector, URL, or filter: the host owns enumeration, manifest
+/// reads, enablement (from the authoritative settings), compatibility, and
+/// bounds. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsListRequest {}
+
+/// Flip request for the `plugins.set_enabled` capability: exactly one
+/// logical plugin id plus the new boolean state. There is deliberately NO
+/// path, manifest, entry, URL, or filesystem selector: the host resolves
+/// the id against fresh discovery and persists the flip into the
+/// `pluginStates` settings map. Charset is re-checked at dispatch; unknown
+/// ids resolve `{ok:false}` (never an error), and enabling an incompatible
+/// plugin resolves `{ok:false}` like Electron.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsSetEnabledRequest {
+    pub plugin_id: String,
+    pub enabled: bool,
+}
+
+/// Re-validation request for the `plugins.reload` capability: exactly one
+/// logical plugin id. There is deliberately NO path, manifest, entry, or
+/// selector: the host re-discovers and re-validates that plugin's manifest
+/// and files, reporting whether it is currently servable. Unknown or
+/// incompatible ids resolve `{ok:false}` like Electron. The renderer loader
+/// picks the result up on the next document; no live in-place re-execution
+/// is manufactured.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsReloadRequest {
+    pub plugin_id: String,
+}
+
+/// Scoped runtime-entries request for the `plugins.get_runtime_entries`
+/// capability: exactly one closed target enum (`preload` or `renderer`).
+/// There is deliberately NO plugin id, path, URL, or selector: the host
+/// returns every enabled+compatible plugin's logical `{id, name}` for that
+/// target (Electron's absolute `path` member is dropped — the loader
+/// requests sources by id+target and the host re-resolves them). Unknown
+/// targets are rejected during deserialization, before any work.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsGetRuntimeEntriesRequest {
+    pub target: crate::plugins::PluginTarget,
+}
+
+/// Scoped runtime-source request for the `plugins.get_runtime_script`
+/// capability: exactly one logical plugin id plus the closed target enum.
+/// There is deliberately NO path, URL, filename, or entry selector: the
+/// host re-resolves the manifest entry under its own plugins root. An
+/// undeclared, unresolvable, missing, or empty entry resolves
+/// `{source:null}` (the loader skips falsy sources, mirroring Electron's
+/// `if (!source) continue`); over-limit, non-UTF-8, or unreadable entries
+/// are typed errors. Charset is re-checked at dispatch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsGetRuntimeScriptRequest {
+    pub plugin_id: String,
+    pub target: crate::plugins::PluginTarget,
 }
 
 /// Empty request for the read-only `backup.list_bundles` discovery
@@ -513,6 +583,8 @@ pub enum BridgeEvent {
     ModBootstrapResult(ModBootstrapResult),
     ModAdapterError(ModAdapterError),
     ModResponseAck(ModResponseAck),
+    /// Shipped plugin-loader execution telemetry (log-only, no response).
+    PluginResult(PluginResult),
     VencordCssResult(VencordCssResult),
     VencordBootstrapResult(VencordBootstrapResult),
     VencordAdapterError(VencordAdapterError),
@@ -669,6 +741,21 @@ pub struct ModAdapterError {
 pub struct ModResponseAck {
     pub mod_id: String,
     pub request_id: String,
+}
+
+/// Shipped one-way execution report posted by the native plugin loader
+/// (`native/web/plugins/loader.js`) after each plugin entry runs. Fire-and-
+/// forget telemetry, not a gate: the host logs it (verifying the id against
+/// fresh discovery so logs stay trustworthy) and sends no response. Carries
+/// only the logical id, the closed target, the verdict, and a bounded
+/// failure message — never source, path, or URL.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginResult {
+    pub plugin_id: String,
+    pub target: crate::plugins::PluginTarget,
+    pub ok: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1056,6 +1143,11 @@ pub enum BridgeResponsePayload {
     AppVersion(AppVersionResponse),
     PluginStorageRead(PluginStorageReadResponse),
     PluginStorageWrite(PluginStorageWriteResponse),
+    PluginsList(PluginsListResponse),
+    PluginsSetEnabled(PluginsSetEnabledResponse),
+    PluginsReload(PluginsReloadResponse),
+    PluginsRuntimeEntries(PluginsRuntimeEntriesResponse),
+    PluginsRuntimeScript(PluginsRuntimeScriptResponse),
     BundlesList(BundlesListResponse),
     FoldersOpened(FoldersOpenedResponse),
     ThemeFolderOpened(ThemeFolderOpenedResponse),
@@ -1184,6 +1276,68 @@ pub struct PluginStorageReadResponse {
 #[derive(Serialize)]
 pub struct PluginStorageWriteResponse {
     pub payload_bytes: usize,
+}
+
+/// Read-only inventory response for the `plugins.list` capability: one
+/// [`crate::plugins::PluginInfo`] per valid manifest, in sorted directory
+/// order. Display metadata only — no paths, URLs, sources, or filesystem
+/// error text.
+#[derive(Debug, Serialize)]
+pub struct PluginsListResponse {
+    pub plugins: Vec<crate::plugins::PluginInfo>,
+}
+
+/// Flip response for the `plugins.set_enabled` capability. Electron parity:
+/// `{ok}` only — `true` carries the validated id echo, the persisted state
+/// (which equals the request, including the idempotent same-state no-op),
+/// the persistence source (always `"file"` after a successful write), and
+/// the persisted file size; `false` (unknown id, or enabling an
+/// incompatible plugin) carries no echo because nothing was applied. No
+/// path crosses the boundary.
+#[derive(Debug, Serialize)]
+pub struct PluginsSetEnabledResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_bytes: Option<usize>,
+}
+
+/// Re-validation response for the `plugins.reload` capability. Same `{ok}`
+/// contract as the enable flip: `true` echoes the re-validated id, `false`
+/// (unknown or incompatible id) echoes nothing.
+#[derive(Debug, Serialize)]
+pub struct PluginsReloadResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+}
+
+/// Scoped runtime-entries response for the `plugins.get_runtime_entries`
+/// capability: the closed target echo plus every enabled+compatible
+/// plugin's logical `{id, name}` for that target. Electron's absolute
+/// `path` member is deliberately dropped — the loader requests sources by
+/// id+target and the host re-resolves them.
+#[derive(Debug, Serialize)]
+pub struct PluginsRuntimeEntriesResponse {
+    pub target: crate::plugins::PluginTarget,
+    pub entries: Vec<crate::plugins::PluginRuntimeEntry>,
+}
+
+/// Scoped runtime-source response for the `plugins.get_runtime_script`
+/// capability: the id+target echo plus the bounded entry source, or
+/// `source: null` when the entry is undeclared, unresolvable, missing, or
+/// empty (the loader skips falsy sources, mirroring Electron's
+/// `if (!source) continue`). No path crosses the boundary.
+#[derive(Debug, Serialize)]
+pub struct PluginsRuntimeScriptResponse {
+    pub plugin_id: String,
+    pub target: crate::plugins::PluginTarget,
+    pub source: Option<String>,
 }
 
 /// One inventoried bundle file for the read-only `backup.list_bundles`
@@ -1548,6 +1702,47 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 }
                 // Parameter-free by protocol (`deny_unknown_fields` already
                 // rejected any renderer-supplied member), so no shape check
+                // is needed. Enumeration, manifest reads, enablement, and
+                // bounds live in `plugins` and are enforced at dispatch.
+                BridgeCommand::PluginsList(_) => {}
+                BridgeCommand::PluginsSetEnabled(payload) => {
+                    // Shape check only (id presence/cap; the boolean is
+                    // typed by serde); id charset, discovery membership,
+                    // and compatibility live in `plugins` (plus the
+                    // `pluginStates` settings owner) and are re-enforced at
+                    // dispatch.
+                    if payload.plugin_id.is_empty()
+                        || payload.plugin_id.len() > crate::plugins::MAX_PLUGIN_ID_BYTES
+                    {
+                        return Err("invalid plugin enable flip".to_owned());
+                    }
+                }
+                BridgeCommand::PluginsReload(payload) => {
+                    // Shape check only (id presence/cap); membership and
+                    // compatibility are re-enforced at dispatch.
+                    if payload.plugin_id.is_empty()
+                        || payload.plugin_id.len() > crate::plugins::MAX_PLUGIN_ID_BYTES
+                    {
+                        return Err("invalid plugin reload".to_owned());
+                    }
+                }
+                // The target is a closed enum validated by serde itself:
+                // unknown variants (including `"main"`) never reach
+                // dispatch. There is no id, path, or selector to
+                // shape-check.
+                BridgeCommand::PluginsGetRuntimeEntries(_) => {}
+                BridgeCommand::PluginsGetRuntimeScript(payload) => {
+                    // Shape check only (id presence/cap); id charset,
+                    // membership, enablement, and the entry jail live in
+                    // `plugins` and are re-enforced at dispatch.
+                    if payload.plugin_id.is_empty()
+                        || payload.plugin_id.len() > crate::plugins::MAX_PLUGIN_ID_BYTES
+                    {
+                        return Err("invalid plugin source request".to_owned());
+                    }
+                }
+                // Parameter-free by protocol (`deny_unknown_fields` already
+                // rejected any renderer-supplied member), so no shape check
                 // is needed. There is nothing to validate: the inventory
                 // covers the fixed allowlist only.
                 BridgeCommand::BundlesList(_) => {}
@@ -1771,6 +1966,24 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                     }
                     if !valid_request_id(&payload.request_id) {
                         return Err("invalid mod response acknowledgement".to_owned());
+                    }
+                }
+                BridgeEvent::PluginResult(payload) => {
+                    // Shipped loader telemetry: the id shape is checked
+                    // here (discovery membership is verified at dispatch,
+                    // where a fresh scan is cheap); the target is a closed
+                    // enum validated by serde; ok/error must agree like
+                    // every other verdict event.
+                    if crate::plugins::validate_plugin_id(&payload.plugin_id).is_err() {
+                        return Err("invalid plugin id in plugin result".to_owned());
+                    }
+                    if payload
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+                        || payload.ok == payload.error.is_some()
+                    {
+                        return Err("invalid plugin result".to_owned());
                     }
                 }
                 BridgeEvent::VencordCssResult(payload) => {
@@ -2201,6 +2414,140 @@ mod tests {
                 "must reject {message}"
             );
         }
+    }
+
+    #[test]
+    fn accepts_plugin_commands_and_rejects_source_selectors() {
+        // All five plugin commands parse with their exact shapes; the
+        // closed target enum accepts only preload/renderer (`main` has no
+        // native runtime and fails closed at parse time).
+        for message in [
+            r#"{"version":1,"request_id":"p-1","command":{"type":"plugins_list","payload":{}}}"#,
+            r#"{"version":1,"request_id":"p-2","command":{"type":"plugins_set_enabled","payload":{"plugin_id":"demo","enabled":true}}}"#,
+            r#"{"version":1,"request_id":"p-3","command":{"type":"plugins_reload","payload":{"plugin_id":"demo"}}}"#,
+            r#"{"version":1,"request_id":"p-4","command":{"type":"plugins_get_runtime_entries","payload":{"target":"preload"}}}"#,
+            r#"{"version":1,"request_id":"p-5","command":{"type":"plugins_get_runtime_script","payload":{"plugin_id":"demo","target":"renderer"}}}"#,
+        ] {
+            assert!(
+                matches!(parse_bridge_message(message), Ok(BridgeMessage::Request(_))),
+                "must parse {message}"
+            );
+        }
+        // A path, URL, filename, manifest, entry, or source member is never
+        // a valid member: it cannot select what the host reads or serves.
+        for hostile in [
+            r#"{"version":1,"request_id":"p-6","command":{"type":"plugins_set_enabled","payload":{"plugin_id":"demo","enabled":true,"path":"C:\\secret"}}}"#,
+            r#"{"version":1,"request_id":"p-7","command":{"type":"plugins_reload","payload":{"plugin_id":"demo","url":"https://attacker.invalid/x.js"}}}"#,
+            r#"{"version":1,"request_id":"p-8","command":{"type":"plugins_get_runtime_entries","payload":{"target":"preload","plugin_id":"demo"}}}"#,
+            r#"{"version":1,"request_id":"p-9","command":{"type":"plugins_get_runtime_script","payload":{"plugin_id":"demo","target":"renderer","source":"x=1"}}}"#,
+            r#"{"version":1,"request_id":"p-10","command":{"type":"plugins_get_runtime_entries","payload":{"target":"main"}}}"#,
+            r#"{"version":1,"request_id":"p-11","command":{"type":"plugins_get_runtime_entries","payload":{"target":"PRELOAD"}}}"#,
+            r#"{"version":1,"request_id":"p-12","command":{"type":"plugins_get_runtime_script","payload":{"plugin_id":"demo"}}}"#,
+            r#"{"version":1,"request_id":"p-13","command":{"type":"plugins_list","payload":{"filter":"demo"}}}"#,
+        ] {
+            assert!(
+                parse_bridge_message(hostile).is_err(),
+                "must reject {hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_result_events_require_agreeing_verdicts() {
+        // ok:true carries no error; ok:false carries a bounded message.
+        // Anything else (including a `main` target) is rejected at parse.
+        let ok = r#"{"version":1,"event":{"type":"plugin_result","payload":{"plugin_id":"demo","target":"preload","ok":true,"error":null}}}"#;
+        assert!(matches!(
+            parse_bridge_message(ok),
+            Ok(BridgeMessage::Event(_))
+        ));
+        for hostile in [
+            r#"{"version":1,"event":{"type":"plugin_result","payload":{"plugin_id":"demo","target":"preload","ok":true,"error":"x"}}}"#,
+            r#"{"version":1,"event":{"type":"plugin_result","payload":{"plugin_id":"demo","target":"preload","ok":false,"error":null}}}"#,
+            r#"{"version":1,"event":{"type":"plugin_result","payload":{"plugin_id":"demo","target":"main","ok":true,"error":null}}}"#,
+            r#"{"version":1,"event":{"type":"plugin_result","payload":{"plugin_id":"../x","target":"preload","ok":true,"error":null}}}"#,
+        ] {
+            assert!(
+                parse_bridge_message(hostile).is_err(),
+                "must reject {hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_responses_serialize_the_electron_display_shape() {
+        use super::{PluginsListResponse, PluginsReloadResponse, PluginsSetEnabledResponse};
+        use crate::plugins::{PluginInfo, PluginTarget};
+        // The list entry mirrors manager.ts listPlugins() key for key
+        // (camelCase on the wire); unset optionals are omitted exactly like
+        // Electron's undefined members.
+        let info = PluginInfo {
+            id: "demo".to_owned(),
+            name: "Demo".to_owned(),
+            version: "1.0.0".to_owned(),
+            description: None,
+            author: Some("tester".to_owned()),
+            enabled: true,
+            compatible: false,
+            compatibility_message: Some(
+                "Incompatible with Remcord 0.0.0 (supports: 9.9.x)".to_owned(),
+            ),
+            compatible_versions: vec!["9.9.x".to_owned()],
+            has_main: true,
+            has_preload: true,
+            has_renderer: false,
+        };
+        let listed = serde_json::to_value(PluginsListResponse {
+            plugins: vec![info],
+        })
+        .expect("list response must serialize");
+        let entry = &listed["plugins"][0];
+        assert_eq!(entry["id"], "demo");
+        assert_eq!(entry["compatibleVersions"], serde_json::json!(["9.9.x"]));
+        assert_eq!(entry["hasMain"], true);
+        assert_eq!(entry["hasRenderer"], false);
+        assert!(entry.get("description").is_none());
+        assert!(entry.get("path").is_none());
+        assert!(entry.get("url").is_none());
+        // Flip success echoes id+state+source; known failure echoes nothing.
+        let flipped = serde_json::to_value(PluginsSetEnabledResponse {
+            ok: true,
+            plugin_id: Some("demo".to_owned()),
+            enabled: Some(true),
+            source: Some("file"),
+            payload_bytes: Some(512),
+        })
+        .expect("flip response must serialize");
+        assert_eq!(flipped["ok"], true);
+        assert_eq!(flipped["plugin_id"], "demo");
+        assert_eq!(flipped["source"], "file");
+        let denied = serde_json::to_value(PluginsSetEnabledResponse {
+            ok: false,
+            plugin_id: None,
+            enabled: None,
+            source: None,
+            payload_bytes: None,
+        })
+        .expect("denied flip must serialize");
+        assert_eq!(denied, serde_json::json!({"ok": false}));
+        let reloaded = serde_json::to_value(PluginsReloadResponse {
+            ok: true,
+            plugin_id: Some("demo".to_owned()),
+        })
+        .expect("reload response must serialize");
+        assert_eq!(
+            reloaded,
+            serde_json::json!({"ok": true, "plugin_id": "demo"})
+        );
+        // The target enum serializes to Electron's lowercase wire values.
+        assert_eq!(
+            serde_json::to_value(PluginTarget::Preload).unwrap(),
+            serde_json::json!("preload")
+        );
+        assert_eq!(
+            serde_json::to_value(PluginTarget::Renderer).unwrap(),
+            serde_json::json!("renderer")
+        );
     }
 
     #[test]

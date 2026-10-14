@@ -677,6 +677,163 @@
         return request({ type: "bundles_list", payload: {} }, timeoutMs).then((payload) => payload.bundles);
     }
 
+    // Runtime plugin bounds, mirroring the host. Plugin ids share the
+    // mod-id charset plus dots ([A-Za-z0-9._-]{1,64}, never "." or "..");
+    // targets are the closed preload/renderer pair (`main` has no native
+    // runtime and fails closed at parse time).
+    const RUNTIME_PLUGIN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+    const PLUGIN_TARGETS = ["preload", "renderer"];
+    const MAX_PLUGIN_LIST_ENTRIES = 256;
+    const MAX_PLUGIN_LIST_FIELD_BYTES = 4096;
+    const MAX_PLUGIN_SOURCE_BYTES = 1048576;
+
+    function checkPluginId(pluginId) {
+        if (
+            typeof pluginId !== "string" ||
+            !RUNTIME_PLUGIN_ID_PATTERN.test(pluginId) ||
+            pluginId === "." ||
+            pluginId === ".." ||
+            textEncoder.encode(pluginId).length > 64
+        ) {
+            return Promise.reject(new TypeError("pluginId must match [A-Za-z0-9._-]{1,64} and not be . or .."));
+        }
+        return null;
+    }
+
+    function checkTimeout(timeoutMs) {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return null;
+    }
+
+    function listPlugins(timeoutMs = 5000) {
+        requireCapability("plugins.list");
+        const badTimeout = checkTimeout(timeoutMs);
+        if (badTimeout) return badTimeout;
+        // Parameter-free by protocol: the host owns the plugins root,
+        // enumeration, manifest reads, enablement, compatibility, and
+        // bounds. No path, root, selector, URL, or filter may be supplied.
+        // The host returns bounded display metadata only.
+        return request({ type: "plugins_list", payload: {} }, timeoutMs).then((payload) => payload.plugins);
+    }
+
+    function setPluginEnabled(pluginId, enabled, timeoutMs = 5000) {
+        requireCapability("plugins.set_enabled");
+        const badId = checkPluginId(pluginId);
+        if (badId) return badId;
+        if (typeof enabled !== "boolean") {
+            return Promise.reject(new TypeError("enabled must be a boolean"));
+        }
+        const badTimeout = checkTimeout(timeoutMs);
+        if (badTimeout) return badTimeout;
+        // Id plus boolean only: the host resolves the id against fresh
+        // discovery and persists the flip into the pluginStates settings
+        // map. Unknown ids and incompatible enables resolve { ok: false }
+        // (Electron parity); the echo must equal the request so one
+        // plugin's flip can never resolve another's call. No path,
+        // manifest, entry, URL, or filesystem surface may be supplied.
+        return request({ type: "plugins_set_enabled", payload: { plugin_id: pluginId, enabled } }, timeoutMs).then(
+            (payload) => {
+                if (!payload || typeof payload.ok !== "boolean") {
+                    throw new Error("Native plugin flip response schema is invalid");
+                }
+                if (payload.ok && (payload.plugin_id !== pluginId || payload.enabled !== enabled)) {
+                    throw new Error("Native plugin flip response schema is invalid");
+                }
+                return payload;
+            },
+        );
+    }
+
+    function reloadPlugin(pluginId, timeoutMs = 5000) {
+        requireCapability("plugins.reload");
+        const badId = checkPluginId(pluginId);
+        if (badId) return badId;
+        const badTimeout = checkTimeout(timeoutMs);
+        if (badTimeout) return badTimeout;
+        // Id only: the host re-discovers and re-validates that plugin's
+        // manifest and files, reporting whether it is currently servable.
+        // The loader picks the result up on the next document; no live
+        // in-place re-execution is manufactured. No path, manifest, entry,
+        // or selector may be supplied.
+        return request({ type: "plugins_reload", payload: { plugin_id: pluginId } }, timeoutMs).then((payload) => {
+            if (!payload || typeof payload.ok !== "boolean") {
+                throw new Error("Native plugin reload response schema is invalid");
+            }
+            if (payload.ok && payload.plugin_id !== pluginId) {
+                throw new Error("Native plugin reload response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
+    function getPluginEntries(target, timeoutMs = 120_000) {
+        requireCapability("plugins.get_runtime_entries");
+        if (typeof target !== "string" || !PLUGIN_TARGETS.includes(target)) {
+            return Promise.reject(new TypeError("target must be preload or renderer"));
+        }
+        const badTimeout = checkTimeout(timeoutMs);
+        if (badTimeout) return badTimeout;
+        // Closed target only: the host returns every enabled+compatible
+        // plugin's logical { id, name } for that target. No id, path, URL,
+        // or selector may be supplied, and none may ride back (Electron's
+        // absolute path member is dropped at the host).
+        return request({ type: "plugins_get_runtime_entries", payload: { target } }, timeoutMs).then((payload) => {
+            if (!payload || payload.target !== target || !Array.isArray(payload.entries)) {
+                throw new Error("Native plugin entries response schema is invalid");
+            }
+            for (const entry of payload.entries) {
+                if (
+                    !entry ||
+                    typeof entry.id !== "string" ||
+                    !RUNTIME_PLUGIN_ID_PATTERN.test(entry.id) ||
+                    typeof entry.name !== "string" ||
+                    entry.name.length === 0 ||
+                    textEncoder.encode(entry.name).length > MAX_PLUGIN_LIST_FIELD_BYTES ||
+                    entry.path !== undefined ||
+                    entry.url !== undefined
+                ) {
+                    throw new Error("Native plugin entries response schema is invalid");
+                }
+            }
+            return payload.entries;
+        });
+    }
+
+    function getPluginScript(pluginId, target, timeoutMs = 120_000) {
+        requireCapability("plugins.get_runtime_script");
+        const badId = checkPluginId(pluginId);
+        if (badId) return badId;
+        if (typeof target !== "string" || !PLUGIN_TARGETS.includes(target)) {
+            return Promise.reject(new TypeError("target must be preload or renderer"));
+        }
+        const badTimeout = checkTimeout(timeoutMs);
+        if (badTimeout) return badTimeout;
+        // Logical id plus closed target only: the host re-resolves the
+        // manifest entry under its own plugins root. An undeclared,
+        // unresolvable, missing, or empty entry resolves { source: null }
+        // (the loader skips falsy sources like Electron); over-limit,
+        // non-UTF-8, or unreadable entries are typed rejections. No path,
+        // URL, filename, or entry selector may be supplied.
+        return request(
+            { type: "plugins_get_runtime_script", payload: { plugin_id: pluginId, target } },
+            timeoutMs,
+        ).then((payload) => {
+            if (
+                !payload ||
+                payload.plugin_id !== pluginId ||
+                payload.target !== target ||
+                (payload.source !== null &&
+                    (typeof payload.source !== "string" ||
+                        textEncoder.encode(payload.source).length > MAX_PLUGIN_SOURCE_BYTES))
+            ) {
+                throw new Error("Native plugin source response schema is invalid");
+            }
+            return payload;
+        });
+    }
+
     // Maximum Quick CSS editor buffer in UTF-8 bytes, mirroring the host
     // bound. Larger buffers are rejected before dispatch.
     const MAX_QUICK_CSS_BYTES = 1048576;
@@ -1440,6 +1597,119 @@
                 return;
             }
             request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "plugins_list") {
+            const payload = response.payload.payload;
+            // Bounded display metadata only: an array of exact-shape
+            // entries in sorted directory order. No paths, URLs, sources,
+            // or extra members anywhere in the envelope (Electron's
+            // absolute entry path is dropped at the host).
+            const entries = payload?.plugins;
+            const textField = (value) =>
+                typeof value === "string" && textEncoder.encode(value).length <= MAX_PLUGIN_LIST_FIELD_BYTES;
+            const shapesValid =
+                Array.isArray(entries) &&
+                entries.length <= MAX_PLUGIN_LIST_ENTRIES &&
+                entries.every(
+                    (entry) =>
+                        entry &&
+                        typeof entry.id === "string" &&
+                        RUNTIME_PLUGIN_ID_PATTERN.test(entry.id) &&
+                        entry.id !== "." &&
+                        entry.id !== ".." &&
+                        textEncoder.encode(entry.id).length <= 64 &&
+                        typeof entry.name === "string" &&
+                        entry.name.length > 0 &&
+                        textEncoder.encode(entry.name).length <= 128 &&
+                        (entry.description === undefined || textField(entry.description)) &&
+                        (entry.author === undefined || textField(entry.author)) &&
+                        typeof entry.enabled === "boolean" &&
+                        typeof entry.compatible === "boolean" &&
+                        (entry.compatibility_message === undefined ||
+                            (typeof entry.compatibility_message === "string" &&
+                                textEncoder.encode(entry.compatibility_message).length <= 512)) &&
+                        Array.isArray(entry.compatible_versions) &&
+                        entry.compatible_versions.length <= 32 &&
+                        entry.compatible_versions.every(
+                            (pattern) => typeof pattern === "string" && textEncoder.encode(pattern).length <= 64,
+                        ) &&
+                        typeof entry.has_main === "boolean" &&
+                        typeof entry.has_preload === "boolean" &&
+                        typeof entry.has_renderer === "boolean" &&
+                        entry.path === undefined &&
+                        entry.url === undefined &&
+                        entry.source === undefined,
+                );
+            if (!payload || !shapesValid) {
+                request.reject(new Error("Native plugin list response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "plugins_set_enabled") {
+            const payload = response.payload.payload;
+            // Electron-parity { ok } plus the validated echo on success so
+            // one plugin's flip can never resolve another's call.
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok &&
+                    (Object.keys(payload).length !== 5 ||
+                        typeof payload.plugin_id !== "string" ||
+                        !RUNTIME_PLUGIN_ID_PATTERN.test(payload.plugin_id) ||
+                        typeof payload.enabled !== "boolean" ||
+                        payload.source !== "file" ||
+                        !Number.isSafeInteger(payload.payload_bytes)))
+            ) {
+                request.reject(new Error("Native plugin flip response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "plugins_reloaded") {
+            const payload = response.payload.payload;
+            // Same { ok } contract as the flip: success echoes the
+            // re-validated id, failure echoes nothing.
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok &&
+                    (Object.keys(payload).length !== 2 ||
+                        typeof payload.plugin_id !== "string" ||
+                        !RUNTIME_PLUGIN_ID_PATTERN.test(payload.plugin_id)))
+            ) {
+                request.reject(new Error("Native plugin reload response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "plugins_runtime_entries") {
+            const payload = response.payload.payload;
+            // Closed target echo plus logical { id, name } entries only.
+            // The per-entry shape is re-checked by getPluginEntries before
+            // resolving; this branch only gates the envelope.
+            if (
+                !payload ||
+                !PLUGIN_TARGETS.includes(payload.target) ||
+                !Array.isArray(payload.entries) ||
+                payload.entries.length > MAX_PLUGIN_LIST_ENTRIES
+            ) {
+                request.reject(new Error("Native plugin entries response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "plugins_runtime_script") {
+            const payload = response.payload.payload;
+            // Id+target echo plus bounded source text, or an explicit null
+            // source for undeclared/missing/empty entries (the loader skips
+            // falsy sources like Electron). The source bound is re-checked
+            // by getPluginScript before resolving; this branch gates shape.
+            if (
+                !payload ||
+                typeof payload.plugin_id !== "string" ||
+                !PLUGIN_TARGETS.includes(payload.target) ||
+                (payload.source !== null && typeof payload.source !== "string")
+            ) {
+                request.reject(new Error("Native plugin source response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "quick_css_read") {
             const payload = response.payload.payload;
             // Fixed-file text plus its byte length only. No path, flag, or
@@ -1640,6 +1910,8 @@
         ping,
         getModBundle,
         getVencordBundle,
+        getPluginEntries,
+        getPluginScript,
         getVersion,
         reportCss(value) {
             sendEvent({
@@ -1866,6 +2138,16 @@
     // Client-mod cache wipe only: an exact empty payload in, the fixed
     // allowlist outcome out. User-owned bundles can never be selected.
     const mod = Object.freeze({ clearCache: clearModCache });
+    // Runtime plugin management only: bounded inventory in, id+boolean
+    // flips and id-only reloads with Electron-parity { ok } outcomes out.
+    // Folder opening reuses the typed folders.open capability on the fixed
+    // plugins root. No manifest, entry, path, URL, or source surface.
+    const plugins = Object.freeze({
+        list: listPlugins,
+        setEnabled: setPluginEnabled,
+        reload: reloadPlugin,
+        openFolder: () => openFolder("plugins"),
+    });
 
     Object.defineProperty(window, "remcord", {
         configurable: false,
@@ -1894,6 +2176,7 @@
             settings: settingsShim,
             getLang,
             pluginStorage,
+            plugins,
             backup,
             folders,
             themes: themesShim,

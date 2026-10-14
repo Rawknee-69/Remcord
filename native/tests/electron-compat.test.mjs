@@ -444,7 +444,7 @@ test("native Shelter and Equicord adapters add no Electron or Node surface", () 
             .replace(/\/\*[\s\S]*?\*\//g, "")
             .replace(/^\s*\/\/.*$/gm, "")
             .replace(/biome-ignore[^\n]*\n/g, "");
-    for (const name of ["shelter", "equicord"]) {
+    for (const name of ["shelter", "equicord", "custom"]) {
         const adapter = strip(readFileSync(new URL(`../web/mods/${name}/adapter.js`, import.meta.url), "utf8"));
         // Neither adapter reaches for an Electron/Node global.
         assert.doesNotMatch(adapter, /require\(|process\.|webFrame|ipcRenderer|contextBridge/, name);
@@ -459,6 +459,33 @@ test("native Shelter and Equicord adapters add no Electron or Node surface", () 
             name,
         );
     }
+});
+
+test("native plugin loader adds no Electron surface beyond the documented new Function primitive", () => {
+    const strip = (source) =>
+        source
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^\s*\/\/.*$/gm, "")
+            .replace(/biome-ignore[^\n]*\n/g, "");
+    const loader = strip(readFileSync(new URL("../web/plugins/loader.js", import.meta.url), "utf8"));
+    // No Electron/Node globals: the loader talks only to window.remcord and
+    // window.ipc, like every other document-start script.
+    assert.doesNotMatch(loader, /require\(|process\.|webFrame|ipcRenderer|contextBridge/);
+    assert.doesNotMatch(loader, /readFile|writeFile|loadScript|executeSource|executeScript/);
+    // The single documented exception: plugin sources execute through
+    // `new Function` with the closed api argument (Electron parity for the
+    // execution primitive); no other eval surface may exist.
+    assert.match(loader, /new Function\("api"/);
+    assert.doesNotMatch(loader, /eval\(/);
+    // Only the closed runtime capabilities plus the three entry origins.
+    assert.match(loader, /getPluginEntries/);
+    assert.match(loader, /getPluginScript/);
+    assert.doesNotMatch(loader, /shelter-builds|githubusercontent|example\.invalid/);
+    assert.deepEqual(loader.match(/https?:\/\/[^\s"'`)]+/g) ?? [], [
+        "https://discord.com",
+        "https://canary.discord.com",
+        "https://ptb.discord.com",
+    ]);
 });
 
 test("native bundle retrieval adds no renderer filesystem or exec surface", () => {
@@ -1311,10 +1338,22 @@ test("plugins UI reveals the plugins folder natively and sends otherwise", () =>
     );
     assert.match(pluginsPage, /revealFolderNative\("plugins"\)/);
     assert.match(pluginsPage, /window\.remcord\.plugins\.openFolder\(\)/);
-    // The toolbar button, the Electron empty-state action, and the native
-    // unavailable-state action each dispatch once (the native one has no
-    // Electron fallback: no `plugins.openFolder` capability exists natively).
-    assert.equal((pluginsPage.match(/revealFolderNative\("plugins"\)/g) ?? []).length, 3);
+    // The toolbar button and the empty-state action each dispatch once.
+    assert.equal((pluginsPage.match(/revealFolderNative\("plugins"\)/g) ?? []).length, 2);
+});
+
+test("plugins UI manages plugins through the native capabilities with no environment branch", () => {
+    const pluginsPage = readFileSync(
+        new URL("../../src/shelter/settings/pages/PluginsPage.tsx", import.meta.url),
+        "utf8",
+    );
+    // List, enable flip, and reload all run natively now: no native guard,
+    // no unavailable-state fallback.
+    assert.match(pluginsPage, /window\.remcord\.plugins\.list\(\)/);
+    assert.match(pluginsPage, /window\.remcord\.plugins\.setEnabled\(plugin\.id, enabled\)/);
+    assert.match(pluginsPage, /window\.remcord\.plugins\.reload\(plugin\.id\)/);
+    assert.doesNotMatch(pluginsPage, /isNativeWebView/);
+    assert.doesNotMatch(pluginsPage, /nativeUnavailable/);
 });
 
 test("theme cards open the theme folder natively with the verbatim id", () => {

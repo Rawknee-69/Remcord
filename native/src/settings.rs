@@ -660,6 +660,62 @@ pub fn apply_settings_set(
     })
 }
 
+/// Result of one plugin enablement mutation. `plugin_id` echoes the
+/// validated id and `enabled` the persisted state (which equals the request,
+/// including the idempotent same-state no-op). `source` is always
+/// [`SettingsSource::File`].
+#[derive(Debug)]
+pub struct PluginStateMutation {
+    pub plugin_id: String,
+    pub enabled: bool,
+    pub source: SettingsSource,
+    pub payload_bytes: usize,
+}
+
+/// Apply one runtime-plugin enablement flip to the `pluginStates` map.
+///
+/// Narrow twin of [`apply_settings_set`] for exactly one field the generic
+/// allowlist deliberately excludes: `pluginStates` keys are plugin ids, so
+/// no closed enum can name them. The id is validated by
+/// [`crate::plugins::validate_plugin_id`] before any filesystem work, and
+/// the CALLER must have resolved it against discovery first (unknown ids
+/// never reach this function — the capability answers `{ok:false}` without
+/// writing). Same ownership semantics: authoritative load first, missing
+/// file starts from defaults, corrupt file is an error that is never
+/// overwritten, unknown future keys preserved, atomic temp+rename
+/// persistence. A present-but-non-object `pluginStates` member is an error,
+/// never silently replaced.
+pub fn apply_plugin_state(
+    profile_dir: &Path,
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<PluginStateMutation, String> {
+    crate::plugins::validate_plugin_id(plugin_id)?;
+    // Authoritative load: validates JSON shape and every known field type.
+    let load = load_settings(profile_dir)?;
+    let mut document = load_document_for_write(profile_dir, load)?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| "settings file is invalid: top-level JSON must be an object".to_owned())?;
+    // ONLY this plugin's map entry is touched; every sibling entry and
+    // every other key (including unknown future keys) is preserved.
+    let states = object
+        .entry("pluginStates".to_owned())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let map = states
+        .as_object_mut()
+        .ok_or_else(|| "settings file is invalid: pluginStates must be an object".to_owned())?;
+    map.insert(plugin_id.to_owned(), serde_json::Value::Bool(enabled));
+    let payload_bytes = persist_settings_document(profile_dir, &document)?;
+
+    Ok(PluginStateMutation {
+        plugin_id: plugin_id.to_owned(),
+        enabled,
+        source: SettingsSource::File,
+        payload_bytes,
+    })
+}
+
 /// Host-constructed settings path. The renderer cannot influence this: the
 /// profile directory is fixed and the remaining segments are constants.
 pub fn settings_file_path(profile_dir: &Path) -> std::path::PathBuf {
@@ -705,8 +761,8 @@ pub fn load_settings(profile_dir: &Path) -> Result<SettingsLoad, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_block_power_saving, apply_settings_set, load_settings, validate_settings_set,
-        SettingsSetKey, SettingsSetValue, SettingsSnapshot, SettingsSource,
+        apply_block_power_saving, apply_plugin_state, apply_settings_set, load_settings,
+        validate_settings_set, SettingsSetKey, SettingsSetValue, SettingsSnapshot, SettingsSource,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1318,5 +1374,91 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(document["supportBannerDismissed"], true);
         assert_eq!(document["someFutureElectronKey"]["nested"], 1);
+    }
+
+    #[test]
+    fn plugin_state_flips_one_map_entry_and_persists() {
+        let profile = unique_profile_dir("plugin-state");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"windowStyle":"overlay","pluginStates":{"other":true}}"#,
+        )
+        .unwrap();
+        let mutation = apply_plugin_state(&profile, "demo.plugin", true)
+            .expect("a valid plugin flip must persist");
+        assert_eq!(mutation.plugin_id, "demo.plugin");
+        assert!(mutation.enabled);
+        assert_eq!(mutation.source, SettingsSource::File);
+        assert!(mutation.payload_bytes > 0);
+        assert!(!profile.join("storage").join("settings.json.tmp").exists());
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["pluginStates"]["demo.plugin"], true);
+        // Sibling entries and sibling keys survive the merge.
+        assert_eq!(document["pluginStates"]["other"], true);
+        assert_eq!(document["windowStyle"], "overlay");
+        let reread = load_settings(&profile).expect("the mutated file must load");
+        assert_eq!(
+            reread.snapshot.plugin_states.get("demo.plugin"),
+            Some(&true)
+        );
+        // The idempotent same-state flip persists the same value.
+        apply_plugin_state(&profile, "demo.plugin", true).expect("idempotent flip must persist");
+        // Flipping back off persists false without dropping siblings.
+        apply_plugin_state(&profile, "demo.plugin", false).expect("flip off must persist");
+        let reread = load_settings(&profile).expect("the flipped file must load");
+        assert_eq!(
+            reread.snapshot.plugin_states.get("demo.plugin"),
+            Some(&false)
+        );
+        assert_eq!(reread.snapshot.plugin_states.get("other"), Some(&true));
+    }
+
+    #[test]
+    fn plugin_state_on_a_missing_file_starts_from_defaults() {
+        let profile = unique_profile_dir("plugin-state-missing");
+        apply_plugin_state(&profile, "demo", true)
+            .expect("a missing file must start from defaults");
+        let reread = load_settings(&profile).expect("the created file must load");
+        assert_eq!(reread.source, SettingsSource::File);
+        assert_eq!(reread.snapshot.plugin_states.get("demo"), Some(&true));
+    }
+
+    #[test]
+    fn plugin_state_rejects_bad_ids_corrupt_files_and_non_object_maps() {
+        for hostile in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "x/y",
+            "https://a.invalid/x",
+            &"a".repeat(65),
+        ] {
+            let profile = unique_profile_dir("plugin-state-bad-id");
+            assert!(
+                apply_plugin_state(&profile, hostile, true).is_err(),
+                "{hostile:?} must be refused before any filesystem work"
+            );
+            assert!(
+                !profile.join("storage").join("settings.json").exists(),
+                "a refused id must not create a file"
+            );
+        }
+        let profile = unique_profile_dir("plugin-state-corrupt");
+        std::fs::create_dir_all(profile.join("storage")).unwrap();
+        let path = profile.join("storage").join("settings.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(apply_plugin_state(&profile, "demo", true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+        // A present-but-non-object map is an error, never silently replaced.
+        std::fs::write(&path, r#"{"pluginStates":[1,2]}"#).unwrap();
+        assert!(apply_plugin_state(&profile, "demo", true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"pluginStates":[1,2]}"#
+        );
     }
 }

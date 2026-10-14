@@ -13,6 +13,7 @@ const vencordAdapter = readFileSync(new URL("../web/mods/vencord/adapter.js", im
 const shelterAdapter = readFileSync(new URL("../web/mods/shelter/adapter.js", import.meta.url), "utf8");
 const equicordAdapter = readFileSync(new URL("../web/mods/equicord/adapter.js", import.meta.url), "utf8");
 const customAdapter = readFileSync(new URL("../web/mods/custom/adapter.js", import.meta.url), "utf8");
+const pluginLoader = readFileSync(new URL("../web/plugins/loader.js", import.meta.url), "utf8");
 const testModAdapter = readFileSync(new URL("../web/mods/testmod/adapter.js", import.meta.url), "utf8");
 
 /**
@@ -4317,6 +4318,575 @@ test("graphics.getInfo rejects malformed reports", async () => {
     }
 });
 
+function createPluginsRuntime(
+    capabilities = [
+        "bridge.ping",
+        "plugins.list",
+        "plugins.set_enabled",
+        "plugins.reload",
+        "plugins.get_runtime_entries",
+        "plugins.get_runtime_script",
+        "folders.open",
+    ],
+) {
+    return createRuntime("https://discord.com", capabilities);
+}
+
+function respondPluginsList(window, request, plugins = []) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "plugins_list", payload: { plugins } },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondPluginFlip(window, request, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "plugins_set_enabled", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondPluginReloaded(window, request, payload) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "plugins_reloaded", payload },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondPluginEntries(window, request, target, entries = []) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: { type: "plugins_runtime_entries", payload: { target, entries } },
+                error: null,
+            },
+        }),
+    );
+}
+
+function respondPluginScript(window, request, pluginId, target, source) {
+    window.dispatchEvent(
+        new FakeCustomEvent("remcord-native:response", {
+            detail: {
+                version: 1,
+                request_id: request.request_id,
+                ok: true,
+                payload: {
+                    type: "plugins_runtime_script",
+                    payload: { plugin_id: pluginId, target, source },
+                },
+                error: null,
+            },
+        }),
+    );
+}
+
+const PLUGIN_A_INFO = {
+    id: "alpha",
+    name: "Alpha",
+    version: "1.0.0",
+    description: "First plugin",
+    author: "tester",
+    enabled: true,
+    compatible: true,
+    compatible_versions: ["*"],
+    has_main: false,
+    has_preload: true,
+    has_renderer: true,
+};
+
+const PLUGIN_B_INFO = {
+    id: "beta",
+    name: "Beta",
+    version: "2.0.0",
+    enabled: false,
+    compatible: false,
+    compatibility_message: "Incompatible with Remcord 0.0.0 (supports: 9.9.x)",
+    compatible_versions: ["9.9.x"],
+    has_main: true,
+    has_preload: false,
+    has_renderer: false,
+};
+
+test("the facade exposes scoped runtime plugin capabilities and no generic surface", () => {
+    const { window } = createPluginsRuntime();
+    assert.equal(typeof window.remcord.plugins.list, "function");
+    assert.equal(typeof window.remcord.plugins.setEnabled, "function");
+    assert.equal(typeof window.remcord.plugins.reload, "function");
+    assert.equal(typeof window.remcord.plugins.openFolder, "function");
+    assert.equal(typeof window.remcord.native.getPluginEntries, "function");
+    assert.equal(typeof window.remcord.native.getPluginScript, "function");
+    assert.equal(Object.isFrozen(window.remcord.plugins), true);
+    assert.equal(window.remcord.native.supports("plugins.list"), true);
+    assert.equal(window.remcord.native.supports("plugins.set_enabled"), true);
+    assert.equal(window.remcord.native.supports("plugins.reload"), true);
+    assert.equal(window.remcord.native.supports("plugins.get_runtime_entries"), true);
+    assert.equal(window.remcord.native.supports("plugins.get_runtime_script"), true);
+    // No generic plugin source, eval, path, or manifest surface may exist.
+    assert.equal(window.remcord.plugins.getRuntimeScript, undefined);
+    assert.equal(window.remcord.plugins.execute, undefined);
+    assert.equal(window.remcord.plugins.eval, undefined);
+    assert.equal(window.remcord.plugins.readManifest, undefined);
+});
+
+test("plugins.list sends a parameter-free request and resolves bounded display metadata", async () => {
+    const { window } = createPluginsRuntime();
+    const pending = window.remcord.plugins.list();
+    assert.ok(pending instanceof Promise);
+    const message = window.messages.find((entry) => entry.command?.type === "plugins_list");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "plugins_list", payload: {} });
+    respondPluginsList(window, message, [PLUGIN_A_INFO, PLUGIN_B_INFO]);
+    const plugins = await pending;
+    assert.equal(plugins.length, 2);
+    assert.equal(plugins[0].id, "alpha");
+    assert.equal(plugins[0].compatible_versions.length, 1);
+    assert.equal(plugins[1].compatible, false);
+    // No path, URL, or source may ride along with any entry.
+    const serialized = JSON.stringify(plugins);
+    assert.doesNotMatch(serialized, /"path"|"url"|"source"/);
+});
+
+test("plugins.list rejects path-bearing and malformed entries", async () => {
+    for (const plugins of [
+        [{ ...PLUGIN_A_INFO, path: "C:\\plugins\\alpha" }],
+        [{ ...PLUGIN_A_INFO, url: "https://attacker.invalid/x.js" }],
+        [{ ...PLUGIN_A_INFO, id: "../escape" }],
+        [{ ...PLUGIN_A_INFO, id: "" }],
+        [{ ...PLUGIN_A_INFO, enabled: "yes" }],
+        [{ ...PLUGIN_A_INFO, compatible_versions: "*" }],
+        [{ ...PLUGIN_A_INFO, has_preload: 1 }],
+        new Array(257).fill(PLUGIN_A_INFO),
+        "not-an-array",
+    ]) {
+        const runtime = createPluginsRuntime();
+        const pending = runtime.window.remcord.plugins.list();
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "plugins_list");
+        respondPluginsList(runtime.window, message, plugins);
+        await assert.rejects(pending, /plugin list response schema is invalid/, JSON.stringify(plugins).slice(0, 80));
+    }
+});
+
+test("plugins.set_enabled sends id+boolean and resolves the echoed outcome", async () => {
+    const { window } = createPluginsRuntime();
+    const pending = window.remcord.plugins.setEnabled("alpha", true);
+    const message = window.messages.find((entry) => entry.command?.type === "plugins_set_enabled");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "plugins_set_enabled",
+        payload: { plugin_id: "alpha", enabled: true },
+    });
+    respondPluginFlip(window, message, {
+        ok: true,
+        plugin_id: "alpha",
+        enabled: true,
+        source: "file",
+        payload_bytes: 512,
+    });
+    assert.deepEqual(await pending, {
+        ok: true,
+        plugin_id: "alpha",
+        enabled: true,
+        source: "file",
+        payload_bytes: 512,
+    });
+    // A known refusal resolves { ok: false } (Electron parity), not a rejection.
+    const second = createPluginsRuntime();
+    const denied = second.window.remcord.plugins.setEnabled("ghost", true);
+    const deniedMessage = second.window.messages.find((entry) => entry.command?.type === "plugins_set_enabled");
+    respondPluginFlip(second.window, deniedMessage, { ok: false });
+    assert.deepEqual(await denied, { ok: false });
+});
+
+test("plugins.set_enabled rejects hostile ids and non-boolean states without sending", async () => {
+    const { window } = createPluginsRuntime();
+    for (const pluginId of ["", ".", "..", "../escape", "..\\escape", "a/b", "a\\b", "C:\\x", "has space", 42, null]) {
+        await assert.rejects(window.remcord.plugins.setEnabled(pluginId, true), /pluginId must match/);
+    }
+    const oversized = `p${"p".repeat(64)}`;
+    await assert.rejects(window.remcord.plugins.setEnabled(oversized, true), /pluginId must match/);
+    // Dotted ids ARE valid runtime plugin ids (unlike plugin-storage ids).
+    const dotted = createPluginsRuntime();
+    const pending = dotted.window.remcord.plugins.setEnabled("demo.plugin", false);
+    const message = dotted.window.messages.find((entry) => entry.command?.type === "plugins_set_enabled");
+    assert.deepEqual(message.command.payload, { plugin_id: "demo.plugin", enabled: false });
+    respondPluginFlip(dotted.window, message, {
+        ok: true,
+        plugin_id: "demo.plugin",
+        enabled: false,
+        source: "file",
+        payload_bytes: 64,
+    });
+    assert.deepEqual(await pending, {
+        ok: true,
+        plugin_id: "demo.plugin",
+        enabled: false,
+        source: "file",
+        payload_bytes: 64,
+    });
+    for (const enabled of ["yes", 1, null, undefined]) {
+        await assert.rejects(window.remcord.plugins.setEnabled("alpha", enabled), /enabled must be a boolean/);
+    }
+    // Echo mismatches reject: one plugin's flip can never resolve another's call.
+    const mismatch = createPluginsRuntime();
+    const mismatchPending = mismatch.window.remcord.plugins.setEnabled("alpha", true);
+    const mismatchMessage = mismatch.window.messages.find((entry) => entry.command?.type === "plugins_set_enabled");
+    respondPluginFlip(mismatch.window, mismatchMessage, {
+        ok: true,
+        plugin_id: "beta",
+        enabled: true,
+        source: "file",
+        payload_bytes: 1,
+    });
+    await assert.rejects(mismatchPending, /plugin flip response schema is invalid/);
+});
+
+test("plugins.reload sends id-only and resolves the re-validation outcome", async () => {
+    const { window } = createPluginsRuntime();
+    const pending = window.remcord.plugins.reload("alpha");
+    const message = window.messages.find((entry) => entry.command?.type === "plugins_reload");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "plugins_reload", payload: { plugin_id: "alpha" } });
+    respondPluginReloaded(window, message, { ok: true, plugin_id: "alpha" });
+    assert.deepEqual(await pending, { ok: true, plugin_id: "alpha" });
+    for (const pluginId of ["", "..", "../escape", 42, null]) {
+        await assert.rejects(window.remcord.plugins.reload(pluginId), /pluginId must match/);
+    }
+    assert.equal(
+        window.messages.filter((entry) => entry.command?.type === "plugins_reload").length,
+        1,
+        "hostile ids never reach the wire",
+    );
+});
+
+test("plugins.openFolder reveals the fixed plugins root", async () => {
+    const { window } = createPluginsRuntime();
+    const pending = window.remcord.plugins.openFolder();
+    const message = window.messages.find((entry) => entry.command?.type === "folders_open");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "folders_open", payload: { location: "plugins" } });
+    respondFoldersOpened(window, message, "plugins");
+    assert.equal(await pending, "plugins");
+});
+
+test("plugin capabilities throw UNSUPPORTED_CAPABILITY when the snapshot denies them", () => {
+    const { window } = createPluginsRuntime(["bridge.ping"]);
+    assert.equal(window.remcord.native.supports("plugins.list"), false);
+    assert.equal(window.remcord.native.supports("plugins.get_runtime_script"), false);
+    assert.throws(
+        () => window.remcord.plugins.list(),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.throws(
+        () => window.remcord.native.getPluginEntries("preload"),
+        (error) => error.code === "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(
+        window.messages.some((message) => message.command?.type === "plugins_list"),
+        false,
+    );
+});
+
+test("plugins.get_runtime_entries validates the closed target and drops paths", async () => {
+    for (const target of ["preload", "renderer"]) {
+        const runtime = createPluginsRuntime();
+        const pending = runtime.window.remcord.native.getPluginEntries(target);
+        const message = runtime.window.messages.find((entry) => entry.command?.type === "plugins_get_runtime_entries");
+        assert.ok(message);
+        assert.deepEqual(message.command, { type: "plugins_get_runtime_entries", payload: { target } });
+        respondPluginEntries(runtime.window, message, target, [{ id: "alpha", name: "Alpha" }]);
+        assert.deepEqual(await pending, [{ id: "alpha", name: "Alpha" }]);
+    }
+    const { window } = createPluginsRuntime();
+    // `main` has no native runtime: it fails closed before dispatch, exactly
+    // like any other unknown target.
+    for (const target of ["main", "PRELOAD", "", "preload ", 42, null, undefined]) {
+        await assert.rejects(window.remcord.native.getPluginEntries(target), /target must be preload or renderer/);
+    }
+    assert.equal(
+        window.messages.some((entry) => entry.command?.type === "plugins_get_runtime_entries"),
+        false,
+    );
+    // A path-bearing entry is rejected even when the envelope is well-formed.
+    const hostile = createPluginsRuntime();
+    const pending = hostile.window.remcord.native.getPluginEntries("preload");
+    const hostileMessage = hostile.window.messages.find(
+        (entry) => entry.command?.type === "plugins_get_runtime_entries",
+    );
+    respondPluginEntries(hostile.window, hostileMessage, "preload", [{ id: "alpha", name: "Alpha", path: "C:\\x" }]);
+    await assert.rejects(pending, /plugin entries response schema is invalid/);
+    // A mismatched target echo is rejected.
+    const mismatched = createPluginsRuntime();
+    const mismatchPending = mismatched.window.remcord.native.getPluginEntries("preload");
+    const mismatchMessage = mismatched.window.messages.find(
+        (entry) => entry.command?.type === "plugins_get_runtime_entries",
+    );
+    respondPluginEntries(mismatched.window, mismatchMessage, "renderer", [{ id: "alpha", name: "Alpha" }]);
+    await assert.rejects(mismatchPending, /plugin entries response schema is invalid/);
+});
+
+test("plugins.get_runtime_script validates id+target and bounds the source", async () => {
+    const { window } = createPluginsRuntime();
+    const pending = window.remcord.native.getPluginScript("alpha", "preload");
+    const message = window.messages.find((entry) => entry.command?.type === "plugins_get_runtime_script");
+    assert.ok(message);
+    assert.deepEqual(message.command, {
+        type: "plugins_get_runtime_script",
+        payload: { plugin_id: "alpha", target: "preload" },
+    });
+    respondPluginScript(window, message, "alpha", "preload", "module.exports.activate = () => {};");
+    assert.deepEqual(await pending, {
+        plugin_id: "alpha",
+        target: "preload",
+        source: "module.exports.activate = () => {};",
+    });
+    // A null source (undeclared/missing/empty entry) resolves; the loader
+    // skips falsy sources like Electron.
+    const second = createPluginsRuntime();
+    const nullPending = second.window.remcord.native.getPluginScript("alpha", "renderer");
+    const nullMessage = second.window.messages.find((entry) => entry.command?.type === "plugins_get_runtime_script");
+    respondPluginScript(second.window, nullMessage, "alpha", "renderer", null);
+    assert.deepEqual(await nullPending, { plugin_id: "alpha", target: "renderer", source: null });
+    for (const pluginId of ["", "..", "../escape"]) {
+        await assert.rejects(window.remcord.native.getPluginScript(pluginId, "preload"), /pluginId must match/);
+    }
+    for (const target of ["main", "RENDERER", ""]) {
+        await assert.rejects(
+            window.remcord.native.getPluginScript("alpha", target),
+            /target must be preload or renderer/,
+        );
+    }
+    // An over-limit source is rejected before it can reach the loader.
+    const big = createPluginsRuntime();
+    const bigPending = big.window.remcord.native.getPluginScript("alpha", "preload");
+    const bigMessage = big.window.messages.find((entry) => entry.command?.type === "plugins_get_runtime_script");
+    respondPluginScript(big.window, bigMessage, "alpha", "preload", `x="${"x".repeat(1048576)}"`);
+    await assert.rejects(bigPending, /plugin source response schema is invalid/);
+});
+
+const PLUGIN_LOADER_CAPS = ["bridge.ping", "plugins.get_runtime_entries", "plugins.get_runtime_script"];
+
+function createPluginLoaderRuntime(origin = "https://discord.com", capabilities = PLUGIN_LOADER_CAPS) {
+    const runtime = createRuntime(origin, capabilities);
+    // The shared harness stubs only error/info; fixtures exercise the
+    // plugin logger fully.
+    runtime.context.console = { error() {}, info() {}, log() {}, warn() {} };
+    return runtime;
+}
+
+/** Flushes pending microtasks so the loader's sequential chain can advance. */
+async function flushLoader(rounds = 30) {
+    for (let i = 0; i < rounds; i++) {
+        await Promise.resolve();
+    }
+}
+
+function pluginCommands(window) {
+    return window.messages.filter((message) => message.command?.type?.startsWith("plugins_"));
+}
+
+function pluginResults(window) {
+    return window.messages.filter((message) => message.event?.type === "plugin_result");
+}
+
+const ALPHA_PRELOAD_SOURCE = [
+    "globalThis.__f1PreloadRan = true;",
+    "module.exports.activate = (api) => {",
+    "    globalThis.__f1ApiId = api.id;",
+    '    api.logger.log("preload hello");',
+    '    api.patcher.before(globalThis.__f1Target, "greet", function (name) { globalThis.__f1BeforeSeen = name; });',
+    '    const unpatch = api.patcher.instead(globalThis.__f1Target, "calc", function (args, original) { return original(args[0], args[1]) * 10; });',
+    "    globalThis.__f1Unpatch = unpatch;",
+    "    api.onCleanup(() => { globalThis.__f1CleanupRan = true; });",
+    "};",
+].join("\n");
+
+const ALPHA_RENDERER_SOURCE = [
+    "const tick = `tick-42`;",
+    "module.exports.activate = (api) => {",
+    "    globalThis.__f1RendererRan = api.name;",
+    "    globalThis.__f1Ticks = tick;",
+    "};",
+].join("\n");
+
+const BOOM_SOURCE = 'module.exports.activate = () => { throw new Error("boom"); };';
+
+/**
+ * Drives one loader target to completion: answers the entries request,
+ * then each script request from `sources` ({ id: source|null }), flushing
+ * between steps so the sequential chain advances.
+ */
+async function drivePluginTarget(window, target, sources) {
+    await flushLoader(10);
+    const entriesMessage = window.messages.find(
+        (message) =>
+            message.command?.type === "plugins_get_runtime_entries" &&
+            message.command.payload.target === target &&
+            !message.answered,
+    );
+    assert.ok(entriesMessage, `entries request for ${target}`);
+    entriesMessage.answered = true;
+    respondPluginEntries(
+        window,
+        entriesMessage,
+        target,
+        Object.keys(sources).map((id) => ({ id, name: id })),
+    );
+    for (const [id, source] of Object.entries(sources)) {
+        await flushLoader(10);
+        const scriptMessage = window.messages.find(
+            (message) =>
+                message.command?.type === "plugins_get_runtime_script" &&
+                message.command.payload.plugin_id === id &&
+                message.command.payload.target === target &&
+                !message.answered,
+        );
+        assert.ok(scriptMessage, `script request for ${id}/${target}`);
+        scriptMessage.answered = true;
+        respondPluginScript(window, scriptMessage, id, target, source);
+    }
+    await flushLoader(20);
+}
+
+test("the plugin loader executes preload then renderer entries with a uniform api", async () => {
+    const { window, context } = createPluginLoaderRuntime();
+    context.__f1Target = {
+        greet(name) {
+            return `hi ${name}`;
+        },
+        calc(a, b) {
+            return a + b;
+        },
+    };
+    vm.runInContext(pluginLoader, context);
+    assert.equal(window.__remcordNativePluginLoader, true);
+    await drivePluginTarget(window, "preload", { alpha: ALPHA_PRELOAD_SOURCE });
+    await drivePluginTarget(window, "renderer", { alpha: ALPHA_RENDERER_SOURCE });
+    // Execution order: preload entries fully precede renderer entries.
+    const commands = pluginCommands(window).map((message) => message.command);
+    assert.deepEqual(commands[0], { type: "plugins_get_runtime_entries", payload: { target: "preload" } });
+    assert.ok(
+        commands.some(
+            (command) => command.type === "plugins_get_runtime_entries" && command.payload.target === "renderer",
+        ),
+    );
+    // The fixture ran in the page world with the loader-built api.
+    assert.equal(context.__f1PreloadRan, true);
+    assert.equal(context.__f1ApiId, "alpha");
+    assert.equal(context.__f1RendererRan, "alpha");
+    // Backtick template sources survive (the wrapper concatenates; an
+    // interpolated template literal would corrupt on these bytes).
+    assert.equal(context.__f1Ticks, "tick-42");
+    // The before/instead patches wrapped the target methods.
+    assert.equal(context.__f1Target.greet("bob"), "hi bob");
+    assert.equal(context.__f1BeforeSeen, "bob");
+    assert.equal(context.__f1Target.calc(2, 3), 50);
+    // The returned unpatch restores the original method.
+    context.__f1Unpatch();
+    assert.equal(context.__f1Target.calc(2, 3), 5);
+    // Both targets reported success with the closed wire shape.
+    const results = pluginResults(window);
+    assert.equal(results.length, 2);
+    for (const result of results) {
+        assert.equal(result.event.payload.plugin_id, "alpha");
+        assert.equal(result.event.payload.ok, true);
+        assert.equal(result.event.payload.error, null);
+    }
+    assert.deepEqual(results.map((result) => result.event.payload.target).sort(), ["preload", "renderer"]);
+    // The readable status object mirrors the reports exactly once each.
+    const statuses = window.__remcordNativePlugins;
+    assert.equal(statuses.alpha.status, "executed");
+    assert.equal(statuses.alpha.error, null);
+    // No source, path, or URL ever crosses back to the host.
+    const serialized = JSON.stringify(results);
+    assert.doesNotMatch(serialized, /"source"|"path"|"url"/);
+});
+
+test("the loader skips falsy sources and isolates per-plugin failures", async () => {
+    const { window, context } = createPluginLoaderRuntime();
+    vm.runInContext(pluginLoader, context);
+    await drivePluginTarget(window, "preload", {
+        good: "module.exports.activate = () => { globalThis.__f1Good = 1; };",
+        bad: BOOM_SOURCE,
+        missing: null,
+    });
+    await drivePluginTarget(window, "renderer", {});
+    assert.equal(context.__f1Good, 1);
+    const results = pluginResults(window);
+    assert.equal(results.length, 2);
+    const byId = Object.fromEntries(results.map((result) => [result.event.payload.plugin_id, result.event.payload]));
+    assert.equal(byId.good.ok, true);
+    assert.equal(byId.bad.ok, false);
+    assert.match(byId.bad.error, /boom/);
+    // A null source is skipped silently: no report, no failure.
+    assert.equal("missing" in byId, false);
+    assert.equal(window.__remcordNativePlugins.missing, undefined);
+    assert.equal(window.__remcordNativePlugins.bad.status, "failed");
+});
+
+test("the loader ignores non-entry origins and double injection", async () => {
+    const evil = createPluginLoaderRuntime("https://example.com");
+    vm.runInContext(pluginLoader, evil.context);
+    await flushLoader();
+    assert.deepEqual(evil.window.messages, []);
+    assert.equal(evil.window.__remcordNativePluginLoader, undefined);
+    const { window, context } = createPluginLoaderRuntime();
+    vm.runInContext(pluginLoader, context);
+    vm.runInContext(pluginLoader, context);
+    await drivePluginTarget(window, "preload", {});
+    await drivePluginTarget(window, "renderer", {});
+    assert.equal(
+        window.messages.filter((message) => message.command?.type === "plugins_get_runtime_entries").length,
+        2,
+        "one entries request per target despite double injection",
+    );
+});
+
+test("the loader stops without capabilities and carries no artifact surface", () => {
+    const { window, context } = createPluginLoaderRuntime("https://discord.com", ["bridge.ping"]);
+    vm.runInContext(pluginLoader, context);
+    // The bootstrap metrics event is unrelated facade traffic; no plugin
+    // command may be sent without its capability.
+    assert.equal(
+        window.messages.some((message) => message.command?.type?.startsWith("plugins_")),
+        false,
+    );
+    const code = stripComments(pluginLoader);
+    const urls = code.match(/https?:\/\/[^\s"'`)]+/g) ?? [];
+    assert.deepEqual(urls, ["https://discord.com", "https://canary.discord.com", "https://ptb.discord.com"]);
+    // The documented execution primitive is present; ambient Electron/Node
+    // globals and file/path vocabulary are absent.
+    assert.match(code, /new Function/);
+    assert.match(code, /getPluginEntries/);
+    assert.match(code, /getPluginScript/);
+    assert.doesNotMatch(code, /require\(|webFrame|ipcRenderer|process\.|readFile|writeFile/);
+    assert.doesNotMatch(code, /shelter-builds|githubusercontent|example\.invalid/);
+});
+
 test("mod.clearCache sends an exact empty payload and resolves the outcome", async () => {
     const { window } = createDiagnosticsRuntime();
     const pending = window.remcord.mod.clearCache();
@@ -5149,7 +5719,11 @@ test("the shim exposes no generic sync API beyond the closed members", () => {
     assert.equal(remcord.themes.folder, undefined);
     assert.equal(remcord.version, undefined);
     assert.equal(remcord.fs, undefined);
-    assert.equal(remcord.plugins, undefined);
+    // The plugins namespace is closed to its four members (list, enable
+    // flip, reload, folder reveal): no source, path, manifest, or eval
+    // surface may exist alongside them.
+    assert.deepEqual(Object.keys(remcord.plugins).sort(), ["list", "openFolder", "reload", "setEnabled"]);
+    assert.equal(remcord.plugins.execute, undefined);
     // backup.save plus the inspect/commit/discard trio are closed members:
     // the typed JSON-string save and the parameter-free preview/commit/
     // discard, each with the long-operation timeout. None takes a path.

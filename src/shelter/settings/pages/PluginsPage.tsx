@@ -3,7 +3,7 @@ import type { RemcordPluginInfo } from "../../../@types/remcordWindow.js";
 import { EmptyState } from "../components/EmptyState.jsx";
 import { PluginCard } from "../components/PluginCard.jsx";
 import { SettingsPageHeader } from "../components/SettingsPageHeader.jsx";
-import { isNativeWebView, revealFolderNative } from "../settings.js";
+import { revealFolderNative } from "../settings.js";
 import classes from "./PluginsPage.module.css";
 
 const {
@@ -32,10 +32,10 @@ export function PluginsPage() {
     const isBusy = (pluginId: string) => busyIds().includes(pluginId);
 
     const refreshPlugins = async () => {
-        // The native shell exposes no plugin list/enable/reload capability
-        // (only folder reveal plus scoped pluginStorage): never call into the
-        // missing `window.remcord.plugins` namespace here.
-        if (isNativeWebView()) return;
+        // The native shell serves the same list/enable/reload capabilities
+        // through `window.remcord.plugins` (backed by the host-owned plugins
+        // root plus the pluginStates settings map), so no environment branch
+        // is needed here.
         const list = await window.remcord.plugins.list();
         setPlugins(list);
     };
@@ -96,7 +96,7 @@ export function PluginsPage() {
         <>
             <SettingsPageHeader title={t()["plugins-pageTitle"]} description={t()["plugins-pageDesc"]} />
             <div class={classes.toolbar}>
-                <Button size={ButtonSizes.LARGE} disabled={isNativeWebView()} onClick={() => void refreshPlugins()}>
+                <Button size={ButtonSizes.LARGE} onClick={() => void refreshPlugins()}>
                     {t()["plugins-refresh"]}
                 </Button>
                 <Button
@@ -111,47 +111,28 @@ export function PluginsPage() {
                 </Button>
             </div>
             <Show
-                when={!isNativeWebView()}
+                when={plugins().length > 0}
                 fallback={
                     <EmptyState
-                        message={
-                            t()["plugins-nativeUnavailable"] ?? "Plugin management is not available in the native app"
-                        }
-                        description={
-                            t()["plugins-nativeUnavailableDesc"] ??
-                            "The native Remcord shell does not support installing or toggling plugins yet. You can still open the plugins folder."
-                        }
+                        message={t()["plugins-empty"]}
+                        description={t()["plugins-emptyDesc"]}
                         actionLabel={t()["plugins-openFolder"]}
                         onAction={() => {
-                            revealFolderNative("plugins");
+                            if (!revealFolderNative("plugins")) window.remcord.plugins.openFolder();
                         }}
                     />
                 }
             >
-                <Show
-                    when={plugins().length > 0}
-                    fallback={
-                        <EmptyState
-                            message={t()["plugins-empty"]}
-                            description={t()["plugins-emptyDesc"]}
-                            actionLabel={t()["plugins-openFolder"]}
-                            onAction={() => {
-                                if (!revealFolderNative("plugins")) window.remcord.plugins.openFolder();
-                            }}
+                <For each={plugins()}>
+                    {(plugin) => (
+                        <PluginCard
+                            plugin={plugin}
+                            busy={isBusy(plugin.id)}
+                            onToggle={(enabled) => void onToggle(plugin, enabled)}
+                            onReload={() => void onReload(plugin)}
                         />
-                    }
-                >
-                    <For each={plugins()}>
-                        {(plugin) => (
-                            <PluginCard
-                                plugin={plugin}
-                                busy={isBusy(plugin.id)}
-                                onToggle={(enabled) => void onToggle(plugin, enabled)}
-                                onReload={() => void onReload(plugin)}
-                            />
-                        )}
-                    </For>
-                </Show>
+                    )}
+                </For>
             </Show>
         </>
     );

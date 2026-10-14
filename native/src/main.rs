@@ -21,6 +21,7 @@ mod navigation_gate;
 mod new_window;
 mod permissions;
 mod plugin_storage;
+mod plugins;
 mod process_failure;
 mod profile;
 mod profile_migration;
@@ -42,7 +43,7 @@ mod webview_runtime;
 use std::{
     collections::HashMap,
     error::Error,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -82,18 +83,21 @@ use protocol::{
     BridgeError, BridgeEvent, BridgeEventMessage, BridgeMessage, BridgeRequest, BridgeResponse,
     BridgeResponsePayload, BundleFileEntry, BundlesListResponse, DiagnosticsInfoResponse,
     FoldersOpenedResponse, LocalizationStringResponse, ModBundleResponse, ModCacheClearedResponse,
-    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, QuickCssReadResponse,
-    QuickCssWrittenResponse, RequestTracker, SettingsConfigResponse, SettingsMutationResponse,
-    SettingsSetResponse, ThemeEnabledResponse, ThemeFolderOpenedResponse, ThemeImportedResponse,
-    ThemeInstalledResponse, ThemeWrittenResponse, ThemesListResponse, WindowAckResponse,
-    PROTOCOL_VERSION,
+    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
+    PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
+    SettingsConfigResponse, SettingsMutationResponse, SettingsSetResponse, ThemeEnabledResponse,
+    ThemeFolderOpenedResponse, ThemeImportedResponse, ThemeInstalledResponse, ThemeWrittenResponse,
+    ThemesListResponse, WindowAckResponse, PROTOCOL_VERSION,
 };
 use quick_css::{load_quick_css, read_quick_css_text, write_quick_css_text, QUICK_CSS_STYLE_ID};
 use recovery::{MainRendererRecovery, MAIN_INSTANCE_ID};
 use remcord_protocol::scheme::create_environment as create_remcord_webview_environment;
 use remcord_protocol::{build_namespace_roots, register_remcord_protocol};
 use serde::Serialize;
-use settings::{apply_block_power_saving, apply_settings_set, load_settings, SettingsSetKey};
+use settings::{
+    apply_block_power_saving, apply_plugin_state, apply_settings_set, load_settings, SettingsSetKey,
+};
 use tao::{
     dpi::{LogicalSize, Size},
     event::{Event, WindowEvent},
@@ -334,6 +338,179 @@ fn load_custom_bundle(
     validate_mod_bundle(descriptor, raw.js.unwrap_or_default(), raw.css)
 }
 
+/// Stateless plugin inventory for `plugins.list`: fresh discovery plus
+/// enablement from the authoritative settings. A missing plugins root
+/// lists empty; an unreadable settings file fails closed (enablement is
+/// unknowable, so guessing would misreport). No path crosses in either
+/// direction.
+fn plugins_list_compute(
+    profile: &Path,
+) -> Result<Vec<plugins::PluginInfo>, plugins::PluginFailure> {
+    let discovered = plugins::discover_plugins(profile, current_app_version());
+    let settings = load_settings(profile).map_err(|message| plugins::PluginFailure {
+        code: "PLUGINS_UNAVAILABLE",
+        message,
+    })?;
+    Ok(plugins::plugin_infos(
+        &discovered,
+        &settings.snapshot.plugin_states,
+    ))
+}
+
+/// Enablement flip for `plugins.set_enabled`. Unknown ids and
+/// incompatible enables resolve `Ok(ok:false)` without writing (Electron
+/// parity); malformed ids and persistence failures are typed errors.
+fn plugins_set_enabled_compute(
+    profile: &Path,
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<PluginsSetEnabledResponse, plugins::PluginFailure> {
+    if plugins::validate_plugin_id(plugin_id).is_err() {
+        return Err(plugins::PluginFailure {
+            code: "INVALID_PLUGIN_ID",
+            message: "plugin id is invalid".to_owned(),
+        });
+    }
+    let discovered = plugins::discover_plugins(profile, current_app_version());
+    let Some(record) = plugins::find_plugin(&discovered, plugin_id) else {
+        return Ok(PluginsSetEnabledResponse {
+            ok: false,
+            plugin_id: None,
+            enabled: None,
+            source: None,
+            payload_bytes: None,
+        });
+    };
+    if enabled && !record.compatible {
+        return Ok(PluginsSetEnabledResponse {
+            ok: false,
+            plugin_id: None,
+            enabled: None,
+            source: None,
+            payload_bytes: None,
+        });
+    }
+    let mutation = apply_plugin_state(profile, plugin_id, enabled).map_err(|message| {
+        plugins::PluginFailure {
+            code: "PLUGINS_UNAVAILABLE",
+            message,
+        }
+    })?;
+    Ok(PluginsSetEnabledResponse {
+        ok: true,
+        plugin_id: Some(mutation.plugin_id),
+        enabled: Some(mutation.enabled),
+        source: Some(mutation.source.as_str()),
+        payload_bytes: Some(mutation.payload_bytes),
+    })
+}
+
+/// Re-validation for `plugins.reload`: unknown or incompatible ids resolve
+/// `Ok(ok:false)` (Electron parity — reload never enables anything). The
+/// re-discovery itself IS the reload in the stateless design; the renderer
+/// loader picks the result up on the next document.
+fn plugins_reload_compute(
+    profile: &Path,
+    plugin_id: &str,
+) -> Result<PluginsReloadResponse, plugins::PluginFailure> {
+    if plugins::validate_plugin_id(plugin_id).is_err() {
+        return Err(plugins::PluginFailure {
+            code: "INVALID_PLUGIN_ID",
+            message: "plugin id is invalid".to_owned(),
+        });
+    }
+    let discovered = plugins::discover_plugins(profile, current_app_version());
+    let Some(record) = plugins::find_plugin(&discovered, plugin_id) else {
+        return Ok(PluginsReloadResponse {
+            ok: false,
+            plugin_id: None,
+        });
+    };
+    if !record.compatible {
+        return Ok(PluginsReloadResponse {
+            ok: false,
+            plugin_id: None,
+        });
+    }
+    Ok(PluginsReloadResponse {
+        ok: true,
+        plugin_id: Some(plugin_id.to_owned()),
+    })
+}
+
+/// Runtime entries for `plugins.get_runtime_entries`: every
+/// enabled+compatible plugin's logical `{id, name}` for the target.
+/// Enablement comes from the authoritative settings; unresolvable entries
+/// are skipped (a plugin whose file vanished mid-run loads nothing).
+fn plugins_entries_compute(
+    profile: &Path,
+    target: plugins::PluginTarget,
+) -> Result<Vec<plugins::PluginRuntimeEntry>, plugins::PluginFailure> {
+    let discovered = plugins::discover_plugins(profile, current_app_version());
+    let settings = load_settings(profile).map_err(|message| plugins::PluginFailure {
+        code: "PLUGINS_UNAVAILABLE",
+        message,
+    })?;
+    let root = plugins::plugins_dir(profile);
+    let mut out = Vec::new();
+    for plugin in &discovered {
+        let enabled = settings
+            .snapshot
+            .plugin_states
+            .get(&plugin.manifest.id)
+            .copied()
+            .unwrap_or(false);
+        if !enabled || !plugin.compatible {
+            continue;
+        }
+        if plugins::resolve_plugin_entry(&root, plugin, target).is_none() {
+            continue;
+        }
+        out.push(plugins::PluginRuntimeEntry {
+            id: plugin.manifest.id.clone(),
+            name: plugin.manifest.name.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// Runtime source for `plugins.get_runtime_script`: `None` when the id is
+/// unknown, disabled, incompatible, or the entry is undeclared,
+/// unresolvable, missing, or empty (the loader skips falsy sources,
+/// mirroring Electron). Hard failures (over-limit, non-UTF-8, unreadable)
+/// are typed errors.
+fn plugins_script_compute(
+    profile: &Path,
+    plugin_id: &str,
+    target: plugins::PluginTarget,
+) -> Result<Option<String>, plugins::PluginFailure> {
+    if plugins::validate_plugin_id(plugin_id).is_err() {
+        return Err(plugins::PluginFailure {
+            code: "INVALID_PLUGIN_ID",
+            message: "plugin id is invalid".to_owned(),
+        });
+    }
+    let discovered = plugins::discover_plugins(profile, current_app_version());
+    let Some(record) = plugins::find_plugin(&discovered, plugin_id) else {
+        return Ok(None);
+    };
+    let settings = load_settings(profile).map_err(|message| plugins::PluginFailure {
+        code: "PLUGINS_UNAVAILABLE",
+        message,
+    })?;
+    let enabled = settings
+        .snapshot
+        .plugin_states
+        .get(&record.manifest.id)
+        .copied()
+        .unwrap_or(false);
+    if !enabled || !record.compatible {
+        return Ok(None);
+    }
+    let root = plugins::plugins_dir(profile);
+    plugins::read_plugin_source(&root, record, target)
+}
+
 /// Every mod the native host serves. Each entry is a thin typed descriptor plus
 /// a thin renderer adapter under `native/web/mods/<id>/`; the substrate
 /// mechanics in `mod_substrate.rs` are identical for all of them. Custom is
@@ -390,6 +567,11 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "app.get_version",
         "plugin_storage.read",
         "plugin_storage.write",
+        "plugins.list",
+        "plugins.set_enabled",
+        "plugins.reload",
+        "plugins.get_runtime_entries",
+        "plugins.get_runtime_script",
         "backup.list_bundles",
         "backup.save",
         "backup.inspect",
@@ -423,6 +605,12 @@ const VENCORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/vencord/adapter.j
 const SHELTER_ADAPTER_SCRIPT: &str = include_str!("../web/mods/shelter/adapter.js");
 const EQUICORD_ADAPTER_SCRIPT: &str = include_str!("../web/mods/equicord/adapter.js");
 const CUSTOM_ADAPTER_SCRIPT: &str = include_str!("../web/mods/custom/adapter.js");
+/// Runtime plugin loader: the native counterpart of Electron's
+/// `src/discord/preload/plugins.mts` (sequential preload-then-renderer
+/// execution through the `plugins.get_runtime_entries` /
+/// `plugins.get_runtime_script` capabilities with one uniform page-world
+/// api). Always injected (see [`initialization_script`]).
+const PLUGIN_LOADER_SCRIPT: &str = include_str!("../web/plugins/loader.js");
 
 /// The renderer adapter for one registered mod, or `None` for a descriptor
 /// with no adapter file (a registry entry must always carry one).
@@ -3044,7 +3232,11 @@ fn apply_startup_visibility(window: &tao::window::Window, mode: StartupVisibilit
 /// shared adapter factory) is identical for every combination. Only the
 /// per-mod adapter files are appended, and only for the mods
 /// [`resolve_active_mods`] selected — so "native without <mod>" is a genuinely
-/// absent adapter, not a disabled one.
+/// absent adapter, not a disabled one. The runtime plugin loader
+/// (`PLUGIN_LOADER_SCRIPT`) is appended unconditionally after the adapters,
+/// mirroring Electron's `plugins.mts` which runs on every document: it
+/// no-ops when no enabled+compatible plugin declares an entry, and all
+/// enablement lives in settings + manifests, never in this script's shape.
 fn initialization_script(
     active_mods: &[&'static ModDescriptor],
     settings_boot_json: &str,
@@ -3080,6 +3272,10 @@ fn initialization_script(
         script.push('\n');
         script.push_str(adapter);
     }
+    // Runtime plugin execution (F2) runs after the client-mod adapters,
+    // matching Electron's preload order (mods, then plugins).
+    script.push('\n');
+    script.push_str(PLUGIN_LOADER_SCRIPT);
     Ok(script)
 }
 
@@ -7186,6 +7382,274 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        BridgeCommand::PluginsList(_) => {
+                            // Read-only inventory: parameter-free by
+                            // protocol. Fresh discovery plus enablement from
+                            // the authoritative settings on every request, so
+                            // manifest edits and new plugins apply without a
+                            // restart. Display metadata only.
+                            let request_id = request.request_id;
+                            match plugins_list_compute(&profile_path) {
+                                Ok(infos) => {
+                                    let count = infos.len();
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::PluginsList(
+                                            PluginsListResponse { plugins: infos },
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Plugins][Metrics] op=list count={count} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Plugins][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::PluginsSetEnabled(payload) => {
+                            // Enablement flip: logical id plus boolean only.
+                            // Unknown ids and incompatible enables resolve
+                            // `{ok:false}` with envelope-ok (Electron
+                            // parity); the flip persists into the
+                            // `pluginStates` settings map. Takes effect on
+                            // the next document (restart-required model is
+                            // NOT needed: the loader re-resolves per
+                            // document, unlike the baked mod adapters).
+                            let request_id = request.request_id;
+                            match plugins_set_enabled_compute(
+                                &profile_path,
+                                &payload.plugin_id,
+                                payload.enabled,
+                            ) {
+                                Ok(flipped) => {
+                                    let ok = flipped.ok;
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::PluginsSetEnabled(flipped),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Plugins][Metrics] op=set_enabled plugin='{}' ok={ok} request_latency_ms={:.3}",
+                                        payload.plugin_id,
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Plugins][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::PluginsReload(payload) => {
+                            // Re-validation: id only. The re-discovery IS
+                            // the reload in the stateless design; the loader
+                            // picks it up on the next document. Unknown or
+                            // incompatible ids resolve `{ok:false}`.
+                            let request_id = request.request_id;
+                            match plugins_reload_compute(&profile_path, &payload.plugin_id) {
+                                Ok(reloaded) => {
+                                    let ok = reloaded.ok;
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(BridgeResponsePayload::PluginsReload(
+                                            reloaded,
+                                        )),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Plugins][Metrics] op=reload ok={ok} request_latency_ms={:.3}",
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Plugins][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::PluginsGetRuntimeEntries(payload) => {
+                            // Loader inventory: closed target only. Logical
+                            // `{id, name}` pairs for every enabled+compatible
+                            // plugin declaring the target — never paths.
+                            let request_id = request.request_id;
+                            let target = payload.target;
+                            match plugins_entries_compute(&profile_path, target) {
+                                Ok(entries) => {
+                                    let count = entries.len();
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::PluginsRuntimeEntries(
+                                                PluginsRuntimeEntriesResponse { target, entries },
+                                            ),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Plugins][Metrics] op=entries target={} count={count} request_latency_ms={:.3}",
+                                        target.as_str(),
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Plugins][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
+                        BridgeCommand::PluginsGetRuntimeScript(payload) => {
+                            // Loader source: logical id plus closed target.
+                            // Absent entries resolve `{source:null}` (the
+                            // loader skips falsy sources like Electron);
+                            // hard failures are typed errors.
+                            let request_id = request.request_id;
+                            let target = payload.target;
+                            match plugins_script_compute(
+                                &profile_path,
+                                &payload.plugin_id,
+                                target,
+                            ) {
+                                Ok(source) => {
+                                    let bytes = source.as_ref().map(|text| text.len());
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: true,
+                                        payload: Some(
+                                            BridgeResponsePayload::PluginsRuntimeScript(
+                                                PluginsRuntimeScriptResponse {
+                                                    plugin_id: payload.plugin_id,
+                                                    target,
+                                                    source,
+                                                },
+                                            ),
+                                        ),
+                                        error: None,
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                    println!(
+                                        "[Plugins][Metrics] op=script target={} bytes={} request_latency_ms={:.3}",
+                                        target.as_str(),
+                                        bytes
+                                            .map(|size| size.to_string())
+                                            .unwrap_or_else(|| "none".to_owned()),
+                                        received_at.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(failure) => {
+                                    eprintln!("[Plugins][{}] {}", failure.code, failure.message);
+                                    let response = BridgeResponse {
+                                        version: PROTOCOL_VERSION,
+                                        request_id: request_id.clone(),
+                                        ok: false,
+                                        payload: None,
+                                        error: Some(BridgeError {
+                                            code: failure.code,
+                                            message: failure.message,
+                                        }),
+                                    };
+                                    send_bridge_response(&webview, &response);
+                                    if let Err(error) = request_tracker.complete(&request_id) {
+                                        eprintln!("[Bridge] correlation failure after response: {error}");
+                                    }
+                                    response_count += 1;
+                                }
+                            }
+                        }
                         BridgeCommand::BundlesList(_) => {
                             // Read-only discovery: parameter-free by
                             // protocol, so the host inventories exactly the
@@ -8819,6 +9283,46 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut smoke_reload_request_id,
                         );
                     }
+                    BridgeEvent::PluginResult(payload) => {
+                        // Shipped loader telemetry: log-only, no response.
+                        // The id is verified against fresh discovery so the
+                        // logs stay trustworthy; a report for an undiscovered
+                        // id is dropped loudly instead of recorded.
+                        if plugins::validate_plugin_id(&payload.plugin_id).is_err() {
+                            eprintln!(
+                                "[Plugins][result] report with an invalid plugin id was dropped"
+                            );
+                        } else {
+                            let discovered = plugins::discover_plugins(
+                                &profile_path,
+                                current_app_version(),
+                            );
+                            if plugins::find_plugin(&discovered, &payload.plugin_id).is_none() {
+                                eprintln!(
+                                    "[Plugins][result] report for undiscovered plugin '{}' was dropped",
+                                    payload.plugin_id
+                                );
+                            } else if payload.ok {
+                                println!(
+                                    "[Plugins][Result] plugin='{}' target={} ok=true",
+                                    payload.plugin_id,
+                                    payload.target.as_str(),
+                                );
+                            } else {
+                                let error = payload.error.unwrap_or_else(|| {
+                                    "plugin entry failed without details".to_owned()
+                                });
+                                // Byte-safe truncation for the log line; the
+                                // loader already bounds the message at 2 KiB.
+                                let shown: String = error.chars().take(512).collect();
+                                eprintln!(
+                                    "[Plugins][Result] plugin='{}' target={} ok=false error={shown}",
+                                    payload.plugin_id,
+                                    payload.target.as_str(),
+                                );
+                            }
+                        }
+                    }
                     // The historically Vencord-named variants remain accepted so
                     // the already-validated Vencord wire contract is unchanged;
                     // each is normalized into the same mod-agnostic handlers.
@@ -9318,11 +9822,12 @@ mod tests {
     use super::{
         document_start_script, initialization_script, is_allowed_navigation,
         is_trusted_bridge_origin, load_custom_bundle, lookup_mod_descriptor, mod_adapter_script,
-        relaunch_command, resolve_active_mods, settings_plugin_start_due,
-        settings_plugin_start_script, settings_ui_probe_script, startup_visibility,
-        titlebar_plugin_start_script, StartupVisibility, CUSTOM_MOD, EQUICORD_MOD, KNOWN_MODS,
-        PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID,
-        SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
+        plugins_entries_compute, plugins_list_compute, plugins_reload_compute,
+        plugins_script_compute, plugins_set_enabled_compute, relaunch_command, resolve_active_mods,
+        settings_plugin_start_due, settings_plugin_start_script, settings_ui_probe_script,
+        startup_visibility, titlebar_plugin_start_script, StartupVisibility, CUSTOM_MOD,
+        EQUICORD_MOD, KNOWN_MODS, PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT,
+        SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
         TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
     };
     use crate::mod_substrate::{
@@ -10203,6 +10708,258 @@ mod tests {
         assert!(css.contains("remcord-native-custom-css"));
         assert!(css.contains("mod_css_result"));
         assert!(css.contains("mod_id: \"custom\""));
+    }
+
+    /// Temporary plugin profile for compute tests: installs manifests,
+    /// entry files, and an optional `pluginStates` map, returning the
+    /// profile root. Callers delete it when done.
+    type FixtureEntry<'a> = (&'a str, &'a [u8]);
+    type FixturePlugin<'a> = (&'a str, &'a str, &'a [FixtureEntry<'a>]);
+    fn plugin_profile(
+        tag: &str,
+        plugins: &[FixturePlugin<'_>],
+        states: Option<&str>,
+    ) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "remcord-plugin-compute-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        for (child, manifest, files) in plugins {
+            let dir = root.join("plugins").join(child);
+            std::fs::create_dir_all(&dir).expect("plugin dir must be creatable");
+            std::fs::write(dir.join("manifest.json"), manifest).expect("manifest must write");
+            for (name, bytes) in *files {
+                let path = dir.join(name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("entry parent must be creatable");
+                }
+                std::fs::write(path, bytes).expect("entry must write");
+            }
+        }
+        if let Some(states) = states {
+            std::fs::create_dir_all(root.join("storage")).expect("storage must be creatable");
+            std::fs::write(
+                root.join("storage").join("settings.json"),
+                format!(r#"{{"pluginStates":{states}}}"#),
+            )
+            .expect("settings must write");
+        }
+        root
+    }
+
+    const PLUGIN_A_MANIFEST: &str = r#"{"id":"alpha","name":"Alpha","version":"1.0.0","description":"First plugin","author":"tester","preload":"preload.js","renderer":"renderer.js","compatibleVersions":["*"]}"#;
+    const PLUGIN_B_MANIFEST: &str = r#"{"id":"beta","name":"Beta","version":"2.0.0","preload":"preload.js","compatibleVersions":["9.9.x"]}"#;
+    const PLUGIN_MAIN_ONLY_MANIFEST: &str =
+        r#"{"id":"mainonly","name":"MainOnly","version":"1.0.0","main":"main.js"}"#;
+
+    #[test]
+    fn plugins_list_reports_display_metadata_with_authoritative_enablement() {
+        let root = plugin_profile(
+            "list",
+            &[
+                ("a", PLUGIN_A_MANIFEST, &[("preload.js", b"void 0;")]),
+                ("b", PLUGIN_B_MANIFEST, &[("preload.js", b"void 0;")]),
+                ("m", PLUGIN_MAIN_ONLY_MANIFEST, &[("main.js", b"void 0;")]),
+            ],
+            Some(r#"{"alpha":true,"beta":true,"ghost":true}"#),
+        );
+        let infos = plugins_list_compute(&root).expect("a valid profile must list");
+        assert_eq!(infos.len(), 3);
+        let alpha = infos.iter().find(|info| info.id == "alpha").unwrap();
+        assert_eq!(alpha.name, "Alpha");
+        assert_eq!(alpha.description.as_deref(), Some("First plugin"));
+        assert_eq!(alpha.author.as_deref(), Some("tester"));
+        assert!(alpha.enabled);
+        assert!(alpha.compatible);
+        assert!(alpha.compatibility_message.is_none());
+        assert_eq!(alpha.compatible_versions, vec!["*".to_owned()]);
+        assert!(!alpha.has_main);
+        assert!(alpha.has_preload);
+        assert!(alpha.has_renderer);
+        // Pinned to a foreign major: listed but incompatible, still enabled
+        // (enablement and compatibility are independent facts).
+        let beta = infos.iter().find(|info| info.id == "beta").unwrap();
+        assert!(beta.enabled);
+        assert!(!beta.compatible);
+        assert!(beta.compatibility_message.is_some());
+        // A main-only plugin is listed honestly (its entry never executes).
+        let main_only = infos.iter().find(|info| info.id == "mainonly").unwrap();
+        assert!(main_only.has_main);
+        assert!(!main_only.has_preload);
+        // States for undiscovered ids change nothing.
+        assert!(infos.iter().all(|info| info.id != "ghost"));
+        // Missing settings file: defaults (everything disabled).
+        let bare = plugin_profile("list-bare", &[("a", PLUGIN_A_MANIFEST, &[])], None);
+        let infos = plugins_list_compute(&bare).expect("missing settings must list defaults");
+        assert!(!infos[0].enabled);
+        // Corrupt settings: fail closed, never guessed enablement.
+        std::fs::create_dir_all(bare.join("storage")).unwrap();
+        std::fs::write(bare.join("storage").join("settings.json"), b"{not json").unwrap();
+        let error = plugins_list_compute(&bare).expect_err("corrupt settings must fail");
+        assert_eq!(error.code, "PLUGINS_UNAVAILABLE");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn plugins_set_enabled_follows_the_electron_decision_table() {
+        let root = plugin_profile(
+            "flip",
+            &[
+                ("a", PLUGIN_A_MANIFEST, &[("preload.js", b"void 0;")]),
+                ("b", PLUGIN_B_MANIFEST, &[("preload.js", b"void 0;")]),
+            ],
+            Some(r#"{}"#),
+        );
+        // Malformed ids are typed errors before any filesystem work.
+        for hostile in ["", ".", "..", "../x", "x/y", "https://a.invalid/x"] {
+            let error = plugins_set_enabled_compute(&root, hostile, true)
+                .expect_err("a malformed id must fail");
+            assert_eq!(error.code, "INVALID_PLUGIN_ID", "{hostile:?}");
+        }
+        // Unknown ids resolve {ok:false} without writing.
+        let denied =
+            plugins_set_enabled_compute(&root, "ghost", true).expect("unknown must resolve");
+        assert!(!denied.ok);
+        assert!(denied.plugin_id.is_none());
+        // Enabling an incompatible plugin resolves {ok:false} without writing.
+        let denied = plugins_set_enabled_compute(&root, "beta", true)
+            .expect("incompatible enable must resolve");
+        assert!(!denied.ok);
+        // Enabling a compatible plugin persists and echoes.
+        let flipped = plugins_set_enabled_compute(&root, "alpha", true)
+            .expect("compatible enable must apply");
+        assert!(flipped.ok);
+        assert_eq!(flipped.plugin_id.as_deref(), Some("alpha"));
+        assert_eq!(flipped.enabled, Some(true));
+        assert_eq!(flipped.source, Some("file"));
+        assert!(flipped.payload_bytes.is_some());
+        let infos = plugins_list_compute(&root).expect("reread must list");
+        assert!(
+            infos
+                .iter()
+                .find(|info| info.id == "alpha")
+                .unwrap()
+                .enabled
+        );
+        assert!(!infos.iter().find(|info| info.id == "beta").unwrap().enabled);
+        // Disabling an incompatible plugin is allowed (Electron parity).
+        let flipped =
+            plugins_set_enabled_compute(&root, "beta", false).expect("disable must apply");
+        assert!(flipped.ok);
+        // Idempotent same-state flip persists the same value.
+        let flipped =
+            plugins_set_enabled_compute(&root, "alpha", true).expect("idempotent flip must apply");
+        assert!(flipped.ok);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_reload_revalidates_without_enabling() {
+        let root = plugin_profile(
+            "reload",
+            &[
+                ("a", PLUGIN_A_MANIFEST, &[("preload.js", b"void 0;")]),
+                ("b", PLUGIN_B_MANIFEST, &[("preload.js", b"void 0;")]),
+            ],
+            Some(r#"{"alpha":true}"#),
+        );
+        assert!(plugins_reload_compute(&root, "../x").is_err());
+        let denied = plugins_reload_compute(&root, "ghost").expect("unknown must resolve");
+        assert!(!denied.ok);
+        // Incompatible reloads fail even when disabled (Electron parity).
+        let denied = plugins_reload_compute(&root, "beta").expect("incompatible must resolve");
+        assert!(!denied.ok);
+        // Compatible reloads succeed enabled or not, and change nothing.
+        let reloaded = plugins_reload_compute(&root, "alpha").expect("enabled reload must succeed");
+        assert!(reloaded.ok);
+        assert_eq!(reloaded.plugin_id.as_deref(), Some("alpha"));
+        plugins_set_enabled_compute(&root, "alpha", false).expect("disable must apply");
+        let reloaded =
+            plugins_reload_compute(&root, "alpha").expect("disabled reload must succeed");
+        assert!(reloaded.ok);
+        let infos = plugins_list_compute(&root).expect("reread must list");
+        assert!(
+            !infos
+                .iter()
+                .find(|info| info.id == "alpha")
+                .unwrap()
+                .enabled
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_entries_and_scripts_serve_only_enabled_compatible_resolvable() {
+        use crate::plugins::PluginTarget;
+        let root = plugin_profile(
+            "serve",
+            &[
+                (
+                    "a",
+                    PLUGIN_A_MANIFEST,
+                    &[
+                        ("preload.js", b"module.exports.activate = () => {};"),
+                        ("renderer.js", b"window.__a = 1;"),
+                    ],
+                ),
+                ("b", PLUGIN_B_MANIFEST, &[("preload.js", b"void 0;")]),
+                (
+                    "gone",
+                    r#"{"id":"gone","name":"Gone","version":"1.0.0","preload":"missing.js"}"#,
+                    &[],
+                ),
+            ],
+            Some(r#"{"alpha":true,"beta":true,"gone":true}"#),
+        );
+        // Entries: only alpha (enabled+compatible+resolvable). Beta is
+        // enabled but incompatible; gone resolves to nothing.
+        let entries =
+            plugins_entries_compute(&root, PluginTarget::Preload).expect("entries must compute");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "alpha");
+        assert_eq!(entries[0].name, "Alpha");
+        let entries =
+            plugins_entries_compute(&root, PluginTarget::Renderer).expect("entries must compute");
+        assert_eq!(entries.len(), 1);
+        // Scripts: alpha serves; beta (incompatible), unknown ids, and
+        // disabled plugins resolve None; missing files resolve None.
+        let source = plugins_script_compute(&root, "alpha", PluginTarget::Preload)
+            .expect("alpha preload must serve")
+            .expect("alpha preload must have source");
+        assert!(source.contains("activate"));
+        let renderer = plugins_script_compute(&root, "alpha", PluginTarget::Renderer)
+            .expect("alpha renderer must serve")
+            .expect("alpha renderer must have source");
+        assert!(renderer.contains("__a"));
+        assert!(plugins_script_compute(&root, "beta", PluginTarget::Preload)
+            .expect("beta must resolve")
+            .is_none());
+        assert!(
+            plugins_script_compute(&root, "ghost", PluginTarget::Preload)
+                .expect("unknown must resolve")
+                .is_none()
+        );
+        assert!(plugins_script_compute(&root, "gone", PluginTarget::Preload)
+            .expect("missing file must resolve")
+            .is_none());
+        // Disabling removes servability without touching files.
+        plugins_set_enabled_compute(&root, "alpha", false).expect("disable must apply");
+        assert!(
+            plugins_script_compute(&root, "alpha", PluginTarget::Preload)
+                .expect("disabled must resolve")
+                .is_none()
+        );
+        assert!(plugins_entries_compute(&root, PluginTarget::Preload)
+            .expect("entries must compute")
+            .is_empty());
+        // Malformed ids are typed errors, never resolutions.
+        assert!(plugins_script_compute(&root, "../x", PluginTarget::Preload).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
