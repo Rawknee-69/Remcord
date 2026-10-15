@@ -349,9 +349,24 @@ function createHarness() {
         },
         NodeFilter: { SHOW_TEXT: 4 },
         KeyboardEvent: class extends FakeEvent {},
-        getComputedStyle: () => ({
-            getPropertyValue: (name) => (name === "--background-primary" ? "#313338" : ""),
-        }),
+        getComputedStyle: () => {
+            // Simulated Discord dark theme plus one custom-CSS variable.
+            const vars = {
+                "--background-primary": "#313338",
+                "--text-normal": "#dbdee1",
+                "--brand-500": "#5865f2",
+                "--custom-accent": "#ff73fa",
+            };
+            const names = Object.keys(vars);
+            const style = {
+                length: names.length,
+                getPropertyValue: (name) => vars[name] ?? "",
+            };
+            names.forEach((name, index) => {
+                style[index] = name;
+            });
+            return style;
+        },
         URL: (() => {
             const RealURL = URL;
             RealURL.createObjectURL = () => "blob:mock";
@@ -455,6 +470,11 @@ test("clicking the Save entry opens the themed popup", () => {
         overlay.style.getPropertyValue("--background-primary"),
         "#313338",
         "the overlay must carry Discord's resolved theme variables",
+    );
+    assert.equal(
+        overlay.style.getPropertyValue("--custom-accent"),
+        "#ff73fa",
+        "the overlay must carry custom-CSS variables too",
     );
     const buttons = popupButtons(overlay);
     for (const expected of ["Save to Gallery", "Copy Link", "Download", "Cancel"]) {

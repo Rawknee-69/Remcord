@@ -385,6 +385,30 @@ const POPUP_THEME_VARS = [
 ];
 
 /**
+ * Snapshots every custom property resolved on an element inside Discord's
+ * themed tree. Custom CSS and custom themes define their own variables, so
+ * a fixed list would miss them: enumerating the computed style captures
+ * whatever the active theme (stock, custom theme, or raw custom CSS)
+ * actually applied. Best-effort and capped — never throws.
+ */
+function snapshotThemeVars(scope: Element): Array<[string, string]> {
+    const out: Array<[string, string]> = [];
+    try {
+        const computed = getComputedStyle(scope);
+        const count = computed.length;
+        for (let index = 0; index < count && out.length < 512; index += 1) {
+            const name = computed[index];
+            if (typeof name !== "string" || !name.startsWith("--")) continue;
+            try {
+                const value = computed.getPropertyValue(name).trim();
+                if (value) out.push([name, value]);
+            } catch {}
+        }
+    } catch {}
+    return out;
+}
+
+/**
  * Save popup: title + collection + note, then Save to Gallery, Copy Link,
  * or Download (media only). Plain DOM so it works in every menu context
  * without a Solid root.
@@ -398,12 +422,16 @@ function openSavePopup(save: PendingSave, anchor: Element): void {
     try {
         // Snapshot the resolved theme BEFORE closing the menu: the close
         // unmounts the menu, so reading afterwards would yield unresolved
-        // variables. Values are copied onto the overlay itself (below), so
-        // the popup matches stock and custom themes wherever it attaches.
+        // variables. Every variable is copied onto the overlay itself
+        // (below), so the popup matches stock themes, custom themes, and
+        // raw custom CSS wherever it attaches.
         const computed = getComputedStyle(anchor);
         const scheme = discordTheme(anchor);
-        const themeVars: Array<[string, string]> = [];
+        const themeVars = snapshotThemeVars(anchor);
+        // Always carry the variables the popup CSS reads, even if the
+        // enumeration above came back empty (non-Chromium hosts).
         for (const name of POPUP_THEME_VARS) {
+            if (themeVars.some(([seen]) => seen === name)) continue;
             try {
                 const value = computed.getPropertyValue(name).trim();
                 if (value) themeVars.push([name, value]);
