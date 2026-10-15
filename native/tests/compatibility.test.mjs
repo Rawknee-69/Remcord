@@ -7541,7 +7541,7 @@ test("tray.get_state rejects non-canonical and inconsistent states", async () =>
     // Unknown modes, raw setting echoes, extra members, and a hide verdict
     // without availability are all refused before resolving.
     for (const payload of [
-        { mode: "ac_plug_colored", available: false, minimize_to_tray: true, should_hide: false },
+        { mode: "rem-smile", available: false, minimize_to_tray: true, should_hide: false },
         { mode: "../../etc/passwd", available: false, minimize_to_tray: true, should_hide: false },
         { mode: "dynamic", available: false, minimize_to_tray: true, should_hide: true },
         { mode: "dynamic", available: false, minimize_to_tray: false, should_hide: true },

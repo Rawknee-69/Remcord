@@ -44,6 +44,13 @@ $info = (Get-Item -LiteralPath $exe).VersionInfo
 if ($info.ProductVersion -ne $version) { throw "exe ProductVersion $($info.ProductVersion) != package.json $version" }
 if ($info.ProductName -ne "Remcord") { throw "exe ProductName must be Remcord" }
 if ($info.OriginalFilename -ne "remcord.exe") { throw "exe OriginalFilename must be remcord.exe" }
+# No-console GUI: release exe must be IMAGE_SUBSYSTEM_WINDOWS_GUI (2), never
+# CONSOLE (3). The windows_subsystem attribute in native/src/main.rs controls
+# this at link time; refuse to ship an installer that pops a terminal window.
+$peBytes = [IO.File]::ReadAllBytes($exe)
+$peOffset = [BitConverter]::ToInt32($peBytes, 0x3C)
+$subsystem = [BitConverter]::ToUInt16($peBytes, $peOffset + 0x5C)
+if ($subsystem -ne 2) { throw "release exe PE subsystem is $subsystem, expected 2 (WINDOWS_GUI): shortcut launches would open a terminal window" }
 Add-Type -AssemblyName System.Drawing
 $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
 if ($null -eq $icon -or $icon.Width -le 0) { throw "release exe carries no icon resource" }

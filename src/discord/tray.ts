@@ -16,7 +16,23 @@ export function createTray() {
         return;
     }
     if (trayIcon === "dynamic") {
-        trayIcon = "ac_plug_colored";
+        trayIcon = "rem-smile";
+    }
+    // Backward compat: pre-rename configs may still name a removed
+    // ac_plug/dsc-tray asset — fall back to the default Rem icon instead
+    // of loading a missing file (which yields an empty tray image).
+    const knownIcons = new Set([
+        "rem-blush",
+        "rem-glasses",
+        "rem-happy",
+        "rem-smile",
+        "rem-sparkler",
+        "rem-sky",
+        "rem-school",
+        "rem-upside",
+    ]);
+    if (!knownIcons.has(trayIcon)) {
+        trayIcon = "rem-smile";
     }
     let trayImg = nativeImage.createFromPath(join(import.meta.dirname, "../", `/assets/${trayIcon}.png`));
     switch (process.platform) {

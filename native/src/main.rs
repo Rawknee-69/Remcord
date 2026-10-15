@@ -1,3 +1,8 @@
+// Windows GUI: release builds run without a console window, so launching
+// from the Start Menu, desktop shortcut, or Search shows only the app —
+// no terminal popup. Debug builds keep the console for logs and diagnostics.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod app_icon;
 mod arrpc;
@@ -6036,14 +6041,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Release blocker 2: the profile root is resolved per build, never
     // hardcoded. Debug takes the isolated DEV profile; release takes
-    // `%LOCALAPPDATA%\Remcord`; an explicit absolute
-    // `REMCORD_NATIVE_PROFILE_DIR` wins in both. Any failure fails startup
+    // `%LOCALAPPDATA%\Remcord`. A `remcord-data` directory next to the
+    // running executable selects portable mode instead (the installer can
+    // create it, or it can be created by hand): all user data then lives
+    // inside the install folder and travels with it. An explicit absolute
+    // `REMCORD_NATIVE_PROFILE_DIR` wins over both. Any failure fails startup
     // — never a silent fallback to another product's data.
     let override_raw = dev_hooks::override_value(profile::PROFILE_OVERRIDE_ENV);
+    let portable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+        .map(|dir| profile::portable_dir_for_exe_dir(&dir))
+        .filter(|dir| dir.is_dir());
     let resolved_profile = profile::resolve_for_build(
         cfg!(debug_assertions),
         override_raw.as_deref(),
         std::env::var("LOCALAPPDATA").ok().as_deref(),
+        portable_dir.as_deref(),
     )
     .map_err(|error| format!("profile resolution failed: {error}"))?;
     // User-mediated import of a previous-generation profile (see

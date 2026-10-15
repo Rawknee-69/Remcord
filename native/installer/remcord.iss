@@ -7,17 +7,39 @@
 ; - Stable AppId below (the GUID the native product shipped with).
 ;   Upgrade detection is scoped to this ID only, so a Remcord setup upgrades
 ;   the already-installed native product in place.
-; - Install target `{localappdata}\Programs\Remcord`. A [Code] guard refuses
+; - Install target `{localappdata}\Programs\Remcord`, always chosen on the
+;   destination page (any folder or drive). A [Code] guard refuses
 ;   data directories and existing application directories, identified by
 ;   content markers rather than product names, so the guard keeps working
-;   across product generations without naming any of them.
+;   across product generations without naming any of them. The one
+;   exception is the currently-installed location itself (read from the
+;   uninstall registry entry): reinstalling or upgrading in place must
+;   never be refused by the guard that protects everywhere else.
+; - User data: `%LOCALAPPDATA%\Remcord` by default — outside the install
+;   directory and never listed for deletion, so install, upgrade, repair,
+;   uninstall, and manual rollback all preserve it. Optionally, the
+;   `portabledata` task creates a `remcord-data` folder next to the
+;   executable: the app then keeps everything inside the install folder,
+;   wherever the user pointed the installer (a fully self-contained,
+;   Electron-like install). Uninstall never deletes user data in either
+;   mode: unknown files and non-empty data directories are left behind.
 ; - The Remcord profile (`{localappdata}\Remcord`) lives OUTSIDE the
 ;   install directory and is never listed for deletion: install, upgrade,
-;   repair, uninstall, and manual rollback all preserve user data. A
+;   repair, uninstall, and manual rollback all preserve user data. The
+;   portable `remcord-data` folder is likewise never listed: uninstall
+;   removes only the files it installed, so user data stays on the PC. A
 ;   previous-generation native profile, if present, is likewise never
 ;   touched by the installer; the application offers a user-mediated import
 ;   on first launch instead.
 ; - `PrivilegesRequired=lowest`: per-user, no administrator rights.
+; - Electron-parity install experience: the wizard always shows the
+;   destination page (`DisableDirPage=no`, so any folder or drive can be
+;   picked via Browse), a license page, an optional desktop shortcut
+;   (checked by default), Start Menu entry (always created, so Search finds
+;   Remcord), and a "Launch Remcord" checkbox on the finish page.
+;   The app itself is a Windows GUI binary (see the `windows_subsystem`
+;   attribute in native/src/main.rs), so shortcut/Search launches never
+;   open a terminal window.
 ; - A running instance is handled by the Restart Manager
 ;   (`CloseApplications=yes`), which only ever sees locks on files inside
 ;   the dedicated install directory — never image-name matching. Image-name
@@ -47,8 +69,14 @@ AppName=Remcord
 AppVersion={#AppVersion}
 AppVerName=Remcord {#AppVersion}
 AppPublisher=rawknee-69
+VersionInfoCompany=rawknee-69
+VersionInfoDescription=Remcord Setup
+VersionInfoProductName=Remcord
 DefaultDirName={localappdata}\Programs\{#InstallLeaf}
+DisableDirPage=no
+AlwaysShowDirOnReadyPage=yes
 DisableProgramGroupPage=yes
+LicenseFile=..\..\license.txt
 PrivilegesRequired=lowest
 OutputDir=dist
 OutputBaseFilename=Remcord-Setup-{#AppVersion}
@@ -69,10 +97,28 @@ WizardStyle=modern
 Source: "stage\remcord.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "stage\license.txt"; DestDir: "{app}"; Flags: ignoreversion
 
+[Dirs]
+; Portable user-data marker, created only when the `portabledata` task is
+; selected. The empty folder makes the installed app keep all user data
+; inside the install location; uninstall leaves it (and any data in it)
+; behind, so user data stays on the PC.
+Name: "{app}\remcord-data"; Tasks: portabledata
+
 [Icons]
 ; "Remcord" is the product Start Menu entry, distinct from the production
-; Electron client in Start Menu and search.
+; Electron client in Start Menu and search. It is always created so
+; Windows Search finds Remcord after install. The desktop shortcut is
+; optional but checked by default (see [Tasks]).
 Name: "{autoprograms}\Remcord"; Filename: "{app}\remcord.exe"
+Name: "{autodesktop}\Remcord"; Filename: "{app}\remcord.exe"; Tasks: desktopicon
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
+Name: "portabledata"; Description: "Keep my Remcord &data next to the app (portable install)"; GroupDescription: "User data:"; Flags: unchecked
+
+[Run]
+; Electron-parity finish page: offer to start the app right after install.
+Filename: "{app}\remcord.exe"; Description: "Launch Remcord"; Flags: nowait postinstall skipifsilent
 
 [Code]
 { WebView2 Runtime prerequisite (release blocker 4): warn-and-continue.
@@ -137,7 +183,7 @@ begin
   begin
     try
       repeat
-        if (Rec.Attributes and faDirectory) = 0 then
+        if (Rec.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0 then
           FoundExe := True;
       until (not FoundExe) or (not FindNext(Rec));
     finally
@@ -160,11 +206,85 @@ begin
     DirContainsInstalledApp(Dir);
 end;
 
+{ In-place upgrade: the destination page is always shown
+  (`DisableDirPage=no`), so on upgrade it opens on the previous location —
+  which now contains the installed app files the guard below refuses
+  everywhere else. Reinstalling into the currently-installed location
+  (read from the per-user uninstall entry this setup maintains) is always
+  allowed; the guard still protects every other application directory and
+  every user-data directory. }
+
+function GetInstalledAppDir(): String;
+var
+  Dir: String;
+begin
+  Result := '';
+  if RegQueryStringValue(HKCU,
+    'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{{{#AppIdValue}}}_is1',
+    'Inno Setup: App Path', Dir) then
+    Result := Dir;
+end;
+
+function IsSamePath(const A, B: String): Boolean;
+var
+  NormA, NormB: String;
+begin
+  NormA := Lowercase(A);
+  NormB := Lowercase(B);
+  while (Length(NormA) > 0) and (NormA[Length(NormA)] = '\') do
+    Delete(NormA, Length(NormA), 1);
+  while (Length(NormB) > 0) and (NormB[Length(NormB)] = '\') do
+    Delete(NormB, Length(NormB), 1);
+  Result := (NormA <> '') and (NormA = NormB);
+end;
+
+{ Last folder component of a path (`E:\LegcordNative` -> `LegcordNative`),
+  ignoring trailing backslashes. Used to recognise a previous-generation
+  install folder. }
+function PathLeaf(const Dir: String): String;
+var
+  P: String;
+  I: Integer;
+begin
+  P := Dir;
+  while (Length(P) > 0) and (P[Length(P)] = '\') do
+    Delete(P, Length(P), 1);
+  I := Length(P);
+  while (I > 0) and (P[I] <> '\') and (P[I] <> ':') do
+    Dec(I);
+  Result := Copy(P, I + 1, Length(P));
+end;
+
+{ Legacy-folder redirect: machines that still carry a previous-generation
+  install location (e.g. `E:\LegcordNative`) would otherwise open every
+  wizard on that folder via `UsePreviousAppDir`, so the old path — and
+  the old name — never goes away. When the remembered location is not a
+  Remcord folder, and it holds no portable user data (which must stay
+  where it is for data continuity), the wizard opens on the fresh
+  per-user Remcord folder instead. A proper Remcord home is never
+  redirected: upgrades stay in place. }
+procedure InitializeWizard();
+var
+  Prev, Fresh: String;
+begin
+  Prev := GetInstalledAppDir();
+  if Prev = '' then
+    Exit;
+  if Lowercase(PathLeaf(Prev)) = Lowercase('{#InstallLeaf}') then
+    Exit;
+  if DirExists(Prev + '\remcord-data') then
+    Exit;
+  Fresh := ExpandConstant('{localappdata}\Programs\{#InstallLeaf}');
+  WizardForm.DirEdit.Text := Fresh;
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
   if CurPageID = wpSelectDir then
   begin
+    if IsSamePath(WizardDirValue, GetInstalledAppDir()) then
+      Exit;
     if IsForbiddenDir(WizardDirValue) then
     begin
       MsgBox('This folder belongs to an installed application or to user data. '

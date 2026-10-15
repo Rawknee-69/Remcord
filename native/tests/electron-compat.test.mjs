@@ -2056,14 +2056,14 @@ test("F11 enables the four scanner keys through the native settings path", () =>
 
 test("F13 tray keeps Electron's menu/badge/close shapes with a read-only native state", () => {
     // Electron owns the icon: disabled builds nothing, dynamic resolves the
-    // ac_plug_colored asset, anything else names a static one; win32 icons
+    // rem-smile asset, anything else names a static one; win32 icons
     // resize to 16 px; the five menu actions + tooltip + click-to-reopen
     // come from tray.ts.
     const tray = readFileSync(new URL("../../src/discord/tray.ts", import.meta.url), "utf8");
     assert.match(tray, /getConfig\("tray"\)/);
     assert.match(tray, /trayIcon === "disabled"/);
     assert.match(tray, /trayIcon === "dynamic"/);
-    assert.match(tray, /ac_plug_colored/);
+    assert.match(tray, /rem-smile/);
     assert.match(tray, /resize\(\{ height: 16 \}\)/);
     for (const label of [
         "menu-remcord",

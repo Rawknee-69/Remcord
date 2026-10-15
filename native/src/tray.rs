@@ -10,7 +10,7 @@
 //!
 //! - [`TrayMode`] resolution from the authoritative `settings.tray` value.
 //!   Electron (`tray.ts:14-20`): `"disabled"` builds no icon; `"dynamic"`
-//!   resolves to the `ac_plug_colored` asset; any other value names a static
+//!   resolves to the `rem-smile` asset; any other value names a static
 //!   asset. The default is `"dynamic"` (`src/common/config.ts:65`, mirrored
 //!   by `settings::default_tray`).
 //! - [`tray_available`] / [`should_hide_to_tray`]: the decision inputs for a
@@ -59,7 +59,7 @@ pub enum TrayMode {
     /// hidden window, so closes must quit.
     Disabled,
     /// `tray: "dynamic"` (the default) — Electron resolves the
-    /// `ac_plug_colored` asset and swaps it per favicon state.
+    /// `rem-smile` asset and swaps it per favicon state.
     Dynamic,
     /// Any other `tray` value names one static asset.
     Static,
@@ -320,10 +320,10 @@ mod tests {
     #[test]
     fn mode_resolution_matches_electron_asset_selection() {
         // tray.ts: disabled builds nothing, dynamic resolves
-        // ac_plug_colored, anything else names a static asset.
+        // rem-smile, anything else names a static asset.
         assert_eq!(resolve_tray_mode("disabled"), TrayMode::Disabled);
         assert_eq!(resolve_tray_mode("dynamic"), TrayMode::Dynamic);
-        assert_eq!(resolve_tray_mode("ac_plug_colored"), TrayMode::Static);
+        assert_eq!(resolve_tray_mode("rem-smile"), TrayMode::Static);
         assert_eq!(resolve_tray_mode(""), TrayMode::Static);
         assert_eq!(resolve_tray_mode("DISABLED"), TrayMode::Static);
         assert_eq!(tray_mode_name(TrayMode::Disabled), "disabled");

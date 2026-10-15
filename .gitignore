@@ -18,3 +18,7 @@ native/installer/dist/
 *.etl
 *.trace
 *.heapsnapshot
+
+# Docs are local-only and must not be committed.
+docs/
+

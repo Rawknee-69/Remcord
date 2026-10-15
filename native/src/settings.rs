@@ -619,13 +619,14 @@ pub const VALID_START_MINIMIZED_MODES: &[&str] = &["off", "minimized", "tray"];
 /// the closed Electron vocabulary.
 pub const VALID_TRAY_ICONS: &[&str] = &[
     "dynamic",
-    "dsc-tray",
-    "clsc-dsc-tray",
-    "ac_plug_colored",
-    "ac_white_plug",
-    "ac_white_plug_hollow",
-    "ac_black_plug",
-    "ac_black_plug_hollow",
+    "rem-blush",
+    "rem-glasses",
+    "rem-happy",
+    "rem-smile",
+    "rem-sparkler",
+    "rem-sky",
+    "rem-school",
+    "rem-upside",
     "disabled",
 ];
 

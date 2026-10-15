@@ -4,13 +4,14 @@ export type ValidMods = "vencord" | "equicord" | "custom" | "shelter";
 
 export type ValidTrayIcons =
     | "dynamic"
-    | "dsc-tray"
-    | "clsc-dsc-tray"
-    | "ac_plug_colored"
-    | "ac_white_plug"
-    | "ac_white_plug_hollow"
-    | "ac_black_plug"
-    | "ac_black_plug_hollow"
+    | "rem-blush"
+    | "rem-glasses"
+    | "rem-happy"
+    | "rem-smile"
+    | "rem-sparkler"
+    | "rem-sky"
+    | "rem-school"
+    | "rem-upside"
     | "disabled";
 
 export interface AudioSettings {

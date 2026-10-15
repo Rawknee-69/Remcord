@@ -5,6 +5,12 @@
 //!
 //! - Debug/DEV: the isolated DEV profile (`DEV_PROFILE_DIR`), preserving
 //!   the established development behavior. Never the Electron profile.
+//! - Portable: a `remcord-data` directory next to the running executable.
+//!   When present, ALL launches (debug and release) keep every byte of
+//!   user data inside it, so an install folder is fully self-contained:
+//!   the app plus its data live wherever the user installed and travel
+//!   together. The installer offers to create it, and creating it by hand
+//!   has the same effect.
 //! - Release: `%LOCALAPPDATA%\Remcord` — a stable, writable,
 //!   per-user, machine-local directory. Machine-local (not roaming) fits
 //!   the WebView2 user-data caches living beneath it, and the leaf
@@ -14,6 +20,12 @@
 //!   honored in both builds for safe isolated testing (e.g. a temp
 //!   directory). The renderer never supplies this: it is read once from
 //!   the host process environment at startup.
+//!
+//! Precedence: explicit override first, then the portable marker, then the
+//! build default. Portable never orphans an existing default profile on
+//! upgrade: upgraders have no marker directory, so they resolve exactly
+//! where they always did; only installs that opt into the marker (fresh
+//! installs via the installer task, or a hand-created folder) use it.
 //!
 //! Failure policy: a missing/empty `LOCALAPPDATA` in release, a relative
 //! or empty override, or an uncreatable directory is a hard startup error.
@@ -35,6 +47,9 @@ pub const PROFILE_OVERRIDE_ENV: &str = "REMCORD_NATIVE_PROFILE_DIR";
 /// Leaf of the release profile under `%LOCALAPPDATA%`. Distinct from
 /// the production Electron profile by root and by leaf.
 pub const RELEASE_PROFILE_LEAF: &str = "Remcord";
+/// Portable marker leaf. A directory with this name next to the running
+/// executable selects self-contained user data (see module docs).
+pub const PORTABLE_MARKER_LEAF: &str = "remcord-data";
 
 /// Which configuration a resolved profile came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +58,8 @@ pub enum ProfileKind {
     Dev,
     /// Release default: `%LOCALAPPDATA%\Remcord`.
     Release,
+    /// Portable: `remcord-data` next to the running executable.
+    Portable,
     /// Explicit absolute override via [`PROFILE_OVERRIDE_ENV`].
     Override,
 }
@@ -52,6 +69,7 @@ impl ProfileKind {
         match self {
             ProfileKind::Dev => "dev",
             ProfileKind::Release => "release",
+            ProfileKind::Portable => "portable",
             ProfileKind::Override => "override",
         }
     }
@@ -94,21 +112,38 @@ pub fn validated_override(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Portable data directory for one executable directory. Pure: no
+/// filesystem access — the caller checks that the marker exists (a
+/// directory, so a stray file can never hijack the profile) and passes
+/// the result in via `resolve_for_build`.
+pub fn portable_dir_for_exe_dir(exe_dir: &std::path::Path) -> PathBuf {
+    exe_dir.join(PORTABLE_MARKER_LEAF)
+}
+
 /// Resolve the profile for one launch. `is_dev` is true for debug builds;
 /// `override_raw` and `local_app_data` are the already-read host
-/// environment values (`None` when unset). The override wins in both
-/// builds; otherwise debug takes the DEV default and release requires
-/// `LOCALAPPDATA`. Every failure is an `Err` — the caller fails startup
-/// instead of redirecting to another product's data.
+/// environment values (`None` when unset); `portable_dir` is the existing
+/// `remcord-data` directory next to the executable (`None` when absent).
+/// The override wins in both builds, then the portable marker, otherwise
+/// debug takes the DEV default and release requires `LOCALAPPDATA`. Every
+/// failure is an `Err` — the caller fails startup instead of redirecting
+/// to another product's data.
 pub fn resolve_for_build(
     is_dev: bool,
     override_raw: Option<&str>,
     local_app_data: Option<&str>,
+    portable_dir: Option<&std::path::Path>,
 ) -> Result<ResolvedProfile, String> {
     if let Some(raw) = override_raw {
         return Ok(ResolvedProfile {
             path: validated_override(raw)?,
             kind: ProfileKind::Override,
+        });
+    }
+    if let Some(dir) = portable_dir {
+        return Ok(ResolvedProfile {
+            path: dir.to_path_buf(),
+            kind: ProfileKind::Portable,
         });
     }
     if is_dev {
@@ -142,7 +177,7 @@ mod tests {
 
     #[test]
     fn dev_selects_the_isolated_dev_profile() {
-        let resolved = resolve_for_build(true, None, None).expect("dev must resolve");
+        let resolved = resolve_for_build(true, None, None, None).expect("dev must resolve");
         assert_eq!(resolved.kind, ProfileKind::Dev);
         assert_eq!(resolved.path, PathBuf::from(DEV_PROFILE_DIR));
         assert_eq!(resolved.path, dev_default_dir());
@@ -150,11 +185,12 @@ mod tests {
 
     #[test]
     fn release_selects_localappdata_remcord() {
-        let overridden = resolve_for_build(false, Some(r"C:\Temp\native-override"), None)
+        let overridden = resolve_for_build(false, Some(r"C:\Temp\native-override"), None, None)
             .expect("override wins");
         assert_eq!(overridden.kind, ProfileKind::Override);
         let resolved =
-            resolve_for_build(false, None, Some(r"C:\Users\Test\AppData\Local")).expect("release");
+            resolve_for_build(false, None, Some(r"C:\Users\Test\AppData\Local"), None)
+                .expect("release");
         assert_eq!(resolved.kind, ProfileKind::Release);
         assert_eq!(
             resolved.path,
@@ -164,20 +200,21 @@ mod tests {
 
     #[test]
     fn dev_and_release_never_alias() {
-        let dev = resolve_for_build(true, None, None).expect("dev");
+        let dev = resolve_for_build(true, None, None, None).expect("dev");
         for local in [
             r"C:\Users\Test\AppData\Local",
             r"E:\",
             r"C:\Users\Test\AppData\Roaming",
         ] {
             let release =
-                resolve_for_build(false, None, Some(local)).expect("release must resolve");
+                resolve_for_build(false, None, Some(local), None).expect("release must resolve");
             assert_ne!(dev.path, release.path, "LOCALAPPDATA={local}");
         }
         // Electron's roaming profile is a different root AND a different
         // leaf; the release path touches neither.
         let release =
-            resolve_for_build(false, None, Some(r"C:\Users\Test\AppData\Local")).expect("release");
+            resolve_for_build(false, None, Some(r"C:\Users\Test\AppData\Local"), None)
+                .expect("release");
         assert_eq!(
             release.path.file_name().and_then(|n| n.to_str()),
             Some("Remcord")
@@ -192,20 +229,58 @@ mod tests {
     fn resolution_is_stable_across_repeated_calls() {
         for _ in 0..3 {
             assert_eq!(
-                resolve_for_build(true, None, None).expect("dev"),
-                resolve_for_build(true, None, None).expect("dev")
+                resolve_for_build(true, None, None, None).expect("dev"),
+                resolve_for_build(true, None, None, None).expect("dev")
             );
             assert_eq!(
-                resolve_for_build(false, None, Some(r"C:\Users\T\AppData\Local")).expect("rel"),
-                resolve_for_build(false, None, Some(r"C:\Users\T\AppData\Local")).expect("rel")
+                resolve_for_build(false, None, Some(r"C:\Users\T\AppData\Local"), None)
+                    .expect("rel"),
+                resolve_for_build(false, None, Some(r"C:\Users\T\AppData\Local"), None)
+                    .expect("rel")
             );
+        }
+    }
+
+    #[test]
+    fn portable_marker_wins_over_both_build_defaults() {
+        let marker = PathBuf::from(r"E:\Apps\Remcord\remcord-data");
+        for is_dev in [true, false] {
+            let resolved = resolve_for_build(is_dev, None, Some(r"C:\Users\T\AppData\Local"), Some(&marker))
+                .expect("portable must resolve");
+            assert_eq!(resolved.kind, ProfileKind::Portable);
+            assert_eq!(resolved.path, marker);
+        }
+    }
+
+    #[test]
+    fn portable_candidate_is_the_marker_beside_the_executable() {
+        assert_eq!(
+            portable_dir_for_exe_dir(std::path::Path::new(r"E:\Apps\Remcord")),
+            PathBuf::from(r"E:\Apps\Remcord\remcord-data")
+        );
+        assert_eq!(PORTABLE_MARKER_LEAF, "remcord-data");
+    }
+
+    #[test]
+    fn explicit_override_wins_over_the_portable_marker() {
+        let marker = PathBuf::from(r"E:\Apps\Remcord\remcord-data");
+        for is_dev in [true, false] {
+            let resolved = resolve_for_build(
+                is_dev,
+                Some(r"C:\Temp\native-probe"),
+                Some(r"C:\Users\T\AppData\Local"),
+                Some(&marker),
+            )
+            .expect("absolute override");
+            assert_eq!(resolved.kind, ProfileKind::Override);
+            assert_eq!(resolved.path, PathBuf::from(r"C:\Temp\native-probe"));
         }
     }
 
     #[test]
     fn absolute_override_wins_in_both_builds() {
         for is_dev in [true, false] {
-            let resolved = resolve_for_build(is_dev, Some(r"C:\Temp\native-probe"), None)
+            let resolved = resolve_for_build(is_dev, Some(r"C:\Temp\native-probe"), None, None)
                 .expect("absolute override");
             assert_eq!(resolved.kind, ProfileKind::Override);
             assert_eq!(resolved.path, PathBuf::from(r"C:\Temp\native-probe"));
@@ -220,7 +295,7 @@ mod tests {
             (true, ""),
             (false, ""),
         ] {
-            let error = resolve_for_build(is_dev, Some(raw), Some(r"C:\Users\T\AppData\Local"))
+            let error = resolve_for_build(is_dev, Some(raw), Some(r"C:\Users\T\AppData\Local"), None)
                 .expect_err("bad override must fail");
             assert!(
                 error.contains(PROFILE_OVERRIDE_ENV),
@@ -232,7 +307,7 @@ mod tests {
     #[test]
     fn release_without_localappdata_fails_and_never_falls_back_to_dev() {
         for local in [None, Some("")] {
-            let error = resolve_for_build(false, None, local).expect_err("must fail");
+            let error = resolve_for_build(false, None, local, None).expect_err("must fail");
             assert!(
                 error.contains("LOCALAPPDATA"),
                 "error must name the missing input: {error}"
@@ -285,6 +360,7 @@ mod tests {
     fn kinds_have_stable_names() {
         assert_eq!(ProfileKind::Dev.as_str(), "dev");
         assert_eq!(ProfileKind::Release.as_str(), "release");
+        assert_eq!(ProfileKind::Portable.as_str(), "portable");
         assert_eq!(ProfileKind::Override.as_str(), "override");
     }
 }

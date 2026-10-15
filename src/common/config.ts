@@ -151,6 +151,31 @@ function migrateStartMinimized(settingsObject: Record<string, unknown>): boolean
     }
     return false;
 }
+
+/** Pre-rename tray values (`ac_*` plug / `dsc-tray`) no longer ship an asset — map them to the new Rem set. */
+const LEGACY_TRAY_ICONS = new Map<string, Settings["tray"]>([
+    ["dsc-tray", "dynamic"],
+    ["clsc-dsc-tray", "dynamic"],
+    ["ac_plug_colored", "rem-smile"],
+    ["ac_plug_classic", "rem-smile"],
+    ["ac_white_plug", "rem-blush"],
+    ["ac_white_plug_hollow", "rem-glasses"],
+    ["ac_black_plug", "rem-happy"],
+    ["ac_black_plug_hollow", "rem-smile"],
+    ["ac_icon", "dynamic"],
+    ["ac_icon_transparent", "dynamic"],
+]);
+
+function migrateTrayIcon(settingsObject: Record<string, unknown>): boolean {
+    const value = settingsObject.tray;
+    if (typeof value === "string" && LEGACY_TRAY_ICONS.has(value)) {
+        const next = LEGACY_TRAY_ICONS.get(value)!;
+        settingsObject.tray = next;
+        console.log(`[Config] Migrated tray "${value}" → "${next}"`);
+        return true;
+    }
+    return false;
+}
 export function setConfig<K extends keyof Settings>(object: K, toSet: Settings[K]): void {
     const parsed = ensureConfigCache();
     parsed[object] = toSet;
@@ -199,6 +224,10 @@ export function checkIfConfigIsBroken(): void {
         const settingsObject = ensureConfigCache() as Settings & Record<string, unknown>;
 
         if (migrateStartMinimized(settingsObject)) {
+            writeFileSync(getConfigLocation(), JSON.stringify(settingsObject, null, 4), "utf-8");
+        }
+
+        if (migrateTrayIcon(settingsObject)) {
             writeFileSync(getConfigLocation(), JSON.stringify(settingsObject, null, 4), "utf-8");
         }
 

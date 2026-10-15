@@ -358,13 +358,14 @@
     const SETTINGS_VALID_START_MINIMIZED = ["off", "minimized", "tray"];
     const SETTINGS_VALID_TRAY_ICONS = [
         "dynamic",
-        "dsc-tray",
-        "clsc-dsc-tray",
-        "ac_plug_colored",
-        "ac_white_plug",
-        "ac_white_plug_hollow",
-        "ac_black_plug",
-        "ac_black_plug_hollow",
+        "rem-blush",
+        "rem-glasses",
+        "rem-happy",
+        "rem-smile",
+        "rem-sparkler",
+        "rem-sky",
+        "rem-school",
+        "rem-upside",
         "disabled",
     ];
     const SETTINGS_VALID_WINDOW_STYLES = ["default", "native", "overlay", "transparent", "legacy", "rebrand"];

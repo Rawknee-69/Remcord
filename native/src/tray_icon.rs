@@ -39,18 +39,19 @@ const WM_TRAY_CALLBACK: u32 = 0x0400 + 0x100;
 const TRAY_TOOLTIP: &str = "Remcord";
 
 /// Tray artwork bundled in `assets/` (Electron tray-icon parity). The
-/// `dynamic` mode and the default `dsc-tray` use the embedded rebranded
-/// mark; every other `ValidTrayIcons` value names its file. Unknown values
-/// fall back to the mark (the F13 model maps them to `Static`, never an
-/// error).
+/// `dynamic` mode uses the embedded rebranded mark; every other
+/// `ValidTrayIcons` value names its file. Unknown values fall back to the
+/// mark (the F13 model maps them to `Static`, never an error).
 pub fn tray_art_bytes(mode: &str) -> &'static [u8] {
     match mode {
-        "clsc-dsc-tray" => include_bytes!("../../assets/clsc-dsc-tray.png"),
-        "ac_plug_colored" => include_bytes!("../../assets/ac_plug_colored.png"),
-        "ac_white_plug" => include_bytes!("../../assets/ac_white_plug.png"),
-        "ac_white_plug_hollow" => include_bytes!("../../assets/ac_white_plug_hollow.png"),
-        "ac_black_plug" => include_bytes!("../../assets/ac_black_plug.png"),
-        "ac_black_plug_hollow" => include_bytes!("../../assets/ac_black_plug_hollow.png"),
+        "rem-blush" => include_bytes!("../../assets/rem-blush.png"),
+        "rem-glasses" => include_bytes!("../../assets/rem-glasses.png"),
+        "rem-happy" => include_bytes!("../../assets/rem-happy.png"),
+        "rem-smile" => include_bytes!("../../assets/rem-smile.png"),
+        "rem-sparkler" => include_bytes!("../../assets/rem-sparkler.png"),
+        "rem-sky" => include_bytes!("../../assets/rem-sky.png"),
+        "rem-school" => include_bytes!("../../assets/rem-school.png"),
+        "rem-upside" => include_bytes!("../../assets/rem-upside.png"),
         _ => crate::app_icon::embedded_png_bytes(),
     }
 }
@@ -497,18 +498,19 @@ mod tests {
 
     #[test]
     fn every_tray_setting_resolves_embedded_artwork() {
-        // Electron's nine ValidTrayIcons: each names compiled-in bytes
-        // (dynamic + default fall back to the rebranded mark); nothing
+        // Electron's ten ValidTrayIcons: each names compiled-in bytes
+        // (dynamic falls back to the rebranded mark); nothing
         // reads the repo or install dir at runtime.
         for mode in [
             "dynamic",
-            "dsc-tray",
-            "clsc-dsc-tray",
-            "ac_plug_colored",
-            "ac_white_plug",
-            "ac_white_plug_hollow",
-            "ac_black_plug",
-            "ac_black_plug_hollow",
+            "rem-blush",
+            "rem-glasses",
+            "rem-happy",
+            "rem-smile",
+            "rem-sparkler",
+            "rem-sky",
+            "rem-school",
+            "rem-upside",
             "disabled",
         ] {
             assert!(
@@ -520,12 +522,8 @@ mod tests {
             tray_art_bytes("dynamic"),
             crate::app_icon::embedded_png_bytes()
         );
-        assert_eq!(
-            tray_art_bytes("dsc-tray"),
-            crate::app_icon::embedded_png_bytes()
-        );
         assert_ne!(
-            tray_art_bytes("ac_plug_colored"),
+            tray_art_bytes("rem-smile"),
             crate::app_icon::embedded_png_bytes()
         );
     }

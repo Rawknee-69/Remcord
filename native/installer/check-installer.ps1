@@ -43,6 +43,9 @@ Check ($code -match "UsePreviousAppDir=yes") "in-place upgrade scoped to previou
 Check ($code -match "CloseApplications=yes") "running instance handled gracefully"
 Check (-not ($code -match "taskkill|TerminateProcess|/IM ")) "no image-name process killing"
 Check ($code -match "RestartApplications=no") "no forced application restart"
+Check ($code -match "(?m)^DisableDirPage=no") "destination page always shown (any folder or drive)"
+Check ($code -match "AlwaysShowDirOnReadyPage=yes") "chosen folder confirmed on ready page"
+Check ($code -match "(?m)^LicenseFile=") "license page shown during install"
 
 # 3. Refusal guard: content markers, never product names. Data/profile
 # locations must appear ONLY inside the [Code] guard; the [Setup] head must
@@ -75,6 +78,17 @@ Check ($code -match 'Source: "stage\\license\.txt"') "packages license only"
 Check (([regex]::Matches($code, 'Source: "')).Count -eq 2) "no additional packaged files"
 Check ($code -match "SetupIconFile=" -and $code -match "build\\icon\.ico") "setup icon from repo asset"
 Check ($code -match 'Name: "\{autoprograms\}\\Remcord"') "distinct Start Menu label"
+Check ($code -match 'Name: "\{autodesktop\}\\Remcord"') "desktop shortcut created"
+Check ($code -match 'Tasks: desktopicon') "desktop shortcut wired to opt-out task"
+Check ($code -match '\[Tasks\]') "additional-shortcuts task section present"
+Check ($code -match "checkedonce") "desktop shortcut checked by default"
+Check ($code -match "(?m)^Filename: ""\{app\}\\remcord\.exe""; Description: ""Launch Remcord""") "finish page offers to launch"
+Check ($code -match "portabledata") "portable user-data task present"
+Check ($code -match '(?m)^Name: "\{app\}\\remcord-data"; Tasks: portabledata') "portable marker created only when selected"
+Check ($code -match "GetInstalledAppDir") "in-place upgrade reads previous location"
+Check ($code -match "IsSamePath\(WizardDirValue, GetInstalledAppDir\(\)\)") "upgrade into current location always allowed"
+Check ($code -match "procedure InitializeWizard") "wizard redirect initializes destination page"
+Check ($code -match "WizardForm\.DirEdit\.Text") "legacy folder redirected to the Remcord folder"
 
 # 7. Out of scope stays out (documents blockers, not silent gaps).
 Check (-not ($code -match "signtool")) "no signing claims in installer"
@@ -95,9 +109,30 @@ if (Test-Path -LiteralPath $exe -PathType Leaf) {
     Check ($info.ProductVersion -eq $package.version) "exe ProductVersion matches package.json ($($package.version))"
     Check ($info.ProductName -eq "Remcord") "exe ProductName is Remcord"
     Check ($info.OriginalFilename -eq "remcord.exe") "exe OriginalFilename is remcord.exe"
+    # No-console GUI: the PE optional-header Subsystem must be 2
+    # (IMAGE_SUBSYSTEM_WINDOWS_GUI), never 3 (CONSOLE), so shortcut and
+    # Search launches never pop a terminal window.
+    $bytes = [IO.File]::ReadAllBytes($exe)
+    $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+    $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C)
+    Check ($subsystem -eq 2) "release exe is a GUI binary with no console window (subsystem=$subsystem)"
 } else {
     Write-Host "skip: no release exe built yet (run build-installer.ps1)"
 }
+
+# 9. No-console source guard: release Windows builds must carry the
+# windows_subsystem attribute, or the next rebuild silently regresses to
+# a terminal popup.
+$mainRs = Get-Content -Raw -LiteralPath (Join-Path $native "src/main.rs")
+Check ($mainRs -match 'windows_subsystem\s*=\s*"windows"') "release binary hides the console window"
+
+# 10. Self-contained data: the resolver must honor a `remcord-data`
+# marker next to the executable (created by the installer task or by
+# hand), so the app plus its data live wherever the user installed.
+$profileRs = Get-Content -Raw -LiteralPath (Join-Path $native "src/profile.rs")
+Check ($profileRs -match 'PORTABLE_MARKER_LEAF\s*:\s*&str\s*=\s*"remcord-data"') "portable marker is remcord-data"
+Check ($profileRs -match "ProfileKind::Portable") "portable profile kind present"
+Check ($profileRs -match "portable_dir_for_exe_dir") "portable candidate derived from executable dir"
 
 if ($failures.Count -gt 0) { throw "packaging checks failed: $($failures -join '; ')" }
 Write-Host "all packaging checks passed"

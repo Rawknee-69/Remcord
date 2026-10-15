@@ -6000,7 +6000,7 @@ mod tests {
             r#"{"title":"(3) Discord"}"#,
             r#"{"badge":"badge-3.ico"}"#,
             r#"{"handle":"0x1234"}"#,
-            r#"{"asset":"ac_plug_colored.png"}"#,
+            r#"{"asset":"rem-smile.png"}"#,
         ] {
             let message = format!(
                 "{{\"version\":1,\"request_id\":\"x\",\"command\":{{\"type\":\"tray_get_state\",\"payload\":{payload}}}}}"
