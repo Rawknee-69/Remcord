@@ -13,7 +13,7 @@
 [![Windows](https://img.shields.io/badge/Windows-Rust_WebView2-0078D4?style=for-the-badge&logo=windows)](native/)
 [![Linux](https://img.shields.io/badge/Linux-supported-FCC624?style=for-the-badge&logo=linux)](electron-builder.ts)
 [![macOS](https://img.shields.io/badge/macOS-supported-000000?style=for-the-badge&logo=apple)](electron-builder.ts)
-[![Discord](https://img.shields.io/badge/Discord-join_community-5865F2?style=for-the-badge&logo=discord)](https://discord.gg/TnhxcqynZ2)
+[![Discord](https://img.shields.io/badge/Discord-join_community-5865F2?style=for-the-badge&logo=discord)](https://discord.gg/)
 
 [Features](#-why-remcord) • [Screenshots](#-screenshots) • [Install](#-install) • [Build from Source](#-build-from-source) • [FAQ](#-faq) • [Contributing](CONTRIBUTING.md)
 
@@ -168,7 +168,7 @@ See [`native/README.md`](native/README.md) and [`native/COMPATIBILITY.md`](nativ
 
 Yes — we'd love to see you there:
 
-[![Discord Server](https://dcbadge.vercel.app/api/server/TnhxcqynZ2)](https://discord.gg/TnhxcqynZ2)
+[![Discord Server](https://dcbadge.vercel.app/api/server/)](https://discord.gg/)
 
 Report bugs, share themes, get help, and vote on features.
 
@@ -223,7 +223,7 @@ Translations are managed on our [Weblate page](https://hosted.weblate.org/projec
 Remcord is community-driven. Whether you fix a typo, add a language, design a theme, or hack on the Rust shell — you belong here.
 
 - 📖 Read [CONTRIBUTING.md](CONTRIBUTING.md)
-- 💬 Join [discord.gg/TnhxcqynZ2](https://discord.gg/TnhxcqynZ2)
+- 💬 Join [discord.gg/](https://discord.gg/)
 - 🐛 Open issues with repro steps and logs
 
 ---

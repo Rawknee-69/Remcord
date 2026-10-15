@@ -82,7 +82,7 @@ export function createTray() {
             label: getLang("tray-supportServer"),
             click() {
                 mainWindows.forEach((mainWindow) => {
-                    navigateTo(mainWindow, "/invite/TnhxcqynZ2");
+                    navigateTo(mainWindow, "/invite/");
                 });
             },
         },
