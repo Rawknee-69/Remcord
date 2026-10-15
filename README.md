@@ -1,6 +1,6 @@
 <div align="center">
 
-![Remcord](https://github.com/user-attachments/assets/f7b007d4-44fa-4c88-96e4-0a448b568b5d)
+![Remcord](https://github.com/Rawknee-69/Remcord/blob/main/assets/rem-sparkler.png)
 
 # Remcord
 
