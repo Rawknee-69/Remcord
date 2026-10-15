@@ -40,16 +40,13 @@ function fileNameFromUrl(url: string, fallback = "saved-file"): string {
     }
 }
 
-// Discord's effective appearance, read from the resolved
-// `--background-primary` (stock dark/light or any custom theme). Keeps the
-// popup's native controls and scrollbars on Discord's theme. Best-effort:
+// Discord's effective appearance, read from an element inside the themed
+// tree (the open menu): stock dark/light or any custom theme. Keeps the
+// popup's surfaces and native controls on Discord's theme. Best-effort:
 // falls back to the OS preference, never throws.
-function discordTheme(): "light" | "dark" {
+function discordTheme(scope: Element): "light" | "dark" {
     try {
-        const raw = getComputedStyle(document.documentElement)
-            .getPropertyValue("--background-primary")
-            .trim()
-            .toLowerCase();
+        const raw = getComputedStyle(scope).getPropertyValue("--background-primary").trim().toLowerCase();
         let r = -1;
         let g = -1;
         let b = -1;
@@ -110,8 +107,9 @@ let pending: PendingSave | null = null;
 let pendingTimer: ReturnType<typeof setTimeout> | undefined;
 let unobserveMenus: (() => void) | undefined;
 
-const PENDING_TTL_MS = 2500;
+const PENDING_TTL_MS = 10_000;
 const INJECTED_ATTR = "data-remcord-gallery";
+const SAVE_ITEM_ATTR = "data-remcord-gallery-save";
 
 function galleryBridge(): GalleryBridge | undefined {
     const gallery = (window.remcord as unknown as { gallery?: unknown }).gallery as
@@ -177,15 +175,19 @@ function setPending(urls: string[]): void {
     }, PENDING_TTL_MS);
 }
 
-function takePending(): PendingSave | null {
-    const p = pending;
+/** Non-consuming read: menus re-render and re-inject, so injection must
+ * never eat the pending save — only a real user action clears it. */
+function peekPending(): PendingSave | null {
+    if (!pending || Date.now() - pending.at > PENDING_TTL_MS) return null;
+    return pending;
+}
+
+function clearPending(): void {
     pending = null;
     if (pendingTimer !== undefined) {
         clearTimeout(pendingTimer);
         pendingTimer = undefined;
     }
-    if (!p || Date.now() - p.at > PENDING_TTL_MS) return null;
-    return p;
 }
 
 /**
@@ -363,12 +365,50 @@ function collectionOptions(): Promise<string[]> {
 }
 
 /**
+ * Discord variables the popup CSS reads. Copied as resolved values onto the
+ * overlay (see openSavePopup), so the popup matches stock and custom themes
+ * no matter where it attaches.
+ */
+const POPUP_THEME_VARS = [
+    "--background-primary",
+    "--background-secondary",
+    "--background-secondary-alt",
+    "--text-normal",
+    "--text-muted",
+    "--border-subtle",
+    "--input-background-default",
+    "--input-text-default",
+    "--input-border-default",
+    "--brand-500",
+    "--shadow-high",
+    "--font-primary",
+];
+
+/**
  * Save popup: title + collection + note, then Save to Gallery, Copy Link,
  * or Download (media only). Plain DOM so it works in every menu context
- * without a Solid root; styled with Discord vars so it follows the theme.
+ * without a Solid root.
+ *
+ * The overlay attaches to `document.body` (menu layers can clip fixed
+ * positioning or unmount, which would hide the popup while it still blocks
+ * input) and carries copies of Discord's resolved theme variables, so it
+ * follows stock and custom themes anywhere in the document.
  */
-function openSavePopup(save: PendingSave): void {
+function openSavePopup(save: PendingSave, anchor: Element): void {
     try {
+        // Snapshot the resolved theme BEFORE closing the menu: the close
+        // unmounts the menu, so reading afterwards would yield unresolved
+        // variables. Values are copied onto the overlay itself (below), so
+        // the popup matches stock and custom themes wherever it attaches.
+        const computed = getComputedStyle(anchor);
+        const scheme = discordTheme(anchor);
+        const themeVars: Array<[string, string]> = [];
+        for (const name of POPUP_THEME_VARS) {
+            try {
+                const value = computed.getPropertyValue(name).trim();
+                if (value) themeVars.push([name, value]);
+            } catch {}
+        }
         closeMenu();
         ensurePopupStyles();
         const bridge = galleryBridge();
@@ -379,7 +419,12 @@ function openSavePopup(save: PendingSave): void {
 
         const overlay = document.createElement("div");
         overlay.className = "remcord-gal-overlay";
-        overlay.style.colorScheme = discordTheme();
+        overlay.style.colorScheme = scheme;
+        for (const [name, value] of themeVars) {
+            try {
+                overlay.style.setProperty(name, value);
+            } catch {}
+        }
         const dialog = document.createElement("div");
         dialog.className = "remcord-gal-dialog";
         dialog.setAttribute("role", "dialog");
@@ -456,9 +501,22 @@ function openSavePopup(save: PendingSave): void {
 
         dialog.append(heading, sub, titleLabel, titleInput, colLabel, colSelect, noteLabel, noteInput, actions);
         overlay.appendChild(dialog);
-        document.body.appendChild(overlay);
+        // Attach to the menu's layer: inside Discord's themed subtree so
+        // every `var(--…)` above resolves to the active theme (stock or
+        // custom). `document.body` is outside that subtree and would render
+        // the popup in fallback colors. The menu itself may be removed by
+        // the close below, so the layer (its parent) owns the overlay.
+        document.body.appendChild(overlay); // body: immune to portal clipping
+        markPopup(true);
+        // Close only after attaching: the menu unmounts but the layer (and
+        // the overlay with it) survives.
+        closeMenu();
+        titleInput.focus();
 
-        const close = () => overlay.remove();
+        const close = () => {
+            markPopup(false);
+            overlay.remove();
+        };
         overlay.addEventListener("mousedown", (e) => {
             if (e.target === overlay) close();
         });
@@ -503,24 +561,9 @@ function openSavePopup(save: PendingSave): void {
         });
 
         downloadBtn?.addEventListener("click", () => {
-            void (async () => {
-                try {
-                    for (const url of save.urls) {
-                        try {
-                            await downloadUrl(url);
-                        } catch {
-                            window.open(url, "_blank", "noopener");
-                        }
-                    }
-                    close();
-                    showToast({ title: "Download started", duration: 2500 });
-                } catch {
-                    showToast({ title: "Could not download", duration: 3000 });
-                }
-            })();
+            close();
+            downloadAll(save.urls);
         });
-
-        titleInput.focus();
     } catch {
         /* never break Discord menus */
     }
@@ -541,35 +584,101 @@ function saveUrls(urls: string[], meta: GalleryMeta): void {
 }
 
 /**
- * Native Discord menu labels we upgrade to the save popup. English-only
- * (the plugin's own labels are English-only too); other locales keep
- * Discord's default behavior for these items.
+ * Native Discord menu labels we upgrade to the save popup. Matched against
+ * the item's label slot (deepest text node), not the whole item text, which
+ * carries surrounding chrome. Strict full-match so lookalikes like
+ * "Copy Message Link" keep their native behavior. English-only (the
+ * plugin's own labels are English-only too); other locales keep Discord's
+ * default behavior for these items.
  */
-const NATIVE_COPY_LABEL = /^copy link$/i;
-const NATIVE_SAVE_MEDIA_LABEL = /^save (image|video)$/i;
+const NATIVE_COPY_LABEL = /^copy (link|image|video)$/;
+const NATIVE_SAVE_MEDIA_LABEL = /^save (image|video)$/;
 
-function hookNativeItem(item: Element, save: PendingSave, fallback: () => void): void {
+function nativeLabelOf(item: Element): string {
+    // Any text node inside the item can hold the label (hints or adornments
+    // may sit deeper than it); join them so the label is never masked.
     try {
-        if (item.hasAttribute(INJECTED_ATTR)) return;
-        item.setAttribute(INJECTED_ATTR, "hooked");
-        item.addEventListener(
-            "click",
-            (event) => {
-                // Take over the click synchronously so Discord's handler
-                // never fires; the popup (or the fallback below) owns what
-                // happens next, so the user's intent is never lost.
-                event.stopPropagation();
-                event.preventDefault();
-                try {
-                    openSavePopup(save);
-                } catch {
-                    fallback();
-                }
-            },
-            { capture: true },
-        );
+        const parts: string[] = [];
+        const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+        let node = walker.nextNode() as Text | null;
+        while (node) {
+            const text = node.data
+                .toLowerCase()
+                .replace(/[\s_]+/g, " ")
+                .trim();
+            if (text) parts.push(text);
+            node = walker.nextNode() as Text | null;
+        }
+        return parts.join(" | ");
     } catch {
-        /* leave the native item untouched */
+        return "";
+    }
+}
+
+function nativeLabelMatches(label: string, pattern: RegExp): boolean {
+    return label.split(" | ").some((part) => pattern.test(part));
+}
+
+/** True while our popup is on screen: stray pointer/click events from the
+ * dismissed menu (e.g. a click landing after the takeover) must not open a
+ * second popup. Set before the overlay attaches, cleared on close. */
+let popupOpen = false;
+
+function markPopup(open: boolean): void {
+    popupOpen = open;
+}
+
+/**
+ * Single delegated takeover for every gallery menu action. One
+ * document-level capture listener (pointerdown AND click) instead of
+ * per-item listeners: Discord re-renders menu nodes on hover/focus, which
+ * silently drops node-level listeners, but nothing can preempt or detach
+ * a document-capture handler. Non-gallery items return untouched.
+ */
+function onDocMenuAction(event: Event): void {
+    try {
+        if (popupOpen) return;
+        const target = event.target as Element | null;
+        if (!target || typeof target.closest !== "function") return;
+        const item = target.closest('[role="menuitem"]');
+        if (!item) return;
+        if (item.hasAttribute(SAVE_ITEM_ATTR)) {
+            event.stopPropagation();
+            event.preventDefault();
+            const save = peekPending();
+            if (!save) return;
+            clearPending();
+            try {
+                openSavePopup(save, item);
+            } catch {
+                saveUrls(save.urls, save.meta);
+            }
+            return;
+        }
+        const save = peekPending();
+        if (!save) return;
+        const label = nativeLabelOf(item);
+        if (nativeLabelMatches(label, NATIVE_COPY_LABEL)) {
+            event.stopPropagation();
+            event.preventDefault();
+            clearPending();
+            try {
+                openSavePopup(save, item);
+            } catch {
+                copyFallback(save);
+            }
+        } else if (nativeLabelMatches(label, NATIVE_SAVE_MEDIA_LABEL)) {
+            event.stopPropagation();
+            event.preventDefault();
+            clearPending();
+            try {
+                openSavePopup(save, item);
+            } catch {
+                downloadFallback(save);
+            }
+        }
+    } catch {
+        /* never break Discord menus */
     }
 }
 
@@ -580,25 +689,42 @@ function copyFallback(save: PendingSave): void {
     });
 }
 
+function downloadAll(urls: string[]): void {
+    void (async () => {
+        try {
+            for (const url of urls) {
+                try {
+                    await downloadUrl(url);
+                } catch {
+                    window.open(url, "_blank", "noopener");
+                }
+            }
+            showToast({ title: "Download started", duration: 2500 });
+        } catch {
+            showToast({ title: "Could not download", duration: 3000 });
+        }
+    })();
+}
+
+function downloadFallback(save: PendingSave): void {
+    closeMenu();
+    downloadAll(save.urls);
+}
+
 function injectIntoMenu(menu: HTMLElement): void {
     try {
         if (menu.hasAttribute(INJECTED_ATTR)) return;
-        const save = takePending();
+        // Peek only: the menu may re-render and re-inject, and the pending
+        // save belongs to the user's click action, not to injection.
+        const save = peekPending();
         if (!save) return;
         menu.setAttribute(INJECTED_ATTR, "1");
 
-        // Upgrade Discord's own Copy Link / Save Image(/Video) entries to
-        // the save popup: same click position, but the user gets Save to
-        // Gallery (with name + note), Copy Link, and Download in one place.
-        for (const candidate of menu.querySelectorAll('[role="menuitem"]')) {
-            const label = (candidate.textContent ?? "").trim().toLowerCase();
-            if (NATIVE_COPY_LABEL.test(label)) {
-                hookNativeItem(candidate, save, () => copyFallback(save));
-            } else if (NATIVE_SAVE_MEDIA_LABEL.test(label)) {
-                hookNativeItem(candidate, save, () => openSavePopup(save));
-            }
-        }
-
+        // Our own entry carries a marker; the delegated document handler
+        // owns the click (node-level listeners don't survive menu
+        // re-renders). Native Copy Link / Save Image entries need no
+        // marking: the delegate matches their labels at click time.
+        if (menu.querySelector(`[${SAVE_ITEM_ATTR}]`)) return;
         const template = menu.querySelector('[role="menuitem"]');
         if (!template) return;
         const labelNode = findLabelNode(template);
@@ -607,23 +733,10 @@ function injectIntoMenu(menu: HTMLElement): void {
         const item = template.cloneNode(true) as HTMLElement;
         item.removeAttribute("id");
         item.setAttribute("aria-label", "Save to Gallery");
+        item.setAttribute(SAVE_ITEM_ATTR, "1");
         const itemLabel = findLabelNode(item);
         if (!itemLabel) return;
         itemLabel.data = save.urls.length === 1 ? "Save to Gallery" : `Save to Gallery (${save.urls.length})`;
-
-        item.addEventListener(
-            "click",
-            (event) => {
-                event.stopPropagation();
-                event.preventDefault();
-                try {
-                    openSavePopup(save);
-                } catch {
-                    saveUrls(save.urls, save.meta);
-                }
-            },
-            { capture: true },
-        );
 
         // Prominent but not first: ahead of the first separator when the
         // menu is grouped, otherwise appended at the end.
@@ -643,6 +756,8 @@ function injectIntoMenu(menu: HTMLElement): void {
 export function onLoad() {
     log("Remcord Gallery context menu");
     document.addEventListener("contextmenu", onContextMenu, true);
+    document.addEventListener("pointerdown", onDocMenuAction, true);
+    document.addEventListener("click", onDocMenuAction, true);
     try {
         const handle = observeDom('[role="menu"]', (node) => injectIntoMenu(node as HTMLElement));
         unobserveMenus = () => handle();
@@ -653,6 +768,12 @@ export function onLoad() {
 
 export function onUnload() {
     document.removeEventListener("contextmenu", onContextMenu, true);
+    try {
+        document.removeEventListener("pointerdown", onDocMenuAction, true);
+    } catch {}
+    try {
+        document.removeEventListener("click", onDocMenuAction, true);
+    } catch {}
     try {
         unobserveMenus?.();
     } catch {}
