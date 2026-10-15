@@ -235,6 +235,7 @@ Built on the shoulders of giants:
 
 - [kckarnige — UI design, branding, and features](https://github.com/kckarnige)
 - [OpenAsar](https://github.com/GooseMod/OpenAsar)
+- [Legcord](https://github.com/Legcord/Legcord)
 - [arRPC — Rich Presence](https://github.com/OpenAsar/arrpc)
 - [Vencord](https://github.com/Vendicated/Vencord) • [Equicord](https://github.com/Equicord/Equicord) • [Shelter](https://github.com/uwu/shelter)
 - [electron-builder](https://electron.build)
