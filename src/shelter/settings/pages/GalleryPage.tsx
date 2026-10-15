@@ -8,7 +8,11 @@ import {
     type GalleryItem,
     galleryThemeFromBackground,
     groupGalleryItems,
+    mixRgb,
     paginateGalleryItems,
+    parseCssColor,
+    relativeLuminance,
+    rgbString,
     sortGalleryItems,
 } from "../../../common/galleryUtils.js";
 import { Dropdown } from "../components/Dropdown.jsx";
@@ -45,7 +49,9 @@ const blobCache = new Map<string, string>();
 function detectDiscordTheme(page: Element | undefined): "light" | "dark" {
     // Menus and modals can render outside the themed subtree, so every
     // scope that may carry the variables is tried in order (themed
-    // container, app mount, page root, body, document root).
+    // container, app mount, page root, body, document root). When variables
+    // resolve nowhere (custom themes styling surfaces directly), the
+    // rendered surface sample decides instead of a hardcoded guess.
     const scopes: Array<Element | undefined> = [];
     try {
         scopes.push(document.querySelector(".theme-dark, .theme-light") ?? undefined);
@@ -69,11 +75,79 @@ function detectDiscordTheme(page: Element | undefined): "light" | "dark" {
             if (parsed) return parsed;
         } catch {}
     }
+    const sample = sampleSurface(scopes);
+    if (sample) return relativeLuminance(sample.bg) <= 0.4 ? "dark" : "light";
     try {
         return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     } catch {
         return "dark";
     }
+}
+
+/** First opaque rendered background across scopes, plus its foreground. */
+function sampleSurface(
+    scopes: Array<Element | undefined>,
+): { bg: [number, number, number]; fg: [number, number, number] } | null {
+    for (const scope of scopes) {
+        if (!scope) continue;
+        try {
+            const cs = getComputedStyle(scope);
+            const bg = parseCssColor(cs.getPropertyValue("background-color") ?? "");
+            if (!bg || bg[3] < 0.95) continue;
+            const base: [number, number, number] = [bg[0], bg[1], bg[2]];
+            const fgRaw = parseCssColor(cs.getPropertyValue("color") ?? "");
+            const fg: [number, number, number] =
+                fgRaw && fgRaw[3] >= 0.95
+                    ? [fgRaw[0], fgRaw[1], fgRaw[2]]
+                    : relativeLuminance(base) <= 0.4
+                      ? [255, 255, 255]
+                      : [6, 6, 7];
+            return { bg: base, fg };
+        } catch {}
+    }
+    return null;
+}
+
+const PAGE_DERIVED_VARS: Array<[string, (bg: [number, number, number], fg: [number, number, number]) => string]> = [
+    ["--background-primary", (bg, fg) => rgbString(mixRgb(bg, fg, 0))],
+    ["--text-normal", (bg, fg) => rgbString(mixRgb(fg, bg, 0))],
+    ["--header-primary", (bg, fg) => rgbString(mixRgb(fg, bg, 0))],
+    ["--input-text-default", (bg, fg) => rgbString(mixRgb(fg, bg, 0))],
+    ["--text-muted", (bg, fg) => rgbString(mixRgb(bg, fg, 0.5))],
+    ["--background-secondary", (bg, fg) => rgbString(mixRgb(bg, fg, 0.06))],
+    ["--background-secondary-alt", (bg, fg) => rgbString(mixRgb(bg, fg, 0.12))],
+    ["--input-background-default", (bg, fg) => rgbString(mixRgb(bg, fg, 0.07))],
+    ["--border-subtle", (bg, fg) => rgbString(mixRgb(bg, fg, 0.2))],
+    ["--input-border-default", (bg, fg) => rgbString(mixRgb(bg, fg, 0.22))],
+];
+
+/**
+ * Guarantees the page never strands in fallback colors: any variable the
+ * page CSS reads that resolves nowhere gets an inline value derived from
+ * Discord's rendered surface. Resolved variables are never touched, so
+ * stock and variable-based custom themes behave exactly as before.
+ */
+function ensurePagePalette(page: HTMLElement): void {
+    try {
+        const cs = getComputedStyle(page);
+        const missing = PAGE_DERIVED_VARS.filter(([name]) => !cs.getPropertyValue(name).trim()).map(([name]) => name);
+        if (missing.length === 0) return;
+        const scopes: Array<Element | undefined> = [page];
+        try {
+            scopes.push(document.querySelector(".theme-dark, .theme-light") ?? undefined);
+        } catch {}
+        try {
+            scopes.push(document.getElementById("app-mount") ?? undefined);
+        } catch {}
+        const sample = sampleSurface(scopes);
+        if (!sample) return;
+        for (const [name, derive] of PAGE_DERIVED_VARS) {
+            if (!missing.includes(name)) continue;
+            try {
+                page.style.setProperty(name, derive(sample.bg, sample.fg));
+            } catch {}
+        }
+    } catch {}
 }
 
 function readPrefs(): Partial<{ groupBy: GalleryGroupBy; sort: "newest" | "oldest"; kind: string }> {
@@ -357,7 +431,11 @@ export function GalleryPage() {
     onMount(() => {
         refresh();
         setTheme(detectDiscordTheme(pageEl));
-        const updateTheme = () => setTheme(detectDiscordTheme(pageEl));
+        if (pageEl) ensurePagePalette(pageEl);
+        const updateTheme = () => {
+            setTheme(detectDiscordTheme(pageEl));
+            if (pageEl) ensurePagePalette(pageEl);
+        };
         const media = window.matchMedia("(prefers-color-scheme: dark)");
         const onMedia = () => updateTheme();
         try {

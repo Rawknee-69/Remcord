@@ -7,7 +7,11 @@ import {
     type GalleryItem,
     galleryThemeFromBackground,
     groupGalleryItems,
+    mixRgb,
     paginateGalleryItems,
+    parseCssColor,
+    relativeLuminance,
+    rgbString,
     sortGalleryItems,
 } from "../src/common/galleryUtils.js";
 
@@ -86,4 +90,20 @@ test("galleryThemeFromBackground follows the resolved Discord background", () =>
     assert.equal(galleryThemeFromBackground("transparent"), null);
     assert.equal(galleryThemeFromBackground("var(--x)"), null);
     assert.equal(galleryThemeFromBackground("not a color"), null);
+});
+
+test("color helpers parse, measure, mix, and serialize", () => {
+    assert.deepEqual(parseCssColor("#313338"), [49, 51, 56, 1]);
+    assert.deepEqual(parseCssColor("#fff"), [255, 255, 255, 1]);
+    assert.deepEqual(parseCssColor("rgb(17, 18, 20)"), [17, 18, 20, 1]);
+    assert.deepEqual(parseCssColor("rgba(17, 18, 20, 0.5)"), [17, 18, 20, 0.5]);
+    assert.deepEqual(parseCssColor("transparent"), [0, 0, 0, 0]);
+    assert.equal(parseCssColor("red"), null);
+    assert.equal(parseCssColor(""), null);
+    assert.equal(relativeLuminance([0, 0, 0]), 0);
+    assert.ok(Math.abs(relativeLuminance([255, 255, 255]) - 1) < 1e-9);
+    assert.deepEqual(mixRgb([0, 0, 0], [255, 255, 255], 0), [0, 0, 0]);
+    assert.deepEqual(mixRgb([0, 0, 0], [255, 255, 255], 1), [255, 255, 255]);
+    assert.deepEqual(mixRgb([0, 0, 0], [100, 100, 100], 0.5), [50, 50, 50]);
+    assert.equal(rgbString([17, 18, 20]), "rgb(17, 18, 20)");
 });

@@ -461,6 +461,98 @@ function parseThemeValue(raw: string): "light" | "dark" | null {
     return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.4 ? "light" : "dark";
 }
 
+type RgbTriple = [number, number, number];
+
+/** Parse one rendered color value into `[r, g, b, alpha]`. */
+function parseRgb(value: string): [number, number, number, number] | null {
+    const v = value.trim().toLowerCase();
+    if (v === "transparent") return [0, 0, 0, 0];
+    const hex = v.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/);
+    if (hex) {
+        const h = hex[1];
+        const full =
+            h.length === 3
+                ? h
+                      .split("")
+                      .map((c) => c + c)
+                      .join("")
+                : h;
+        const r = parseInt(full.slice(0, 2), 16);
+        const g = parseInt(full.slice(2, 4), 16);
+        const b = parseInt(full.slice(4, 6), 16);
+        if (r >= 0 && g >= 0 && b >= 0 && r <= 255 && g <= 255 && b <= 255) return [r, g, b, 1];
+        return null;
+    }
+    const m = v.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([\d.]+))?\)/);
+    if (m) {
+        const r = Number(m[1]);
+        const g = Number(m[2]);
+        const b = Number(m[3]);
+        const a = m[4] === undefined ? 1 : Number(m[4]);
+        if (r >= 0 && g >= 0 && b >= 0 && r <= 255 && g <= 255 && b <= 255 && a >= 0 && a <= 1) {
+            return [r, g, b, a];
+        }
+    }
+    return null;
+}
+
+function luminance([r, g, b]: RgbTriple): number {
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+function mix(a: RgbTriple, b: RgbTriple, t: number): string {
+    const k = Math.min(1, Math.max(0, t));
+    const c = (x: number, y: number) => Math.round(x + (y - x) * k);
+    return `rgb(${c(a[0], b[0])}, ${c(a[1], b[1])}, ${c(a[2], b[2])})`;
+}
+
+/**
+ * Rendered-surface sample: the first opaque `background-color` found
+ * walking the theme scopes, plus its foreground (defaulting to white on
+ * dark surfaces, near-black on light ones). Used only when theme variables
+ * resolve nowhere — e.g. custom themes that style surfaces directly
+ * instead of through variables. Reads what Discord literally paints, so
+ * any theme works.
+ */
+function sampleSurface(anchor: Element): { bg: RgbTriple; fg: RgbTriple } | null {
+    for (const scope of themeScopes(anchor)) {
+        try {
+            const cs = getComputedStyle(scope);
+            const bg = parseRgb(cs.getPropertyValue("background-color"));
+            if (!bg || bg[3] < 0.95) continue;
+            const base: RgbTriple = [bg[0], bg[1], bg[2]];
+            const fgRaw = parseRgb(cs.getPropertyValue("color"));
+            const fg: RgbTriple =
+                fgRaw && fgRaw[3] >= 0.95
+                    ? [fgRaw[0], fgRaw[1], fgRaw[2]]
+                    : luminance(base) <= 0.4
+                      ? [255, 255, 255]
+                      : [6, 6, 7];
+            return { bg: base, fg };
+        } catch {}
+    }
+    return null;
+}
+
+/** Fill every popup variable missing from `vars` using a surface sample. */
+function fillDerivedVars(vars: Array<[string, string]>, sample: { bg: RgbTriple; fg: RgbTriple }): void {
+    const has = (name: string) => vars.some(([seen]) => seen === name);
+    const put = (name: string, value: string) => {
+        if (!has(name)) vars.push([name, value]);
+    };
+    const { bg, fg } = sample;
+    put("--background-primary", mix(bg, fg, 0));
+    put("--text-normal", mix(fg, bg, 0));
+    put("--header-primary", mix(fg, bg, 0));
+    put("--input-text-default", mix(fg, bg, 0));
+    put("--text-muted", mix(bg, fg, 0.5));
+    put("--background-secondary", mix(bg, fg, 0.06));
+    put("--background-secondary-alt", mix(bg, fg, 0.12));
+    put("--input-background-default", mix(bg, fg, 0.07));
+    put("--border-subtle", mix(bg, fg, 0.2));
+    put("--input-border-default", mix(bg, fg, 0.22));
+}
+
 /**
  * Save popup: title + collection + note, then Save to Gallery, Copy Link,
  * or Download (media only). Plain DOM so it works in every menu context
@@ -477,9 +569,19 @@ function openSavePopup(save: PendingSave, anchor: Element): void {
         // unmounts the menu, so reading afterwards would yield unresolved
         // variables. Every variable is copied onto the overlay itself
         // (below), so the popup matches stock themes, custom themes, and
-        // raw custom CSS wherever it attaches.
-        const scheme = discordTheme(anchor);
+        // raw custom CSS wherever it attaches. When variables resolve
+        // nowhere (custom themes styling surfaces directly), fall back to
+        // the rendered surface sample so no theme can strand the popup in
+        // fallback colors.
+        let scheme = discordTheme(anchor);
         const themeVars = snapshotThemeVars(anchor);
+        if (!themeVars.some(([name]) => name === "--background-primary")) {
+            const sample = sampleSurface(anchor);
+            if (sample) {
+                fillDerivedVars(themeVars, sample);
+                scheme = luminance(sample.bg) <= 0.4 ? "dark" : "light";
+            }
+        }
         closeMenu();
         ensurePopupStyles();
         const bridge = galleryBridge();

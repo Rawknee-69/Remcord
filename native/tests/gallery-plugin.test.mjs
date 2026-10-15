@@ -359,28 +359,41 @@ function createHarness() {
         KeyboardEvent: class extends FakeEvent {},
         getComputedStyle: (el) => {
             // Production-faithful: theme variables resolve only inside the
-            // themed subtree. The menu layer lives outside it, so reads off
-            // the menu come back empty and the plugin must climb scopes.
+            // themed subtree, while every rendered surface still paints its
+            // own background/foreground colors (the menu layer included).
             const vars = {
                 "--background-primary": "#313338",
                 "--text-normal": "#dbdee1",
                 "--brand-500": "#5865f2",
                 "--custom-accent": "#ff73fa",
             };
+            const classesOf = (node) => String(node.className ?? "").split(" ");
             let themed = false;
+            let inMenu = false;
             let node = el;
             while (node) {
-                const classes = String(node.className ?? "").split(" ");
-                if (classes.includes("theme-dark") || classes.includes("theme-light")) {
-                    themed = true;
-                    break;
-                }
+                const classes = classesOf(node);
+                if (classes.includes("theme-dark") || classes.includes("theme-light")) themed = true;
+                try {
+                    const role = typeof node.getAttribute === "function" ? node.getAttribute("role") : null;
+                    if (role === "menu" || role === "menuitem") inMenu = true;
+                } catch {}
                 node = node.parentNode;
             }
             const names = themed ? Object.keys(vars) : [];
+            const background = themed
+                ? "rgb(49, 51, 56)"
+                : inMenu
+                  ? "rgb(24, 25, 28)"
+                  : "rgba(0, 0, 0, 0)";
+            const foreground = themed || inMenu ? "rgb(219, 222, 225)" : "";
             const style = {
                 length: names.length,
-                getPropertyValue: (name) => (themed ? (vars[name] ?? "") : ""),
+                getPropertyValue: (name) => {
+                    if (name === "background-color") return background;
+                    if (name === "color") return foreground;
+                    return themed ? (vars[name] ?? "") : "";
+                },
             };
             names.forEach((name, index) => {
                 style[index] = name;
@@ -525,6 +538,27 @@ test("popup follows the themed container when the menu is outside it", () => {
     const overlay = overlayOf(harness);
     assert.ok(overlay, "the popup must open");
     assert.equal(overlay.style.getPropertyValue("--background-primary"), "#313338");
+    assert.equal(overlay.style.colorScheme, "dark");
+});
+
+test("popup derives its palette when no variables resolve anywhere", () => {
+    // Hardest production shape: a custom theme styling surfaces directly
+    // with no theme variables at all. The popup must still match the
+    // rendered menu surface instead of falling back to white.
+    const harness = createHarness();
+    harness.hooks.onLoad();
+    harness.document.querySelector(".theme-dark").remove();
+    assert.equal(harness.document.querySelector(".theme-dark"), null);
+    rightClickImage(harness, "https://cdn.discordapp.com/attachments/1/2/photo.png");
+    const { menu } = renderMenu(harness);
+    findItem(menu, "Save to Gallery").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    const overlay = overlayOf(harness);
+    assert.ok(overlay, "the popup must open");
+    assert.equal(
+        overlay.style.getPropertyValue("--background-primary"),
+        "rgb(24, 25, 28)",
+        "the overlay must carry the sampled menu surface, not a fallback",
+    );
     assert.equal(overlay.style.colorScheme, "dark");
 });
 

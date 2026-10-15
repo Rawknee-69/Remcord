@@ -237,5 +237,61 @@ export function galleryThemeFromBackground(value: string): "light" | "dark" | nu
         }
     }
     if (r < 0 || g < 0 || b < 0 || r > 255 || g > 255 || b > 255) return null;
-    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.4 ? "light" : "dark";
+    return relativeLuminance([r, g, b]) > 0.4 ? "light" : "dark";
+}
+
+export type RgbColor = [number, number, number];
+
+/**
+ * Parses a CSS color (`#rgb`, `#rrggbb`, `rgb()`, `rgba()`) into
+ * `[r, g, b, alpha]`. Returns `null` for anything else. Pure.
+ */
+export function parseCssColor(value: string): [number, number, number, number] | null {
+    const v = value.trim().toLowerCase();
+    if (v === "transparent") return [0, 0, 0, 0];
+    const hex = v.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/);
+    if (hex) {
+        const h = hex[1];
+        const full =
+            h.length === 3
+                ? h
+                      .split("")
+                      .map((c) => c + c)
+                      .join("")
+                : h;
+        const r = parseInt(full.slice(0, 2), 16);
+        const g = parseInt(full.slice(2, 4), 16);
+        const b = parseInt(full.slice(4, 6), 16);
+        if ([r, g, b].every((c) => c >= 0 && c <= 255)) return [r, g, b, 1];
+        return null;
+    }
+    const rgb = v.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([\d.]+))?\)/);
+    if (rgb) {
+        const r = Number(rgb[1]);
+        const g = Number(rgb[2]);
+        const b = Number(rgb[3]);
+        const a = rgb[4] === undefined ? 1 : Number(rgb[4]);
+        if ([r, g, b].every((c) => c >= 0 && c <= 255) && a >= 0 && a <= 1) return [r, g, b, a];
+    }
+    return null;
+}
+
+/** Relative luminance of an sRGB color, 0 (black) to 1 (white). */
+export function relativeLuminance([r, g, b]: RgbColor): number {
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+/** Linear mix of two colors: `t = 0` yields `a`, `t = 1` yields `b`. */
+export function mixRgb(a: RgbColor, b: RgbColor, t: number): RgbColor {
+    const k = Math.min(1, Math.max(0, t));
+    return [
+        Math.round(a[0] + (b[0] - a[0]) * k),
+        Math.round(a[1] + (b[1] - a[1]) * k),
+        Math.round(a[2] + (b[2] - a[2]) * k),
+    ];
+}
+
+/** `rgb(r, g, b)` serialization for inline styles. */
+export function rgbString([r, g, b]: RgbColor): string {
+    return `rgb(${r}, ${g}, ${b})`;
 }
