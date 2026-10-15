@@ -216,6 +216,12 @@ pub struct SettingsSnapshot {
     pub plugin_states: HashMap<String, bool>,
     #[serde(default)]
     pub show_experimental_plugin_menu: bool,
+    /// Custom gallery storage root (absolute host path). Empty means the
+    /// default `<profile>/gallery/`. Written only by the host-owned
+    /// `gallery.root_pick` capability (folder picker + migration) — never
+    /// by renderer-supplied paths.
+    #[serde(default)]
+    pub gallery_root: String,
 }
 
 fn bool_true() -> bool {

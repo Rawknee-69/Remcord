@@ -120,6 +120,7 @@ pub enum BridgeCommand {
     GalleryUsage(GalleryUsageRequest),
     GalleryFile(GalleryFileRequest),
     GalleryRoot(GalleryRootRequest),
+    GalleryRootPick(GalleryRootPickRequest),
     RpcGetProcessList(RpcGetProcessListRequest),
     RpcRefreshProcessList(RpcRefreshProcessListRequest),
     RpcGetDetectables(RpcGetDetectablesRequest),
@@ -714,11 +715,20 @@ pub struct GalleryFileRequest {
 }
 
 /// Empty request for the read-only `gallery.root` capability: reports the
-/// fixed profile-relative root label. There is deliberately NO path
-/// member in either direction — an absolute path never crosses.
+/// gallery root display label (the fixed `"gallery"` label by default, the
+/// absolute custom path when `galleryRoot` is set). The custom value is
+/// host-picked, never renderer-supplied.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GalleryRootRequest {}
+
+/// Empty request for the `gallery.root_pick` capability: the host shows
+/// its own folder picker, migrates the gallery cache, and persists the
+/// custom root. No paths cross in either direction — the host picks,
+/// validates, and reports. Any extra field is rejected.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryRootPickRequest {}
 
 /// Empty request for the read-only `rpc.get_process_list` capability: the
 /// host enumerates running processes live (ToolHelp32 snapshot, sorted by
@@ -1719,6 +1729,7 @@ pub enum BridgeResponsePayload {
     GalleryUsage(GalleryUsageResponse),
     GalleryFile(GalleryFileResponse),
     GalleryRoot(GalleryRootResponse),
+    GalleryRootPick(GalleryRootPickResponse),
     DownloadsList(DownloadsListResponse),
     DownloadsFolderOpened(DownloadsFolderOpenedResponse),
     DownloadsRevealed(DownloadsRevealedResponse),
@@ -2131,10 +2142,14 @@ pub struct BadgeStateResponse {
 /// Save response for the `gallery.add_url` / `gallery.add_link`
 /// capabilities, in Electron's `{ok, item} | {ok, error}` shape. Typed
 /// failures resolve (never reject) so the page can toast the reason.
+/// Absent members are omitted (never `null`): the renderer validator
+/// rejects `error: null` on success and `item: null` on failure.
 #[derive(Serialize)]
 pub struct GalleryAddResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub item: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -2171,11 +2186,14 @@ pub struct GalleryExportItemsResponse {
 }
 
 /// Update response for the `gallery.update` capability, in Electron's
-/// `{ok, item} | {ok, error}` shape.
+/// `{ok, item} | {ok, error}` shape. Absent members are omitted (never
+/// `null`): the renderer validator rejects `error: null` on success.
 #[derive(Serialize)]
 pub struct GalleryUpdateResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub item: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -2187,19 +2205,25 @@ pub struct GalleryCategoriesResponse {
 }
 
 /// Creation response for the `gallery.category_add` capability, in
-/// Electron's `{ok, category} | {ok, error}` shape.
+/// Electron's `{ok, category} | {ok, error}` shape. Absent members are
+/// omitted (never `null`): the renderer validator rejects `error: null`
+/// on success.
 #[derive(Serialize)]
 pub struct GalleryCategoryAddResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// Rename response for the `gallery.category_rename` capability, in
-/// Electron's `{ok} | {ok, error}` shape.
+/// Electron's `{ok} | {ok, error}` shape. The absent error is omitted
+/// (never `null`): the renderer validator rejects `error: null`.
 #[derive(Serialize)]
 pub struct GalleryCategoryRenameResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -2221,21 +2245,43 @@ pub struct GalleryUsageResponse {
 
 /// Preview response for the `gallery.file` capability, in Electron's
 /// `{ok, base64, mime, fileName} | {ok, error}` shape. The base64 text
-/// is bounded by the 48 MiB transport cap enforced at dispatch.
+/// is bounded by the 48 MiB transport cap enforced at dispatch. Absent
+/// members are omitted (never `null`) and keys are camelCase: the
+/// renderer validator rejects `error: null` and requires `fileName`.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GalleryFileResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// Read-only root response for the `gallery.root` capability: the fixed
-/// profile-relative root label. Never an absolute path.
+/// Read-only root response for the `gallery.root` capability: the display
+/// label (`"gallery"` by default, the absolute custom path when set).
+/// The custom value is host-picked via `gallery.root_pick`, never
+/// renderer-supplied.
 #[derive(Serialize)]
 pub struct GalleryRootResponse {
     pub root: String,
+}
+
+/// Folder-pick response for the `gallery.root_pick` capability, in
+/// Electron's `{ok, root} | {ok, error}` shape. Cancellation resolves
+/// `{ok: false, error: "CANCELLED"}` (never a rejection). Absent members
+/// are omitted (never `null`).
+#[derive(Serialize)]
+pub struct GalleryRootPickResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Read-only inventory response for the `downloads.list` manager
@@ -2861,6 +2907,7 @@ pub fn parse_bridge_message(body: &str) -> Result<BridgeMessage, String> {
                 | BridgeCommand::GalleryCategories(_)
                 | BridgeCommand::GalleryUsage(_)
                 | BridgeCommand::GalleryRoot(_)
+                | BridgeCommand::GalleryRootPick(_)
                 | BridgeCommand::DownloadsList(_)
                 | BridgeCommand::DownloadsOpenFolder(_) => {}
                 // Keybinds: shape check only (presence + byte caps); the
@@ -4605,6 +4652,7 @@ mod tests {
             "gallery_categories",
             "gallery_usage",
             "gallery_root",
+            "gallery_root_pick",
         ] {
             assert!(
                 matches!(
@@ -4698,7 +4746,7 @@ mod tests {
         // Unknown command names are rejected.
         assert!(
             parse_bridge_message(&wire("gallery_import_dialog", "{}")).is_err(),
-            "F5b dialog wires do not exist"
+            "legacy Electron dialog wires do not exist"
         );
     }
 
@@ -4987,6 +5035,55 @@ mod tests {
         assert!(value["payload"]["payload"]["items"][0]
             .get("path")
             .is_none());
+    }
+
+    #[test]
+    fn gallery_mutation_responses_omit_absent_members() {
+        // The renderer validator rejects `error: null` on success and
+        // `item/category: null` on failure, so absent members must be
+        // omitted outright — never serialized as null.
+        use super::{GalleryCategoryAddResponse, GalleryUpdateResponse};
+        let added = serde_json::to_value(GalleryCategoryAddResponse {
+            ok: true,
+            category: Some(serde_json::json!({"name": "clips"})),
+            error: None,
+        })
+        .unwrap();
+        assert!(added.get("error").is_none());
+        assert_eq!(added["category"]["name"], "clips");
+        let add_failed = serde_json::to_value(GalleryCategoryAddResponse {
+            ok: false,
+            category: None,
+            error: Some("EXISTS".to_owned()),
+        })
+        .unwrap();
+        assert!(add_failed.get("category").is_none());
+        assert_eq!(add_failed["error"], "EXISTS");
+        let updated = serde_json::to_value(GalleryUpdateResponse {
+            ok: true,
+            item: Some(serde_json::json!({"id": "a-1"})),
+            error: None,
+        })
+        .unwrap();
+        assert!(updated.get("error").is_none());
+    }
+
+    #[test]
+    fn gallery_file_response_uses_camel_case_without_nulls() {
+        // The renderer requires `fileName` (camelCase) and rejects
+        // `error: null`: both broke imported-image previews.
+        use super::GalleryFileResponse;
+        let file = serde_json::to_value(GalleryFileResponse {
+            ok: true,
+            base64: Some("AAA=".to_owned()),
+            mime: Some("image/png".to_owned()),
+            file_name: Some("x.png".to_owned()),
+            error: None,
+        })
+        .unwrap();
+        assert_eq!(file["fileName"], "x.png");
+        assert!(file.get("file_name").is_none());
+        assert!(file.get("error").is_none());
     }
 
     #[test]

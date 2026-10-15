@@ -36,6 +36,7 @@ mod navigation_completed;
 mod navigation_gate;
 mod net_filter;
 mod new_window;
+mod os_theme;
 mod performance_flags;
 mod permissions;
 mod plugin_storage;
@@ -115,11 +116,11 @@ use protocol::{
     FoldersOpenedResponse, GalleryAddResponse, GalleryBulkRemoveResponse,
     GalleryCategoriesResponse, GalleryCategoryAddResponse, GalleryCategoryRemoveResponse,
     GalleryCategoryRenameResponse, GalleryExportItemsResponse, GalleryFileResponse,
-    GalleryImportFilesResponse, GalleryListResponse, GalleryRemoveResponse, GalleryRootResponse,
-    GalleryUpdateResponse, GalleryUsageResponse, KeybindsAddResponse, KeybindsListResponse,
-    KeybindsRemoveResponse, KeybindsToggleResponse, LocalizationStringResponse,
-    MenusTemplateResponse, ModBundleResponse, ModCacheClearedResponse, PingResponse,
-    PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
+    GalleryImportFilesResponse, GalleryListResponse, GalleryRemoveResponse,
+    GalleryRootPickResponse, GalleryRootResponse, GalleryUpdateResponse, GalleryUsageResponse,
+    KeybindsAddResponse, KeybindsListResponse, KeybindsRemoveResponse, KeybindsToggleResponse,
+    LocalizationStringResponse, MenusTemplateResponse, ModBundleResponse, ModCacheClearedResponse,
+    PingResponse, PluginStorageReadResponse, PluginStorageWriteResponse, PluginsListResponse,
     PluginsReloadResponse, PluginsRuntimeEntriesResponse, PluginsRuntimeScriptResponse,
     PluginsSetEnabledResponse, QuickCssReadResponse, QuickCssWrittenResponse, RequestTracker,
     RpcBlacklistResponse, RpcDetectableAddResponse, RpcDetectableRemoveResponse,
@@ -648,6 +649,7 @@ const BOOT_SNAPSHOT: BootSnapshot = BootSnapshot {
         "gallery.usage",
         "gallery.file",
         "gallery.root",
+        "gallery.root_pick",
         "gallery.import_files",
         "gallery.export_items",
         "downloads.list",
@@ -3181,6 +3183,15 @@ enum NativeEvent {
         received_at: Instant,
         result: Result<gallery::GalleryExportSummary, gallery::GalleryFailure>,
     },
+    /// Completed gallery storage-folder pick from the dedicated STA
+    /// gallery worker. The worker owns the modal folder picker plus the
+    /// cache migration; the absolute display path (host-picked, never
+    /// renderer-supplied) arrives here.
+    GalleryRootPickReady {
+        request_id: String,
+        received_at: Instant,
+        result: Result<String, gallery::GalleryFailure>,
+    },
     /// Completed custom-icon pick from the dedicated STA window worker.
     /// The worker owns the modal file dialog only; the picked path (never
     /// validated there beyond dialog filters) arrives here for host
@@ -4433,10 +4444,12 @@ struct GalleryJob {
     proxy: EventLoopProxy<NativeEvent>,
 }
 
-/// Gallery worker job kind: dialog-backed import or id-list export.
+/// Gallery worker job kind: dialog-backed import, id-list export, or
+/// storage-folder pick (with cache migration).
 enum GalleryJobKind {
     Import,
     Export { ids: Vec<String> },
+    RootPick,
 }
 
 /// Name of the dedicated STA worker thread that owns the custom-icon
@@ -6469,6 +6482,51 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 },
                             );
                         }
+                        GalleryJobKind::RootPick => {
+                            // Cancellation is not an error: Electron
+                            // resolves `{ok: false, error: "CANCELLED"}`,
+                            // so report it as a typed pick failure the
+                            // event handler maps to that shape.
+                            let result = match gallery::show_gallery_root_picker() {
+                                Ok(None) => {
+                                    println!("[Gallery][RootPick] picker dismissed by the user");
+                                    Err(gallery::GalleryFailure {
+                                        code: "CANCELLED",
+                                        message: "gallery folder picking was cancelled".to_owned(),
+                                    })
+                                }
+                                Ok(Some(dir)) => {
+                                    match gallery::set_gallery_root(&job.profile, &dir) {
+                                        Ok(root) => {
+                                            println!("[Gallery][RootPick] storage folder updated");
+                                            Ok(root)
+                                        }
+                                        Err(failure) => {
+                                            eprintln!(
+                                                "[Gallery][RootPick:{}] {}",
+                                                failure.code, failure.message
+                                            );
+                                            Err(failure)
+                                        }
+                                    }
+                                }
+                                Err(failure) => {
+                                    eprintln!(
+                                        "[Gallery][RootPick:{}] {}",
+                                        failure.code, failure.message
+                                    );
+                                    Err(failure)
+                                }
+                            };
+                            queue_event(
+                                &job.proxy,
+                                NativeEvent::GalleryRootPickReady {
+                                    request_id: job.request_id,
+                                    received_at: job.received_at,
+                                    result,
+                                },
+                            );
+                        }
                     }
                 }
                 if com_owned {
@@ -6500,6 +6558,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 request_id: job.request_id,
                                 received_at: job.received_at,
                                 result: Err(failure),
+                            },
+                        ),
+                        GalleryJobKind::RootPick => queue_event(
+                            &job.proxy,
+                            NativeEvent::GalleryRootPickReady {
+                                request_id: job.request_id,
+                                received_at: job.received_at,
+                                result: Err(gallery::GalleryFailure {
+                                    code: failure.code,
+                                    message: failure.message.clone(),
+                                }),
                             },
                         ),
                     }
@@ -6819,6 +6888,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         use tao::platform::windows::WindowExtWindows;
         window_chrome::apply_backdrop_material(window.hwnd(), chrome.material);
+    }
+    // OS appearance (system theme): the native frame follows the OS
+    // light/dark setting so the window never ships a mismatched frame.
+    // Explicit overrides stay `None`: no persisted appearance setting
+    // exists (Discord owns the in-page theme), so the OS value always wins.
+    // Best-effort; a failure only loses frame sync, never boot.
+    let os_theme = os_theme::resolve_effective_theme(os_theme::current_os_theme(), None);
+    println!("[OsTheme] system={}", os_theme.as_str());
+    #[cfg(target_os = "windows")]
+    {
+        use tao::platform::windows::WindowExtWindows;
+        os_theme::apply_window_theme(window.hwnd(), os_theme);
     }
     // F16 startup restore: reopen where the user left off. Runs before any
     // window is shown; first run keeps the compiled-in default.
@@ -7227,6 +7308,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "windows")]
     let popup_roots =
         main_webview::attach_main_content_filters(&webview, &profile_path, &profile_path);
+    // Mirror the OS theme into the WebView2 profile (`PreferredColorScheme`)
+    // so page `prefers-color-scheme` — Discord and the Gallery fallbacks —
+    // tracks the system from the first document. Best-effort.
+    #[cfg(target_os = "windows")]
+    {
+        os_theme::apply_webview_theme(&webview.webview(), os_theme);
+    }
     // Second boot phase (P0.2): navigate to Discord only after both
     // WebResourceRequested filters exist, so the first Discord document is
     // intercepted like every later one. `about:blank` has no CSP of its own
@@ -7554,6 +7642,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             Event::WindowEvent {
+                event: WindowEvent::ThemeChanged(theme),
+                ..
+            } => {
+                // Live OS appearance switch: repaint the frame and mirror
+                // the WebView2 profile scheme so the running app follows
+                // the OS without a restart. Best-effort; a failure only
+                // loses theme sync.
+                let os_theme =
+                    os_theme::from_is_dark(matches!(theme, tao::window::Theme::Dark));
+                println!("[OsTheme] system changed system={}", os_theme.as_str());
+                #[cfg(target_os = "windows")]
+                {
+                    use tao::platform::windows::WindowExtWindows;
+                    os_theme::apply_window_theme(window.hwnd(), os_theme);
+                    os_theme::apply_webview_theme(&webview.webview(), os_theme);
+                }
+            }
+            Event::WindowEvent {
                 event: WindowEvent::Moved(_),
                 window_id,
                 ..
@@ -7865,6 +7971,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     #[cfg(target_os = "windows")]
                     {
                         let _ = main_webview::attach_main_content_filters(&webview, &profile_path, &profile_path);
+                        // A replacement WebView starts with a default (light)
+                        // profile scheme: re-mirror the OS theme with a fresh
+                        // read so the rebuilt page cannot strand in the wrong
+                        // appearance.
+                        let os_theme =
+                            os_theme::resolve_effective_theme(os_theme::current_os_theme(), None);
+                        os_theme::apply_webview_theme(&webview.webview(), os_theme);
                     }
 
                     // 10. Re-attach per-WebView observers.
@@ -9591,8 +9704,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         BridgeCommand::FoldersOpen(payload) => {
                             // Reveal semantics (showItemInFolder equivalent):
                             // the location is a closed enum, so the host
-                            // reveals exactly one fixed root. No path, URL,
-                            // or selector crosses the boundary.
+                            // reveals exactly one fixed root — except the
+                            // gallery, which follows the custom `galleryRoot`
+                            // setting when one is set (any disk/partition).
+                            // No path, URL, or selector crosses the boundary.
                             let request_id = request.request_id;
                             let location = payload.location;
                             let location_label = match location {
@@ -9601,8 +9716,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 FolderLocation::Plugins => "plugins",
                                 FolderLocation::Gallery => "gallery",
                             };
-                            match ensure_folder_root(&profile_path, location)
-                                .and_then(|dir| reveal_folder(&dir))
+                            let revealed = if matches!(location, FolderLocation::Gallery) {
+                                crate::folders::gallery_reveal_root(&profile_path)
+                                    .and_then(|dir| reveal_folder(&dir).map(|_| dir))
+                            } else {
+                                ensure_folder_root(&profile_path, location)
+                                    .and_then(|dir| reveal_folder(&dir).map(|_| dir))
+                            };
+                            match revealed
                             {
                                 Ok(_) => {
                                     let response = BridgeResponse {
@@ -10283,10 +10404,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
                         BridgeCommand::GalleryRoot(_) => {
-                            // Fixed profile-relative label only; an
-                            // absolute path never crosses (deliberate
-                            // difference: Electron reports the absolute
-                            // custom root, native fixes the root).
+                            // Display label: `"gallery"` by default, the
+                            // absolute custom path when `galleryRoot` is set
+                            // (host-picked via `gallery.root_pick`, Electron
+                            // `getGalleryRoot()` parity).
                             let request_id = request.request_id;
                             let latency_ms = received_at.elapsed().as_secs_f64() * 1000.0;
                             respond_gallery_ok(
@@ -10295,11 +10416,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 &mut response_count,
                                 request_id,
                                 BridgeResponsePayload::GalleryRoot(GalleryRootResponse {
-                                    root: gallery::GALLERY_ROOT_LABEL.to_owned(),
+                                    root: gallery::gallery_root_display(&profile_path),
                                 }),
                                 "op=root",
                                 latency_ms,
                             );
+                        }
+                        BridgeCommand::GalleryRootPick(_) => {
+                            // Host-owned folder picker plus cache migration
+                            // on the gallery STA worker; the typed outcome
+                            // comes back as GalleryRootPickReady, so the
+                            // WebView/UI thread never blocks. Cancellation
+                            // resolves `{ok: false}` (Electron parity), never
+                            // a rejection.
+                            let gallery_request_id = request.request_id.clone();
+                            let job = GalleryJob {
+                                request_id: gallery_request_id.clone(),
+                                received_at,
+                                profile: profile_path.clone(),
+                                kind: GalleryJobKind::RootPick,
+                                proxy: proxy.clone(),
+                            };
+                            if gallery_tx.send(job).is_err() {
+                                eprintln!("[Gallery][RootPick:ROOT_PICK_UNAVAILABLE] gallery worker is unavailable");
+                                let response = BridgeResponse {
+                                    version: PROTOCOL_VERSION,
+                                    request_id: gallery_request_id.clone(),
+                                    ok: false,
+                                    payload: None,
+                                    error: Some(BridgeError {
+                                        code: "ROOT_PICK_UNAVAILABLE",
+                                        message: "gallery folder picking is unavailable".to_owned(),
+                                    }),
+                                };
+                                send_bridge_response(&webview, &response);
+                                if let Err(error) = request_tracker.complete(&gallery_request_id) {
+                                    eprintln!("[Bridge] correlation failure after response: {error}");
+                                }
+                                response_count += 1;
+                            }
                         }
                         BridgeCommand::DownloadsList(_) => {
                             // Read-only inventory of the host downloads
@@ -12549,6 +12704,47 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         response_count += 1;
                     }
+                }
+            }
+            Event::UserEvent(NativeEvent::GalleryRootPickReady {
+                request_id,
+                received_at,
+                result,
+            }) => {
+                // Cancellation and failures both resolve `{ok: false}`
+                // (Electron parity: `gallery:root-pick` returns `{ok,
+                // root} | {ok: false, error}`), never a rejection, so the
+                // page can toast the reason.
+                let payload = match &result {
+                    Ok(root) => GalleryRootPickResponse {
+                        ok: true,
+                        root: Some(root.clone()),
+                        error: None,
+                    },
+                    Err(failure) => GalleryRootPickResponse {
+                        ok: false,
+                        root: None,
+                        error: Some(failure.code.to_owned()),
+                    },
+                };
+                let response = BridgeResponse {
+                    version: PROTOCOL_VERSION,
+                    request_id: request_id.clone(),
+                    ok: true,
+                    payload: Some(BridgeResponsePayload::GalleryRootPick(payload)),
+                    error: None,
+                };
+                send_bridge_response(&webview, &response);
+                if let Err(error) = request_tracker.complete(&request_id) {
+                    eprintln!("[Bridge] correlation failure after response: {error}");
+                }
+                response_count += 1;
+                match result {
+                    Ok(_) => println!(
+                        "[Gallery][RootPick] storage folder updated request_latency_ms={:.3}",
+                        received_at.elapsed().as_secs_f64() * 1000.0
+                    ),
+                    Err(failure) => eprintln!("[Gallery][RootPick:{}] {}", failure.code, failure.message),
                 }
             }
             Event::UserEvent(NativeEvent::WindowCustomIconReady {

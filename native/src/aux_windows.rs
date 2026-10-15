@@ -78,10 +78,22 @@ pub const SPLASH_WIDTH: u32 = 300;
 pub const SPLASH_HEIGHT: u32 = 350;
 /// The splash window is frameless (`frame: false`).
 pub const SPLASH_FRAMELESS: bool = true;
-/// Electron splash background color.
+/// Electron splash background color (dark appearance).
+///
+/// Dark-only by history: light mode must use
+/// [`splash_background_for_theme`] instead so the splash frame is
+/// genuinely light when the OS is.
 pub const SPLASH_BACKGROUND: &str = "#202225";
 /// Localization key for the splash window title.
 pub const SPLASH_TITLE_KEY: &str = "splash-title";
+
+/// Splash background for an OS theme: dark keeps Electron's `#202225`,
+/// light gets a genuinely light backdrop. Deferred-window policy (no HWND
+/// here): the implementer paints this color on the splash surface for the
+/// theme read at startup.
+pub fn splash_background_for_theme(theme: crate::os_theme::OsTheme) -> &'static str {
+    crate::os_theme::splash_background_for(theme)
+}
 
 /// Electron setup window width (`src/setup/main.ts`).
 pub const SETUP_WIDTH: u32 = 840;
@@ -350,6 +362,20 @@ mod tests {
         assert!(frameless);
         assert_eq!(background, "#202225");
         assert_eq!(title, "splash-title");
+    }
+
+    #[test]
+    fn splash_background_follows_the_os_theme() {
+        // The legacy constant stays dark-only; themed callers must use the
+        // per-theme function so light mode is genuinely light.
+        assert_eq!(
+            splash_background_for_theme(crate::os_theme::OsTheme::Dark),
+            "#202225"
+        );
+        assert_eq!(
+            splash_background_for_theme(crate::os_theme::OsTheme::Light),
+            "#f2f3f5"
+        );
     }
 
     #[test]

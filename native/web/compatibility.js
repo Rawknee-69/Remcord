@@ -1525,13 +1525,14 @@
     }
 
     // Gallery disk cache (F5 core): save/browse/search/categories/disk
-    // usage/inline preview over the host-owned <profile>/gallery/ root.
-    // Method names and result shapes mirror the Electron bridge exactly
+    // usage/inline preview over the host-owned gallery root (default
+    // `<profile>/gallery/`, or the custom `galleryRoot` setting after the
+    // host-owned folder picker migrates it). Method names and result
+    // shapes mirror the Electron bridge exactly
     // (src/discord/preload/bridge.ts), so GalleryPage.tsx needs no
-    // environment branch. Import/export/root-pick need modal host dialogs
-    // (F5b slice): their methods exist for signature parity but their
-    // capabilities are absent, so they throw UNSUPPORTED_CAPABILITY
-    // honestly and the page gates those buttons.
+    // environment branch. Import/export/root-pick run their modal host
+    // dialogs on the gallery STA worker; cancellation resolves an honest
+    // `{ok: false}` shape the page toasts.
     const GALLERY_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
     const MAX_GALLERY_URL_BYTES = 2048;
     const MAX_GALLERY_IDS = 2000;
@@ -1748,18 +1749,32 @@
         requireCapability("gallery.root");
         const badTimeout = checkGalleryTimeout(timeoutMs);
         if (badTimeout) return Promise.reject(new TypeError(badTimeout));
-        // Fixed profile-relative label only; an absolute path never
-        // crosses (deliberate difference: Electron reports its custom
-        // root, native fixes the root until the F5b dialog slice).
+        // Display label: `"gallery"` by default, the absolute custom path
+        // once the host-owned folder picker sets it (Electron parity).
         return request({ type: "gallery_root", payload: {} }, timeoutMs);
     }
 
-    function pickGalleryRoot(_timeoutMs = 120_000) {
-        // F5b dialog slice: no host directory picker exists yet, so the
-        // capability is absent and this throws UNSUPPORTED_CAPABILITY
-        // honestly. The Gallery page gates the Choose-folder button.
+    function pickGalleryRoot(timeoutMs = 120_000) {
+        // Host-owned folder picker plus cache migration: an exact empty
+        // payload in, Electron's `{ok, root} | {ok: false, error}` shape
+        // out. Cancellation resolves `{ok: false}` (never a rejection) so
+        // the page can toast the reason.
         requireCapability("gallery.root_pick");
-        return Promise.reject(new Error("unreachable"));
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+            return Promise.reject(new TypeError("timeout must be a positive finite number"));
+        }
+        return request({ type: "gallery_root_pick", payload: {} }, timeoutMs).then((payload) => {
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok
+                    ? typeof payload.root !== "string" || payload.root.length === 0 || payload.error !== undefined
+                    : typeof payload.error !== "string" || payload.root !== undefined)
+            ) {
+                throw new Error("Native gallery root-pick response schema is invalid");
+            }
+            return payload;
+        });
     }
 
     function openGalleryRoot() {
@@ -3229,10 +3244,32 @@
             request.resolve(payload);
         } else if (response.ok === true && response.payload?.type === "gallery_root") {
             const payload = response.payload.payload;
-            // Fixed profile-relative label only; an absolute path never
-            // crosses.
-            if (!payload || Object.keys(payload).length !== 1 || payload.root !== "gallery") {
+            // Default reports the fixed profile-relative label; a custom
+            // root reports its host-picked absolute path (bounded). Both
+            // are display labels the page shows as-is.
+            if (
+                !payload ||
+                Object.keys(payload).length !== 1 ||
+                typeof payload.root !== "string" ||
+                payload.root.length === 0 ||
+                textEncoder.encode(payload.root).length > 512
+            ) {
                 request.reject(new Error("Native gallery root response schema is invalid"));
+                return;
+            }
+            request.resolve(payload);
+        } else if (response.ok === true && response.payload?.type === "gallery_root_pick") {
+            const payload = response.payload.payload;
+            // Electron's `{ok, root} | {ok: false, error}` shape, resolved
+            // (never rejected) so the page can toast the reason.
+            if (
+                !payload ||
+                typeof payload.ok !== "boolean" ||
+                (payload.ok
+                    ? typeof payload.root !== "string" || payload.root.length === 0 || payload.error !== undefined
+                    : typeof payload.error !== "string" || payload.root !== undefined)
+            ) {
+                request.reject(new Error("Native gallery root-pick response schema is invalid"));
                 return;
             }
             request.resolve(payload);
@@ -4031,9 +4068,9 @@
     // paths, no self-destruct surface.
     const crash = Object.freeze({ list: listCrashes, openFolder: openCrashFolder });
     // Gallery disk cache only: Electron-identical method names and result
-    // shapes over host-owned storage. Import/export/root-pick need modal
-    // host dialogs (F5b slice): their methods exist for signature parity
-    // but throw UNSUPPORTED_CAPABILITY until their capabilities exist.
+    // shapes over host-owned storage. Import/export/root-pick run their
+    // modal host dialogs on the gallery STA worker; cancellation resolves
+    // an honest `{ok: false}` shape.
     const gallery = Object.freeze({
         list: listGalleryItems,
         addUrl: addGalleryUrl,

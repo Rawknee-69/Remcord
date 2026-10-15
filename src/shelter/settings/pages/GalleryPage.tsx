@@ -243,6 +243,17 @@ function AddLinkModal(props: { close: () => void; onSaved: () => void }) {
 // biome-ignore lint/suspicious/noExplicitAny: shelter runtime bridge is untyped
 const ui = (shelter as unknown as { ui: Record<string, any> }).ui;
 
+// shelter `Button size=SMALL` is a fixed 60x32px box (see shelter-ui
+// ButtonSizes): long labels overflow the button and collide with neighbours.
+// Every gallery Button below passes this auto-width style (the CSS module
+// enforces the same as a second layer) so labels size their buttons.
+const BTN_AUTO = {
+    "--shltr-btn-w": "auto",
+    "--shltr-btn-h": "36px",
+    "white-space": "nowrap",
+    "flex-shrink": "0",
+} as Record<string, string>;
+
 export function GalleryPage() {
     const prefs = readPrefs();
     const [items, setItems] = createSignal<GalleryItem[]>([]);
@@ -265,11 +276,9 @@ export function GalleryPage() {
     let sentinel: HTMLDivElement | undefined;
 
     function refresh() {
-        // The native shell serves the same list/usage/root capabilities
-        // through `window.remcord.gallery` (host-owned gallery root plus
-        // the gallery index), so no environment branch is needed here.
-        // Only the dialog-backed actions (import/export/root-pick) stay
-        // Electron-only until the F5b dialog slice.
+        // The native shell serves the full gallery surface through
+        // `window.remcord.gallery` (host-owned storage root plus the
+        // gallery index), so no environment branch is needed here.
         setLoading(true);
         void window.remcord.gallery
             .list()
@@ -437,7 +446,7 @@ export function GalleryPage() {
     const t = store.i18n ?? {};
 
     return (
-        <>
+        <div class={classes.page} data-gallery-theme="system">
             <SettingsPageHeader
                 title={t["gallery-title"] ?? "Gallery"}
                 description={
@@ -445,39 +454,32 @@ export function GalleryPage() {
                     "Everything you save — images, videos, links — grouped by server, channel and date. Items stay here even if you leave the server."
                 }
             />
-            {/* Native WebView2 serves the same gallery capabilities through
-                `window.remcord.gallery`; only the dialog-backed actions
-                (import/export/root-pick, F5b slice) stay gated below. */}
+            {/* Native WebView2 serves the full gallery surface through
+                `window.remcord.gallery`, including the host-owned folder
+                picker behind Choose folder. */}
             <div class={classes.storageBar}>
                 <span class={classes.storagePath} title={root()}>
                     {root() || "…"} · {usage().items} items · {formatGalleryBytes(usage().bytes)} on disk
                 </span>
-                <div style={{ display: "flex", gap: "6px" }}>
-                    <Show
-                        when={!isNativeWebView()}
-                        fallback={
-                            <button
-                                type="button"
-                                class={classes.miniBtn}
-                                disabled
-                                title="Choosing the storage folder needs the desktop app"
-                            >
-                                Choose folder
-                            </button>
+                <div class={classes.storageActions}>
+                    <button
+                        type="button"
+                        class={classes.miniBtn}
+                        title="Choose the gallery storage folder (any disk / partition / folder)"
+                        onClick={() =>
+                            void window.remcord.gallery
+                                .pickRoot()
+                                .then((r) => {
+                                    const res = r as { ok?: boolean; error?: string };
+                                    if (res.ok) refresh();
+                                    else if (res.error && res.error !== "CANCELLED")
+                                        showToast({ title: "Could not change folder", duration: 2500 });
+                                })
+                                .catch(() => showToast({ title: "Could not change folder", duration: 2500 }))
                         }
                     >
-                        <button
-                            type="button"
-                            class={classes.miniBtn}
-                            onClick={() =>
-                                void window.remcord.gallery.pickRoot().then((r) => {
-                                    if ((r as { ok?: boolean }).ok) refresh();
-                                })
-                            }
-                        >
-                            Choose folder
-                        </button>
-                    </Show>
+                        Choose folder
+                    </button>
                     <button type="button" class={classes.miniBtn} onClick={() => window.remcord.gallery.openRoot()}>
                         Open
                     </button>
@@ -487,193 +489,238 @@ export function GalleryPage() {
                 </div>
             </div>
 
-            <div class={classes.toolbar}>
-                <div class={classes.search}>
-                    <TextBox
-                        value={query()}
-                        onInput={(v: string) => {
-                            setQuery(v);
-                            setVisible(PAGE_STEP);
-                        }}
-                        placeholder="Search title, server, channel…"
-                    />
+            <section class={classes.section} aria-label="Filters and primary actions">
+                <h2 class={classes.sectionTitle}>Filters</h2>
+                <div class={classes.toolbar}>
+                    <div class={classes.search}>
+                        <TextBox
+                            value={query()}
+                            onInput={(v: string) => {
+                                setQuery(v);
+                                setVisible(PAGE_STEP);
+                            }}
+                            placeholder="Search title, server, channel…"
+                            aria-label="Search gallery"
+                        />
+                    </div>
+                    <div class={classes.filterRow}>
+                        <Dropdown
+                            class={classes.dd}
+                            value={kind()}
+                            onChange={(v) => {
+                                setKind(v);
+                                setVisible(PAGE_STEP);
+                            }}
+                            options={[
+                                { label: "All types", value: "all" },
+                                { label: "Images", value: "image" },
+                                { label: "Videos", value: "video" },
+                                { label: "Links", value: "link" },
+                                { label: "Files", value: "file" },
+                            ]}
+                        />
+                        <Dropdown
+                            class={classes.dd}
+                            limitHeight
+                            maxHeight={280}
+                            value={guild()}
+                            onChange={(v) => {
+                                setGuild(v);
+                                setChannel("all");
+                                setVisible(PAGE_STEP);
+                            }}
+                            options={[
+                                { label: "All servers", value: "all" },
+                                ...guildOptions().map(([id, name]) => ({ label: name, value: id })),
+                            ]}
+                        />
+                        <Dropdown
+                            class={classes.dd}
+                            limitHeight
+                            maxHeight={280}
+                            value={channel()}
+                            onChange={(v) => {
+                                setChannel(v);
+                                setVisible(PAGE_STEP);
+                            }}
+                            options={[
+                                { label: "All channels", value: "all" },
+                                ...channelOptions().map(([id, name]) => ({ label: name, value: id })),
+                            ]}
+                        />
+                        <Dropdown
+                            class={classes.dd}
+                            limitHeight
+                            maxHeight={280}
+                            value={category()}
+                            onChange={(v) => {
+                                setCategory(v);
+                                setVisible(PAGE_STEP);
+                            }}
+                            options={[
+                                { label: "All collections", value: "all" },
+                                ...categories().map((c) => ({ label: c.name, value: c.name })),
+                            ]}
+                        />
+                        <Dropdown
+                            class={classes.dd}
+                            value={groupBy()}
+                            onChange={(v) => {
+                                setGroupBy(v as GalleryGroupBy);
+                                writePrefs({ groupBy: v, sort: sort(), kind: kind() });
+                            }}
+                            options={[
+                                { label: "No grouping", value: "none" },
+                                { label: "Group by server", value: "guild" },
+                                { label: "Group by channel", value: "channel" },
+                                { label: "Group by date", value: "date" },
+                                { label: "Group by type", value: "kind" },
+                                { label: "Group by collection", value: "category" },
+                            ]}
+                        />
+                        <Dropdown
+                            class={classes.dd}
+                            value={sort()}
+                            onChange={(v) => {
+                                setSort(v as "newest" | "oldest");
+                                writePrefs({ groupBy: groupBy(), sort: v, kind: kind() });
+                            }}
+                            options={[
+                                { label: "Newest first", value: "newest" },
+                                { label: "Oldest first", value: "oldest" },
+                            ]}
+                        />
+                    </div>
+                    <div class={classes.toolbarActions}>
+                        <Button size={ButtonSizes.SMALL} style={BTN_AUTO} onClick={openAddModal}>
+                            Add link
+                        </Button>
+                        <Button size={ButtonSizes.SMALL} style={BTN_AUTO} onClick={importFiles}>
+                            Import files
+                        </Button>
+                    </div>
                 </div>
-                <Dropdown
-                    class={classes.dd}
-                    value={kind()}
-                    onChange={(v) => {
-                        setKind(v);
-                        setVisible(PAGE_STEP);
-                    }}
-                    options={[
-                        { label: "All types", value: "all" },
-                        { label: "Images", value: "image" },
-                        { label: "Videos", value: "video" },
-                        { label: "Links", value: "link" },
-                        { label: "Files", value: "file" },
-                    ]}
-                />
-                <Dropdown
-                    class={classes.dd}
-                    limitHeight
-                    maxHeight={280}
-                    value={guild()}
-                    onChange={(v) => {
-                        setGuild(v);
-                        setChannel("all");
-                        setVisible(PAGE_STEP);
-                    }}
-                    options={[
-                        { label: "All servers", value: "all" },
-                        ...guildOptions().map(([id, name]) => ({ label: name, value: id })),
-                    ]}
-                />
-                <Dropdown
-                    class={classes.dd}
-                    limitHeight
-                    maxHeight={280}
-                    value={channel()}
-                    onChange={(v) => {
-                        setChannel(v);
-                        setVisible(PAGE_STEP);
-                    }}
-                    options={[
-                        { label: "All channels", value: "all" },
-                        ...channelOptions().map(([id, name]) => ({ label: name, value: id })),
-                    ]}
-                />
-                <Dropdown
-                    class={classes.dd}
-                    limitHeight
-                    maxHeight={280}
-                    value={category()}
-                    onChange={(v) => {
-                        setCategory(v);
-                        setVisible(PAGE_STEP);
-                    }}
-                    options={[
-                        { label: "All collections", value: "all" },
-                        ...categories().map((c) => ({ label: c.name, value: c.name })),
-                    ]}
-                />
-                <Dropdown
-                    class={classes.dd}
-                    value={groupBy()}
-                    onChange={(v) => {
-                        setGroupBy(v as GalleryGroupBy);
-                        writePrefs({ groupBy: v, sort: sort(), kind: kind() });
-                    }}
-                    options={[
-                        { label: "No grouping", value: "none" },
-                        { label: "Group by server", value: "guild" },
-                        { label: "Group by channel", value: "channel" },
-                        { label: "Group by date", value: "date" },
-                        { label: "Group by type", value: "kind" },
-                        { label: "Group by collection", value: "category" },
-                    ]}
-                />
-                <Dropdown
-                    class={classes.dd}
-                    value={sort()}
-                    onChange={(v) => {
-                        setSort(v as "newest" | "oldest");
-                        writePrefs({ groupBy: groupBy(), sort: v, kind: kind() });
-                    }}
-                    options={[
-                        { label: "Newest first", value: "newest" },
-                        { label: "Oldest first", value: "oldest" },
-                    ]}
-                />
-                <Button size={ButtonSizes.SMALL} onClick={openAddModal}>
-                    Add link
-                </Button>
-                <Button size={ButtonSizes.SMALL} onClick={importFiles}>
-                    Import files
-                </Button>
-            </div>
+            </section>
 
-            <div class={classes.categoryRow}>
-                <div class={classes.catInput}>
-                    <TextBox value={newCat()} onInput={setNewCat} placeholder="New collection name…" />
-                </div>
-                <Button size={ButtonSizes.SMALL} onClick={createCategory}>
-                    Create collection
-                </Button>
-                <For each={categories()}>
-                    {(c) => (
-                        <span class={classes.catPill} style={{ background: c.color }} title={c.name}>
-                            {c.name}
-                            <button
-                                type="button"
-                                class={classes.miniBtn}
-                                title={`Delete ${c.name}`}
-                                onClick={() => void window.remcord.gallery.categoryRemove(c.name).then(() => refresh())}
-                            >
-                                ×
-                            </button>
+            <section class={classes.section} aria-label="Collection management">
+                <h2 class={classes.sectionTitle}>Collections</h2>
+                <div class={classes.categoryRow}>
+                    <div class={classes.catInput}>
+                        <TextBox
+                            value={newCat()}
+                            onInput={setNewCat}
+                            placeholder="New collection name…"
+                            aria-label="New collection name"
+                        />
+                    </div>
+                    <Button
+                        size={ButtonSizes.SMALL}
+                        style={BTN_AUTO}
+                        onClick={createCategory}
+                        aria-label="Create collection"
+                        title="Create collection"
+                    >
+                        <span aria-hidden="true" class={classes.plusIcon}>
+                            +
                         </span>
-                    )}
-                </For>
-            </div>
+                    </Button>
+                    <div class={classes.catList}>
+                        <For each={categories()}>
+                            {(c) => (
+                                <span class={classes.catPill} style={{ background: c.color }} title={c.name}>
+                                    {c.name}
+                                    <button
+                                        type="button"
+                                        class={classes.miniBtn}
+                                        title={`Delete ${c.name}`}
+                                        aria-label={`Delete collection ${c.name}`}
+                                        onClick={() =>
+                                            void window.remcord.gallery.categoryRemove(c.name).then(() => refresh())
+                                        }
+                                    >
+                                        ×
+                                    </button>
+                                </span>
+                            )}
+                        </For>
+                    </div>
+                </div>
+            </section>
 
             <Show when={selected().size > 0}>
-                <div class={classes.selectionBar}>
-                    <span>
-                        {selected().size} selected of {visibleRows().total} matching
-                    </span>
-                    <Dropdown
-                        class={classes.dd}
-                        limitHeight
-                        maxHeight={240}
-                        value={assignCat() || "__none"}
-                        onChange={(v) => setAssignCat(v === "__none" ? "" : v)}
-                        options={[
-                            { label: "Tag with collection…", value: "__none" },
-                            ...categories().map((c) => ({ label: c.name, value: c.name })),
-                        ]}
-                    />
-                    <Button size={ButtonSizes.SMALL} onClick={assignCategoryToSelected} disabled={!assignCat()}>
-                        Tag
-                    </Button>
-                    <Show
-                        when={!isNativeWebView()}
-                        fallback={
+                <section class={classes.section} aria-label="Bulk actions">
+                    <h2 class={classes.sectionTitle}>Bulk actions</h2>
+                    <div class={classes.selectionBar}>
+                        <span class={classes.selectionCount}>
+                            {selected().size} selected of {visibleRows().total} matching
+                        </span>
+                        <Dropdown
+                            class={classes.dd}
+                            limitHeight
+                            maxHeight={240}
+                            value={assignCat() || "__none"}
+                            onChange={(v) => setAssignCat(v === "__none" ? "" : v)}
+                            options={[
+                                { label: "Tag with collection…", value: "__none" },
+                                ...categories().map((c) => ({ label: c.name, value: c.name })),
+                            ]}
+                        />
+                        <div class={classes.selectionActions}>
                             <Button
                                 size={ButtonSizes.SMALL}
-                                onClick={() =>
-                                    void window.remcord.gallery
-                                        .exportItems([...selected()])
-                                        .then((res) => {
-                                            const summary = res as { exported?: number; skipped?: number };
-                                            showToast({
-                                                title: `Copied ${summary?.exported ?? 0} file(s)${(summary?.skipped ?? 0) > 0 ? `, ${summary.skipped} skipped` : ""}`,
-                                                duration: 3000,
-                                            });
-                                        })
-                                        .catch(() => showToast({ title: "Copy failed", duration: 2500 }))
+                                style={BTN_AUTO}
+                                onClick={assignCategoryToSelected}
+                                disabled={!assignCat()}
+                            >
+                                Tag
+                            </Button>
+                            <Show
+                                when={!isNativeWebView()}
+                                fallback={
+                                    <Button
+                                        size={ButtonSizes.SMALL}
+                                        style={BTN_AUTO}
+                                        onClick={() =>
+                                            void window.remcord.gallery
+                                                .exportItems([...selected()])
+                                                .then((res) => {
+                                                    const summary = res as { exported?: number; skipped?: number };
+                                                    showToast({
+                                                        title: `Copied ${summary?.exported ?? 0} file(s)${(summary?.skipped ?? 0) > 0 ? `, ${summary.skipped} skipped` : ""}`,
+                                                        duration: 3000,
+                                                    });
+                                                })
+                                                .catch(() => showToast({ title: "Copy failed", duration: 2500 }))
+                                        }
+                                    >
+                                        Copy to folder
+                                    </Button>
                                 }
                             >
-                                Copy to folder
+                                <Button
+                                    size={ButtonSizes.SMALL}
+                                    style={BTN_AUTO}
+                                    onClick={() => void window.remcord.gallery.exportItems([...selected()])}
+                                >
+                                    Copy to folder
+                                </Button>
+                            </Show>
+                            <Button size={ButtonSizes.SMALL} style={BTN_AUTO} onClick={deleteSelected}>
+                                Delete selected
                             </Button>
-                        }
-                    >
-                        <Button
-                            size={ButtonSizes.SMALL}
-                            onClick={() => void window.remcord.gallery.exportItems([...selected()])}
-                        >
-                            Copy to folder
-                        </Button>
-                    </Show>
-                    <Button size={ButtonSizes.SMALL} onClick={deleteSelected}>
-                        Delete selected
-                    </Button>
-                    <Button size={ButtonSizes.SMALL} onClick={() => setSelected(new Set())}>
-                        Clear
-                    </Button>
-                    <Button size={ButtonSizes.SMALL} onClick={() => setSelected(new Set(filtered().map((i) => i.id)))}>
-                        Select all matching
-                    </Button>
-                </div>
+                            <Button size={ButtonSizes.SMALL} style={BTN_AUTO} onClick={() => setSelected(new Set())}>
+                                Clear
+                            </Button>
+                            <Button
+                                size={ButtonSizes.SMALL}
+                                style={BTN_AUTO}
+                                onClick={() => setSelected(new Set(filtered().map((i) => i.id)))}
+                            >
+                                Select all matching
+                            </Button>
+                        </div>
+                    </div>
+                </section>
             </Show>
 
             <Show
@@ -703,94 +750,110 @@ export function GalleryPage() {
                                     </Show>
                                     <div class={classes.grid}>
                                         <For each={g.items}>
-                                            {(item) => (
-                                                <div
-                                                    class={`${classes.card} ${selected().has(item.id) ? classes.cardSelected : ""}`}
-                                                >
-                                                    <label class={classes.checkRow}>
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={selected().has(item.id)}
-                                                            onChange={() => toggleSelect(item.id)}
-                                                        />
-                                                        {formatGalleryDate(item.savedAt)}
-                                                    </label>
-                                                    <Thumb item={item} />
-                                                    <div class={classes.meta}>
-                                                        <span class={classes.title} title={item.title}>
-                                                            {item.title}
-                                                        </span>
-                                                        <span class={classes.sub}>
-                                                            {(item.guildName || "External") +
-                                                                (item.channelName ? ` · #${item.channelName}` : "")}
-                                                        </span>
-                                                        <span class={classes.sub}>
-                                                            {item.kind} ·{" "}
-                                                            {item.sizeBytes > 0
-                                                                ? formatGalleryBytes(item.sizeBytes)
-                                                                : "link"}
-                                                        </span>
-                                                        <Show when={item.categories.length > 0}>
-                                                            <span
-                                                                style={{
-                                                                    display: "flex",
-                                                                    gap: "4px",
-                                                                    "flex-wrap": "wrap",
-                                                                }}
-                                                            >
-                                                                <For each={item.categories}>
-                                                                    {(cn) => {
-                                                                        const col =
-                                                                            categories().find((c) => c.name === cn)
-                                                                                ?.color ?? "#5865f2";
-                                                                        return (
-                                                                            <span
-                                                                                class={classes.catPill}
-                                                                                style={{ background: col }}
-                                                                            >
-                                                                                {cn}
-                                                                            </span>
-                                                                        );
-                                                                    }}
-                                                                </For>
+                                            {(item) => {
+                                                const isSel = () => selected().has(item.id);
+                                                return (
+                                                    <article
+                                                        class={`${classes.card} ${isSel() ? classes.cardSelected : ""}`}
+                                                    >
+                                                        <label class={classes.checkRow}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={isSel()}
+                                                                onChange={() => toggleSelect(item.id)}
+                                                                aria-label={`Select ${item.title || item.fileName || item.id}`}
+                                                            />
+                                                            <span class={classes.checkDate}>
+                                                                {formatGalleryDate(item.savedAt)}
                                                             </span>
-                                                        </Show>
-                                                    </div>
-                                                    <div class={classes.cardActions}>
-                                                        <Show when={item.sourceUrl}>
+                                                            <Show when={isSel()}>
+                                                                <span class={classes.selectedBadge}>Selected</span>
+                                                            </Show>
+                                                        </label>
+                                                        <div class={classes.thumbWrap}>
+                                                            <Thumb item={item} />
+                                                        </div>
+                                                        <div class={classes.meta}>
+                                                            <span
+                                                                class={classes.title}
+                                                                title={item.title || item.fileName}
+                                                            >
+                                                                {item.title || item.fileName || "Untitled"}
+                                                            </span>
+                                                            <span class={classes.sub}>
+                                                                {(item.guildName || "External") +
+                                                                    (item.channelName ? ` · #${item.channelName}` : "")}
+                                                            </span>
+                                                            <span class={classes.sub}>
+                                                                {item.kind} ·{" "}
+                                                                {item.sizeBytes > 0
+                                                                    ? formatGalleryBytes(item.sizeBytes)
+                                                                    : "link"}
+                                                            </span>
+                                                            <Show when={item.categories.length > 0}>
+                                                                <span class={classes.tagRow}>
+                                                                    <For each={item.categories}>
+                                                                        {(cn) => {
+                                                                            const col =
+                                                                                categories().find((c) => c.name === cn)
+                                                                                    ?.color ?? "#5865f2";
+                                                                            return (
+                                                                                <span
+                                                                                    class={classes.catPill}
+                                                                                    style={{ background: col }}
+                                                                                    title={cn}
+                                                                                >
+                                                                                    {cn}
+                                                                                </span>
+                                                                            );
+                                                                        }}
+                                                                    </For>
+                                                                </span>
+                                                            </Show>
+                                                        </div>
+                                                        <div class={classes.cardActions}>
+                                                            <Show when={item.sourceUrl}>
+                                                                <button
+                                                                    type="button"
+                                                                    class={classes.miniBtn}
+                                                                    title="Open original link"
+                                                                    onClick={() =>
+                                                                        window.open(
+                                                                            item.sourceUrl,
+                                                                            "_blank",
+                                                                            "noopener",
+                                                                        )
+                                                                    }
+                                                                >
+                                                                    Open
+                                                                </button>
+                                                            </Show>
                                                             <button
                                                                 type="button"
                                                                 class={classes.miniBtn}
+                                                                title="Copy file to a folder"
                                                                 onClick={() =>
-                                                                    window.open(item.sourceUrl, "_blank", "noopener")
+                                                                    void window.remcord.gallery.exportItems([item.id])
                                                                 }
                                                             >
-                                                                Open
+                                                                Copy
                                                             </button>
-                                                        </Show>
-                                                        <button
-                                                            type="button"
-                                                            class={classes.miniBtn}
-                                                            onClick={() =>
-                                                                void window.remcord.gallery.exportItems([item.id])
-                                                            }
-                                                        >
-                                                            Copy
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            class={classes.miniBtn}
-                                                            onClick={() =>
-                                                                void window.remcord.gallery
-                                                                    .remove(item.id)
-                                                                    .then(() => refresh())
-                                                            }
-                                                        >
-                                                            Delete
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            )}
+                                                            <button
+                                                                type="button"
+                                                                class={`${classes.miniBtn} ${classes.miniBtnDanger}`}
+                                                                title="Delete this item"
+                                                                onClick={() =>
+                                                                    void window.remcord.gallery
+                                                                        .remove(item.id)
+                                                                        .then(() => refresh())
+                                                                }
+                                                            >
+                                                                Delete
+                                                            </button>
+                                                        </div>
+                                                    </article>
+                                                );
+                                            }}
                                         </For>
                                     </div>
                                 </>
@@ -802,6 +865,6 @@ export function GalleryPage() {
             >
                 <EmptyState message="Loading Gallery…" description="Reading the on-disk index." />
             </Show>
-        </>
+        </div>
     );
 }

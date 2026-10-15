@@ -1636,13 +1636,15 @@ test("F5 gallery keeps the Electron store contract with a natively-gated page", 
         assert.match(bridge, new RegExp(`"${method}"`), `${method} must stay bridged`);
     }
     const page = readFileSync(new URL("../../src/shelter/settings/pages/GalleryPage.tsx", import.meta.url), "utf8");
-    // The full-page unavailable gate is gone; only dialog-backed actions
-    // stay gated behind isNativeWebView.
+    // No environment gating remains: the native shell serves the full
+    // gallery surface (including the host-owned folder picker), so the
+    // page calls the same members on both shells.
     assert.doesNotMatch(page, /does not provide the Gallery disk cache yet/);
     assert.match(page, /window\.remcord\.gallery/);
     assert.match(page, /\.list\(\)/);
     assert.match(page, /\.addUrl\(/);
-    assert.match(page, /F5b dialog slice/);
+    assert.match(page, /\.pickRoot\(\)/);
+    assert.match(page, /\.importFiles\(\)/);
     // The native contract pins the same shape from the host side.
     const nativeGallery = readFileSync(new URL("../src/gallery.rs", import.meta.url), "utf8");
     assert.match(nativeGallery, /INDEX_VERSION/);

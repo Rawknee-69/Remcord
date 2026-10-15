@@ -3,24 +3,6 @@
     margin-bottom: 24px;
     position: relative;
 }
-option {
-    color: var(--text-subtle);
-    font-size: 16px;
-    font-weight: 400;
-    line-height: 20px;
-    align-items: center;
-    padding: 12px;
-    cursor: pointer;
-
-    &:hover {
-        background-color: var(--interactive-background-hover);
-        color: var(--interactive-text-hover);
-    }
-    &[aria-selected="true"] {
-        background-color: var(--interactive-background-selected);
-        color: var(--interactive-text-active);
-    }
-}
 .valuewrapper {
     display: flex;
     justify-content: space-between;
@@ -87,4 +69,26 @@ option {
     &::-webkit-scrollbar-thumb:hover {
         background-color: rgba(255, 255, 255, 0.3);
     }
+}
+
+/* Scoped to the dropdown menu so standalone <option> elements elsewhere
+   in settings are never restyled by this component. */
+.list option {
+    color: var(--text-subtle);
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 20px;
+    align-items: center;
+    padding: 12px;
+    cursor: pointer;
+}
+
+.list option:hover {
+    background-color: var(--interactive-background-hover);
+    color: var(--interactive-text-hover);
+}
+
+.list option[aria-selected="true"] {
+    background-color: var(--interactive-background-selected);
+    color: var(--interactive-text-active);
 }

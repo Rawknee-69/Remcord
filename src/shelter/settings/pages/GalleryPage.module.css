@@ -1,217 +1,533 @@
-.toolbar {
+/* Gallery page — layout architecture + theme tokens.
+   Root causes fixed here (see GalleryPage.tsx for the Button fix):
+   - shelter `Button size=SMALL` renders a fixed 60x32px box, so long labels
+     ("Create collection", "Select all matching", …) overflowed their buttons
+     and collided with neighbours. Every shelter Button in this page now gets
+     an auto-width style (tsx) AND this sheet enforces size-to-content as a
+     second layer, so labels can never squeeze out of their button box.
+   - shelter `TextBox` is 44px tall / full-width while dropdowns/buttons were
+     32px, and Dropdown containers carry standalone page margins — this sheet
+     unifies control heights and neutralises those margins inside toolbars.
+   - Theme: Discord supplies the vars when running as a plugin; the var()
+     fallbacks below follow the OS (`prefers-color-scheme`) so the page is
+     genuinely light in light mode and dark in dark mode even where Discord
+     vars are absent (standalone/test hosts). Explicit
+     `[data-gallery-theme="light"|"dark"]` overrides win over the OS. */
+
+.page {
+    color-scheme: light dark;
     display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    margin: 12px 0;
-    padding: 10px;
-    border: 1px solid var(--background-modifier-accent);
-    border-radius: 8px;
-    background: var(--background-secondary-alt);
-}
-
-.search {
-    flex: 2 1 200px;
-    min-width: 180px;
-}
-
-/* Themed Dropdown (see components/Dropdown): neutralizes its standalone
-   page margins and sizes it for toolbar flow. Higher specificity wins over
-   the component's own container margins. */
-.toolbar .dd {
-    flex: 1 1 140px;
-    min-width: 140px;
-    max-width: 220px;
-    margin-top: 0;
-    margin-bottom: 0;
-}
-
-.selectionBar .dd {
-    min-width: 180px;
-    max-width: 260px;
-    margin-top: 0;
-    margin-bottom: 0;
-}
-
-.catInput {
-    flex: 1 1 180px;
+    flex-direction: column;
+    gap: 12px;
     min-width: 0;
+    max-width: 100%;
+    min-height: 0;
+    padding-bottom: 24px;
+    overflow-wrap: anywhere;
+
+    /* Semantic tokens: Discord value first, OS-aware fallback second. */
+    --gal-bg: var(--background-primary, #f7f8fa);
+    --gal-surface: var(--background-secondary, #ffffff);
+    --gal-surface-2: var(--background-secondary-alt, #f0f2f5);
+    --gal-surface-3: var(--background-tertiary, #e9ecf1);
+    --gal-text: var(--text-normal, var(--header-primary, #17191f));
+    --gal-text-2: var(--text-muted, var(--header-secondary, #626875));
+    --gal-border: var(--background-modifier-accent, var(--border-subtle, #dfe3e8));
+    --gal-accent: var(--brand-500, var(--text-link, #5865f2));
+    --gal-accent-contrast: #ffffff;
+    --gal-danger: var(--status-danger, #dc3545);
+    --gal-input-bg: var(--input-background-default, var(--background-primary, #ffffff));
+    --gal-input-text: var(--input-text-default, var(--text-normal, #17191f));
+    --gal-input-border: var(--input-border-default, var(--background-modifier-accent, #dfe3e8));
+    --gal-hover: var(--background-modifier-hover, #e9ecf1);
+    --gal-radius: 8px;
+    --gal-control-h: 36px;
+    --gal-gap: 8px;
+
+    color: var(--gal-text);
 }
 
-/* Keep toolbar / create-collection action buttons at content size so
-   their labels never squeeze or overflow the button box. */
-.toolbar > button,
-.categoryRow > button {
-    flex-shrink: 0;
-    white-space: nowrap;
+@media (prefers-color-scheme: dark) {
+    .page {
+        --gal-bg: var(--background-primary, #111214);
+        --gal-surface: var(--background-secondary, #18191c);
+        --gal-surface-2: var(--background-secondary-alt, #24262b);
+        --gal-surface-3: var(--background-tertiary, #2d3036);
+        --gal-text: var(--text-normal, var(--header-primary, #f2f3f5));
+        --gal-text-2: var(--text-muted, var(--header-secondary, #a5a9b3));
+        --gal-border: var(--background-modifier-accent, var(--border-subtle, #34363d));
+        --gal-accent: var(--brand-500, var(--text-link, #6875f5));
+        --gal-danger: var(--status-danger, #ff6b72);
+        --gal-input-bg: var(--input-background-default, var(--background-primary, #18191c));
+        --gal-input-text: var(--input-text-default, var(--text-normal, #f2f3f5));
+        --gal-input-border: var(--input-border-default, var(--background-modifier-accent, #34363d));
+        --gal-hover: var(--background-modifier-hover, #2d3036);
+    }
 }
+
+/* Explicit overrides win over the OS preference. */
+.page[data-gallery-theme="light"] {
+    color-scheme: light;
+    --gal-bg: var(--background-primary, #f7f8fa);
+    --gal-surface: var(--background-secondary, #ffffff);
+    --gal-surface-2: var(--background-secondary-alt, #f0f2f5);
+    --gal-surface-3: var(--background-tertiary, #e9ecf1);
+    --gal-text: var(--text-normal, var(--header-primary, #17191f));
+    --gal-text-2: var(--text-muted, var(--header-secondary, #626875));
+    --gal-border: var(--background-modifier-accent, var(--border-subtle, #dfe3e8));
+    --gal-input-bg: var(--input-background-default, #ffffff);
+    --gal-input-text: var(--input-text-default, #17191f);
+    --gal-input-border: var(--input-border-default, #dfe3e8);
+    --gal-hover: #e9ecf1;
+}
+
+.page[data-gallery-theme="dark"] {
+    color-scheme: dark;
+    --gal-bg: var(--background-primary, #111214);
+    --gal-surface: var(--background-secondary, #18191c);
+    --gal-surface-2: var(--background-secondary-alt, #24262b);
+    --gal-surface-3: var(--background-tertiary, #2d3036);
+    --gal-text: var(--text-normal, var(--header-primary, #f2f3f5));
+    --gal-text-2: var(--text-muted, var(--header-secondary, #a5a9b3));
+    --gal-border: var(--background-modifier-accent, var(--border-subtle, #34363d));
+    --gal-input-bg: var(--input-background-default, #18191c);
+    --gal-input-text: var(--input-text-default, #f2f3f5);
+    --gal-input-border: var(--input-border-default, #34363d);
+    --gal-hover: #2d3036;
+}
+
+/* ---------- shared section frame ---------- */
+
+.section {
+    min-width: 0;
+    border: 1px solid var(--gal-border);
+    border-radius: var(--gal-radius);
+    background: var(--gal-surface);
+    padding: 10px 12px;
+}
+
+.sectionTitle {
+    margin: 0 0 8px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--gal-text-2);
+}
+
+/* ---------- storage row ---------- */
 
 .storageBar {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--gal-gap);
     align-items: center;
     justify-content: space-between;
-    margin: 8px 0 4px;
+    min-width: 0;
     padding: 8px 12px;
-    border: 1px solid var(--background-modifier-accent);
-    border-radius: 8px;
-    background: var(--background-primary);
-    color: var(--text-muted);
+    border: 1px solid var(--gal-border);
+    border-radius: var(--gal-radius);
+    background: var(--gal-surface);
+    color: var(--gal-text-2);
     font-size: 12px;
 }
 
 .storagePath {
+    flex: 1 1 220px;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 46ch;
 }
 
-.selectionBar {
+.storageActions {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
     align-items: center;
-    margin: 8px 0;
-    padding: 8px 12px;
-    border: 1px solid var(--background-modifier-accent);
-    border-radius: 8px;
-    background: var(--background-modifier-accent-2, var(--background-secondary));
-    color: var(--text-normal);
-    font-size: 13px;
+    min-width: 0;
 }
+
+/* ---------- toolbar ---------- */
+
+.toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    min-width: 0;
+}
+
+.search {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+}
+
+/* shelter TextBox renders a bare <input width:100% height:44px>; constrain
+   it to the toolbar's control height without touching other pages. */
+.search input,
+.catInput input {
+    width: 100%;
+    min-width: 0;
+    height: var(--gal-control-h);
+    font-size: 14px;
+    background: var(--gal-input-bg);
+    color: var(--gal-input-text);
+    border-color: var(--gal-input-border);
+}
+
+.search input::placeholder,
+.catInput input::placeholder {
+    color: var(--gal-text-2);
+    opacity: 1;
+}
+
+/* Filter dropdowns line up in an even grid: full horizontal rows when
+   there is room, collapsing column-by-column down to a single vertical
+   stack when there isn't. No ragged wrapping. */
+.filterRow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+    gap: var(--gal-gap);
+    align-items: center;
+    min-width: 0;
+}
+
+.filterRow .dd {
+    min-width: 0;
+    max-width: none;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.toolbarActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gal-gap);
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 0;
+    width: 100%;
+}
+
+/* Size-to-content guard (second layer; the tsx also passes auto-width
+   styles to shelter Buttons). Beats shelter's fixed 60px SMALL width so
+   labels never overflow the button box. */
+.toolbar button,
+.categoryRow button,
+.selectionBar button,
+.storageActions button {
+    flex-shrink: 0;
+    width: auto;
+    min-width: 0;
+    max-width: 100%;
+    min-height: var(--gal-control-h);
+    height: auto;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ---------- collections ---------- */
 
 .categoryRow {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
     align-items: center;
-    margin: 8px 0;
+    min-width: 0;
 }
 
-.pill {
-    border: 1px solid var(--background-modifier-accent);
-    background: var(--background-tertiary);
-    color: var(--text-normal);
-    border-radius: 999px;
-    padding: 3px 10px;
-    font-size: 12px;
-    cursor: pointer;
+.catInput {
+    flex: 2 1 200px;
+    min-width: 160px;
 }
 
-.pillActive {
-    border-color: var(--text-link);
-    background: var(--brand-500, #5865f2);
-    color: #fff;
+/* Icon-only "+" create-collection button: larger tap target, no squeeze. */
+.plusIcon {
+    display: inline-block;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.catList {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+    flex: 1 1 100%;
 }
 
 .catPill {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    max-width: 180px;
     border-radius: 999px;
-    padding: 2px 8px;
+    padding: 3px 6px 3px 10px;
     font-size: 11px;
     font-weight: 600;
+    line-height: 18px;
     color: #fff;
-    max-width: 140px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
+.catPill button {
+    flex-shrink: 0;
+    min-height: 0;
+    padding: 0 6px;
+    line-height: 18px;
+}
+
+/* ---------- bulk selection ---------- */
+
+.selectionBar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gal-gap);
+    align-items: center;
+    min-width: 0;
+    color: var(--gal-text);
+    font-size: 13px;
+}
+
+.selectionBar .dd {
+    flex: 1 1 170px;
+    min-width: 150px;
+    max-width: 260px;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.selectionCount {
+    flex: 1 1 160px;
+    min-width: 0;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.selectionActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+}
+
+/* ---------- results grid ---------- */
+
 .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr));
     gap: 10px;
-    margin-top: 8px;
+    min-width: 0;
+    margin-top: 4px;
 }
 
 .groupTitle {
     margin: 18px 0 6px;
+    color: var(--gal-text);
 }
 
 .card {
-    border: 1px solid var(--background-modifier-accent);
-    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--gal-border);
+    border-radius: var(--gal-radius);
     overflow: hidden;
-    background: var(--background-primary);
+    background: var(--gal-surface);
     content-visibility: auto;
-    contain-intrinsic-size: 220px;
+    contain-intrinsic-size: 260px;
+    transition:
+        border-color 120ms ease,
+        box-shadow 120ms ease,
+        background-color 120ms ease;
+}
+
+.card:hover {
+    border-color: var(--gal-accent);
+}
+
+.card:focus-within {
+    border-color: var(--gal-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--gal-accent) 35%, transparent);
 }
 
 .cardSelected {
-    outline: 2px solid var(--text-link);
+    border-color: var(--gal-accent);
+    background: color-mix(in srgb, var(--gal-accent) 8%, var(--gal-surface));
+    box-shadow:
+        inset 3px 0 0 var(--gal-accent),
+        0 0 0 1px var(--gal-accent);
 }
 
-.thumb {
+.checkRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 8px 10px 4px;
+    color: var(--gal-text-2);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.checkRow input[type="checkbox"] {
+    flex-shrink: 0;
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--gal-accent);
+}
+
+.checkDate {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.selectedBadge {
+    flex-shrink: 0;
+    border-radius: 999px;
+    padding: 1px 8px;
+    background: var(--gal-accent);
+    color: var(--gal-accent-contrast);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.thumbWrap {
+    aspect-ratio: 16 / 10;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--gal-surface-3);
+    border-top: 1px solid var(--gal-border);
+    border-bottom: 1px solid var(--gal-border);
+    margin-top: 6px;
+}
+
+.thumb,
+.thumbVideo {
     width: 100%;
-    height: 120px;
-    object-fit: cover;
+    height: 100%;
     display: block;
-    background: var(--background-tertiary);
+    object-fit: cover;
+    background: var(--gal-surface-3);
 }
 
 .thumbVideo {
-    width: 100%;
-    height: 120px;
-    display: block;
     background: #000;
 }
 
 .linkThumb {
-    height: 120px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 8px;
-    background: var(--background-tertiary);
-    color: var(--text-link);
+    height: 100%;
+    min-height: 120px;
+    padding: 10px;
+    background: var(--gal-surface-3);
+    color: var(--gal-accent);
     font-size: 12px;
+    line-height: 1.4;
     word-break: break-all;
     overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    align-content: center;
 }
 
 .meta {
-    padding: 8px;
+    padding: 8px 10px 4px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 3px;
+    min-width: 0;
+    flex: 1 1 auto;
 }
 
 .title {
-    color: var(--text-normal);
+    color: var(--gal-text);
     font-size: 12px;
     font-weight: 600;
+    line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
 .sub {
-    color: var(--text-muted);
+    color: var(--gal-text-2);
     font-size: 11px;
+    line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
+.tagRow {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    min-width: 0;
+    margin-top: 2px;
+}
+
 .cardActions {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     align-items: center;
-    padding: 0 8px 8px;
+    padding: 8px 10px 10px;
+    margin-top: auto;
+    border-top: 1px solid transparent;
+}
+
+.cardActions button {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .miniBtn {
-    background: var(--background-secondary-alt);
-    color: var(--text-normal);
-    border: 1px solid var(--background-modifier-accent);
+    background: var(--gal-surface-2);
+    color: var(--gal-text);
+    border: 1px solid var(--gal-border);
     border-radius: 6px;
     font-size: 11px;
-    padding: 3px 8px;
+    font-weight: 600;
+    line-height: 1.5;
+    padding: 4px 8px;
     cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition:
+        background-color 120ms ease,
+        border-color 120ms ease;
+}
+
+.miniBtn:hover {
+    background: var(--gal-hover);
+    border-color: var(--gal-accent);
+}
+
+.miniBtn:focus-visible {
+    outline: 2px solid var(--gal-accent);
+    outline-offset: 1px;
 }
 
 .miniBtn:disabled {
@@ -219,21 +535,60 @@
     cursor: default;
 }
 
+.miniBtnDanger:hover {
+    border-color: var(--gal-danger);
+    color: var(--gal-danger);
+}
+
 .sentinel {
     height: 24px;
 }
 
 .hint {
-    color: var(--text-muted);
+    color: var(--gal-text-2);
     font-size: 12px;
+    line-height: 1.45;
     margin: 8px 0;
+    overflow-wrap: anywhere;
 }
 
-.checkRow {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px 0;
-    color: var(--text-muted);
-    font-size: 11px;
+.emptyWrap {
+    min-width: 0;
+}
+
+/* Narrow panes: the filter grid collapses to a vertical stack on its
+   own (auto-fit); action buttons stretch full-width, no overflow. */
+@media (max-width: 560px) {
+    .selectionBar .dd {
+        flex: 1 1 100%;
+        max-width: none;
+    }
+
+    .toolbarActions {
+        justify-content: stretch;
+    }
+
+    .toolbarActions button {
+        flex: 1 1 auto;
+    }
+
+    .grid {
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 160px), 1fr));
+    }
+}
+
+.page button:focus-visible,
+.page input:focus-visible {
+    outline: 2px solid var(--gal-accent);
+    outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .page *,
+    .page *::before,
+    .page *::after {
+        transition-duration: 0.01ms;
+        animation-duration: 0.01ms;
+        animation-iteration-count: 1;
+    }
 }

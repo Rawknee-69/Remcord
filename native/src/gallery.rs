@@ -383,9 +383,47 @@ fn slice_chars(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
-/// Gallery root and files dir under the host-controlled profile dir.
+/// Maximum accepted gallery root path length, mirroring Electron's 512
+/// slice in `setGalleryRoot`.
+pub const MAX_GALLERY_ROOT_BYTES: usize = 512;
+
+/// Gallery root: the custom `galleryRoot` setting when it names a usable
+/// absolute directory, else the default `<profile>/gallery/`. The custom
+/// value is written only by the host-owned `gallery.root_pick` flow
+/// (folder picker + migration), never by renderer-supplied paths.
 pub fn gallery_root(profile_dir: &Path) -> PathBuf {
+    if let Some(custom) = read_custom_gallery_root(profile_dir) {
+        return custom;
+    }
     profile_dir.join(GALLERY_DIR_NAME)
+}
+
+/// Display label for the `gallery:root` capability. The default reports
+/// the fixed profile-relative label (`"gallery"` — no absolute path
+/// crosses); a custom root reports its absolute path so the page can show
+/// the folder the user chose (Electron parity: `getGalleryRoot()`).
+pub fn gallery_root_display(profile_dir: &Path) -> String {
+    if let Some(custom) = read_custom_gallery_root(profile_dir) {
+        return custom.to_string_lossy().into_owned();
+    }
+    GALLERY_ROOT_LABEL.to_owned()
+}
+
+/// Reads the persisted custom gallery root, if any. Returns `Some` only
+/// for a non-empty absolute path; anything else (missing, relative,
+/// overlong) falls back to the default. Never fails: an unreadable
+/// settings file simply means the default.
+fn read_custom_gallery_root(profile_dir: &Path) -> Option<PathBuf> {
+    let snapshot = crate::settings::load_settings(profile_dir).ok()?.snapshot;
+    let clean = snapshot.gallery_root.trim().to_owned();
+    if clean.is_empty() || clean.len() > MAX_GALLERY_ROOT_BYTES {
+        return None;
+    }
+    let path = PathBuf::from(&clean);
+    if !path.is_absolute() {
+        return None;
+    }
+    Some(path)
 }
 
 pub fn gallery_files_dir(profile_dir: &Path) -> PathBuf {
@@ -398,6 +436,148 @@ pub fn ensure_gallery_dirs(profile_dir: &Path) -> Result<PathBuf, GalleryFailure
         .and_then(|_| std::fs::create_dir_all(gallery_files_dir(profile_dir)))
         .map_err(|_| unavailable("storage"))?;
     Ok(root)
+}
+
+/// Sets a custom gallery storage root (the `Choose folder` button),
+/// mirroring Electron's `setGalleryRoot`: validates the host-picked
+/// directory, creates it plus `files/`, migrates the existing index and
+/// cached files (copy, never move — the old root stays as a backup),
+/// persists `galleryRoot` in the settings document, and returns the
+/// absolute display path. `picked` comes from the host folder picker,
+/// never the renderer.
+pub fn set_gallery_root(profile_dir: &Path, picked: &Path) -> Result<String, GalleryFailure> {
+    let text = picked.to_string_lossy().into_owned();
+    let clean = text.trim().to_owned();
+    if clean.is_empty() || clean.len() > MAX_GALLERY_ROOT_BYTES {
+        return Err(failure("INVALID_PATH", "gallery folder path is not valid"));
+    }
+    let resolved = PathBuf::from(&clean);
+    if !resolved.is_absolute() {
+        return Err(failure("INVALID_PATH", "gallery folder path is not valid"));
+    }
+    std::fs::create_dir_all(&resolved)
+        .and_then(|_| std::fs::create_dir_all(resolved.join(FILES_DIR_NAME)))
+        .map_err(|_| failure("NOT_WRITABLE", "gallery folder is not writable"))?;
+    let current = gallery_root(profile_dir);
+    if resolved != current {
+        // Migrate existing cache so switching disk/partition/folder keeps
+        // items (Electron parity: index copy + files/ copy, failures
+        // degrade to a fresh start at the new root, never a lost write).
+        let from_index = current.join(INDEX_FILE_NAME);
+        let to_index = resolved.join(INDEX_FILE_NAME);
+        if from_index.exists() && !to_index.exists() {
+            let _ = std::fs::copy(&from_index, &to_index);
+        }
+        let from_files = current.join(FILES_DIR_NAME);
+        let to_files = resolved.join(FILES_DIR_NAME);
+        if from_files.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&from_files) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else { continue };
+                    if name.is_empty() || name.contains('/') || name.contains('\\') {
+                        continue;
+                    }
+                    let src = entry.path();
+                    if std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_file())
+                        && !to_files.join(name).exists()
+                    {
+                        let _ = std::fs::copy(&src, to_files.join(name));
+                    }
+                }
+            }
+        }
+    }
+    persist_gallery_root_setting(profile_dir, &clean)?;
+    Ok(clean)
+}
+
+/// Persists `galleryRoot` into the settings document, touching only that
+/// field (unknown future keys preserved byte-for-value, atomic
+/// temp+rename write). Mirrors `apply_settings_set` mechanics without
+/// going through the renderer-facing allowlist.
+fn persist_gallery_root_setting(profile_dir: &Path, value: &str) -> Result<(), GalleryFailure> {
+    let path = crate::settings::settings_file_path(profile_dir);
+    let mut document = match std::fs::read(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(_) => return Err(unavailable("storage")),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| unavailable("storage"))?,
+    };
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| unavailable("storage"))?;
+    object.insert(
+        "galleryRoot".to_owned(),
+        serde_json::Value::String(value.to_owned()),
+    );
+    let serialized = serde_json::to_string_pretty(&document).map_err(|_| unavailable("storage"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| unavailable("storage"))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serialized.as_bytes()).map_err(|_| unavailable("storage"))?;
+    std::fs::rename(&tmp, &path).map_err(|_| unavailable("storage"))?;
+    Ok(())
+}
+
+/// Host folder picker for the gallery storage root (directory-pick
+/// mode). Same contract as the export picker: `Ok(None)` on dismissal.
+#[cfg(target_os = "windows")]
+pub fn show_gallery_root_picker() -> Result<Option<std::path::PathBuf>, GalleryFailure> {
+    use windows::{
+        core::HSTRING,
+        Win32::{
+            System::Com::{CoCreateInstance, CLSCTX_ALL},
+            UI::Shell::{
+                FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+                FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+            },
+        },
+    };
+    let dialog: IFileOpenDialog = unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) }
+        .map_err(|_| failure("ROOT_PICK_FAILED", "gallery folder picker cannot be shown"))?;
+    let failed = || failure("ROOT_PICK_FAILED", "gallery folder picker cannot be shown");
+    unsafe {
+        dialog
+            .SetTitle(&HSTRING::from(
+                "Choose Gallery storage folder (any disk / partition / folder)",
+            ))
+            .map_err(|_| failed())?;
+        dialog
+            .SetOkButtonLabel(&HSTRING::from("Use this folder"))
+            .map_err(|_| failed())?;
+        let options = dialog.GetOptions().map_err(|_| failed())?;
+        dialog
+            .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST)
+            .map_err(|_| failed())?;
+        match dialog.Show(None) {
+            Ok(()) => {}
+            Err(error) => {
+                if error.code() == windows::core::HRESULT::from_win32(1223) {
+                    return Ok(None);
+                }
+                return Err(failed());
+            }
+        }
+        let result = dialog.GetResult().map_err(|_| failed())?;
+        let display = result
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .map_err(|_| failed())?;
+        let text = display.to_string().unwrap_or_default();
+        windows::Win32::System::Com::CoTaskMemFree(Some(display.0 as *const std::ffi::c_void));
+        if text.is_empty() {
+            return Err(failed());
+        }
+        Ok(Some(std::path::PathBuf::from(text)))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn show_gallery_root_picker() -> Result<Option<std::path::PathBuf>, GalleryFailure> {
+    Err(failure(
+        "ROOT_PICK_FAILED",
+        "gallery folder picking is not supported on this platform",
+    ))
 }
 
 /// Reads one directory entry's metadata without following links.
@@ -1622,6 +1802,36 @@ mod tests {
             assert!(add_gallery_link(&root, url, &test_meta()).is_err(), "{url}");
         }
         remove_temp_root(&root);
+    }
+
+    #[test]
+    fn custom_root_resolves_display_and_migrates() {
+        // Default profile reports the fixed relative label.
+        let profile = unique_temp_root("profile");
+        assert_eq!(gallery_root_display(&profile), "gallery");
+        assert_eq!(gallery_root(&profile), profile.join(GALLERY_DIR_NAME));
+        // A persisted absolute custom root wins for storage and display.
+        let custom = unique_temp_root("custom");
+        let stored = set_gallery_root(&profile, &custom).unwrap();
+        assert_eq!(stored, custom.to_string_lossy());
+        assert_eq!(gallery_root(&profile), custom);
+        assert_eq!(gallery_root_display(&profile), custom.to_string_lossy());
+        // Items saved after the switch land in the custom root, and a
+        // pre-existing default-root index migrates across.
+        let item = add_gallery_link(&profile, "https://example.com/kept", &test_meta()).unwrap();
+        assert!(!item.id.is_empty());
+        let another = unique_temp_root("custom2");
+        set_gallery_root(&profile, &another).unwrap();
+        let items = list_gallery_items(&profile).unwrap();
+        assert!(items.iter().any(|entry| entry.id == item.id));
+        assert!(another.join(INDEX_FILE_NAME).exists());
+        // Hostile values fail closed: relative paths and empties never
+        // become the root.
+        assert!(set_gallery_root(&profile, Path::new("relative/dir")).is_err());
+        assert!(set_gallery_root(&profile, Path::new("")).is_err());
+        remove_temp_root(&profile);
+        remove_temp_root(&custom);
+        remove_temp_root(&another);
     }
 
     #[test]

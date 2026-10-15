@@ -4693,9 +4693,11 @@ test("gallery.getFile bounds the preview and falls back honestly", async () => {
 });
 
 test("gallery dialog-backed methods throw UNSUPPORTED_CAPABILITY honestly", () => {
-    // Import/export/root-pick need modal host dialogs (F5b slice): the
-    // capabilities are absent, so the methods throw the closed
-    // UNSUPPORTED_CAPABILITY error and the page gates those buttons.
+    // Import/export need their capabilities granted by the host; when the
+    // runtime withholds them (this test's minimal cap set), the methods
+    // throw the closed UNSUPPORTED_CAPABILITY error and the page gates
+    // those buttons. Root-pick is granted in production (see the next
+    // test); here it is withheld the same way.
     const { window } = createGalleryRuntime();
     assert.equal(window.remcord.native.supports("gallery.import_files"), false);
     assert.throws(
@@ -4714,6 +4716,22 @@ test("gallery dialog-backed methods throw UNSUPPORTED_CAPABILITY honestly", () =
         window.messages.some((message) => message.command?.type?.startsWith("gallery_")),
         false,
     );
+});
+
+test("gallery.pickRoot sends an empty payload and resolves the Electron shape", async () => {
+    const { window } = createRuntime("https://discord.com", [...GALLERY_CAPS, "gallery.root_pick"]);
+    const pending = window.remcord.gallery.pickRoot();
+    const message = window.messages.find((entry) => entry.command?.type === "gallery_root_pick");
+    assert.ok(message);
+    assert.deepEqual(message.command, { type: "gallery_root_pick", payload: {} });
+    respondGallery(window, message, "gallery_root_pick", { ok: true, root: "D:\\Media\\Gallery" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { ok: true, root: "D:\\Media\\Gallery" });
+    // Cancellation resolves `{ok: false}` (never a rejection).
+    const second = createRuntime("https://discord.com", [...GALLERY_CAPS, "gallery.root_pick"]);
+    const cancelled = second.window.remcord.gallery.pickRoot();
+    const message2 = second.window.messages.find((entry) => entry.command?.type === "gallery_root_pick");
+    respondGallery(second.window, message2, "gallery_root_pick", { ok: false, error: "CANCELLED" });
+    assert.deepEqual(JSON.parse(JSON.stringify(await cancelled)), { ok: false, error: "CANCELLED" });
 });
 
 test("gallery.openRoot reveals the fixed gallery root through folders.open", async () => {
@@ -4762,6 +4780,17 @@ test("gallery usage/root/categories resolve bounded host facts", async () => {
         },
     );
     assert.deepEqual(JSON.parse(JSON.stringify(await root)), { root: "gallery" });
+
+    // A custom host-picked absolute path is a valid display label too.
+    const second = createGalleryRuntime();
+    const custom = second.window.remcord.gallery.root();
+    respondGallery(
+        second.window,
+        second.window.messages.find((entry) => entry.command?.type === "gallery_root"),
+        "gallery_root",
+        { root: "D:\\Media\\Gallery" },
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(await custom)), { root: "D:\\Media\\Gallery" });
 
     const cats = window.remcord.gallery.categories();
     respondGallery(

@@ -107,6 +107,20 @@ pub fn folder_root(profile_dir: &Path, location: FolderLocation) -> PathBuf {
     profile_dir.join(location.dir_name())
 }
 
+/// Gallery reveal root: the custom `galleryRoot` setting when one is set
+/// (host-chosen at pick time, created then), else the default
+/// `<profile>/gallery/`. A custom root may live on any disk/partition,
+/// so it is canonicalized directly without the profile-containment check
+/// that guards the fixed roots — the path was host-picked and validated,
+/// never renderer-supplied.
+pub fn gallery_reveal_root(profile_dir: &Path) -> Result<PathBuf, FolderFailure> {
+    let root = crate::gallery::gallery_root(profile_dir);
+    std::fs::create_dir_all(&root)
+        .map_err(|_| failure("FOLDERS_UNAVAILABLE", "folder root is unavailable"))?;
+    std::fs::canonicalize(&root)
+        .map_err(|_| failure("FOLDERS_UNAVAILABLE", "folder root is unavailable"))
+}
+
 fn contains(canonical_root: &Path, canonical_candidate: &Path) -> bool {
     canonical_candidate.starts_with(canonical_root)
 }

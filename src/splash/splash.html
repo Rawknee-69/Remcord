@@ -33,11 +33,25 @@
             OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
             SOFTWARE.*/
             :root {
+                color-scheme: light dark;
                 --background-primary: #282b30;
                 --background-secondary: rgba(255, 255, 255, 0.1);
                 --brand-experiment: #7289da;
                 --header-primary: #fff;
                 --text-muted: #72767d;
+            }
+
+            /* Light OS appearance: a genuinely light splash instead of the
+               dark-only palette above. The host sets the WebView2
+               PreferredColorScheme from the OS theme, so this tracks the
+               system automatically. */
+            @media (prefers-color-scheme: light) {
+                :root {
+                    --background-primary: #f2f3f5;
+                    --background-secondary: rgba(0, 0, 0, 0.1);
+                    --header-primary: #060607;
+                    --text-muted: #5c5e66;
+                }
             }
 
             /* Splash uses only system fonts: no remote font is fetched. The
@@ -119,7 +133,7 @@
 
             button {
                 background: var(--brand-experiment);
-                color: var(--header-primary);
+                color: #fff;
                 outline: none;
                 border: none;
                 border-radius: 5px;
