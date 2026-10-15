@@ -165,7 +165,6 @@
     background-color: #000000cc;
     transition: 0.1s ease;
 }
-/* biome-ignore lint/style/noDescendingSpecificity: cross-platform, linux [remcord-platform="linux"] only */
 [remcord-platform="win32"] .titlebar #window-controls-container #quit-icon {
     background-color: var(--remcord-chrome-icon, var(--interactive-icon-default));
     display: list-item;
@@ -339,11 +338,7 @@
 
 [remcord-platform="darwin"] .titlebar #window-controls-container #minimize-icon,
 [remcord-platform="darwin"] .titlebar #window-controls-container #maximize-icon,
-/* biome-ignore lint/style/noDescendingSpecificity: cross-platform */
-    [remcord-platform="darwin"]
-    .titlebar
-    #window-controls-container
-    #quit-icon {
+[remcord-platform="darwin"] .titlebar #window-controls-container #quit-icon {
     display: none;
 }
 

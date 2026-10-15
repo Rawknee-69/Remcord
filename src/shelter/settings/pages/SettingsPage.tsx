@@ -498,7 +498,12 @@ export function SettingsPage() {
                         />
                     </SearchableSetting>
                 </Show>
-                <Show when={window.remcord.platform === "darwin" || (window.remcord.platform === "win32" && isNativeWebView())}>
+                <Show
+                    when={
+                        window.remcord.platform === "darwin" ||
+                        (window.remcord.platform === "win32" && isNativeWebView())
+                    }
+                >
                     <SearchableSetting keywords={[t["settings-bounceOnPing"], t["settings-bounceOnPing-desc"]]}>
                         <SwitchItem
                             note={
@@ -1228,9 +1233,7 @@ export function SettingsPage() {
                                                 showToast({ title: "Custom icon not set", duration: 2500 });
                                             }
                                         })
-                                        .catch(() =>
-                                            showToast({ title: "Custom icon not set", duration: 2500 }),
-                                        );
+                                        .catch(() => showToast({ title: "Custom icon not set", duration: 2500 }));
                                     return;
                                 }
                                 if (!isNativeWebView()) window.remcord.settings.openCustomIconDialog();

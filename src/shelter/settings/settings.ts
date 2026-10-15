@@ -448,10 +448,7 @@ export async function setNativeSetting<K extends NativeSettingsSetKey>(
     const nativeSet = (window.remcord as unknown as { settings: NativeSettingsSet }).settings.set;
     let applied: { key: string; value: boolean | string[] | string | number };
     try {
-        applied = await nativeSet(
-            NATIVE_SETTINGS_SET_WIRE_KEY[key],
-            value as boolean | string[] | string | number,
-        );
+        applied = await nativeSet(NATIVE_SETTINGS_SET_WIRE_KEY[key], value as boolean | string[] | string | number);
     } catch (error) {
         withPreservedSettingsScroll(() => {
             (store.settings as Record<string, unknown>)[key as string] = previous;

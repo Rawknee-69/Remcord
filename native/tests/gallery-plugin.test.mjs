@@ -40,7 +40,7 @@ function matchesSingle(el, selector) {
     if (!m) return false;
     const [, tag, attrPart] = m;
     if (tag && tag !== "*" && el.tagName.toLowerCase() !== tag.toLowerCase()) return false;
-    if (!attrPart) return !selector.includes("[") ? true : true;
+    if (!attrPart) return true;
     const attr = attrPart.match(/^\[([\w-]+)(="([^"]*)")?\]$/);
     if (!attr) return false;
     const [, name, , value] = attr;
@@ -95,13 +95,13 @@ class FakeElement {
         this._clicked = false;
     }
     get className() {
-        return this.attributes["class"] ?? "";
+        return this.attributes.class ?? "";
     }
     set className(value) {
-        this.attributes["class"] = String(value);
+        this.attributes.class = String(value);
     }
     get id() {
-        return this.attributes["id"] ?? "";
+        return this.attributes.id ?? "";
     }
     set id(value) {
         this.setAttribute("id", value);
@@ -222,11 +222,11 @@ class FakeElement {
         }
         // Target: capture listeners, then bubble listeners.
         const targetListeners = path[0].listeners.get(event.type) ?? [];
-        for (const { listener, capture } of targetListeners.filter((entry) => entry.capture)) {
+        for (const { listener } of targetListeners.filter((entry) => entry.capture)) {
             listener(event);
             if (event._stopped) return !event._prevented;
         }
-        for (const { listener, capture } of targetListeners.filter((entry) => !entry.capture)) {
+        for (const { listener } of targetListeners.filter((entry) => !entry.capture)) {
             listener(event);
             if (event._stopped) return !event._prevented;
         }
@@ -265,7 +265,7 @@ class FakeDocument extends FakeElement {
     createTextNode(data) {
         return new FakeText(data);
     }
-    createTreeWalker(root, what) {
+    createTreeWalker(root, _what) {
         const texts = [];
         const walk = (node) => {
             for (const child of node.children ?? []) {
@@ -381,11 +381,7 @@ function createHarness() {
                 node = node.parentNode;
             }
             const names = themed ? Object.keys(vars) : [];
-            const background = themed
-                ? "rgb(49, 51, 56)"
-                : inMenu
-                  ? "rgb(24, 25, 28)"
-                  : "rgba(0, 0, 0, 0)";
+            const background = themed ? "rgb(49, 51, 56)" : inMenu ? "rgb(24, 25, 28)" : "rgba(0, 0, 0, 0)";
             const foreground = themed || inMenu ? "rgb(219, 222, 225)" : "";
             const style = {
                 length: names.length,
@@ -528,10 +524,7 @@ test("popup follows the themed container when the menu is outside it", () => {
     // reads come back empty. The popup must still resolve the theme.
     const harness = createHarness();
     harness.hooks.onLoad();
-    assert.ok(
-        harness.document.querySelector(".theme-dark"),
-        "the harness must provide a themed container",
-    );
+    assert.ok(harness.document.querySelector(".theme-dark"), "the harness must provide a themed container");
     rightClickImage(harness, "https://cdn.discordapp.com/attachments/1/2/photo.png");
     const { menu } = renderMenu(harness);
     findItem(menu, "Save to Gallery").dispatchEvent(new FakeEvent("click", { bubbles: true }));

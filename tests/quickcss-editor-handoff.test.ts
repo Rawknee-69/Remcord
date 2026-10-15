@@ -108,9 +108,7 @@ function setNativeWindow(remcord: Record<string, unknown>) {
 
 test("system CSS editor handoff is unavailable without the native shell", async () => {
     setNativeWindow({});
-    const { isNativeCssEditorAvailable, openSystemCssEditor } = await import(
-        "../src/shelter/settings/settings.js"
-    );
+    const { isNativeCssEditorAvailable, openSystemCssEditor } = await import("../src/shelter/settings/settings.js");
     assert.equal(isNativeCssEditorAvailable(), false);
     await assert.rejects(openSystemCssEditor(), /unavailable/);
 });
@@ -126,9 +124,7 @@ test("system CSS editor handoff opens through the host namespace", async () => {
             },
         },
     });
-    const { isNativeCssEditorAvailable, openSystemCssEditor } = await import(
-        "../src/shelter/settings/settings.js"
-    );
+    const { isNativeCssEditorAvailable, openSystemCssEditor } = await import("../src/shelter/settings/settings.js");
     assert.equal(isNativeCssEditorAvailable(), true);
     assert.equal(await openSystemCssEditor(), true);
     assert.equal(opened, 1);

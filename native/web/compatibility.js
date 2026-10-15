@@ -895,7 +895,6 @@
     const RPC_OS_VALUES = ["win32", "linux", "darwin"];
 
     let rpcBlacklistCache = [];
-    let rpcBlacklistLoaded = false;
 
     function sanitizeBlacklistEntries(entries) {
         if (!Array.isArray(entries)) return null;
@@ -923,7 +922,6 @@
                 const clean = sanitizeBlacklistEntries(entries);
                 if (clean !== null) {
                     rpcBlacklistCache = clean;
-                    rpcBlacklistLoaded = true;
                 }
             },
             () => {
@@ -1081,7 +1079,6 @@
         // read) and from the host broadcast for every other document.
         return request({ type: "rpc_blacklist_game", payload: { name, id } }, timeoutMs).then((entries) => {
             rpcBlacklistCache = entries.map((entry) => ({ name: entry.name, id: entry.id }));
-            rpcBlacklistLoaded = true;
             return getRpcBlacklist();
         });
     }
@@ -1096,7 +1093,6 @@
         // The local cache converges like the save path above.
         return request({ type: "rpc_unblacklist_game", payload: { id } }, timeoutMs).then((entries) => {
             rpcBlacklistCache = entries.map((entry) => ({ name: entry.name, id: entry.id }));
-            rpcBlacklistLoaded = true;
             return getRpcBlacklist();
         });
     }
@@ -1220,7 +1216,7 @@
             return Promise.reject(new TypeError("timeout must be a positive finite number"));
         }
         return request({ type: "css_editor_open_system", payload: {} }, timeoutMs).then((payload) => {
-            if (!payload || payload.opened !== true) {
+            if (payload?.opened !== true) {
                 throw new Error("Native CSS editor response schema is invalid");
             }
             return payload;
@@ -3951,7 +3947,6 @@
         const clean = sanitizeBlacklistEntries(detail.entries);
         if (clean === null) return;
         rpcBlacklistCache = clean;
-        rpcBlacklistLoaded = true;
     });
     // Seed the synchronous blacklist cache from the host (Electron's
     // preload-cache parity). Fire-and-forget: the hot path serves the cache

@@ -1,5 +1,5 @@
 {
-    "$schema": "https://biomejs.dev/schemas/2.5.5/schema.json",
+    "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
     "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
     "files": {
         "ignoreUnknown": false,
@@ -32,5 +32,17 @@
                 "useKeyWithClickEvents": "off"
             }
         }
-    }
+    },
+    "overrides": [
+        {
+            "includes": ["assets/**/*.css"],
+            "linter": {
+                "rules": {
+                    "style": {
+                        "noDescendingSpecificity": "off"
+                    }
+                }
+            }
+        }
+    ]
 }

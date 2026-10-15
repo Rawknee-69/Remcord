@@ -5,7 +5,7 @@ import {
     type QuickCssEditorMode,
     type QuickCssEditorSource,
 } from "./quickCssEditorSource.js";
-import { isNativeWebView, isNativeCssEditorAvailable, openSystemCssEditor } from "./settings.js";
+import { isNativeCssEditorAvailable, isNativeWebView, openSystemCssEditor } from "./settings.js";
 
 const {
     ui: { openModal, showToast },
