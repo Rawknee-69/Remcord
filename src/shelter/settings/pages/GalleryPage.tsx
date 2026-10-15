@@ -36,16 +36,39 @@ const blobCache = new Map<string, string>();
 
 /**
  * Discord's effective appearance: whatever theme — stock dark/light or any
- * custom theme — actually resolved `--background-primary` to. Falls back to
- * the OS preference when Discord's variables are unreadable, so the page
- * never hardcodes an appearance. Never throws.
+ * custom theme — actually resolved `--background-primary` to. Read from an
+ * element inside Discord's themed tree (the page root lives in the settings
+ * modal; `document.documentElement` sits outside the theme classes where
+ * the variables don't resolve). Falls back to the OS preference when
+ * unreadable, so the page never hardcodes an appearance. Never throws.
  */
-function detectDiscordTheme(): "light" | "dark" {
+function detectDiscordTheme(page: Element | undefined): "light" | "dark" {
+    // Menus and modals can render outside the themed subtree, so every
+    // scope that may carry the variables is tried in order (themed
+    // container, app mount, page root, body, document root).
+    const scopes: Array<Element | undefined> = [];
     try {
-        const raw = getComputedStyle(document.documentElement).getPropertyValue("--background-primary");
-        const parsed = galleryThemeFromBackground(raw ?? "");
-        if (parsed) return parsed;
+        scopes.push(document.querySelector(".theme-dark, .theme-light") ?? undefined);
     } catch {}
+    try {
+        scopes.push(document.getElementById("app-mount") ?? undefined);
+    } catch {}
+    scopes.push(page);
+    try {
+        scopes.push(document.body);
+    } catch {}
+    try {
+        scopes.push(document.documentElement);
+    } catch {}
+    for (const scope of scopes) {
+        if (!scope) continue;
+        try {
+            const parsed = galleryThemeFromBackground(
+                getComputedStyle(scope).getPropertyValue("--background-primary") ?? "",
+            );
+            if (parsed) return parsed;
+        } catch {}
+    }
     try {
         return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     } catch {
@@ -301,7 +324,10 @@ export function GalleryPage() {
     // Live Discord theme: re-read whenever the OS scheme flips or Discord
     // rewrites its root (theme switch / custom theme applied), so the
     // `data-gallery-theme` tokens and `color-scheme` always match Discord.
-    const [theme, setTheme] = createSignal<"light" | "dark">(detectDiscordTheme());
+    // Reads from the page root (inside the themed settings modal) because
+    // `document.documentElement` sits outside Discord's theme classes.
+    let pageEl: HTMLDivElement | undefined;
+    const [theme, setTheme] = createSignal<"light" | "dark">(detectDiscordTheme(undefined));
 
     let sentinel: HTMLDivElement | undefined;
 
@@ -330,19 +356,32 @@ export function GalleryPage() {
 
     onMount(() => {
         refresh();
-        const updateTheme = () => setTheme(detectDiscordTheme());
+        setTheme(detectDiscordTheme(pageEl));
+        const updateTheme = () => setTheme(detectDiscordTheme(pageEl));
         const media = window.matchMedia("(prefers-color-scheme: dark)");
         const onMedia = () => updateTheme();
         try {
             media.addEventListener("change", onMedia);
         } catch {}
         const observer = new MutationObserver(updateTheme);
+        // Watch every likely theme carrier: the document root plus the app
+        // mount and the themed wrapper (Discord applies `.theme-dark` /
+        // `.theme-light` below `documentElement`, where the variables live).
+        const carriers: Element[] = [document.documentElement];
         try {
-            observer.observe(document.documentElement, {
-                attributes: true,
-                attributeFilter: ["class", "style", "data-theme"],
-            });
+            const mount = document.getElementById("app-mount");
+            if (mount) carriers.push(mount);
+            const themed = document.querySelector(".theme-dark, .theme-light");
+            if (themed && !carriers.includes(themed)) carriers.push(themed);
         } catch {}
+        for (const target of carriers) {
+            try {
+                observer.observe(target, {
+                    attributes: true,
+                    attributeFilter: ["class", "style", "data-theme"],
+                });
+            } catch {}
+        }
         const io = new IntersectionObserver(
             (entries) => {
                 if (entries.some((e) => e.isIntersecting)) setVisible((v) => v + PAGE_STEP);
@@ -495,7 +534,7 @@ export function GalleryPage() {
     const t = store.i18n ?? {};
 
     return (
-        <div class={classes.page} data-gallery-theme={theme()}>
+        <div ref={pageEl} class={classes.page} data-gallery-theme={theme()}>
             <SettingsPageHeader
                 title={t["gallery-title"] ?? "Gallery"}
                 description={

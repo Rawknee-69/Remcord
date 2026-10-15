@@ -29,7 +29,14 @@ function matchesSelector(el, selector) {
 
 function matchesSingle(el, selector) {
     if (!(el instanceof FakeElement)) return false;
-    const m = selector.match(/^([a-zA-Z0-9*]+)?(\[.*\])?$/);
+    const trimmed = selector.trim();
+    const classMatch = trimmed.match(/^\.([\w-]+)$/);
+    if (classMatch) {
+        return String(el.className ?? "")
+            .split(" ")
+            .includes(classMatch[1]);
+    }
+    const m = trimmed.match(/^([a-zA-Z0-9*]+)?(\[.*\])?$/);
     if (!m) return false;
     const [, tag, attrPart] = m;
     if (tag && tag !== "*" && el.tagName.toLowerCase() !== tag.toLowerCase()) return false;
@@ -275,10 +282,11 @@ class FakeDocument extends FakeElement {
         };
     }
     getElementById(id) {
-        return this._ids[id] ?? this.body.querySelector(`[id="${id}"]`) ?? null;
+        if (this._ids[id]) return this._ids[id];
+        const found = this.documentElement.querySelector(`[id="${id}"]`);
+        return found ?? null;
     }
     querySelector(selector) {
-        if (selector === ".theme-dark, .theme-light") return null;
         return this.documentElement.querySelector(selector);
     }
     dispatchEvent(event) {
@@ -349,18 +357,30 @@ function createHarness() {
         },
         NodeFilter: { SHOW_TEXT: 4 },
         KeyboardEvent: class extends FakeEvent {},
-        getComputedStyle: () => {
-            // Simulated Discord dark theme plus one custom-CSS variable.
+        getComputedStyle: (el) => {
+            // Production-faithful: theme variables resolve only inside the
+            // themed subtree. The menu layer lives outside it, so reads off
+            // the menu come back empty and the plugin must climb scopes.
             const vars = {
                 "--background-primary": "#313338",
                 "--text-normal": "#dbdee1",
                 "--brand-500": "#5865f2",
                 "--custom-accent": "#ff73fa",
             };
-            const names = Object.keys(vars);
+            let themed = false;
+            let node = el;
+            while (node) {
+                const classes = String(node.className ?? "").split(" ");
+                if (classes.includes("theme-dark") || classes.includes("theme-light")) {
+                    themed = true;
+                    break;
+                }
+                node = node.parentNode;
+            }
+            const names = themed ? Object.keys(vars) : [];
             const style = {
                 length: names.length,
-                getPropertyValue: (name) => vars[name] ?? "",
+                getPropertyValue: (name) => (themed ? (vars[name] ?? "") : ""),
             };
             names.forEach((name, index) => {
                 style[index] = name;
@@ -382,6 +402,11 @@ function createHarness() {
         "\nglobalThis.__hooks = __exp;";
     vm.runInContext(wrapped, context);
     const hooks = vm.runInContext("globalThis.__hooks", context);
+    // Production-faithful tree: Discord's themed container lives under body
+    // while menu layers portal outside it.
+    const themed = document.createElement("div");
+    themed.className = "theme-dark";
+    document.body.appendChild(themed);
     return { document, window, shelter, hooks, toasts, clipboard, opened, fetched, addedUrls, menuCallbacks, context };
 }
 
@@ -483,6 +508,24 @@ test("clicking the Save entry opens the themed popup", () => {
     assert.ok(overlay.querySelector("input"), "popup must have a name field");
     assert.ok(overlay.querySelector("select"), "popup must have a collection picker");
     assert.ok(overlay.querySelector("textarea"), "popup must have a note field");
+});
+
+test("popup follows the themed container when the menu is outside it", () => {
+    // Production shape: menus portal outside `.theme-dark`, where variable
+    // reads come back empty. The popup must still resolve the theme.
+    const harness = createHarness();
+    harness.hooks.onLoad();
+    assert.ok(
+        harness.document.querySelector(".theme-dark"),
+        "the harness must provide a themed container",
+    );
+    rightClickImage(harness, "https://cdn.discordapp.com/attachments/1/2/photo.png");
+    const { menu } = renderMenu(harness);
+    findItem(menu, "Save to Gallery").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    const overlay = overlayOf(harness);
+    assert.ok(overlay, "the popup must open");
+    assert.equal(overlay.style.getPropertyValue("--background-primary"), "#313338");
+    assert.equal(overlay.style.colorScheme, "dark");
 });
 
 test("native Copy Link opens the popup instead of copying silently", () => {

@@ -40,46 +40,63 @@ function fileNameFromUrl(url: string, fallback = "saved-file"): string {
     }
 }
 
-// Discord's effective appearance, read from an element inside the themed
-// tree (the open menu): stock dark/light or any custom theme. Keeps the
-// popup's surfaces and native controls on Discord's theme. Best-effort:
-// falls back to the OS preference, never throws.
-function discordTheme(scope: Element): "light" | "dark" {
-    try {
-        const raw = getComputedStyle(scope).getPropertyValue("--background-primary").trim().toLowerCase();
-        let r = -1;
-        let g = -1;
-        let b = -1;
-        const hex = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/);
-        if (hex) {
-            const h = hex[1];
-            const full =
-                h.length === 3
-                    ? h
-                          .split("")
-                          .map((c) => c + c)
-                          .join("")
-                    : h;
-            r = parseInt(full.slice(0, 2), 16);
-            g = parseInt(full.slice(2, 4), 16);
-            b = parseInt(full.slice(4, 6), 16);
-        } else {
-            const rgb = raw.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
-            if (rgb) {
-                r = Number(rgb[1]);
-                g = Number(rgb[2]);
-                b = Number(rgb[3]);
-            }
-        }
-        if (r >= 0 && g >= 0 && b >= 0 && r <= 255 && g <= 255 && b <= 255) {
-            return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.4 ? "light" : "dark";
-        }
-    } catch {}
+// Discord's effective appearance: the first scope in the theme chain whose
+// resolved `--background-primary` parses (themed container, app mount,
+// anchor, body, document root). Falls back to the OS preference when no
+// scope yields a color, so custom themes, custom CSS, and stock themes all
+// resolve without hardcoding. Never throws.
+function discordTheme(anchor: Element): "light" | "dark" {
+    for (const scope of themeScopes(anchor)) {
+        try {
+            const parsed = parseThemeValue(getComputedStyle(scope).getPropertyValue("--background-primary"));
+            if (parsed) return parsed;
+        } catch {}
+    }
     try {
         return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     } catch {
         return "dark";
     }
+}
+
+/**
+ * Snapshots every custom property the active theme resolved, merged across
+ * every scope that may carry them (first non-empty value wins per
+ * variable). Custom CSS and custom themes define their own variables, so a
+ * fixed list would miss them: enumerating computed styles captures whatever
+ * the active theme (stock, custom theme, or raw custom CSS) actually
+ * applied, plus an explicit backfill of the variables the popup CSS reads
+ * for hosts without enumeration. Best-effort and capped — never throws.
+ */
+function snapshotThemeVars(anchor: Element): Array<[string, string]> {
+    const out: Array<[string, string]> = [];
+    const seen = new Set<string>();
+    const pushVar = (name: string, value: string) => {
+        if (!seen.has(name) && value) {
+            seen.add(name);
+            out.push([name, value]);
+        }
+    };
+    for (const scope of themeScopes(anchor)) {
+        try {
+            const computed = getComputedStyle(scope);
+            const count = computed.length;
+            for (let index = 0; index < count && out.length < 512; index += 1) {
+                const name = computed[index];
+                if (typeof name !== "string" || !name.startsWith("--") || seen.has(name)) continue;
+                try {
+                    pushVar(name, computed.getPropertyValue(name).trim());
+                } catch {}
+            }
+        } catch {}
+        for (const name of POPUP_THEME_VARS) {
+            if (seen.has(name)) continue;
+            try {
+                pushVar(name, getComputedStyle(scope).getPropertyValue(name).trim());
+            } catch {}
+        }
+    }
+    return out;
 }
 
 interface GalleryMeta {
@@ -385,27 +402,63 @@ const POPUP_THEME_VARS = [
 ];
 
 /**
- * Snapshots every custom property resolved on an element inside Discord's
- * themed tree. Custom CSS and custom themes define their own variables, so
- * a fixed list would miss them: enumerating the computed style captures
- * whatever the active theme (stock, custom theme, or raw custom CSS)
- * actually applied. Best-effort and capped — never throws.
+ * Elements that may carry Discord's theme variables, most authoritative
+ * first. Menus (and the click anchor with them) can render outside the
+ * themed subtree, where variable reads come back empty even though Discord
+ * itself looks themed — so the themed container, app mount, anchor, body,
+ * and document root are all tried in order. Covers stock themes, custom
+ * themes, and raw custom CSS (which usually targets `:root`).
  */
-function snapshotThemeVars(scope: Element): Array<[string, string]> {
-    const out: Array<[string, string]> = [];
+function themeScopes(anchor: Element): Element[] {
+    const scopes: Element[] = [];
+    const push = (el: Element | null | undefined) => {
+        if (el && !scopes.includes(el)) scopes.push(el);
+    };
     try {
-        const computed = getComputedStyle(scope);
-        const count = computed.length;
-        for (let index = 0; index < count && out.length < 512; index += 1) {
-            const name = computed[index];
-            if (typeof name !== "string" || !name.startsWith("--")) continue;
-            try {
-                const value = computed.getPropertyValue(name).trim();
-                if (value) out.push([name, value]);
-            } catch {}
-        }
+        push(document.querySelector(".theme-dark, .theme-light"));
     } catch {}
-    return out;
+    try {
+        push(document.getElementById("app-mount"));
+    } catch {}
+    push(anchor);
+    try {
+        if (document.body) push(document.body);
+    } catch {}
+    try {
+        if (document.documentElement) push(document.documentElement);
+    } catch {}
+    return scopes;
+}
+
+/** Parse one resolved background value into an appearance, if possible. */
+function parseThemeValue(raw: string): "light" | "dark" | null {
+    const value = raw.trim().toLowerCase();
+    let r = -1;
+    let g = -1;
+    let b = -1;
+    const hex = value.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/);
+    if (hex) {
+        const h = hex[1];
+        const full =
+            h.length === 3
+                ? h
+                      .split("")
+                      .map((c) => c + c)
+                      .join("")
+                : h;
+        r = parseInt(full.slice(0, 2), 16);
+        g = parseInt(full.slice(2, 4), 16);
+        b = parseInt(full.slice(4, 6), 16);
+    } else {
+        const rgb = value.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
+        if (rgb) {
+            r = Number(rgb[1]);
+            g = Number(rgb[2]);
+            b = Number(rgb[3]);
+        }
+    }
+    if (r < 0 || g < 0 || b < 0 || r > 255 || g > 255 || b > 255) return null;
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.4 ? "light" : "dark";
 }
 
 /**
@@ -425,18 +478,8 @@ function openSavePopup(save: PendingSave, anchor: Element): void {
         // variables. Every variable is copied onto the overlay itself
         // (below), so the popup matches stock themes, custom themes, and
         // raw custom CSS wherever it attaches.
-        const computed = getComputedStyle(anchor);
         const scheme = discordTheme(anchor);
         const themeVars = snapshotThemeVars(anchor);
-        // Always carry the variables the popup CSS reads, even if the
-        // enumeration above came back empty (non-Chromium hosts).
-        for (const name of POPUP_THEME_VARS) {
-            if (themeVars.some(([seen]) => seen === name)) continue;
-            try {
-                const value = computed.getPropertyValue(name).trim();
-                if (value) themeVars.push([name, value]);
-            } catch {}
-        }
         closeMenu();
         ensurePopupStyles();
         const bridge = galleryBridge();
