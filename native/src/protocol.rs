@@ -576,13 +576,17 @@ pub struct KeybindsRemoveRequest {
 pub struct MenusGetTemplateRequest {}
 
 /// Renderer-supplied save metadata for gallery additions. Every member is
-/// optional and bounded; unknown members are rejected. The host slices
-/// each string exactly like Electron's `addGalleryUrl`/`addGalleryLink`.
+/// optional and bounded; unknown members are rejected. Keys are camelCase
+/// on the wire (matching the Electron bridge exactly), hence the rename.
+/// The host slices each string exactly like Electron's
+/// `addGalleryUrl`/`addGalleryLink`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GalleryMetaRequest {
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub note: String,
     #[serde(default)]
     pub guild_id: String,
     #[serde(default)]
@@ -656,15 +660,18 @@ pub struct GalleryBulkRemoveRequest {
 }
 
 /// Update request for the `gallery.update` capability: exactly one item
-/// id plus an optional title and/or category list. There is deliberately
-/// NO kind, URL, file, size, mime, timestamp, or path member: only the
-/// title and the tag list are mutable, mirroring Electron's patch shape.
+/// id plus an optional title, note, and/or category list. There is
+/// deliberately NO kind, URL, file, size, mime, timestamp, or path
+/// member: only the title, note, and tag list are mutable, mirroring
+/// Electron's patch shape.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GalleryUpdateRequest {
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
     #[serde(default)]
     pub categories: Option<Vec<String>>,
 }
@@ -2560,6 +2567,7 @@ fn gallery_save_shape_valid(url: &str, meta: &GalleryMetaRequest) -> bool {
     !(url.is_empty()
         || url.len() > crate::gallery::MAX_URL_BYTES
         || meta.title.len() > 1024
+        || meta.note.len() > 2048
         || meta.guild_id.len() > 256
         || meta.guild_name.len() > 256
         || meta.channel_id.len() > 256
@@ -5084,6 +5092,35 @@ mod tests {
         assert_eq!(file["fileName"], "x.png");
         assert!(file.get("file_name").is_none());
         assert!(file.get("error").is_none());
+    }
+
+    #[test]
+    fn gallery_meta_accepts_camel_case_with_note() {
+        // The Electron bridge sends camelCase meta (`guildId`, `note`,
+        // …): snake_case members must parse, and anything else must not.
+        let wire = "{\"version\":1,\"request_id\":\"r\",\"command\":{\"type\":\"gallery_add_url\",\"payload\":{\"url\":\"https://x/y.png\",\"meta\":{\"title\":\"t\",\"note\":\"why\",\"guildId\":\"g\",\"channelName\":\"c\",\"categories\":[\"clips\"]}}}}";
+        let parsed = parse_bridge_message(wire).expect("camelCase meta must parse");
+        assert!(
+            matches!(parsed, super::BridgeMessage::Request(_)),
+            "camelCase save envelope must parse"
+        );
+        let hostile = "{\"version\":1,\"request_id\":\"r\",\"command\":{\"type\":\"gallery_add_url\",\"payload\":{\"url\":\"https://x/y.png\",\"meta\":{\"path\":\"C:\\\\x\"}}}}";
+        assert!(
+            parse_bridge_message(hostile).is_err(),
+            "path members in meta are refused"
+        );
+    }
+
+    #[test]
+    fn gallery_update_accepts_a_note_patch() {
+        let wire = "{\"version\":1,\"request_id\":\"r\",\"command\":{\"type\":\"gallery_update\",\"payload\":{\"id\":\"a\",\"note\":\"why\"}}}";
+        assert!(
+            matches!(
+                parse_bridge_message(wire),
+                Ok(super::BridgeMessage::Request(_))
+            ),
+            "note patch must parse"
+        );
     }
 
     #[test]

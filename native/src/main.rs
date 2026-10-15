@@ -24,6 +24,7 @@ mod downloads;
 mod environment_observer;
 mod folders;
 mod gallery;
+mod gallery_plugin;
 mod graphics;
 mod keybinds;
 mod localization;
@@ -2838,6 +2839,75 @@ fn titlebar_plugin_start_script() -> Result<String, String> {
     Ok(script)
 }
 
+/// Closed registry id for the real Remcord gallery plugin. It matches the
+/// `"remcord-gallery"` key Electron pins in the Shelter injector map
+/// (`src/discord/preload/mods/shelter.mts`), so host logs and the Electron
+/// contract name the same plugin. The renderer never supplies this id: the
+/// host splices it into the fixed start script below.
+const GALLERY_PLUGIN_ID: &str = "remcord-gallery";
+
+/// Fixed manifest for the real Remcord gallery plugin registration. Only the
+/// name is carried (the loader-probe precedent); the renderer supplies no
+/// manifest, id, source, or update flag.
+const GALLERY_PLUGIN_MANIFEST_JSON: &str = r#"{"name":"Remcord Gallery"}"#;
+
+/// Host-built start script for the real Remcord gallery plugin (context-menu
+/// save popup), evaluated once per document after Shelter's own bootstrap
+/// marker proves `window.shelter.plugins` exists (same trigger as the
+/// settings/titlebar plugins). It registers the embedded artifact through
+/// the same closed add/start lifecycle the loader probe proved (remove-first
+/// for idempotency, host-fixed id/source/manifest, then start), and returns
+/// a plain status string the host logs — never plugin source, paths, or URLs.
+///
+/// `__REMCORD_GALLERY_PLUGIN_JS__` is spliced as a JSON-encoded string
+/// literal (never interpolated raw); `__REMCORD_GALLERY_PLUGIN_MANIFEST__`
+/// is spliced as fixed JSON.
+const GALLERY_PLUGIN_START_TEMPLATE: &str = r#"
+(() => {
+  const ID = "remcord-gallery";
+  try {
+    const plugins = window.shelter && window.shelter.plugins;
+    if (!plugins) return "gallery-plugin-failed: shelter plugins unavailable";
+    for (const name of ["addLocalPlugin", "startPlugin", "removePlugin"]) {
+      if (typeof plugins[name] !== "function") return "gallery-plugin-failed: missing " + name;
+    }
+    try {
+      plugins.removePlugin(ID);
+    } catch (ignored) {}
+    plugins.addLocalPlugin(ID, {
+      js: __REMCORD_GALLERY_PLUGIN_JS__,
+      manifest: __REMCORD_GALLERY_PLUGIN_MANIFEST__,
+      update: false,
+    });
+    plugins.startPlugin(ID);
+    return "gallery-plugin-started";
+  } catch (error) {
+    return "gallery-plugin-failed: " + String((error && error.message) || error).slice(0, 256);
+  }
+})()
+"#;
+
+/// Builds the per-launch gallery plugin start script by splicing the
+/// embedded artifact and the fixed manifest into the closed template.
+/// Fails fast on an unspliced placeholder or an unserializable artifact.
+fn gallery_plugin_start_script() -> Result<String, String> {
+    let js = serde_json::to_string(gallery_plugin::artifact().js)
+        .map_err(|error| format!("gallery plugin artifact cannot be serialized: {error}"))?;
+    let script = GALLERY_PLUGIN_START_TEMPLATE
+        .replace("__REMCORD_GALLERY_PLUGIN_JS__", &js)
+        .replace(
+            "__REMCORD_GALLERY_PLUGIN_MANIFEST__",
+            GALLERY_PLUGIN_MANIFEST_JSON,
+        );
+    if script.contains("__REMCORD_GALLERY_PLUGIN_") {
+        return Err("gallery plugin start script has an unspliced placeholder".to_owned());
+    }
+    if !script.contains(GALLERY_PLUGIN_ID) {
+        return Err("gallery plugin start script lost the closed plugin id".to_owned());
+    }
+    Ok(script)
+}
+
 /// DEV-only settings smoke probe (`REMCORD_NATIVE_SETTINGS_SMOKE=1`).
 /// Exercises the exact read the migrated Shelter power caller performs:
 /// `window.remcord.settings.getConfig()` → `blockPowerSavingInVoiceChat`.
@@ -5092,6 +5162,7 @@ fn sync_hotkey_worker(
 fn gallery_meta_from_request(meta: &protocol::GalleryMetaRequest) -> gallery::GalleryMeta {
     gallery::GalleryMeta {
         title: meta.title.clone(),
+        note: meta.note.clone(),
         guild_id: meta.guild_id.clone(),
         guild_name: meta.guild_name.clone(),
         channel_id: meta.channel_id.clone(),
@@ -5700,6 +5771,7 @@ fn handle_mod_bootstrap_result(
     injector_probe_after_marker: Option<&str>,
     settings_plugin_start: Option<ShelterPluginStart<'_>>,
     titlebar_plugin_start: Option<ShelterPluginStart<'_>>,
+    gallery_plugin_start: Option<ShelterPluginStart<'_>>,
 ) {
     let Some(pending) = pending_mods.remove(&request_id) else {
         eprintln!(
@@ -5876,6 +5948,35 @@ fn handle_mod_bootstrap_result(
                     })
                 {
                     eprintln!("[Titlebar] start evaluation failed: {error}");
+                }
+            }
+        }
+        // Real Remcord gallery plugin (context-menu save popup): same
+        // trigger, same closed lifecycle, own generation guard so a
+        // settings/titlebar replay can never start (or skip) the gallery.
+        // Failure is loud but never blocks the document.
+        if let Some(start) = gallery_plugin_start {
+            let generation = document_lifecycle.generation();
+            if !settings_plugin_start_due(*start.started_generation, generation) {
+                eprintln!(
+                    "[GalleryPlugin][duplicate] gallery plugin already started in document generation {generation}"
+                );
+            } else {
+                *start.started_generation = Some(generation);
+                *start.start_count += 1;
+                let count = *start.start_count;
+                if let Err(error) =
+                    webview.evaluate_script_with_callback(start.script, move |result| {
+                        if result == "\"gallery-plugin-started\"" {
+                            println!(
+                                "[GalleryPlugin] start ok=true count={count} generation={generation}"
+                            );
+                        } else {
+                            eprintln!("[GalleryPlugin] start ok=false result={result}");
+                        }
+                    })
+                {
+                    eprintln!("[GalleryPlugin] start evaluation failed: {error}");
                 }
             }
         }
@@ -6986,6 +7087,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         "[Titlebar] artifact name='{}' bytes={} sha256={}",
         titlebar_plugin.name, titlebar_plugin.bytes, titlebar_plugin.sha256
     );
+    let gallery_plugin = gallery_plugin::artifact();
+    // Same defense in depth as the settings/titlebar artifacts: the build
+    // validated, the running host re-checks, startup fails fast on drift.
+    // Without this artifact the context-menu save popup could never load.
+    gallery_plugin::validate_artifact(gallery_plugin.js, gallery_plugin.name)
+        .expect("embedded gallery plugin artifact must validate at startup");
+    gallery_plugin::validate_sha256(gallery_plugin.sha256)
+        .expect("embedded gallery plugin identity must be well-formed");
+    println!(
+        "[GalleryPlugin] artifact name='{}' bytes={} sha256={}",
+        gallery_plugin.name, gallery_plugin.bytes, gallery_plugin.sha256
+    );
     // Shelter injector surface (F3): validate both embedded injector
     // artifacts and build the static declaration once per launch.
     // Defense in depth like the settings/titlebar artifacts: the build
@@ -7417,6 +7530,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut titlebar_started_generation = None::<u64>;
     let mut titlebar_start_count = 0_u64;
+    // Real Remcord gallery plugin (context-menu save popup): same host-built
+    // script plus per-document guard as the settings/titlebar plugins, moved
+    // into the event-loop closure below. Started from the same Shelter
+    // bootstrap trigger, right after the titlebar.
+    let gallery_plugin_start_script =
+        gallery_plugin_start_script().expect("gallery plugin start script must build");
+    println!(
+        "[GalleryPlugin] start script bytes={}",
+        gallery_plugin_start_script.len()
+    );
+    let mut gallery_plugin_started_generation = None::<u64>;
+    let mut gallery_plugin_start_count = 0_u64;
     // Settle generation for the finish-time titlebar re-run (see the
     // PageLoadFinished arm): heals marker-time injections discarded by a
     // later mount, once per document, with no retry loop.
@@ -10165,6 +10290,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 &profile_path,
                                 &payload.id,
                                 payload.title.as_deref(),
+                                payload.note.as_deref(),
                                 payload.categories.as_deref(),
                             ) {
                                 Ok(item) => respond_gallery_ok(
@@ -13142,6 +13268,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     started_generation: &mut titlebar_started_generation,
                                     start_count: &mut titlebar_start_count,
                                 }),
+                                Some(ShelterPluginStart {
+                                    script: &gallery_plugin_start_script,
+                                    started_generation: &mut gallery_plugin_started_generation,
+                                    start_count: &mut gallery_plugin_start_count,
+                                }),
                             );
                         } else {
                             eprintln!(
@@ -13258,6 +13389,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut smoke_reloads_remaining,
                             &mut smoke_reload_request_id,
                             &mut response_count,
+                            None,
                             None,
                             None,
                             None,
@@ -13773,15 +13905,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        document_start_script, execution_script_for, initialization_script, is_allowed_navigation,
-        is_trusted_bridge_origin, load_custom_bundle, lookup_mod_descriptor, mod_adapter_script,
-        plugins_entries_compute, plugins_list_compute, plugins_reload_compute,
-        plugins_script_compute, plugins_set_enabled_compute, relaunch_command, resolve_active_mods,
-        settings_plugin_start_due, settings_plugin_start_script, settings_ui_probe_script,
-        startup_visibility, titlebar_plugin_start_script, StartupVisibility, CUSTOM_MOD,
-        EQUICORD_MOD, KNOWN_MODS, PERMISSIONS_SMOKE_SCRIPT, REMCORD_PROTOCOL_SMOKE_SCRIPT,
-        SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE, SHELTER_MOD, TITLEBAR_PLUGIN_ID,
-        TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
+        document_start_script, execution_script_for, gallery_plugin_start_script,
+        initialization_script, is_allowed_navigation, is_trusted_bridge_origin, load_custom_bundle,
+        lookup_mod_descriptor, mod_adapter_script, plugins_entries_compute, plugins_list_compute,
+        plugins_reload_compute, plugins_script_compute, plugins_set_enabled_compute,
+        relaunch_command, resolve_active_mods, settings_plugin_start_due,
+        settings_plugin_start_script, settings_ui_probe_script, startup_visibility,
+        titlebar_plugin_start_script, StartupVisibility, CUSTOM_MOD, EQUICORD_MOD,
+        GALLERY_PLUGIN_ID, GALLERY_PLUGIN_START_TEMPLATE, KNOWN_MODS, PERMISSIONS_SMOKE_SCRIPT,
+        REMCORD_PROTOCOL_SMOKE_SCRIPT, SETTINGS_PLUGIN_ID, SETTINGS_PLUGIN_START_TEMPLATE,
+        SHELTER_MOD, TITLEBAR_PLUGIN_ID, TITLEBAR_PLUGIN_START_TEMPLATE, VENCORD_MOD,
     };
     use crate::mod_substrate::{
         is_allowed_mod_download_url, mod_css_script, mod_execution_context_script,
@@ -14017,6 +14150,41 @@ mod tests {
         // The embedded stylesheets travel with the script (a controls rule
         // proves real CSS bytes, not padding).
         assert!(script.contains("#window-controls-container"));
+    }
+
+    #[test]
+    fn gallery_plugin_start_script_is_closed_and_embedded() {
+        // The template is closed: host-fixed lifecycle calls and plain status
+        // strings only — no protocol, bridge, URL, or path surface of its own.
+        for token in [
+            "removePlugin",
+            "addLocalPlugin",
+            "startPlugin",
+            "gallery-plugin-started",
+            "gallery-plugin-failed",
+        ] {
+            assert!(
+                GALLERY_PLUGIN_START_TEMPLATE.contains(token),
+                "template must carry {token}"
+            );
+        }
+        assert!(
+            GALLERY_PLUGIN_START_TEMPLATE.contains(GALLERY_PLUGIN_ID),
+            "template must use the closed plugin id"
+        );
+        for token in ["remcord://", "postMessage", "http://", "https://"] {
+            assert!(
+                !GALLERY_PLUGIN_START_TEMPLATE.contains(token),
+                "template must not carry {token}"
+            );
+        }
+        let script = gallery_plugin_start_script().expect("the start script must build");
+        assert!(!script.contains("__REMCORD_GALLERY_PLUGIN_"));
+        assert!(script.contains("remcord-gallery"));
+        assert!(script.contains("Remcord Gallery"));
+        // The embedded artifact travels with the script (the popup marker
+        // proves the splice carries real plugin bytes, not padding).
+        assert!(script.contains("remcord-gal-dialog"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ import {
     type GalleryCategory,
     type GalleryGroupBy,
     type GalleryItem,
+    galleryThemeFromBackground,
     groupGalleryItems,
     paginateGalleryItems,
     sortGalleryItems,
@@ -32,6 +33,25 @@ const {
 const PAGE_STEP = 60;
 const PREFS_KEY = "remcord:gallery:prefs";
 const blobCache = new Map<string, string>();
+
+/**
+ * Discord's effective appearance: whatever theme — stock dark/light or any
+ * custom theme — actually resolved `--background-primary` to. Falls back to
+ * the OS preference when Discord's variables are unreadable, so the page
+ * never hardcodes an appearance. Never throws.
+ */
+function detectDiscordTheme(): "light" | "dark" {
+    try {
+        const raw = getComputedStyle(document.documentElement).getPropertyValue("--background-primary");
+        const parsed = galleryThemeFromBackground(raw ?? "");
+        if (parsed) return parsed;
+    } catch {}
+    try {
+        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    } catch {
+        return "dark";
+    }
+}
 
 function readPrefs(): Partial<{ groupBy: GalleryGroupBy; sort: "newest" | "oldest"; kind: string }> {
     try {
@@ -71,6 +91,7 @@ function castItem(raw: Record<string, unknown>): GalleryItem {
         kind: (raw.kind as GalleryItem["kind"]) ?? "link",
         sourceUrl: String(raw.sourceUrl ?? ""),
         title: String(raw.title ?? ""),
+        note: String(raw.note ?? ""),
         fileName: String(raw.fileName ?? ""),
         localFile: String(raw.localFile ?? ""),
         sizeBytes: Number(raw.sizeBytes ?? 0),
@@ -188,6 +209,7 @@ function Thumb(props: { item: GalleryItem }) {
 function AddLinkModal(props: { close: () => void; onSaved: () => void }) {
     const [url, setUrl] = createSignal("");
     const [title, setTitle] = createSignal("");
+    const [note, setNote] = createSignal("");
     const ctx = shelterContext();
     function save() {
         const u = url().trim();
@@ -198,6 +220,7 @@ function AddLinkModal(props: { close: () => void; onSaved: () => void }) {
         void window.remcord.gallery
             .addUrl(u, {
                 title: title().trim(),
+                note: note().trim(),
                 guildId: ctx.guildId,
                 guildName: ctx.guildName,
                 channelId: ctx.channelId,
@@ -229,6 +252,9 @@ function AddLinkModal(props: { close: () => void; onSaved: () => void }) {
                 <Divider mt mb />
                 <Header tag={HeaderTags.HeadingSM}>Title (optional)</Header>
                 <TextBox value={title()} onInput={setTitle} placeholder="My clip" />
+                <Divider mt mb />
+                <Header tag={HeaderTags.HeadingSM}>Note (optional)</Header>
+                <TextBox value={note()} onInput={setNote} placeholder="Why are you saving this?" />
                 <p class={classes.hint}>
                     Tagged with {ctx.guildName || "current server"} #{ctx.channelName || "current channel"} · snapshots
                     stay even if you leave the server.
@@ -272,6 +298,10 @@ export function GalleryPage() {
     const [selected, setSelected] = createSignal<Set<string>>(new Set());
     const [newCat, setNewCat] = createSignal("");
     const [assignCat, setAssignCat] = createSignal("");
+    // Live Discord theme: re-read whenever the OS scheme flips or Discord
+    // rewrites its root (theme switch / custom theme applied), so the
+    // `data-gallery-theme` tokens and `color-scheme` always match Discord.
+    const [theme, setTheme] = createSignal<"light" | "dark">(detectDiscordTheme());
 
     let sentinel: HTMLDivElement | undefined;
 
@@ -300,6 +330,19 @@ export function GalleryPage() {
 
     onMount(() => {
         refresh();
+        const updateTheme = () => setTheme(detectDiscordTheme());
+        const media = window.matchMedia("(prefers-color-scheme: dark)");
+        const onMedia = () => updateTheme();
+        try {
+            media.addEventListener("change", onMedia);
+        } catch {}
+        const observer = new MutationObserver(updateTheme);
+        try {
+            observer.observe(document.documentElement, {
+                attributes: true,
+                attributeFilter: ["class", "style", "data-theme"],
+            });
+        } catch {}
         const io = new IntersectionObserver(
             (entries) => {
                 if (entries.some((e) => e.isIntersecting)) setVisible((v) => v + PAGE_STEP);
@@ -307,7 +350,13 @@ export function GalleryPage() {
             { rootMargin: "600px" },
         );
         if (sentinel) io.observe(sentinel);
-        onCleanup(() => io.disconnect());
+        onCleanup(() => {
+            io.disconnect();
+            observer.disconnect();
+            try {
+                media.removeEventListener("change", onMedia);
+            } catch {}
+        });
     });
 
     const guildOptions = createMemo(() => {
@@ -446,7 +495,7 @@ export function GalleryPage() {
     const t = store.i18n ?? {};
 
     return (
-        <div class={classes.page} data-gallery-theme="system">
+        <div class={classes.page} data-gallery-theme={theme()}>
             <SettingsPageHeader
                 title={t["gallery-title"] ?? "Gallery"}
                 description={
@@ -780,6 +829,11 @@ export function GalleryPage() {
                                                             >
                                                                 {item.title || item.fileName || "Untitled"}
                                                             </span>
+                                                            <Show when={item.note}>
+                                                                <span class={classes.note} title={item.note}>
+                                                                    {item.note}
+                                                                </span>
+                                                            </Show>
                                                             <span class={classes.sub}>
                                                                 {(item.guildName || "External") +
                                                                     (item.channelName ? ` · #${item.channelName}` : "")}

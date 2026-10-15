@@ -4666,6 +4666,18 @@ test("gallery.remove/update/category mutations resolve Electron-parity outcomes"
     assert.deepEqual(JSON.parse(JSON.stringify(await renamed)), { ok: true });
 });
 
+test("gallery.update passes note patches through to the host", async () => {
+    const { window } = createGalleryRuntime();
+    const pending = window.remcord.gallery.update("a-1", { note: "why I saved this" });
+    const message = window.messages.find((entry) => entry.command?.type === "gallery_update");
+    assert.deepEqual(message.command, {
+        type: "gallery_update",
+        payload: { id: "a-1", note: "why I saved this" },
+    });
+    respondGallery(window, message, "gallery_update", { ok: true, item: { id: "a-1" } });
+    assert.deepEqual(JSON.parse(JSON.stringify(await pending)), { ok: true, item: { id: "a-1" } });
+});
+
 test("gallery.getFile bounds the preview and falls back honestly", async () => {
     const { window } = createGalleryRuntime();
     const pending = window.remcord.gallery.getFile("a-1");

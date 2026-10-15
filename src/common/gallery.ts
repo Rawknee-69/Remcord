@@ -34,8 +34,13 @@ export interface GalleryMeta {
     authorName?: string;
     messageId?: string;
     title?: string;
+    /** User note: why the item is being saved. Sliced to 500 chars. */
+    note?: string;
     categories?: string[];
 }
+
+/** Maximum stored note length, mirroring the host slice. */
+export const GALLERY_NOTE_MAX = 500;
 
 const INDEX_FILE = "gallery-index.json";
 const FILES_DIR = "files";
@@ -99,6 +104,12 @@ export function loadGalleryIndex(): { items: GalleryItem[]; categories: GalleryC
         const categories = Array.isArray(raw.categories)
             ? raw.categories.filter((c) => c && typeof c.name === "string")
             : [];
+        // Snapshot guarantee: items keep stored guild/channel names forever,
+        // even after leaving the server. Never drop them here. Older index
+        // files predate `note`: backfill it so readers never see undefined.
+        for (const item of items) {
+            if (typeof (item as GalleryItem).note !== "string") (item as GalleryItem).note = "";
+        }
         // Snapshot guarantee: items keep stored guild/channel names forever,
         // even after leaving the server. Never drop them here.
         indexCache = { items, categories };
@@ -247,6 +258,7 @@ export async function addGalleryUrl(
         kind,
         sourceUrl: clean,
         title,
+        note: (meta.note ?? "").slice(0, GALLERY_NOTE_MAX),
         fileName: fileNameFromUrl(clean),
         localFile: "",
         sizeBytes: 0,
@@ -293,6 +305,7 @@ export function addGalleryLink(
         kind: "link",
         sourceUrl: clean,
         title: (meta.title ?? "").slice(0, 256) || fileNameFromUrl(clean, clean.slice(0, 80)),
+        note: (meta.note ?? "").slice(0, GALLERY_NOTE_MAX),
         fileName: fileNameFromUrl(clean),
         localFile: "",
         sizeBytes: 0,
@@ -332,6 +345,7 @@ export function importGalleryFiles(
                 kind: kind === "link" ? "file" : kind,
                 sourceUrl: "",
                 title: (meta.title ?? "").slice(0, 256) || base,
+                note: (meta.note ?? "").slice(0, GALLERY_NOTE_MAX),
                 fileName: name,
                 localFile: `${FILES_DIR}/${name}`,
                 sizeBytes: st.size,
@@ -359,12 +373,13 @@ export function importGalleryFiles(
 
 export function updateGalleryItem(
     id: string,
-    patch: Partial<Pick<GalleryItem, "title" | "categories">>,
+    patch: Partial<Pick<GalleryItem, "title" | "note" | "categories">>,
 ): { ok: true; item: GalleryItem } | { ok: false; error: string } {
     const idx = loadGalleryIndex();
     const item = idx.items.find((i) => i.id === id);
     if (!item) return { ok: false, error: "NOT_FOUND" };
     if (typeof patch.title === "string") item.title = patch.title.slice(0, 256);
+    if (typeof patch.note === "string") item.note = patch.note.slice(0, GALLERY_NOTE_MAX);
     if (Array.isArray(patch.categories)) {
         item.categories = patch.categories.map(normalizeCategoryName).filter(Boolean).slice(0, 12);
     }

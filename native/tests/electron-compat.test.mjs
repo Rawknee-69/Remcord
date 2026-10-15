@@ -396,6 +396,7 @@ test("Electron keeps the Shelter preload wrapper and its injector plugin map", (
     assert.match(shelterPreload, /"remcord-power": \["remcord:\/\/plugins\/power\/"/);
     assert.match(shelterPreload, /"remcord-screenshare": \["remcord:\/\/plugins\/screenshare\/"/);
     assert.match(shelterPreload, /"remcord-titlebar": \["remcord:\/\/plugins\/titlebar\/"/);
+    assert.match(shelterPreload, /"remcord-gallery": \["remcord:\/\/plugins\/gallery\/"/);
     // Platform-specific behavior: Touch Bar is Darwin-only.
     assert.match(shelterPreload, /if \(process\.platform === "darwin"\)/);
     assert.match(shelterPreload, /"remcord-touchbar"/);

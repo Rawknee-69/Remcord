@@ -8,6 +8,7 @@ const requiredPlugins: Record<string, [string, { isVisible: boolean; allowedActi
     "remcord-power": ["remcord://plugins/power/", { isVisible: false, allowedActions: {} }],
     "remcord-screenshare": ["remcord://plugins/screenshare/", { isVisible: false, allowedActions: {} }],
     "remcord-titlebar": ["remcord://plugins/titlebar/", { isVisible: false, allowedActions: {} }],
+    "remcord-gallery": ["remcord://plugins/gallery/", { isVisible: false, allowedActions: {} }],
 };
 if (process.platform === "darwin") {
     requiredPlugins["remcord-touchbar"] = [

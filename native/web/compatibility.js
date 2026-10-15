@@ -1688,12 +1688,13 @@
         }
         const badTimeout = checkGalleryTimeout(timeoutMs);
         if (badTimeout) return Promise.reject(new TypeError(badTimeout));
-        // Id plus title/categories patch only: only the title and the tag
-        // list are mutable, mirroring Electron's patch shape. No kind,
-        // URL, file, size, mime, timestamp, or path member may be supplied
-        // (the host rejects unknown members).
+        // Id plus title/note/categories patch only: only the title, the
+        // note, and the tag list are mutable, mirroring Electron's patch
+        // shape. No kind, URL, file, size, mime, timestamp, or path member
+        // may be supplied (the host rejects unknown members).
         const clean = {};
         if (patch.title !== undefined) clean.title = patch.title;
+        if (patch.note !== undefined) clean.note = patch.note;
         if (patch.categories !== undefined) clean.categories = patch.categories;
         return request({ type: "gallery_update", payload: { id, ...clean } }, timeoutMs);
     }

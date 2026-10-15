@@ -5,6 +5,7 @@ import {
     filterGalleryItems,
     formatGalleryBytes,
     type GalleryItem,
+    galleryThemeFromBackground,
     groupGalleryItems,
     paginateGalleryItems,
     sortGalleryItems,
@@ -16,6 +17,7 @@ function item(over: Partial<GalleryItem>): GalleryItem {
         kind: "image",
         sourceUrl: "https://cdn.discordapp.com/x.png",
         title: "pic",
+        note: "",
         fileName: "x.png",
         localFile: "files/x.png",
         sizeBytes: 10,
@@ -69,4 +71,19 @@ test("grouping supports server/channel/date/kind/category", () => {
     assert.equal(groupGalleryItems(items, "guild").length, 2);
     assert.equal(groupGalleryItems(items, "category").length, 2);
     assert.equal(groupGalleryItems(items, "none")[0].items.length, 2);
+});
+
+test("galleryThemeFromBackground follows the resolved Discord background", () => {
+    // Stock Discord dark/light plus custom-theme shapes.
+    assert.equal(galleryThemeFromBackground("#313338"), "dark");
+    assert.equal(galleryThemeFromBackground("#ffffff"), "light");
+    assert.equal(galleryThemeFromBackground("#FFF"), "light");
+    assert.equal(galleryThemeFromBackground("rgb(49, 51, 56)"), "dark");
+    assert.equal(galleryThemeFromBackground("rgba(255,255,255,0.9)"), "light");
+    assert.equal(galleryThemeFromBackground("  #282B30  "), "dark");
+    // Missing or unparseable values fall back to null (caller uses the OS).
+    assert.equal(galleryThemeFromBackground(""), null);
+    assert.equal(galleryThemeFromBackground("transparent"), null);
+    assert.equal(galleryThemeFromBackground("var(--x)"), null);
+    assert.equal(galleryThemeFromBackground("not a color"), null);
 });

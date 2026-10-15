@@ -15,6 +15,8 @@ export interface GalleryItem {
     sourceUrl: string;
     /** Human title (filename, link title, or user label). */
     title: string;
+    /** User note: why the item was saved. Empty when unset. */
+    note: string;
     fileName: string;
     /** Path relative to the gallery root (files/xxx). Empty for link-only items. */
     localFile: string;
@@ -199,4 +201,41 @@ export function sanitizeGalleryId(id: string): boolean {
 
 export function createGalleryId(): string {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Reads Discord's effective appearance from the resolved
+ * `--background-primary` value (whatever theme — stock dark/light or any
+ * custom theme — actually applied). Returns `"light"`/`"dark"` by relative
+ * luminance, or `null` when the value is missing/unparseable so callers
+ * can fall back to the OS preference. Pure and dependency-free.
+ */
+export function galleryThemeFromBackground(value: string): "light" | "dark" | null {
+    const v = value.trim().toLowerCase();
+    let r = -1;
+    let g = -1;
+    let b = -1;
+    const hex = v.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/);
+    if (hex) {
+        const h = hex[1];
+        const full =
+            h.length === 3
+                ? h
+                      .split("")
+                      .map((c) => c + c)
+                      .join("")
+                : h;
+        r = parseInt(full.slice(0, 2), 16);
+        g = parseInt(full.slice(2, 4), 16);
+        b = parseInt(full.slice(4, 6), 16);
+    } else {
+        const rgb = v.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
+        if (rgb) {
+            r = Number(rgb[1]);
+            g = Number(rgb[2]);
+            b = Number(rgb[3]);
+        }
+    }
+    if (r < 0 || g < 0 || b < 0 || r > 255 || g > 255 || b > 255) return null;
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.4 ? "light" : "dark";
 }

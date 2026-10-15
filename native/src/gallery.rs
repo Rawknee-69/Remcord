@@ -84,6 +84,8 @@ pub const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_MEDIA_BYTES: usize = 48 * 1024 * 1024;
 /// Maximum accepted source URL length (mirrors Electron's 2048 slice).
 pub const MAX_URL_BYTES: usize = 2048;
+/// Maximum stored note length, mirroring Electron's slice.
+pub const MAX_NOTE_CHARS: usize = 500;
 /// Maximum ids accepted per bulk removal (mirrors Electron's 2000 slice).
 pub const MAX_BULK_IDS: usize = 2000;
 /// Maximum categories carried per item (mirrors Electron's 12 slice).
@@ -139,6 +141,8 @@ pub struct GalleryItem {
     pub kind: GalleryKind,
     pub source_url: String,
     pub title: String,
+    /// User note: why the item was saved. Empty when unset.
+    pub note: String,
     pub file_name: String,
     /// Profile-relative `files/<name>` with forward slashes, or empty for
     /// link-only items. Never an absolute path on the wire.
@@ -168,6 +172,7 @@ pub struct GalleryCategory {
 #[derive(Debug, Clone, Default)]
 pub struct GalleryMeta {
     pub title: String,
+    pub note: String,
     pub guild_id: String,
     pub guild_name: String,
     pub channel_id: String,
@@ -717,6 +722,7 @@ pub fn import_local_files(
             kind,
             source_url: String::new(),
             title,
+            note: String::new(),
             file_name: name.clone(),
             local_file: format!("{FILES_DIR_NAME}/{name}"),
             size_bytes: stored,
@@ -863,6 +869,7 @@ pub fn gallery_item_json(item: &GalleryItem) -> serde_json::Value {
         "kind": item.kind.as_str(),
         "sourceUrl": item.source_url,
         "title": item.title,
+        "note": item.note,
         "fileName": item.file_name,
         "localFile": item.local_file,
         "sizeBytes": item.size_bytes,
@@ -893,6 +900,12 @@ fn item_from_json(value: &serde_json::Value) -> Option<GalleryItem> {
             .to_owned(),
         title: value
             .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        // Older index files predate `note`: backfill empty.
+        note: value
+            .get("note")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned(),
@@ -1079,6 +1092,7 @@ fn clean_meta_url(url: &str) -> Result<String, GalleryFailure> {
 fn clean_meta(meta: &GalleryMeta) -> GalleryMeta {
     GalleryMeta {
         title: slice_chars(&meta.title, 256),
+        note: slice_chars(&meta.note, MAX_NOTE_CHARS),
         guild_id: slice_chars(&meta.guild_id, 64),
         guild_name: slice_chars(&meta.guild_name, 128),
         channel_id: slice_chars(&meta.channel_id, 64),
@@ -1176,6 +1190,7 @@ pub fn add_gallery_url(
         kind,
         source_url: clean,
         title,
+        note: meta.note.clone(),
         file_name: slice_chars(&file_name_from_url(url, "saved-file"), 128),
         local_file: String::new(),
         size_bytes: 0,
@@ -1238,6 +1253,7 @@ pub fn add_gallery_link(
         kind: GalleryKind::Link,
         source_url: clean,
         title,
+        note: meta.note.clone(),
         file_name: slice_chars(&file_name_from_url(url, "saved-file"), 128),
         local_file: String::new(),
         size_bytes: 0,
@@ -1307,6 +1323,7 @@ pub fn update_gallery_item(
     profile_dir: &Path,
     id: &str,
     title: Option<&str>,
+    note: Option<&str>,
     categories: Option<&[String]>,
 ) -> Result<GalleryItem, GalleryFailure> {
     validate_gallery_id(id).map_err(|_| failure("INVALID_ID", "gallery id is not valid"))?;
@@ -1318,6 +1335,9 @@ pub fn update_gallery_item(
         .ok_or_else(|| failure("NOT_FOUND", "gallery item was not found"))?;
     if let Some(title) = title {
         item.title = slice_chars(title, 256);
+    }
+    if let Some(note) = note {
+        item.note = slice_chars(note, MAX_NOTE_CHARS);
     }
     if let Some(categories) = categories {
         item.categories = categories
@@ -1713,6 +1733,7 @@ mod tests {
             kind: GalleryKind::Link,
             source_url: String::new(),
             title: String::new(),
+            note: String::new(),
             file_name: String::new(),
             local_file: String::new(),
             size_bytes: 0,
@@ -1951,6 +1972,24 @@ mod tests {
         assert_eq!(items, 1);
         assert!(bytes > 0, "the index file itself counts");
         assert!(files >= 1);
+        remove_temp_root(&root);
+    }
+
+    #[test]
+    fn notes_round_trip_and_update_like_electron() {
+        let root = unique_temp_root("notes");
+        let mut meta = test_meta();
+        meta.note = "clip for the montage".to_owned();
+        meta.title = "cool clip".to_owned();
+        let item = add_gallery_link(&root, "https://example.com/note", &meta).unwrap();
+        assert_eq!(item.note, "clip for the montage");
+        // Persists through the index and back.
+        let items = list_gallery_items(&root).unwrap();
+        assert_eq!(items[0].note, "clip for the montage");
+        // Updates patch the note; overlong notes slice to 500 chars.
+        let updated =
+            update_gallery_item(&root, &item.id, None, Some(&"x".repeat(600)), None).unwrap();
+        assert_eq!(updated.note.len(), 500);
         remove_temp_root(&root);
     }
 }
