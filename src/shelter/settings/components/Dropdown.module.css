@@ -71,8 +71,9 @@
     }
 }
 
-/* Scoped to the dropdown menu so standalone <option> elements elsewhere
+/* Scoped to the dropdown menu so standalone elements elsewhere
    in settings are never restyled by this component. */
+.list [role="option"],
 .list option {
     color: var(--text-subtle);
     font-size: 16px;
@@ -83,11 +84,13 @@
     cursor: pointer;
 }
 
+.list [role="option"]:hover,
 .list option:hover {
     background-color: var(--interactive-background-hover);
     color: var(--interactive-text-hover);
 }
 
+.list [role="option"][aria-selected="true"],
 .list option[aria-selected="true"] {
     background-color: var(--interactive-background-selected);
     color: var(--interactive-text-active);

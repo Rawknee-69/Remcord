@@ -12,6 +12,11 @@ export let tray: Tray;
 
 export function createTray() {
     let trayIcon = getConfig("tray");
+    // Normalize missing/unknown values to the default instead of loading a
+    // missing file (which yields an empty tray image).
+    if (typeof trayIcon !== "string" || trayIcon.length === 0) {
+        trayIcon = "dynamic";
+    }
     if (trayIcon === "disabled") {
         return;
     }

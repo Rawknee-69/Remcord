@@ -33,10 +33,10 @@
 //!   cross here.
 //!
 //! Deliberately out of scope (not omission): constructing the OS tray icon
-//! itself needs a `tray-icon` crate plus the `assets/*.png` pipeline and a
-//! main-loop event arm — a new dependency and a large `main.rs` hunk that
-//! does not belong in a parallel lane. Until that slice ships, every close
-//! still quits exactly like today.
+//! itself lives in `tray_icon.rs` (dedicated STA worker + asset pipeline +
+//! main-loop event arm). This module stays pure so the mapping is tested
+//! without OS calls; `main.rs` wires the live `TrayHandle` presence into
+//! `snapshot_tray_state_live` and `close_behavior::decide`.
 //!
 //! Safety properties (all pinned by tests):
 //!
@@ -96,8 +96,19 @@ pub fn tray_mode_name(mode: TrayMode) -> &'static str {
 /// setting value alone (even `"dynamic"`) never counts — only an actual
 /// icon plus a tested reopen action flips this. Mirrors the rule in
 /// `close_behavior::tray_available` without touching that module.
+///
+/// Compile-time floor: always `false`. Call sites with a live
+/// [`crate::tray_icon::TrayHandle`] use [`tray_available_live`] instead.
 pub fn tray_available() -> bool {
     false
+}
+
+/// Live availability: a spawned tray worker plus a non-disabled mode.
+/// `main.rs` owns the `TrayHandle`; this keeps the "setting alone never
+/// counts" rule while letting `tray.get_state` and startup visibility
+/// report the real icon instead of stranding the window.
+pub fn tray_available_live(tray_handle_present: bool, mode: TrayMode) -> bool {
+    tray_handle_present && mode != TrayMode::Disabled
 }
 
 /// Close policy for one close request under a tray mode: hide if and only
@@ -220,14 +231,29 @@ pub struct TrayStateSnapshot {
 
 /// Build the snapshot from the authoritative settings values. The host owns
 /// both inputs; the renderer supplies nothing.
+///
+/// Compile-time floor (`available: false`): `main.rs` uses
+/// [`snapshot_tray_state_live`] with the live handle instead.
+#[allow(dead_code)]
 pub fn snapshot_tray_state(tray_setting: &str, minimize_to_tray: bool) -> TrayStateSnapshot {
+    snapshot_tray_state_live(tray_setting, minimize_to_tray, false)
+}
+
+/// Build the snapshot with live worker presence. `main.rs` passes
+/// `tray_handle.is_some()` so `available`/`should_hide` reflect the real
+/// OS icon; a disabled mode never counts even with a handle.
+pub fn snapshot_tray_state_live(
+    tray_setting: &str,
+    minimize_to_tray: bool,
+    tray_handle_present: bool,
+) -> TrayStateSnapshot {
     let mode = resolve_tray_mode(tray_setting);
-    let available = tray_available();
+    let available = tray_available_live(tray_handle_present, mode);
     TrayStateSnapshot {
         mode: tray_mode_name(mode),
         available,
         minimize_to_tray,
-        should_hide: should_hide_to_tray(minimize_to_tray, mode),
+        should_hide: minimize_to_tray && mode != TrayMode::Disabled && available,
     }
 }
 

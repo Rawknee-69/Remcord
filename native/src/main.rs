@@ -3451,7 +3451,12 @@ fn startup_visibility(start_minimized: &str) -> StartupVisibility {
     }
 }
 
-fn apply_startup_visibility(window: &tao::window::Window, mode: StartupVisibility, tray: &str) {
+fn apply_startup_visibility(
+    window: &tao::window::Window,
+    mode: StartupVisibility,
+    tray: &str,
+    tray_handle_present: bool,
+) {
     match mode {
         StartupVisibility::Show => window.set_visible(true),
         StartupVisibility::ShowMinimized => {
@@ -3459,10 +3464,16 @@ fn apply_startup_visibility(window: &tao::window::Window, mode: StartupVisibilit
             window.set_minimized(true);
         }
         StartupVisibility::HiddenTray => {
-            if tray == "disabled" {
+            // Never strand the window: "hidden in tray" with no usable
+            // icon falls back to minimized (Electron parity for the
+            // disabled-tray path, which no longer hides blindly).
+            if tray == "disabled" || !tray_handle_present {
                 eprintln!(
-                    "[Window] startMinimized is \"tray\" but the tray icon is disabled; the window will stay hidden with no tray."
+                    "[Window] startMinimized is \"tray\" but no tray icon is available; falling back to minimized."
                 );
+                window.set_visible(true);
+                window.set_minimized(true);
+                return;
             }
             // Hide to tray (Electron `setSkipTaskbar(true)` + hide parity):
             // the tray worker owns the reopen action.
@@ -8312,7 +8323,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     };
                     let mode = startup_visibility(mode_name.as_str());
                     println!("[Window] startup visibility mode={mode:?}");
-                    apply_startup_visibility(&window, mode, tray_name.as_str());
+                    apply_startup_visibility(&window, mode, tray_name.as_str(), tray_handle.is_some());
                 }
                 if let Some(started_at) = page_load_started_at.take() {
                     println!(
@@ -11623,17 +11634,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
                         BridgeCommand::TrayGetState(_) => {
-                            // F13 read-only tray state: resolved mode, the
-                            // availability flip point (false until an OS icon
-                            // ships), the authoritative minimizeToTray, and
-                            // the resulting close policy. Parameter-free like
+                            // F13 read-only tray state: resolved mode, live
+                            // worker presence (a setting alone never counts),
+                            // the authoritative minimizeToTray, and the
+                            // resulting close policy. Parameter-free like
                             // diagnostics; a corrupt snapshot fails closed.
                             let request_id = request.request_id;
                             match load_settings(&profile_path) {
                                 Ok(loaded) => {
-                                    let state = tray::snapshot_tray_state(
+                                    let state = tray::snapshot_tray_state_live(
                                         &loaded.snapshot.tray,
                                         loaded.snapshot.minimize_to_tray,
+                                        tray_handle.is_some(),
                                     );
                                     println!("{}", tray::format_log(
                                         tray::resolve_tray_mode(&loaded.snapshot.tray),

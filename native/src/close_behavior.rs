@@ -4,9 +4,8 @@
 //! true and `window_quit` when it is false (shared titlebar artifact,
 //! `src/shelter/titlebar/index.ts:43-47` — Electron-owned, not touched
 //! here). Hiding is only safe when a working tray icon can reopen the app;
-//! no native tray icon exists (verified: no `TrayIcon`/`SystemTray` surface
-//! anywhere under `native/`), so a hide would strand the app running with
-//! no visible way to reopen it.
+//! the live worker (`tray_icon::TrayHandle` presence, checked by `main.rs`
+//! at the close site) is what counts — a setting name alone never does.
 //!
 //! Policy (pure, no new mechanism): hide if and only if hide-to-tray was
 //! requested AND a usable native tray is available; otherwise take the

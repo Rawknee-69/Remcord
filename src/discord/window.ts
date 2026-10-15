@@ -316,6 +316,12 @@ function doAfterDefiningTheWindow(passedWindow: BrowserWindow): void {
             passedWindow.destroy();
         }
         if (getConfig("minimizeToTray") && !forceQuit) {
+            // Never strand the app: hiding is only safe when a tray icon
+            // exists to reopen it. With the tray disabled, quit instead.
+            if (getConfig("tray") === "disabled") {
+                app.quit();
+                return;
+            }
             // Save state when hiding to tray so we persist display metadata
             try {
                 saveWindowState(passedWindow);

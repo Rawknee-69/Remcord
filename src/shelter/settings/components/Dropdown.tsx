@@ -12,25 +12,56 @@ export const Dropdown = (props: {
     disabled?: boolean | undefined;
 }) => {
     const [open, set] = createSignal(false);
-    const [maxHeight, setMaxHeight] = createSignal(`${props.maxHeight}px`);
+    const [maxHeight, setMaxHeight] = createSignal(
+        typeof props.maxHeight === "number" ? `${props.maxHeight}px` : "240px",
+    );
     let container: HTMLDivElement | undefined;
 
-    const handler = (e: MouseEvent) => !container?.contains(e.target as Node) && set(false);
+    const close = () => set(false);
 
-    onMount(() => document.addEventListener("click", handler));
-    onCleanup(() => document.removeEventListener("click", handler));
+    const handler = (e: MouseEvent) => !container?.contains(e.target as Node) && close();
+
+    const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key === "Escape") {
+            close();
+        }
+    };
+
+    onMount(() => {
+        document.addEventListener("click", handler);
+        document.addEventListener("keydown", onKeyDown);
+    });
+    onCleanup(() => {
+        document.removeEventListener("click", handler);
+        document.removeEventListener("keydown", onKeyDown);
+    });
 
     createEffect(() => {
-        if (!open() || !props.limitHeight || props.maxHeight) return;
+        if (!open()) return;
+        if (typeof props.maxHeight === "number") {
+            setMaxHeight(`${props.maxHeight}px`);
+            return;
+        }
+        // Long lists (tray has 10 entries) must scroll instead of growing
+        // past the settings pane and appearing blank/clipped.
+        if (!props.limitHeight) {
+            setMaxHeight("240px");
+            return;
+        }
 
         const rect = container?.parentElement?.getBoundingClientRect();
         if (!rect) return;
 
         const availableSpace = rect.bottom - container!.getBoundingClientRect().bottom - 20;
-        setMaxHeight(`${availableSpace}px`);
+        setMaxHeight(`${Math.max(120, Math.min(280, availableSpace))}px`);
     });
 
     const text = createMemo(() => props.options.find((o) => o.value === props.value)?.label ?? props.value);
+
+    const select = (val: string | number) => {
+        props.onChange(String(val));
+        close();
+    };
 
     return (
         <div ref={container} class={`${classes.container} ${props.class ?? ""}`.trim()} style={props.styles?.container}>
@@ -64,22 +95,33 @@ export const Dropdown = (props: {
                 </div>
             </button>
             {open() && (
-                <div
-                    class={classes.list}
-                    style={props.limitHeight ? { "max-height": maxHeight() } : props.styles?.list}
-                >
+                <div class={classes.list} role="listbox" style={{ "max-height": maxHeight() }}>
                     <For each={props.options}>
                         {(opt) => (
-                            <option
-                                value={opt.value}
+                            <div
+                                role="option"
+                                data-value={opt.value}
                                 aria-selected={opt.value === props.value}
-                                onClick={() => {
-                                    props.onChange(String(opt.value));
-                                    set(false);
+                                tabindex={0}
+                                onMouseDown={(e) => {
+                                    // Select on mousedown so the document click
+                                    // closer cannot swallow the click first.
+                                    e.preventDefault();
+                                    select(opt.value);
+                                }}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    select(opt.value);
+                                }}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        select(opt.value);
+                                    }
                                 }}
                             >
                                 {opt.label}
-                            </option>
+                            </div>
                         )}
                     </For>
                 </div>

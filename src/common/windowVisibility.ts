@@ -23,8 +23,12 @@ export function applyStartupWindowVisibility(win: BrowserWindow): void {
         case "tray":
             if (getConfig("tray") === "disabled") {
                 console.warn(
-                    '[Window] startMinimized is "tray" but the tray icon is disabled; the window will be hidden with no tray.',
+                    '[Window] startMinimized is "tray" but the tray icon is disabled; falling back to minimized.',
                 );
+                win.setSkipTaskbar(false);
+                win.show();
+                win.minimize();
+                break;
             }
             win.setSkipTaskbar(true);
             win.hide();
