@@ -8,7 +8,7 @@
 
 *One client for every workflow — mods, themes, and privacy built in, not bolted on.*
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue?style=for-the-badge&logo=semanticrelease)](package.json)
+[![Version](https://img.shields.io/badge/version-1.3.1-blue?style=for-the-badge&logo=semanticrelease)](package.json)
 [![License: OSL-3.0](https://img.shields.io/badge/license-OSL--3.0-green?style=for-the-badge)](license.txt)
 [![Windows](https://img.shields.io/badge/Windows-Rust_WebView2-0078D4?style=for-the-badge&logo=windows)](native/)
 [![Linux](https://img.shields.io/badge/Linux-supported-FCC624?style=for-the-badge&logo=linux)](electron-builder.ts)
