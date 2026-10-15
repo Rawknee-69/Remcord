@@ -4,6 +4,43 @@ import { sleep } from "../../common/sleep.js";
 const { ipcRenderer } = require("electron");
 const version = ipcRenderer.sendSync("displayVersion") as string;
 
+// Swallow Discord's benign user-cancelled MFA rejection. Closing the MFA modal
+// rejects the modal promise with "Multi-factor authentication cancelled" and
+// Discord leaves it unhandled, which surfaces as an unhandledrejection crash
+// report. This is expected user behavior, so handle it in the page world before
+// Discord/Chromium logs it. Runs before any other patch so it catches early rejections.
+{
+    const script = document.createElement("script");
+    script.textContent = `(function () {
+    function isBenign(reason) {
+        try {
+            var text = (reason && reason.stack) || String(reason && reason.message ? reason.message : reason);
+            return /multi[-\\s]?factor authentication cancelled|\\bmfa cancelled\\b/i.test(text);
+        } catch (e) {
+            return false;
+        }
+    }
+    window.addEventListener("unhandledrejection", function (event) {
+        if (isBenign(event && event.reason)) {
+            try { event.preventDefault(); } catch (e) {}
+            try { event.stopImmediatePropagation(); } catch (e) {}
+        }
+    }, true);
+})();`;
+
+    if (document.documentElement) {
+        document.documentElement.prepend(script);
+    } else {
+        const observer = new MutationObserver(() => {
+            if (document.documentElement) {
+                observer.disconnect();
+                document.documentElement.prepend(script);
+            }
+        });
+        observer.observe(document, { childList: true });
+    }
+}
+
 {
     const script = document.createElement("script");
     script.textContent = `if (window.PublicKeyCredential) {

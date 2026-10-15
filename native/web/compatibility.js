@@ -127,6 +127,17 @@
         }
     }
 
+    // Benign user-cancelled flows that Discord rejects as errors. Closing the
+    // MFA modal rejects with "Multi-factor authentication cancelled", which is
+    // expected user behavior — not a crash — so it must never reach host logs.
+    function isBenignRendererRejectionMessage(message) {
+        try {
+            return /multi[-\s]?factor authentication cancelled|\bmfa cancelled\b/i.test(String(message));
+        } catch {
+            return false;
+        }
+    }
+
     function request(command, timeoutMs = 5000) {
         const requestId = nextId();
         const pendingRequest = new Promise((resolve, reject) => {
@@ -3879,20 +3890,26 @@
         reportRendererError("uncaught", `${event.message || "Uncaught renderer error"}${location}`);
     });
     window.addEventListener("unhandledrejection", (event) => {
-        reportRendererError("unhandled_rejection", describeRendererError(event.reason));
+        const description = describeRendererError(event.reason);
+        if (isBenignRendererRejectionMessage(description)) {
+            try {
+                if (typeof event.preventDefault === "function") event.preventDefault();
+            } catch {}
+            return;
+        }
+        reportRendererError("unhandled_rejection", description);
     });
 
     const originalConsoleError = console.error.bind(console);
     console.error = (...values) => {
         originalConsoleError(...values);
-        reportRendererError(
-            "console.error",
-            values
-                .map((value) => {
-                    return describeRendererError(value);
-                })
-                .join(" "),
-        );
+        const text = values
+            .map((value) => {
+                return describeRendererError(value);
+            })
+            .join(" ");
+        if (isBenignRendererRejectionMessage(text)) return;
+        reportRendererError("console.error", text);
     };
 
     const snapshot = freezeDeep(bootSnapshot);
