@@ -165,6 +165,18 @@ fn canonical_key_token(token: &str) -> Option<(&'static str, u32)> {
         "DOWN" | "ARROWDOWN" => Some(("Down", 0x28)),
         "LEFT" | "ARROWLEFT" => Some(("Left", 0x25)),
         "RIGHT" | "ARROWRIGHT" => Some(("Right", 0x27)),
+        "CAPSLOCK" => Some(("CapsLock", 0x14)),
+        "NUMLOCK" => Some(("NumLock", 0x90)),
+        "SCROLLLOCK" | "SCRLOCK" => Some(("ScrollLock", 0x91)),
+        "PRINTSCREEN" | "PRTSC" | "SNAPSHOT" => Some(("PrintScreen", 0x2C)),
+        "PAUSE" | "BREAK" => Some(("Pause", 0x13)),
+        "MEDIANEXTTRACK" => Some(("MediaNextTrack", 0xB0)),
+        "MEDIAPREVIOUSTRACK" => Some(("MediaPreviousTrack", 0xB1)),
+        "MEDIASTOP" => Some(("MediaStop", 0xB2)),
+        "MEDIAPLAYPAUSE" => Some(("MediaPlayPause", 0xB3)),
+        "VOLUMEMUTE" => Some(("VolumeMute", 0xAD)),
+        "VOLUMEDOWN" => Some(("VolumeDown", 0xAE)),
+        "VOLUMEUP" => Some(("VolumeUp", 0xAF)),
         _ => {
             // F1..F24.
             let digits = upper.strip_prefix('F')?;
@@ -528,6 +540,11 @@ mod tests {
         assert_eq!(parse_accelerator("Alt+Space").unwrap().vk, 0x20);
         assert_eq!(parse_accelerator("Super+Up").unwrap().modifiers, MOD_WIN);
         assert_eq!(parse_accelerator("Meta+ArrowDown").unwrap().vk, 0x28);
+        // Lock/navigation/print/media/volume keys (maker-recordable names).
+        assert_eq!(parse_accelerator("CapsLock").unwrap().vk, 0x14);
+        assert_eq!(parse_accelerator("Ctrl+PrintScreen").unwrap().vk, 0x2C);
+        assert_eq!(parse_accelerator("MediaPlayPause").unwrap().vk, 0xB3);
+        assert_eq!(parse_accelerator("VolumeUp").unwrap().vk, 0xAF);
     }
 
     #[test]

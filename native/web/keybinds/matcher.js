@@ -72,6 +72,18 @@
         if (upper === "DOWN" || upper === "ARROWDOWN") return "Down";
         if (upper === "LEFT" || upper === "ARROWLEFT") return "Left";
         if (upper === "RIGHT" || upper === "ARROWRIGHT") return "Right";
+        if (upper === "CAPSLOCK") return "CapsLock";
+        if (upper === "NUMLOCK") return "NumLock";
+        if (upper === "SCROLLLOCK" || upper === "SCRLOCK") return "ScrollLock";
+        if (upper === "PRINTSCREEN" || upper === "PRTSC" || upper === "SNAPSHOT") return "PrintScreen";
+        if (upper === "PAUSE" || upper === "BREAK") return "Pause";
+        if (upper === "MEDIANEXTTRACK") return "MediaNextTrack";
+        if (upper === "MEDIAPREVIOUSTRACK") return "MediaPreviousTrack";
+        if (upper === "MEDIASTOP") return "MediaStop";
+        if (upper === "MEDIAPLAYPAUSE") return "MediaPlayPause";
+        if (upper === "VOLUMEMUTE") return "VolumeMute";
+        if (upper === "VOLUMEDOWN") return "VolumeDown";
+        if (upper === "VOLUMEUP") return "VolumeUp";
         const fkey = /^F([1-9]|1[0-9]|2[0-4])$/.exec(upper);
         if (fkey) return `F${Number.parseInt(fkey[1], 10)}`;
         return null;

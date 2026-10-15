@@ -1177,6 +1177,19 @@ test("the matcher reports canonical matches across maker ordering noise", async 
     assert.deepEqual(matchedIds(window), ["a-1"]);
 });
 
+test("the matcher canonicalizes lock, media, and volume keys", async () => {
+    const { window } = createMatcherRuntime();
+    respondKeybindsList(window, [
+        { id: "caps", accelerator: "CapsLock", action: "mute", global: false, enabled: true },
+        { id: "media", accelerator: "Ctrl+MediaPlayPause", action: "deafen", global: false, enabled: true },
+    ]);
+    await flushInventory();
+    window.dispatchEvent(fakeKeydown({ key: "CapsLock" }));
+    assert.deepEqual(matchedIds(window), ["caps"]);
+    window.dispatchEvent(fakeKeydown({ ctrlKey: true, key: "MediaPlayPause" }));
+    assert.deepEqual(matchedIds(window), ["caps", "media"]);
+});
+
 test("the matcher shadows the page on match and ignores default-prevented keys", async () => {
     const { window } = createMatcherRuntime();
     respondKeybindsList(window, [{ id: "a-1", accelerator: "Ctrl+M", action: "mute", global: false, enabled: true }]);
