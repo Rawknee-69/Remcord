@@ -12,8 +12,6 @@ export const MAINTAINER_AVATAR_URL = `${MAINTAINER_GITHUB_URL}.png`;
 /** Opens the maintainer's profile in Discord, where visitors can send a friend request. */
 export const MAINTAINER_FRIEND_URL = `https://discord.com/users/${MAINTAINER_DISCORD_USER_ID}`;
 
-export const DISCORD_SERVER_INVITE = "https://discord.gg/JatCnhKufc";
-
 /**
  * Opens an external link. `window.open` is handled by both shells: Electron
  * delegates to the OS browser and the Rust shell fast-paths https URLs to

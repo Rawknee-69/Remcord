@@ -1,7 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import {
     copyAboutText,
-    DISCORD_SERVER_INVITE,
     getAppVersionLabel,
     getRuntimeLabel,
     MAINTAINER_AVATAR_URL,
@@ -142,12 +141,6 @@ export function AboutPage() {
                         desc="Support Remcord's development"
                         icon="♥"
                         onClick={() => openExternal(MAINTAINER_SPONSOR_URL)}
-                    />
-                    <ActionRow
-                        title="Join Discord Server"
-                        desc="Chat with the community"
-                        icon="✉"
-                        onClick={() => openExternal(DISCORD_SERVER_INVITE)}
                     />
                 </div>
             </section>
