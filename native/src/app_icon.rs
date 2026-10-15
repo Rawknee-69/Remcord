@@ -1,8 +1,8 @@
 //! App icon rebrand contract (F29).
 //!
 //! `build/icon.ico` / `build/icon.png` already carry the Remcord artwork
-//! (navy tile, white R, cyan bar; 512x512 PNG source, 4-image ICO) since
-//! `ef67a92` ("assets: replace inherited product branding"). Three
+//! (circular Rem avatar mark; 512x512 PNG source, 7-image ICO) since the
+//! icon rebrand. Three
 //! consumers share those two files and must keep pointing at them:
 //!
 //! - the Windows exe embed (`native/build.rs` →
@@ -72,15 +72,15 @@ pub const ICON_CONSUMERS: &[(&str, &str)] = &[
 /// swap — including a revert to old branding — changes the digest and must
 /// update this constant explicitly.
 pub const EXPECTED_ICON_ICO_SHA256: &str =
-    "153a845071e6ce9c4deae5dbb43f85644b682d51ea5778e90044b91383cec58a";
+    "134f2172c1e67b88e2483a844f7c168fb73e202e2ef7ab35db000d4c1ace6279";
 
 /// `sha256` of the rebranded `build/icon.png` (lowercase hex).
 pub const EXPECTED_ICON_PNG_SHA256: &str =
-    "72dfa93e0f88033bd42b626f8e6b557db3a4275f083d77d71411fff89781140f";
+    "90130ca3a650ea73af849ea47a2edfa5e8eb055054c39b445c99a956e814033d";
 
-/// Maximum accepted icon file size in bytes. The real assets are ~7–9 KiB;
-/// this is a safety rail against hashing unbounded input, not a claim about
-/// icon formats.
+/// Maximum accepted icon file size in bytes. The real assets are ~190 KiB
+/// (ICO) / ~436 KiB (PNG); this is a safety rail against hashing unbounded
+/// input, not a claim about icon formats.
 pub const MAX_ICON_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Copy of `build/icon.ico` compiled into the binary, so the startup check

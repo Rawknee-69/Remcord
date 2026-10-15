@@ -159,15 +159,20 @@ begin
   end;
 end;
 
-{ Directory guards: the install target must stay dedicated to Remcord.
+{ Directory guards: user-data directories are ALWAYS refused (installing
+  into one would endanger settings, themes, and browser caches), while a
+  folder that merely contains another installed application asks for
+  confirmation instead of refusing: Inno only ever removes the files it
+  installed, so side-by-side installs are safe.
   Locations are identified by content markers, never by product names:
   - a settings database (`storage\settings.json`) marks a product data
     directory of any generation;
   - `EBWebView` marks a WebView2 profile root of any generation;
   - `webview-dev-user-data` marks an isolated development profile;
+  - `remcord-data` marks a portable Remcord data directory;
   - an existing `license.txt` next to any `.exe` marks an installed
-    application directory (either product).
-  Even if typed by hand, setup refuses all of them plus the Remcord
+    application directory (either product) — confirmation, not refusal.
+  Even if typed by hand, setup refuses all data locations plus the Remcord
   profile itself. }
 
 function DirContainsInstalledApp(const Dir: String): Boolean;
@@ -202,8 +207,8 @@ begin
     FileExists(Dir + '\storage\settings.json') or
     DirExists(Dir + '\EBWebView') or
     (Pos('webview-dev-user-data', Warm) > 0) or
-    (Warm = Lowercase(ExpandConstant('{localappdata}\Remcord'))) or
-    DirContainsInstalledApp(Dir);
+    DirExists(Dir + '\remcord-data') or
+    (Warm = Lowercase(ExpandConstant('{localappdata}\Remcord')));
 end;
 
 { In-place upgrade: the destination page is always shown
@@ -287,9 +292,21 @@ begin
       Exit;
     if IsForbiddenDir(WizardDirValue) then
     begin
-      MsgBox('This folder belongs to an installed application or to user data. '
-        + 'Please keep the default Remcord installation folder.',
+      MsgBox('This folder holds user data (settings, themes, or browser data). '
+        + 'Installing here would endanger it. '
+        + 'Please choose a different folder.',
         mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+    if DirContainsInstalledApp(WizardDirValue) then
+    begin
+      if MsgBox('This folder already contains an installed application. '
+        + 'Remcord will install alongside it — uninstalling Remcord later '
+        + 'removes only Remcord''s own files.' + #13#10 + #13#10
+        + 'Install here anyway?',
+        mbConfirmation, MB_YESNO) = IDYES then
+        Exit;
       Result := False;
     end;
   end;
