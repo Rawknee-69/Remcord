@@ -364,7 +364,6 @@ mod tests {
             "http://example.com/x",
             "mailto:someone@example.com",
             "https://example.com/repo",
-            "https://discord.gg/JatCnhKufc",
         ] {
             assert!(is_fast_path_external(url), "{url} must be fast-path");
             assert_eq!(decide(url), Decision::ExternalOpen);

@@ -9,7 +9,7 @@
 # Steps: read product version from package.json -> cargo build --release ->
 # verify exe identity/resources -> stage exactly {remcord.exe, license.txt}
 # -> ISCC native/installer/remcord.iss -> SHA-256 the setup artifact.
-# No signing (separate blocker).
+# Ships unsigned (signing removed from scope).
 #
 # Identity: the installer AppId is stable (see remcord.iss) so a Remcord
 # setup upgrades the already-installed native product in place. The install

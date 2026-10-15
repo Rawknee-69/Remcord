@@ -35,55 +35,6 @@ jobs:
           winget install --id JRSoftware.InnoSetup --exact --accept-source-agreements --accept-package-agreements
           pwsh -NoProfile -File native/installer/build-installer.ps1
 
-      - name: Upload unsigned bundle (SignPath input)
-        id: upload-unsigned
-        uses: actions/upload-artifact@v6
-        with:
-          name: windows-unsigned-native
-          path: |
-            native/installer/stage/remcord.exe
-            native/installer/dist/*.exe
-          if-no-files-found: error
-
-      # Free trusted signing for open-source projects (same 4 SIGNPATH_*
-      # secrets as native-sign.yml). Skipped when no token is configured.
-      # If the action's inputs changed upstream, check its Marketplace
-      # README and keep the major version pinned.
-      - name: Sign native exes with SignPath (free OSS)
-        if: secrets.SIGNPATH_API_TOKEN != ''
-        uses: signpath/github-action@v1
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
-          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
-          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed-native
-
-      - name: Replace with SignPath-signed files
-        if: secrets.SIGNPATH_API_TOKEN != ''
-        shell: pwsh
-        run: |
-          $signed = Get-ChildItem -Path signed-native -Recurse -Include *.exe -File
-          if ($signed.Count -eq 0) { throw "SignPath returned no signed exes" }
-          foreach ($f in $signed) {
-            if ($f.Name -eq "remcord.exe") { Copy-Item -LiteralPath $f.FullName -Destination "native/installer/stage/remcord.exe" -Force }
-            else { Copy-Item -LiteralPath $f.FullName -Destination "native/installer/dist/$($f.Name)" -Force }
-          }
-          Write-Host "replaced $($signed.Count) artifact(s) with SignPath-signed files"
-
-      - name: Sign native artifacts (PFX fallback)
-        shell: pwsh
-        env:
-          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
-          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
-        run: pwsh -NoProfile -File native/installer/signing/Invoke-CodeSigning.ps1
-
-      - name: Confirm signatures
-        shell: pwsh
-        run: pwsh -NoProfile -File native/installer/signing/Confirm-ArtifactSignatures.ps1
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:

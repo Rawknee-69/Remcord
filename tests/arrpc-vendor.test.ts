@@ -77,10 +77,13 @@ test("About screen makes no obsolete contributor-endpoint request", () => {
     assert.match(source, /Contributor information is not configured for this build/);
 });
 
-test("packaging workflow trusts no foreign signing certificate", () => {
+test("packaging workflow builds the native installer with no signing", () => {
     const source = readFileSync(join(repoRoot, ".github/workflows/package.yml"), "utf-8");
     assert.doesNotMatch(source, /legcord/i);
     assert.doesNotMatch(source, /NewSign/);
     assert.doesNotMatch(source, /electron-builder/i);
-    assert.match(source, /SIGNPATH_API_TOKEN/);
+    assert.doesNotMatch(source, /signpath/i);
+    assert.doesNotMatch(source, /SIGNPATH/i);
+    assert.doesNotMatch(source, /signtool/i);
+    assert.match(source, /build-installer\.ps1/);
 });
