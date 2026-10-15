@@ -1,6 +1,7 @@
 /// <reference path="../../../node_modules/@uwu/shelter-defs/dist/shelter-defs/rootdefs.d.ts" />
 import { type Component, createComponent, onCleanup, onMount } from "solid-js";
 import {
+    AboutSidebarIcon,
     GallerySidebarIcon,
     GamesSidebarIcon,
     KeybindsSidebarIcon,
@@ -8,6 +9,7 @@ import {
     SettingsSidebarIcon,
     ThemesSidebarIcon,
 } from "./components/icons/SettingsNavIcons.jsx";
+import { AboutPage } from "./pages/AboutPage.jsx";
 import { GalleryPage } from "./pages/GalleryPage.jsx";
 import { KeybindsPage } from "./pages/KeybindsPage.jsx";
 import { PluginsPage } from "./pages/PluginsPage.jsx";
@@ -63,6 +65,10 @@ function registerSections(): (() => void)[] {
         }),
         registerSection("section", "remcord-games", "Games", withScrollRestoration(RegisteredGamesPage), {
             icon: GamesSidebarIcon,
+        }),
+        registerSection("divider"),
+        registerSection("section", "remcord-about", "About", withScrollRestoration(AboutPage), {
+            icon: AboutSidebarIcon,
         }),
     ];
     if (window.remcord.settings.getConfig().showExperimentalPluginMenu) {
