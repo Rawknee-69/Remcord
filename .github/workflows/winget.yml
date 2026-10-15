@@ -6,12 +6,11 @@ jobs:
     publish:
         runs-on: windows-latest
         steps:
-            # identifier must match electron-builder.ts appx.applicationId
-            # (rawknee-69.Remcord). installers-regex matches the artifactName
-            # from electron-builder.ts: Remcord-<version>-win-<arch>.exe
-            # (win-x64 / win-arm64 / win-ia32 from the NSIS target).
+            # identifier stays rawknee-69.Remcord so the existing WinGet
+            # package updates in place. installers-regex matches the native
+            # Rust installer asset: Remcord-Setup-<version>.exe
             - uses: vedantmgoyal9/winget-releaser@main
               with:
                 identifier: rawknee-69.Remcord
-                installers-regex: '-win-\w+\.exe$'
+                installers-regex: '-Setup-.*\.exe$'
                 token: ${{secrets.PUBLIC_REPO_READ}}

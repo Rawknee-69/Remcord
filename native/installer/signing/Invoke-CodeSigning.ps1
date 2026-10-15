@@ -1,4 +1,4 @@
-# Signs the native Remcord Windows artifacts (F31 code signing).
+# Signs the native Remcord Windows artifacts with an OV/EV PFX certificate.
 #
 # POST-BUILD step. Run AFTER native/installer/build-installer.ps1 produced
 # the artifacts described in signing.json (same directory). This script never
@@ -6,14 +6,9 @@
 # installer definition stays signing-free by contract (check-installer Sec.7
 # asserts no signtool claims in it).
 #
-# Providers (first fully-configured one in policy order wins):
-#   1. Azure Trusted Signing - all AZURE_TRUSTED_SIGNING_* / AZURE_* env vars
-#      present. Requires AzureSignTool on PATH (installed on demand in CI, see
-#      .github/workflows/native-sign.yml). Nothing is downloaded from
-#      third-party domains.
-#   2. PFX - -PfxPath (explicit local file) or WINDOWS_PFX_BASE64 secret
-#      material (written to a temp file, shredded after use). URL sources are
-#      refused outright.
+# Provider: PFX only (signtool.exe + RFC3161 timestamp).
+#   - -PfxPath (explicit local file) or WINDOWS_PFX_BASE64 secret material
+#     (written to a temp file, shredded after use). URL sources are refused.
 #
 # Fail-closed: -Required (or policy releaseRequiresSignature) with no usable
 # provider throws. Without -Required, a missing provider is a loud warning
@@ -104,38 +99,20 @@ if (-not [string]::IsNullOrWhiteSpace($PfxPath)) {
     if (-not (Test-Path -LiteralPath $PfxPath -PathType Leaf)) { throw "PFX file not found: $PfxPath" }
 }
 
-$azureVars = @(
-    $policy.providers.azureTrustedSigning.endpointEnv,
-    $policy.providers.azureTrustedSigning.accountEnv,
-    $policy.providers.azureTrustedSigning.profileEnv,
-    $policy.providers.azureTrustedSigning.tenantEnv,
-    $policy.providers.azureTrustedSigning.clientIdEnv,
-    $policy.providers.azureTrustedSigning.clientSecretEnv
-)
-$azureReady = $true
-foreach ($name in $azureVars) {
-    $value = [Environment]::GetEnvironmentVariable($name)
-    if ([string]::IsNullOrWhiteSpace($value)) { $azureReady = $false }
-}
 $pfxBase64 = [Environment]::GetEnvironmentVariable($policy.providers.pfx.base64Env)
 $pfxPassword = [Environment]::GetEnvironmentVariable($policy.providers.pfx.passwordEnv)
 $pfxReady = (-not [string]::IsNullOrWhiteSpace($PfxPath)) -or (-not [string]::IsNullOrWhiteSpace($pfxBase64))
 
-$provider = $null
-foreach ($candidate in $policy.providers.order) {
-    if ($candidate -eq "azureTrustedSigning" -and $azureReady) { $provider = $candidate; break }
-    if ($candidate -eq "pfx" -and $pfxReady) { $provider = $candidate; break }
-}
-if ($null -eq $provider) {
-    $message = "no signing provider configured (set Azure Trusted Signing secrets or $($policy.providers.pfx.base64Env) / -PfxPath)"
+if (-not $pfxReady) {
+    $message = "no signing provider configured (set $($policy.providers.pfx.base64Env) / -PfxPath)"
     if ($require) { throw $message }
     Write-Warning "$message - leaving artifacts unsigned (current default; see docs/NATIVE_CODE_SIGNING.md)"
     return
 }
 
 $signtool = Find-Signtool $policy.signtoolMinimum
-if (($null -eq $signtool) -and ($provider -eq "pfx")) {
-    $message = "signtool.exe not found (install Windows SDK 10+, or winget the documented Inno Setup flow first)"
+if ($null -eq $signtool) {
+    $message = "signtool.exe not found (install Windows SDK 10+, or use the windows-latest runner which carries it)"
     if ($require) { throw $message }
     Write-Warning "$message - leaving artifacts unsigned"
     return
@@ -143,38 +120,23 @@ if (($null -eq $signtool) -and ($provider -eq "pfx")) {
 
 $tempPfx = $null
 try {
-    if ($provider -eq "pfx" -and [string]::IsNullOrWhiteSpace($PfxPath)) {
+    if ([string]::IsNullOrWhiteSpace($PfxPath)) {
         $tempPfx = Join-Path ([IO.Path]::GetTempPath()) ("remcord-sign-" + [Guid]::NewGuid().ToString("N") + ".pfx")
         [IO.File]::WriteAllBytes($tempPfx, [Convert]::FromBase64String($pfxBase64.Trim()))
         $PfxPath = $tempPfx
     }
     foreach ($target in $targets) {
-        if ($provider -eq "azureTrustedSigning") {
-            $tool = Get-Command AzureSignTool.exe -ErrorAction SilentlyContinue
-            if ($null -eq $tool) {
-                throw "Azure Trusted Signing selected but AzureSignTool.exe is not on PATH (CI installs it; see native-sign.yml)"
-            }
-            $endpoint = [Environment]::GetEnvironmentVariable($policy.providers.azureTrustedSigning.endpointEnv)
-            $account = [Environment]::GetEnvironmentVariable($policy.providers.azureTrustedSigning.accountEnv)
-            $profile = [Environment]::GetEnvironmentVariable($policy.providers.azureTrustedSigning.profileEnv)
-            if ($PSCmdlet.ShouldProcess($target, "Azure Trusted Signing sign")) {
-                & $tool.Source sign -du "$endpoint" -kvu "$endpoint" -kva "$account" -kvc "$profile" `
-                    -tr $policy.timestampServer -td sha256 -fd sha256 -v "$target"
-                if ($LASTEXITCODE -ne 0) { throw "AzureSignTool failed for $target" }
-            }
-        } else {
-            $allow = @()
-            foreach ($subject in $policy.providers.pfx.subjectAllowlist) { $allow += $subject }
-            $signArgs = @("sign", "/fd", "sha256", "/tr", $policy.timestampServer, "/td", "sha256", "/f", $PfxPath)
-            if (-not [string]::IsNullOrWhiteSpace($pfxPassword)) { $signArgs += @("/p", $pfxPassword) }
-            if ($allow.Count -gt 0) { $signArgs += @("/n", $allow[0]) }
-            $signArgs += @($target)
-            if ($PSCmdlet.ShouldProcess($target, "signtool sign (SHA256 + RFC3161 timestamp)")) {
-                & $signtool @signArgs
-                if ($LASTEXITCODE -ne 0) { throw "signtool failed for $target" }
-            }
+        $allow = @()
+        foreach ($subject in $policy.providers.pfx.subjectAllowlist) { $allow += $subject }
+        $signArgs = @("sign", "/fd", "sha256", "/tr", $policy.timestampServer, "/td", "sha256", "/f", $PfxPath)
+        if (-not [string]::IsNullOrWhiteSpace($pfxPassword)) { $signArgs += @("/p", $pfxPassword) }
+        if ($allow.Count -gt 0) { $signArgs += @("/n", $allow[0]) }
+        $signArgs += @($target)
+        if ($PSCmdlet.ShouldProcess($target, "signtool sign (SHA256 + RFC3161 timestamp)")) {
+            & $signtool @signArgs
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed for $target" }
         }
-        Write-Host "signed: $target (provider: $provider)"
+        Write-Host "signed: $target (provider: pfx)"
     }
 } finally {
     if ($null -ne $tempPfx -and (Test-Path -LiteralPath $tempPfx -PathType Leaf)) {

@@ -36,17 +36,16 @@ test("signing policy: exactly the two known relative artifacts", () => {
     }
 });
 
-test("signing policy: provider order resolves against declared secrets", () => {
-    assert.deepEqual(policy.providers.order, ["azureTrustedSigning", "pfx"]);
-    const azure = policy.providers.azureTrustedSigning;
+test("signing policy: SignPath-first providers resolve against declared secrets", () => {
+    assert.deepEqual(policy.providers.order, ["signpath", "pfx"]);
+    assert.ok(!("azureTrustedSigning" in policy.providers), "no Azure provider");
+    const signpath = policy.providers.signpath;
     const pfx = policy.providers.pfx;
     const envNames = [
-        azure.endpointEnv,
-        azure.accountEnv,
-        azure.profileEnv,
-        azure.tenantEnv,
-        azure.clientIdEnv,
-        azure.clientSecretEnv,
+        signpath.tokenEnv,
+        signpath.orgIdEnv,
+        signpath.projectSlugEnv,
+        signpath.policySlugEnv,
         pfx.base64Env,
         pfx.passwordEnv,
     ];
@@ -77,7 +76,7 @@ test("installer definition stays signing-free (check-installer §7 contract)", (
     assert.ok(!/Invoke-CodeSigning/i.test(builder), "build script never invokes signing itself");
 });
 
-test("invoke script: fail-closed provider selection, no URL key sources", () => {
+test("invoke script: PFX-only, fail-closed, no URL key sources, no Azure", () => {
     assert.ok(invoke.includes("SupportsShouldProcess"), "dry-run support via ShouldProcess");
     assert.ok(invoke.includes("https?://"), "URL PFX sources are refused");
     assert.ok(invoke.includes("releaseRequiresSignature"), "policy gate honored");
@@ -85,6 +84,7 @@ test("invoke script: fail-closed provider selection, no URL key sources", () => 
     assert.ok(invoke.includes("subjectAllowlist"), "subject pinning honored when populated");
     assert.ok(invoke.includes("WriteAllBytes"), "temp PFX is shredded after use");
     assert.ok(!/Invoke-WebRequest|curl\.exe|Start-BitsTransfer/.test(invoke), "no download machinery");
+    assert.ok(!/AzureSignTool|azureTrustedSigning|AZURE_/i.test(invoke), "no Azure signing");
 });
 
 test("confirm script: read-only gate with local-only escape hatch", () => {
@@ -95,24 +95,28 @@ test("confirm script: read-only gate with local-only escape hatch", () => {
     assert.ok(!/signtool sign|Set-AuthenticodeSignature/.test(confirm), "confirm script never signs");
 });
 
-test("workflow: opt-in dispatch, policy test first, Electron secrets untouched", () => {
-    assert.ok(workflow.includes("workflow_dispatch"), "manual opt-in trigger only");
+test("workflow: signs Windows on release, SignPath-first, policy test first", () => {
+    assert.ok(workflow.includes("workflow_dispatch"), "manual trigger present");
+    assert.ok(workflow.includes("release"), "release trigger present");
+    assert.ok(workflow.includes("windows-latest"), "Windows-only runner");
     assert.ok(workflow.includes("require-signed"), "fail-closed input present");
     assert.ok(workflow.includes("native/tests/signing-policy.test.mjs"), "policy test gates the job");
     assert.ok(workflow.includes("Confirm-ArtifactSignatures.ps1"), "audit step present on every run");
-    assert.ok(workflow.includes("Invoke-CodeSigning.ps1"), "sign step present behind the flag");
+    assert.ok(workflow.includes("Invoke-CodeSigning.ps1"), "PFX fallback step present");
+    assert.ok(/signpath/i.test(workflow), "SignPath step present");
     for (const secret of policy.secretNames) {
         assert.ok(workflow.includes(secret), `workflow wires secret ${secret}`);
     }
-    assert.ok(!/MACOS_CSC_LINK|MACOS_SIGN_PASS|CSC_LINK|APPLE_ID/.test(workflow), "Electron signing flow untouched");
+    assert.ok(!/AZURE_|AzureSignTool|azureTrustedSigning/i.test(workflow), "no Azure signing");
     assert.ok(!/^(\s*)needs:/m.test(workflow), "no job dependency on existing flows");
-    assert.ok(!/\bpush:|\brelease:/.test(workflow), "no push/release triggers that could interfere");
 });
 
-test("runbook: documents cert options, secrets, and the signed-by-default flip", () => {
-    assert.ok(runbook.includes("Azure Trusted Signing"), "recommended CI option documented");
-    assert.ok(runbook.includes("Self-signed test certificate"), "local smoke path documented");
-    assert.ok(runbook.includes("Never ships"), "self-signed scope is explicit");
+test("runbook: documents free SignPath path, secrets, and the signed-by-default flip", () => {
+    assert.ok(!/Azure Trusted Signing/i.test(runbook), "no Azure option documented");
+    assert.ok(/signpath/i.test(runbook), "SignPath free path documented");
+    assert.ok(runbook.includes("SIGNPATH_API_TOKEN"), "SignPath secret documented");
+    assert.ok(runbook.includes("WINDOWS_PFX_BASE64"), "PFX fallback secret documented");
+    assert.ok(runbook.includes("never a release fix"), "self-signed scope is explicit");
     assert.ok(runbook.includes("releaseRequiresSignature"), "flip procedure references the policy flag");
     assert.ok(runbook.includes("SmartScreen"), "SmartScreen reality documented");
     for (const secret of policy.secretNames) {

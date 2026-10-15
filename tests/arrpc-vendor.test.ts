@@ -81,5 +81,6 @@ test("packaging workflow trusts no foreign signing certificate", () => {
     const source = readFileSync(join(repoRoot, ".github/workflows/package.yml"), "utf-8");
     assert.doesNotMatch(source, /legcord/i);
     assert.doesNotMatch(source, /NewSign/);
-    assert.match(source, /MACOS_CSC_LINK/);
+    assert.doesNotMatch(source, /electron-builder/i);
+    assert.match(source, /SIGNPATH_API_TOKEN/);
 });

@@ -6,15 +6,11 @@ on:
       - stable
 jobs:
   package:
-    continue-on-error: true
-    strategy:
-      matrix:
-        # Windows-only for now. Re-enable macOS/Linux by uncommenting below.
-        os: [windows-latest]
-        # os: [macos-latest, windows-latest, ubuntu-latest]
-    runs-on: ${{matrix.os}}
+    # Production pipeline: Rust native Windows app only.
+    # The Electron codebase is stale legacy code — it is not built,
+    # signed, or released here.
+    runs-on: windows-latest
     env:
-      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_TOKEN }}
       GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
 
     steps:
@@ -26,98 +22,77 @@ jobs:
         run: cat <<< $(jq --arg ver "$(jq -r '.version' package.json)-$(git rev-parse --short HEAD)" '.version = $ver' package.json) > package.json
         shell: bash
 
-      - name: Prepare PNPM
-        uses: pnpm/action-setup@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Prepare Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-          cache: pnpm
+      - name: Run Rust tests
+        run: cargo test --manifest-path native/Cargo.toml
+        shell: pwsh
 
-      - name: Install dependencies
-        run: pnpm i --frozen-lockfile
-
-      # Fail fast before the expensive multi-arch Electron build.
-      # Covers the Gallery (tests/gallery.test.ts) plus all other suites.
-      - name: Run tests
-        run: pnpm test
-
-      - name: Build TypeScript
-        run: pnpm build
-
-      # Windows-only for now: SnapCraft install + macOS signing check +
-      # macOS/Linux builds are commented out. Uncomment to re-enable.
-      # - name: Install SnapCraft
-      #   if: matrix.os == 'macos-latest'
-      #   uses: samuelmeuli/action-snapcraft@v3
-
-      - name: Load Electron cache
-        uses: actions/cache/restore@v5
-        with:
-          path: .cache
-          key: electron-zips.${{matrix.os}}
-
-      # Code signing requires a properly obtained certificate stored as CI
-      # secrets (see the macOS build step below). Unsigned local packaging
-      # (`pnpm packageQuick` / `electron-builder --dir`) always works without
-      # any certificate. Never download or trust a certificate URL from
-      # another product's domain.
-      # Windows-only for now: macOS signing check commented out.
-      # - name: Verify macOS signing configuration
-      #   if: matrix.os == 'macos-latest'
-      #   run: |
-      #     if [ -n "${{ secrets.MACOS_SIGN_PASS }}" ] && [ -z "${{ secrets.MACOS_CSC_LINK }}" ]; then
-      #       echo "macOS signing was requested (MACOS_SIGN_PASS is set) but no signing certificate is configured (MACOS_CSC_LINK is empty)." >&2
-      #       echo "Provide a properly obtained certificate via the MACOS_CSC_LINK secret with secure secret management; refusing to sign." >&2
-      #       exit 1
-      #     fi
-      #     if [ -z "${{ secrets.MACOS_CSC_LINK }}" ]; then
-      #       echo "No signing certificate configured; macOS build will proceed unsigned."
-      #     fi
-      #   shell: bash
-
-      # Sadly, it makes more sense to separate builds per platform
-      # Windows-only for now: macOS build commented out.
-      # - name: Build Electron for macOS (DMG & ZIP)
-      #   if: matrix.os == 'macos-latest'
-      #   run: pnpm electron-builder --universal -m zip dmg
-      #   env:
-      #     CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
-      #     CSC_KEY_PASSWORD: ${{ secrets.MACOS_SIGN_PASS }}
-      #     APPLE_ID: ${{secrets.APPLE_ID}}
-      #     APPLE_APP_SPECIFIC_PASSWORD: ${{secrets.APPLE_ID_PASSWORD}}
-      #     APPLE_TEAM_ID: ${{secrets.APPLE_TEAM_ID}}
-
-      - name: Build Electron for Windows (NSIS, AppX, & ZIP)
-        if: matrix.os == 'windows-latest'
-        run: pnpm electron-builder --ia32 --arm64 --x64 -w nsis appx zip
-
-      # Windows-only for now: Linux build commented out.
-      # - name: Build Electron for Linux (RPM, DEB, AppImage & ZIP)
-      #   if: matrix.os == 'ubuntu-latest'
-      #   run: pnpm electron-builder --armv7l --arm64 --x64 -l rpm deb appimage zip tar.gz
-
-      - name: Save Electron Cache
-        uses: actions/cache/save@v5
-        with:
-          path: .cache
-          key: electron-zips.${{matrix.os}}
-
-      - name: Collect artifacts
+      - name: Build native installer
+        shell: pwsh
         run: |
-          mkdir -p artifacts
-          find dist/. -maxdepth 1 -type f -exec mv {} artifacts \;
-        shell: bash
+          winget install --id JRSoftware.InnoSetup --exact --accept-source-agreements --accept-package-agreements
+          pwsh -NoProfile -File native/installer/build-installer.ps1
+
+      - name: Upload unsigned bundle (SignPath input)
+        id: upload-unsigned
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-unsigned-native
+          path: |
+            native/installer/stage/remcord.exe
+            native/installer/dist/*.exe
+          if-no-files-found: error
+
+      # Free trusted signing for open-source projects (same 4 SIGNPATH_*
+      # secrets as native-sign.yml). Skipped when no token is configured.
+      # If the action's inputs changed upstream, check its Marketplace
+      # README and keep the major version pinned.
+      - name: Sign native exes with SignPath (free OSS)
+        if: secrets.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-native
+
+      - name: Replace with SignPath-signed files
+        if: secrets.SIGNPATH_API_TOKEN != ''
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem -Path signed-native -Recurse -Include *.exe -File
+          if ($signed.Count -eq 0) { throw "SignPath returned no signed exes" }
+          foreach ($f in $signed) {
+            if ($f.Name -eq "remcord.exe") { Copy-Item -LiteralPath $f.FullName -Destination "native/installer/stage/remcord.exe" -Force }
+            else { Copy-Item -LiteralPath $f.FullName -Destination "native/installer/dist/$($f.Name)" -Force }
+          }
+          Write-Host "replaced $($signed.Count) artifact(s) with SignPath-signed files"
+
+      - name: Sign native artifacts (PFX fallback)
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: pwsh -NoProfile -File native/installer/signing/Invoke-CodeSigning.ps1
+
+      - name: Confirm signatures
+        shell: pwsh
+        run: pwsh -NoProfile -File native/installer/signing/Confirm-ArtifactSignatures.ps1
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: ${{matrix.os}}-artifacts
-          path: artifacts/*
+          name: windows-artifacts
+          path: |
+            native/installer/stage/remcord.exe
+            native/installer/dist/*.exe
 
   release:
-    # Windows-only for now: release publishing runs on Windows too (no Linux/macOS runners).
     runs-on: windows-latest
     needs:
       - package
@@ -137,7 +112,7 @@ jobs:
           allowUpdates: true
           removeArtifacts: true
           prerelease: true
-          body: "Rolling development build compiled from the dev branch on every commit. NOTE: tarballs do not update."
+          body: "Rolling development build of the native Rust app compiled from the dev branch on every commit."
           draft: false
           tag: devbuild
           artifacts: release-files/**/*

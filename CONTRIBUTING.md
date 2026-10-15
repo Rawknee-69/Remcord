@@ -34,7 +34,10 @@ If you are fixing a critical bug or security issue, you may open fixes for both 
 - Avoid `@ts-ignore` and broad type escapes. If suppression is unavoidable, use the narrowest suppression possible and include a short reason.
 - Any lint suppression (`biome-ignore`, `eslint-disable`, etc.) must include a clear explanation and preferably a tracking issue/URL when relevant.
 
-### Electron security expectations
+### Electron security expectations (legacy — Electron codebase is no longer built, signed, or released)
+
+- The Rust native Windows app is the production target; apply the equivalent least-privilege care there.
+- For legacy Electron code, follow Electron security best practices.
 
 - Follow Electron security best practices.
 - Keep preload APIs minimal and explicit when exposing APIs through `contextBridge`.

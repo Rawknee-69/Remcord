@@ -1,27 +1,39 @@
-# F31 native code signing (opt-in). NEW file — the existing Electron
-# package/release flow in package.yml is untouched.
+# Windows release signing (free for open source).
 #
-# Signing is a post-build step over the native installer artifacts
-# (native/installer/build-installer.ps1 output). This workflow never signs by
-# default: it validates policy + scripts and audits current signatures. Pass
-# sign=true with certificate secrets configured to actually sign, and
-# require-signed=true to fail the run on unsigned/untrusted artifacts.
-name: Native code signing (opt-in)
+# Signs the Windows app on release so SmartScreen trusts it.
+# Windows-only. No Azure, no paid cert needed.
+#
+# Primary: SignPath free open-source signing (trusted cert, $0).
+# Fallback: OV/EV PFX via Invoke-CodeSigning.ps1 (paid cert, optional).
+#
+# Triggers:
+#   - release published -> signs automatically
+#   - workflow_dispatch -> manual re-sign / smoke test
+#
+# Secrets (repo Settings -> Secrets -> Actions), all free to obtain:
+#   SIGNPATH_API_TOKEN           CI-user API token from your SignPath org
+#   SIGNPATH_ORG_ID               SignPath organization ID
+#   SIGNPATH_PROJECT_SLUG        SignPath project slug for this repo
+#   SIGNPATH_SIGNING_POLICY_SLUG SignPath signing policy slug (e.g. release-signing)
+#   WINDOWS_PFX_BASE64           (optional paid fallback) base64 of OV/EV .pfx
+#   WINDOWS_PFX_PASSWORD         (optional paid fallback) password for that .pfx
+#
+# Without any signing secrets the job warns and exits 0 (unsigned), unless
+# require-signed=true is passed manually, in which case it fails closed.
+name: Sign Windows release
 
 on:
+    release:
+        types: [published]
     workflow_dispatch:
         inputs:
-            sign:
-                description: "Attempt signing when certificate secrets are present"
-                type: boolean
-                default: false
             require-signed:
-                description: "Fail the run if any required artifact is unsigned or untrusted"
+                description: "Fail the run if artifacts are unsigned/untrusted"
                 type: boolean
                 default: false
 
 jobs:
-    native-sign:
+    sign-windows:
         runs-on: windows-latest
         steps:
             - name: Checkout code
@@ -30,36 +42,69 @@ jobs:
             - name: Validate signing policy
               run: node --test native/tests/signing-policy.test.mjs
 
-            - name: Audit artifact signatures
+            - name: Build native installer
               shell: pwsh
-              run: >
-                pwsh -NoProfile -File native/installer/signing/Confirm-ArtifactSignatures.ps1
-                -RequireSigned:${{ inputs.require-signed }}
+              run: |
+                winget install --id JRSoftware.InnoSetup --exact --accept-source-agreements --accept-package-agreements
+                pwsh -NoProfile -File native/installer/build-installer.ps1
 
-            - name: Install AzureSignTool (only when Azure signing is configured)
-              if: ${{ inputs.sign && secrets.AZURE_TRUSTED_SIGNING_ENDPOINT != '' }}
-              run: dotnet tool install --global AzureSignTool
+            - name: Upload unsigned bundle (SignPath input)
+              id: upload-unsigned
+              uses: actions/upload-artifact@v6
+              with:
+                name: windows-unsigned-native
+                path: |
+                    native/installer/stage/remcord.exe
+                    native/installer/dist/*.exe
+                if-no-files-found: warn
+
+            # Free trusted signing for open-source projects.
+            # If the action's inputs changed upstream, check its Marketplace
+            # README and keep the major version pinned.
+            - name: Sign with SignPath (free OSS)
+              if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+              uses: signpath/github-action@v1
+              with:
+                api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+                organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+                project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+                signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+                github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+                wait-for-completion: true
+                output-artifact-directory: signed-native
+
+            - name: Replace with SignPath-signed files
+              if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
               shell: pwsh
+              run: |
+                $signed = Get-ChildItem -Path signed-native -Recurse -Include *.exe -File
+                if ($signed.Count -eq 0) { throw "SignPath returned no signed exes" }
+                foreach ($f in $signed) {
+                  if ($f.Name -eq "remcord.exe") { Copy-Item -LiteralPath $f.FullName -Destination "native/installer/stage/remcord.exe" -Force }
+                  else { Copy-Item -LiteralPath $f.FullName -Destination "native/installer/dist/$($f.Name)" -Force }
+                }
+                Write-Host "replaced $($signed.Count) artifact(s) with SignPath-signed files"
 
-            - name: Sign native artifacts
-              if: ${{ inputs.sign }}
+            - name: Sign native artifacts (PFX fallback)
               shell: pwsh
               env:
                 WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
                 WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
-                AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-                AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-                AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-                AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-                AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-                AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
               run: >
                 pwsh -NoProfile -File native/installer/signing/Invoke-CodeSigning.ps1
-                -Required:${{ inputs.require-signed }}
+                -Required:${{ inputs.require-signed == true }}
 
-            - name: Confirm signatures after signing
-              if: ${{ inputs.sign }}
+            - name: Confirm signatures
               shell: pwsh
               run: >
                 pwsh -NoProfile -File native/installer/signing/Confirm-ArtifactSignatures.ps1
-                -RequireSigned:${{ inputs.require-signed }}
+                -RequireSigned:${{ inputs.require-signed == true }}
+
+            - name: Upload signed installer
+              uses: actions/upload-artifact@v6
+              with:
+                name: windows-signed-installer
+                path: |
+                    native/installer/stage/remcord.exe
+                    native/installer/dist/*.exe
+                if-no-files-found: warn

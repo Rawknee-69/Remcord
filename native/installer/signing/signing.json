@@ -1,6 +1,6 @@
 {
     "version": 1,
-    "comment": "F31 code-signing policy for the NATIVE Windows client. Signing is a POST-BUILD step over the artifacts that native/installer/build-installer.ps1 produces (staged remcord.exe + dist setup exe). remcord.iss, build-installer.ps1, and check-installer.ps1 stay signing-free by contract (check-installer §7 asserts no signtool claims in the installer definition). No private key material ever lives in this repo.",
+    "comment": "Windows-only code-signing policy. Signing is a POST-BUILD step over the artifacts that native/installer/build-installer.ps1 produces (staged remcord.exe + dist setup exe). Primary: SignPath free open-source signing (no cert purchase, trusted cert, kills SmartScreen). Fallback: PFX (OV/EV Authenticode cert) + signtool + RFC3161 timestamp. No private key material ever lives in this repo.",
     "artifacts": [
         {
             "path": "native/installer/stage/remcord.exe",
@@ -18,36 +18,25 @@
     "timestampServer": "https://timestamp.digicert.com",
     "allowedTimestampHosts": ["timestamp.digicert.com"],
     "providers": {
-        "order": ["azureTrustedSigning", "pfx"],
-        "azureTrustedSigning": {
-            "description": "Recommended for CI. Endpoint + account + certificate profile come from secrets; authentication is a Microsoft Entra service principal. Nothing is downloaded from third-party domains.",
-            "endpointEnv": "AZURE_TRUSTED_SIGNING_ENDPOINT",
-            "accountEnv": "AZURE_TRUSTED_SIGNING_ACCOUNT",
-            "profileEnv": "AZURE_TRUSTED_SIGNING_PROFILE",
-            "tenantEnv": "AZURE_TENANT_ID",
-            "clientIdEnv": "AZURE_CLIENT_ID",
-            "clientSecretEnv": "AZURE_CLIENT_SECRET"
+        "order": ["signpath", "pfx"],
+        "signpath": {
+            "description": "Free for open-source projects via SignPath Foundation (no certificate purchase). CI submits the unsigned artifact, SignPath signs with its trusted cert, CI downloads the signed result.",
+            "tokenEnv": "SIGNPATH_API_TOKEN",
+            "orgIdEnv": "SIGNPATH_ORG_ID",
+            "projectSlugEnv": "SIGNPATH_PROJECT_SLUG",
+            "policySlugEnv": "SIGNPATH_SIGNING_POLICY_SLUG"
         },
         "pfx": {
-            "description": "OV/EV code-signing certificate as base64 PFX in a secret, or a local file path passed explicitly. URL sources are refused.",
+            "description": "Paid fallback: OV/EV code-signing certificate as base64 PFX in a secret, or a local file path passed explicitly. URL sources are refused.",
             "base64Env": "WINDOWS_PFX_BASE64",
             "passwordEnv": "WINDOWS_PFX_PASSWORD",
             "subjectAllowlist": []
         }
     },
     "releaseRequiresSignature": false,
-    "releaseRequiresSignatureNote": "false matches the CURRENT reality (unsigned native builds, same as unsigned Electron builds — checklist D/F31). Flip to true only together with: a real certificate in CI secrets, a populated pfx.subjectAllowlist, and a signed release run whose Confirm-ArtifactSignatures.ps1 output is pasted as evidence. Never flip on a self-signed test certificate.",
+    "releaseRequiresSignatureNote": "false matches the CURRENT reality (unsigned builds until free SignPath OSS signing is approved — checklist D/F31). Flip to true only together with: a green SignPath-signed release run whose Confirm-ArtifactSignatures.ps1 output is pasted as evidence. Never flip on a self-signed test certificate (it does not silence SmartScreen).",
     "allowUnsignedEnv": "REMCORD_ALLOW_UNSIGNED",
     "allowUnsignedNote": "Local/dev escape hatch only. When releaseRequiresSignature is true, an unsigned artifact fails the gate unless this variable is explicitly set to '1' AND the run is not CI (GITHUB_ACTIONS unset). CI never honors the escape hatch.",
     "signtoolMinimum": "10.0",
-    "secretNames": [
-        "WINDOWS_PFX_BASE64",
-        "WINDOWS_PFX_PASSWORD",
-        "AZURE_TRUSTED_SIGNING_ENDPOINT",
-        "AZURE_TRUSTED_SIGNING_ACCOUNT",
-        "AZURE_TRUSTED_SIGNING_PROFILE",
-        "AZURE_TENANT_ID",
-        "AZURE_CLIENT_ID",
-        "AZURE_CLIENT_SECRET"
-    ]
+    "secretNames": ["SIGNPATH_API_TOKEN", "SIGNPATH_ORG_ID", "SIGNPATH_PROJECT_SLUG", "SIGNPATH_SIGNING_POLICY_SLUG", "WINDOWS_PFX_BASE64", "WINDOWS_PFX_PASSWORD"]
 }

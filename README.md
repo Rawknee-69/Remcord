@@ -29,11 +29,11 @@
 
 - **Much more stable**
 
-   Remcord is using a newer build of Electron than the stock Discord app. This means you can have a much more stable and secure experience, along with slightly better performance.
+   The production Windows app is the Rust native WebView2 shell (built + signed in CI). The Electron sources are stale legacy code that is no longer built, signed, or released — kept as reference only.
 
 - **Cross-platform support!**
 
-   Remcord was originally created for AArch64 Linux devices since Discord doesn't support them. We soon decided to support every platform that [Electron supports](https://github.com/electron/electron#platform-support)!
+   Remcord was originally created for AArch64 Linux devices since Discord doesn't support them. The Electron sources are now stale legacy code that is no longer built, signed, or released; the Rust native app is the production Windows app.
   
 # How to run/install it?
 
@@ -77,7 +77,7 @@ Build from source with `pnpm run package` (see `electron-builder.ts`).
 
 ## How does this work?
 
-- We utilize the official web app and package it within Electron. While this approach may seem familiar, our focus is on delivering a truly customized and enhanced experience. Unlike many others, we provide seamless integration for loading themes and mods without the need for installers or injectors. You can easily enable transparency effects and adopt Windows' Fluent Design, offering a modern and sleek interface. Though it's fundamentally a web wrapper, we have implemented numerous optimizations and patches to ensure a smooth and tailored experience for you.
+- The production Windows app is the Rust native WebView2 shell, which wraps the official web app. The Electron packaging described in older history is stale legacy code that is no longer built, signed, or released. While this approach may seem familiar, our focus is on delivering a truly customized and enhanced experience. Unlike many others, we provide seamless integration for loading themes and mods without the need for installers or injectors. You can easily enable transparency effects and adopt Windows' Fluent Design, offering a modern and sleek interface. Though it's fundamentally a web wrapper, we have implemented numerous optimizations and patches to ensure a smooth and tailored experience for you.
 
 ## Does Remcord have a portable mode for windows?
 

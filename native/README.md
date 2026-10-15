@@ -1,6 +1,6 @@
-# Native WebView2 shell prototype (DEV only)
+# Native WebView2 shell (production Windows app)
 
-This isolated Rust application is a prototype. It does not replace, build, package, or modify the production Electron application.
+This Rust application is the production Windows app (built + signed in CI). The Electron application/codebase is stale legacy code that is no longer built, signed, or released.
 
 ## Requirements
 
@@ -23,7 +23,7 @@ Or launch Cargo directly:
 cargo run --manifest-path .\native\Cargo.toml
 ```
 
-Both commands build and launch only `native/`. The prototype always uses the isolated persistent profile `E:\Remcord.webview-dev-user-data`. It never selects the production Electron profile or launches the installed Remcord binary.
+Both commands build and launch only `native/`. The prototype always uses the isolated persistent profile `E:\Remcord.webview-dev-user-data`. It never selects the legacy Electron profile or launches any Electron binary (the Electron app is no longer built or released).
 
 Close the native window to drop the WebView and its profile lock cleanly. Discord navigation is limited to HTTPS `discord.com` hosts in this prototype; popup windows are logged and blocked.
 

@@ -1,6 +1,6 @@
 # Native WebView2 compatibility boundary
 
-This document records the existing Electron renderer/preload contract and the intentionally narrow native bridge. The Electron sources remain the behavioral specification. Native WebView2 now executes four real client mods — Vencord, Shelter, Equicord, and Custom — through one shared typed substrate, plus user-authored runtime plugins through the `plugins.*` capabilities and the document-start plugin loader; nothing here claims that the Rust shell is Remcord-compatible. In-mod plugin settings pages (F4) need no host surface and are pinned by contract tests; remaining per-mod feature gaps are tracked below.
+This document records the existing Electron renderer/preload contract and the intentionally narrow native bridge. The Electron sources are a frozen historical spec (legacy code that is no longer built, signed, or released). Native WebView2 now executes four real client mods — Vencord, Shelter, Equicord, and Custom — through one shared typed substrate, plus user-authored runtime plugins through the `plugins.*` capabilities and the document-start plugin loader; nothing here claims that the Rust shell is Remcord-compatible. In-mod plugin settings pages (F4) need no host surface and are pinned by contract tests; remaining per-mod feature gaps are tracked below.
 
 “Boot required” means necessary to open Discord in a bare WebView, not necessary to preserve every existing Remcord feature. Injection and the renderer bridge are also tested in this prototype even though bare Discord can load without them.
 

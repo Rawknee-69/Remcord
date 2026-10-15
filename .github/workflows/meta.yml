@@ -21,7 +21,7 @@ jobs:
             - uses: pnpm/action-setup@v6 # Install pnpm using packageManager key in package.json
 
             # Must track package.json engines (>=26). Node 22 breaks
-            # postinstall (electron-builder install-app-deps) and the build.
+            # postinstall and the build.
             - name: Use Node.js
               uses: actions/setup-node@v6
               with:
