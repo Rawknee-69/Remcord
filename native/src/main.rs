@@ -10484,19 +10484,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         latency_ms,
                                     );
                                 }
-                                Err(failure) => respond_keybinds_ok(
-                                    &webview,
-                                    &mut request_tracker,
-                                    &mut response_count,
-                                    request_id,
-                                    BridgeResponsePayload::KeybindsAdd(KeybindsAddResponse {
-                                        ok: false,
-                                        id: None,
-                                        error: Some(failure.code.to_owned()),
-                                    }),
-                                    "op=add",
-                                    latency_ms,
-                                ),
+                                Err(failure) => {
+                                    // Log the fixed-vocabulary code: the
+                                    // maker toasts it, but a silent host
+                                    // makes field reports undebuggable.
+                                    eprintln!("[Keybinds][Add:{}] save refused", failure.code);
+                                    respond_keybinds_ok(
+                                        &webview,
+                                        &mut request_tracker,
+                                        &mut response_count,
+                                        request_id,
+                                        BridgeResponsePayload::KeybindsAdd(KeybindsAddResponse {
+                                            ok: false,
+                                            id: None,
+                                            error: Some(failure.code.to_owned()),
+                                        }),
+                                        "op=add",
+                                        latency_ms,
+                                    )
+                                }
                             }
                         }
                         BridgeCommand::KeybindsToggle(payload) => {
