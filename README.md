@@ -223,7 +223,6 @@ Translations are managed on our [Weblate page](https://hosted.weblate.org/projec
 Remcord is community-driven. Whether you fix a typo, add a language, design a theme, or hack on the Rust shell — you belong here.
 
 - 📖 Read [CONTRIBUTING.md](CONTRIBUTING.md)
-- 🌍 Translate on [Weblate](https://hosted.weblate.org/projects/armcord/)
 - 💬 Join [discord.gg/TnhxcqynZ2](https://discord.gg/TnhxcqynZ2)
 - 🐛 Open issues with repro steps and logs
 
