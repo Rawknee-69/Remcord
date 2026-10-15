@@ -6829,7 +6829,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tray_handle: Option<tray_icon::TrayHandle> =
         if crate::tray::resolve_tray_mode(&chrome_snapshot.tray) != crate::tray::TrayMode::Disabled
         {
-            match tray_icon::spawn_tray(proxy.clone()) {
+            match tray_icon::spawn_tray(
+                proxy.clone(),
+                tray_icon::tray_art_bytes(&chrome_snapshot.tray),
+            ) {
                 Ok(handle) => {
                     println!("[Tray] OS icon running mode={}", chrome_snapshot.tray);
                     Some(handle)
@@ -8374,10 +8377,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     if let Ok(mut guard) = live_counters.lock() {
                                         guard.css_updates += 1;
                                     }
-                                    // A recreated node appends at the head
-                                    // end; repair order so Quick CSS still
-                                    // precedes themes.
-                                    if created && !last_themes.is_empty() {
+                                    // Re-assert order on every update, not
+                                    // just recreation: asynchronously injected
+                                    // theme/mod styles can land after our
+                                    // node between saves, silently flipping
+                                    // tie-breaks until the next structural
+                                    // event. Re-appending existing nodes is
+                                    // order-only (no re-parse) and saves are
+                                    // user-paced, so the recalc cost is tiny.
+                                    if !last_themes.is_empty() {
                                         let mut ordered: Vec<String> =
                                             vec![QUICK_CSS_STYLE_ID.to_owned()];
                                         ordered.extend(
@@ -13867,9 +13875,18 @@ mod tests {
         let quality_at = script
             .find("__remcordScreenshareQuality")
             .expect("quality status present");
-        assert!(!script.contains("__remcordStreamPicker"), "picker must not ship");
-        assert!(!script.contains("__remcordStreamPrefs"), "picker prefs must not ship");
-        assert!(!script.contains("remcord.screenshare.pickerPatch"), "picker patch must not ship");
+        assert!(
+            !script.contains("__remcordStreamPicker"),
+            "picker must not ship"
+        );
+        assert!(
+            !script.contains("__remcordStreamPrefs"),
+            "picker prefs must not ship"
+        );
+        assert!(
+            !script.contains("remcord.screenshare.pickerPatch"),
+            "picker patch must not ship"
+        );
         assert!(media_at < snapshot_at);
         assert!(snapshot_at < adapter_at);
         assert!(adapter_at < spell_at);
@@ -13939,7 +13956,10 @@ mod tests {
         assert!(script.contains("__remcordScreenshareMedia"));
         assert!(script.contains("__remcordSpellcheck"));
         assert!(script.contains("__remcordScreenshareQuality"));
-        assert!(!script.contains("__remcordStreamPicker"), "picker must not ship");
+        assert!(
+            !script.contains("__remcordStreamPicker"),
+            "picker must not ship"
+        );
         // Picker contract anchors must be gone with the popup.
         assert!(!script.contains("__remcordStreamPrefs"));
         assert!(!script.contains("remcord.screenshare.pickerPatch"));
@@ -13957,7 +13977,10 @@ mod tests {
             document_start_script(&[], boot, platform, "ultra-hd", true, true, "en-US", false)
                 .expect("must build");
         assert!(script.contains("\"default\""));
-        assert!(!script.contains("__remcordStreamPicker"), "picker must not ship");
+        assert!(
+            !script.contains("__remcordStreamPicker"),
+            "picker must not ship"
+        );
         assert!(
             !script.contains("[Remcord][ScreenshareQuality] capture constrained"),
             "unknown quality mode must contribute no capture wrapper"

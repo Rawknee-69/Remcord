@@ -38,6 +38,33 @@ const WM_TRAY_CALLBACK: u32 = 0x0400 + 0x100;
 /// Tooltip text (fixed vocabulary, mirrors the window title).
 const TRAY_TOOLTIP: &str = "Remcord";
 
+/// Tray artwork bundled in `assets/` (Electron tray-icon parity). The
+/// `dynamic` mode and the default `dsc-tray` use the embedded rebranded
+/// mark; every other `ValidTrayIcons` value names its file. Unknown values
+/// fall back to the mark (the F13 model maps them to `Static`, never an
+/// error).
+pub fn tray_art_bytes(mode: &str) -> &'static [u8] {
+    match mode {
+        "clsc-dsc-tray" => include_bytes!("../../assets/clsc-dsc-tray.png"),
+        "ac_plug_colored" => include_bytes!("../../assets/ac_plug_colored.png"),
+        "ac_white_plug" => include_bytes!("../../assets/ac_white_plug.png"),
+        "ac_white_plug_hollow" => include_bytes!("../../assets/ac_white_plug_hollow.png"),
+        "ac_black_plug" => include_bytes!("../../assets/ac_black_plug.png"),
+        "ac_black_plug_hollow" => include_bytes!("../../assets/ac_black_plug_hollow.png"),
+        _ => crate::app_icon::embedded_png_bytes(),
+    }
+}
+
+/// Decode arbitrary PNG bytes (tray art selection) to top-down BGRA.
+fn tray_bitmap_pixels_from(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let (width, height, bgra) =
+        crate::clipboard::decode_image_bgra(png).map_err(|failure| failure.code.to_owned())?;
+    if width == 0 || height == 0 {
+        return Err("tray PNG has zero dimensions".to_owned());
+    }
+    Ok((width, height, bgra))
+}
+
 /// Live handle to the running tray worker. Dropping removes the icon and
 /// stops the worker thread.
 pub struct TrayHandle {
@@ -61,15 +88,17 @@ impl Drop for TrayHandle {
 ///
 /// The icon is built on the worker thread itself: `HICON` is a raw pointer
 /// wrapper that is not `Send`, so only the PNG bytes (static, `Send`)
-/// cross the spawn boundary.
+/// cross the spawn boundary. `art` selects the `tray` setting's artwork
+/// (see [`tray_art_bytes`]).
 pub fn spawn_tray(
     proxy: tao::event_loop::EventLoopProxy<crate::NativeEvent>,
+    art: &'static [u8],
 ) -> Result<TrayHandle, String> {
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
     let thread = std::thread::Builder::new()
         .name("remcord-tray-worker".to_owned())
-        .spawn(move || run_tray_worker(proxy, ready_tx, shutdown_rx))
+        .spawn(move || run_tray_worker(proxy, art, ready_tx, shutdown_rx))
         .map_err(|error| format!("tray worker failed to start: {error}"))?;
     match ready_rx
         .recv()
@@ -83,23 +112,14 @@ pub fn spawn_tray(
     }
 }
 
-/// Decode the embedded PNG to top-down BGRA pixels for icon construction.
-fn tray_bitmap_pixels() -> Result<(u32, u32, Vec<u8>), String> {
-    let png = crate::app_icon::embedded_png_bytes();
-    let (width, height, bgra) =
-        crate::clipboard::decode_image_bgra(png).map_err(|failure| failure.code.to_owned())?;
-    if width == 0 || height == 0 {
-        return Err("tray PNG has zero dimensions".to_owned());
-    }
-    Ok((width, height, bgra))
-}
-
-/// Build an `HICON` from the embedded PNG: 32-bit color bitmap (bottom-up
+/// Build an `HICON` from tray artwork bytes: 32-bit color bitmap (bottom-up
 /// DIB, as `CreateIconIndirect` requires) plus a 1-bpp AND mask derived
 /// from the alpha channel (opaque where alpha >= 128). Caller must
 /// `DestroyIcon` the result.
 #[cfg(target_os = "windows")]
-fn build_tray_icon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, String> {
+fn build_tray_icon_from(
+    png: &[u8],
+) -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, String> {
     use windows::Win32::{
         Foundation::HWND,
         Graphics::Gdi::{
@@ -108,7 +128,7 @@ fn build_tray_icon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, S
         },
         UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO},
     };
-    let (width, height, bgra) = tray_bitmap_pixels()?;
+    let (width, height, bgra) = tray_bitmap_pixels_from(png)?;
     let (width, height) = (width as i32, height as i32);
     unsafe {
         let screen_dc = CreateCompatibleDC(None);
@@ -223,6 +243,7 @@ struct ThreadState {
 #[cfg(target_os = "windows")]
 fn run_tray_worker(
     proxy: tao::event_loop::EventLoopProxy<crate::NativeEvent>,
+    art: &'static [u8],
     ready_tx: mpsc::Sender<Result<(), String>>,
     shutdown_rx: mpsc::Receiver<()>,
 ) {
@@ -254,7 +275,7 @@ fn run_tray_worker(
     };
     // The icon is a raw handle (not Send): build it on this thread from
     // the static PNG bytes before creating any window.
-    let icon = match build_tray_icon() {
+    let icon = match build_tray_icon_from(art) {
         Ok(icon) => icon,
         Err(reason) => {
             report(Err(format!("tray icon unavailable: {reason}")));
@@ -475,8 +496,44 @@ mod tests {
     }
 
     #[test]
+    fn every_tray_setting_resolves_embedded_artwork() {
+        // Electron's nine ValidTrayIcons: each names compiled-in bytes
+        // (dynamic + default fall back to the rebranded mark); nothing
+        // reads the repo or install dir at runtime.
+        for mode in [
+            "dynamic",
+            "dsc-tray",
+            "clsc-dsc-tray",
+            "ac_plug_colored",
+            "ac_white_plug",
+            "ac_white_plug_hollow",
+            "ac_black_plug",
+            "ac_black_plug_hollow",
+            "disabled",
+        ] {
+            assert!(
+                !tray_art_bytes(mode).is_empty(),
+                "{mode} must resolve artwork"
+            );
+        }
+        assert_eq!(
+            tray_art_bytes("dynamic"),
+            crate::app_icon::embedded_png_bytes()
+        );
+        assert_eq!(
+            tray_art_bytes("dsc-tray"),
+            crate::app_icon::embedded_png_bytes()
+        );
+        assert_ne!(
+            tray_art_bytes("ac_plug_colored"),
+            crate::app_icon::embedded_png_bytes()
+        );
+    }
+
+    #[test]
     fn embedded_png_decodes_for_icon_use() {
-        let (width, height, bgra) = tray_bitmap_pixels().expect("embedded PNG must decode");
+        let (width, height, bgra) = tray_bitmap_pixels_from(crate::app_icon::embedded_png_bytes())
+            .expect("embedded PNG must decode");
         assert!(width > 0 && height > 0);
         assert_eq!(bgra.len(), width as usize * height as usize * 4);
     }
@@ -493,15 +550,18 @@ mod tests {
             Graphics::Gdi::{GetObjectW, BITMAP},
             UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo},
         };
-        let icon = build_tray_icon().expect("tray icon must build");
-        let (width, height, _) = tray_bitmap_pixels().expect("embedded PNG must decode");
+        let icon = build_tray_icon_from(crate::app_icon::embedded_png_bytes())
+            .expect("tray icon must build");
+        let (width, height, _) = tray_bitmap_pixels_from(crate::app_icon::embedded_png_bytes())
+            .expect("embedded PNG must decode");
         unsafe {
             let mut icon_info =
                 std::mem::zeroed::<windows::Win32::UI::WindowsAndMessaging::ICONINFO>();
             // Rebuild through the same constructor the worker uses, then
             // interrogate the object GDI actually holds.
             let _ = DestroyIcon(icon);
-            let rebuilt = build_tray_icon().expect("tray icon must rebuild");
+            let rebuilt = build_tray_icon_from(crate::app_icon::embedded_png_bytes())
+                .expect("tray icon must rebuild");
             assert!(GetIconInfo(rebuilt, &mut icon_info).is_ok());
             assert!(!icon_info.hbmColor.is_invalid());
             assert!(!icon_info.hbmMask.is_invalid());
