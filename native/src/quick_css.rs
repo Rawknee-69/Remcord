@@ -165,18 +165,10 @@ pub fn load_quick_css(profile_dir: &Path) -> QuickCssReport {
             read_ms: read_ms(started_at),
         };
     }
-    let css = match String::from_utf8(bytes) {
-        Ok(css) => css,
-        Err(_) => {
-            return QuickCssReport {
-                enabled: true,
-                css: None,
-                css_bytes: 0,
-                state: "invalid_utf8",
-                read_ms: read_ms(started_at),
-            };
-        }
-    };
+    // Node/Electron parity: invalid sequences decode lossy (U+FFFD), so
+    // one stray byte can never nuke the whole stylesheet. Byte length is
+    // reported for parity with the valid path.
+    let css = String::from_utf8_lossy(&bytes).into_owned();
     if css.is_empty() {
         return QuickCssReport {
             enabled: true,
@@ -186,7 +178,7 @@ pub fn load_quick_css(profile_dir: &Path) -> QuickCssReport {
             read_ms: read_ms(started_at),
         };
     }
-    let css_bytes = css.len();
+    let css_bytes = bytes.len();
     QuickCssReport {
         enabled: true,
         css: Some(css),
@@ -200,9 +192,10 @@ pub fn load_quick_css(profile_dir: &Path) -> QuickCssReport {
 ///
 /// Returns the current text (possibly empty) plus its byte length. A missing
 /// file reads as empty (Electron creates it on enable; the editor must not
-/// fail on a fresh profile). Oversize and non-UTF-8 files are errors, never
-/// truncated content: the editor must show exactly what the push would
-/// inject. There is deliberately no path parameter: the file is fixed.
+/// fail on a fresh profile). Oversize files are errors, never truncation.
+/// Non-UTF-8 bytes decode lossy (Node parity), so the editor shows exactly
+/// what the push injects. There is deliberately no path parameter: the file
+/// is fixed.
 pub fn read_quick_css_text(profile_dir: &Path) -> Result<(String, usize), String> {
     let path = quick_css_path(profile_dir);
     let bytes = match std::fs::read(&path) {
@@ -217,9 +210,8 @@ pub fn read_quick_css_text(profile_dir: &Path) -> Result<(String, usize), String
     if bytes.len() > MAX_QUICK_CSS_BYTES {
         return Err("Quick CSS file exceeds the size limit".to_owned());
     }
-    let css = String::from_utf8(bytes).map_err(|_| "Quick CSS file is not UTF-8".to_owned())?;
-    let css_bytes = css.len();
-    Ok((css, css_bytes))
+    let css_bytes = bytes.len();
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), css_bytes))
 }
 
 /// Replace the fixed Quick CSS file (`quickcss.write`).
@@ -307,7 +299,8 @@ mod tests {
         let (css, bytes) = read_quick_css_text(&profile).expect("present must read");
         assert_eq!(css, ":root{--q:1;}");
         assert_eq!(bytes, ":root{--q:1;}".len());
-        // Oversize and non-UTF-8 files are errors, never truncation.
+        // Oversize files are errors, never truncation; non-UTF-8 bytes
+        // decode lossy (Node parity), so the editor shows what injects.
         fs::write(
             quick_css_path(&profile),
             vec![b'x'; MAX_QUICK_CSS_BYTES + 1],
@@ -315,7 +308,9 @@ mod tests {
         .expect("fixture");
         assert!(read_quick_css_text(&profile).is_err());
         fs::write(quick_css_path(&profile), [0x66, 0xFF, 0x66]).expect("fixture");
-        assert!(read_quick_css_text(&profile).is_err());
+        let (css, bytes) = read_quick_css_text(&profile).expect("lossy must read");
+        assert_eq!(css, "f\u{FFFD}f");
+        assert_eq!(bytes, 3);
         fs::remove_dir_all(&profile).ok();
     }
 
@@ -412,13 +407,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_is_rejected() {
+    fn invalid_utf8_decodes_lossy_like_node() {
         let profile = temp_profile();
         fs::write(quick_css_path(&profile), [0x66, 0xFF, 0x66]).expect("fixture");
         let report = load_quick_css(&profile);
         assert!(report.enabled);
-        assert!(report.css.is_none());
-        assert_eq!(report.state, "invalid_utf8");
+        assert_eq!(report.css.as_deref(), Some("f\u{FFFD}f"));
+        assert_eq!(report.state, "injected");
         fs::remove_dir_all(&profile).ok();
     }
 
