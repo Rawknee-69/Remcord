@@ -48,8 +48,11 @@ function fileNameFromUrl(url: string, fallback = "saved-file"): string {
 function discordTheme(anchor: Element): "light" | "dark" {
     for (const scope of themeScopes(anchor)) {
         try {
-            const parsed = parseThemeValue(getComputedStyle(scope).getPropertyValue("--background-primary"));
+            const background = getComputedStyle(scope).getPropertyValue("--background-primary");
+            const parsed = parseThemeValue(background);
             if (parsed) return parsed;
+            const color = parseRgb(background);
+            if (color && color[3] >= 0.95) return luminance([color[0], color[1], color[2]]) > 0.4 ? "light" : "dark";
         } catch {}
     }
     try {
@@ -310,21 +313,21 @@ function ensurePopupStyles(): void {
     const style = document.createElement("style");
     style.id = POPUP_STYLE_ID;
     style.textContent = `
-.remcord-gal-overlay{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.62);padding:24px;box-sizing:border-box}
-.remcord-gal-dialog{width:min(420px,100%);max-height:calc(100vh - 48px);overflow-y:auto;background:var(--background-primary,#fff);color:var(--text-normal,#060607);border:1px solid var(--border-subtle,rgba(0,0,0,.15));border-radius:12px;box-shadow:var(--shadow-high,0 8px 32px rgba(0,0,0,.4));padding:16px;box-sizing:border-box;font-family:var(--font-primary,inherit);font-size:14px}
+.remcord-gal-overlay{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,light-dark(CanvasText,Canvas) 62%,transparent);padding:24px;box-sizing:border-box}
+.remcord-gal-dialog{width:min(420px,100%);max-height:calc(100vh - 48px);overflow-y:auto;background:var(--background-primary,Canvas);color:var(--text-normal,CanvasText);border:1px solid var(--border-subtle,currentColor);border-radius:12px;box-shadow:var(--shadow-high,none);padding:16px;box-sizing:border-box;font-family:var(--font-primary,inherit);font-size:14px}
 .remcord-gal-title{margin:0 0 4px;font-size:16px;font-weight:700}
-.remcord-gal-sub{margin:0 0 12px;font-size:12px;color:var(--text-muted,#5c5e66);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.remcord-gal-label{display:block;margin:10px 0 4px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:var(--text-muted,#5c5e66)}
-.remcord-gal-input,.remcord-gal-textarea,.remcord-gal-select{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--input-border-default,rgba(0,0,0,.2));border-radius:8px;background:var(--input-background-default,transparent);color:var(--input-text-default,inherit);font:inherit;font-size:14px}
-.remcord-gal-input:focus,.remcord-gal-textarea:focus,.remcord-gal-select:focus{outline:2px solid var(--brand-500,#5865f2);outline-offset:-1px}
+.remcord-gal-sub{margin:0 0 12px;font-size:12px;color:var(--text-muted,CanvasText);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remcord-gal-label{display:block;margin:10px 0 4px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;color:var(--text-muted,CanvasText)}
+.remcord-gal-input,.remcord-gal-textarea,.remcord-gal-select{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--input-border-default,currentColor);border-radius:8px;background:var(--input-background-default,Field);color:var(--input-text-default,FieldText);font:inherit;font-size:14px}
+.remcord-gal-input:focus,.remcord-gal-textarea:focus,.remcord-gal-select:focus{outline:2px solid var(--brand-500,var(--text-normal,CanvasText));outline-offset:-1px}
 .remcord-gal-textarea{min-height:64px;resize:vertical}
 .remcord-gal-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .remcord-gal-btn{flex:1 1 auto;padding:8px 12px;border-radius:8px;border:1px solid transparent;font:inherit;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap}
-.remcord-gal-btn-primary{background:var(--brand-500,#5865f2);color:#fff}
+.remcord-gal-btn-primary{background:var(--brand-500,var(--text-normal,CanvasText));color:var(--text-normal,CanvasText)}
 .remcord-gal-btn-primary:hover{filter:brightness(1.08)}
-.remcord-gal-btn-secondary{background:var(--background-secondary-alt,rgba(0,0,0,.08));color:var(--text-normal,inherit);border-color:var(--border-subtle,rgba(0,0,0,.12))}
+.remcord-gal-btn-secondary{background:var(--background-secondary-alt,ButtonFace);color:var(--text-normal,CanvasText);border-color:var(--border-subtle,currentColor)}
 .remcord-gal-btn-secondary:hover{filter:brightness(1.1)}
-.remcord-gal-btn-ghost{background:transparent;color:var(--text-muted,#5c5e66)}
+.remcord-gal-btn-ghost{background:transparent;color:var(--text-muted,CanvasText)}
 `;
     document.head.appendChild(style);
 }
@@ -493,7 +496,27 @@ function parseRgb(value: string): [number, number, number, number] | null {
             return [r, g, b, a];
         }
     }
-    return null;
+    // Chromium/WebView2 preserves modern CSS Color values (notably Discord's
+    // current `oklab(...)` surfaces) in computed styles instead of
+    // serializing them to rgb(). Let the browser parse and convert every CSS
+    // color syntax it supports; this reads the actual painted color rather
+    // than approximating Discord token names. The unattached canvas is clean,
+    // and all DOM/canvas access is best-effort.
+    try {
+        if (typeof CSS !== "undefined" && !CSS.supports("color", v)) return null;
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (!context) return null;
+        context.clearRect(0, 0, 1, 1);
+        context.fillStyle = v;
+        context.fillRect(0, 0, 1, 1);
+        const pixel = context.getImageData(0, 0, 1, 1).data;
+        return [pixel[0], pixel[1], pixel[2], pixel[3] / 255];
+    } catch {
+        return null;
+    }
 }
 
 function luminance([r, g, b]: RgbTriple): number {
@@ -508,37 +531,48 @@ function mix(a: RgbTriple, b: RgbTriple, t: number): string {
 
 /**
  * Rendered-surface sample: the first opaque `background-color` found
- * walking the theme scopes, plus its foreground (defaulting to white on
- * dark surfaces, near-black on light ones). Used only when theme variables
- * resolve nowhere — e.g. custom themes that style surfaces directly
- * instead of through variables. Reads what Discord literally paints, so
- * any theme works.
+ * walking the theme scopes, plus the live menu item's computed foreground.
+ * Used to backfill missing or incompatible palette tokens from what Discord
+ * literally paints, including modern CSS color syntaxes.
  */
 function sampleSurface(anchor: Element): { bg: RgbTriple; fg: RgbTriple } | null {
+    let base: RgbTriple | null = null;
     for (const scope of themeScopes(anchor)) {
         try {
             const cs = getComputedStyle(scope);
             const bg = parseRgb(cs.getPropertyValue("background-color"));
             if (!bg || bg[3] < 0.95) continue;
-            const base: RgbTriple = [bg[0], bg[1], bg[2]];
-            const fgRaw = parseRgb(cs.getPropertyValue("color"));
-            const fg: RgbTriple =
-                fgRaw && fgRaw[3] >= 0.95
-                    ? [fgRaw[0], fgRaw[1], fgRaw[2]]
-                    : luminance(base) <= 0.4
-                      ? [255, 255, 255]
-                      : [6, 6, 7];
-            return { bg: base, fg };
+            base = [bg[0], bg[1], bg[2]];
+            break;
+        } catch {}
+    }
+    if (!base) return null;
+
+    // The popup opens from a live menu item. Its computed foreground is
+    // already the theme's actual text color, even when the root surface has
+    // no legacy `--text-normal` variable. Prefer that over synthesizing
+    // white/black from the background.
+    for (const scope of [anchor, ...themeScopes(anchor)]) {
+        try {
+            const fg = parseRgb(getComputedStyle(scope).getPropertyValue("color"));
+            if (fg && fg[3] >= 0.95) return { bg: base, fg: [fg[0], fg[1], fg[2]] };
         } catch {}
     }
     return null;
 }
 
-/** Fill every popup variable missing from `vars` using a surface sample. */
-function fillDerivedVars(vars: Array<[string, string]>, sample: { bg: RgbTriple; fg: RgbTriple }): void {
-    const has = (name: string) => vars.some(([seen]) => seen === name);
+/** Fill the popup palette from a rendered surface, replacing legacy color
+ * aliases only when the active theme has no `--background-primary` token. */
+function fillDerivedVars(
+    vars: Array<[string, string]>,
+    sample: { bg: RgbTriple; fg: RgbTriple },
+    replacePalette: boolean,
+): void {
+    const indexOf = (name: string) => vars.findIndex(([seen]) => seen === name);
     const put = (name: string, value: string) => {
-        if (!has(name)) vars.push([name, value]);
+        const index = indexOf(name);
+        if (index < 0) vars.push([name, value]);
+        else if (replacePalette) vars[index][1] = value;
     };
     const { bg, fg } = sample;
     put("--background-primary", mix(bg, fg, 0));
@@ -560,10 +594,11 @@ function fillDerivedVars(vars: Array<[string, string]>, sample: { bg: RgbTriple;
  *
  * The overlay attaches to `document.body` (menu layers can clip fixed
  * positioning or unmount, which would hide the popup while it still blocks
- * input) and carries copies of Discord's resolved theme variables, so it
- * follows stock and custom themes anywhere in the document.
+ * input). It carries resolved theme variables and a surface-derived palette
+ * so its appearance does not depend on inheriting Discord's theme subtree.
  */
-function openSavePopup(save: PendingSave, anchor: Element): void {
+function openSavePopup(save: PendingSave, anchor: Element): boolean {
+    let overlay: HTMLDivElement | null = null;
     try {
         // Snapshot the resolved theme BEFORE closing the menu: the close
         // unmounts the menu, so reading afterwards would yield unresolved
@@ -575,27 +610,32 @@ function openSavePopup(save: PendingSave, anchor: Element): void {
         // fallback colors.
         let scheme = discordTheme(anchor);
         const themeVars = snapshotThemeVars(anchor);
-        if (!themeVars.some(([name]) => name === "--background-primary")) {
-            const sample = sampleSurface(anchor);
-            if (sample) {
-                fillDerivedVars(themeVars, sample);
-                scheme = luminance(sample.bg) <= 0.4 ? "dark" : "light";
-            }
+        const hasPrimarySurface = themeVars.some(([name]) => name === "--background-primary");
+        const sample = sampleSurface(anchor);
+        if (sample) {
+            // A modern Discord theme can expose hundreds of computed
+            // properties while no longer defining the old primary token.
+            // In that case its legacy input/text aliases are not a coherent
+            // popup palette, so derive those colors from the actual surface.
+            // Otherwise retain copied values and only backfill missing ones.
+            fillDerivedVars(themeVars, sample, !hasPrimarySurface);
+            scheme = luminance(sample.bg) <= 0.4 ? "dark" : "light";
         }
         closeMenu();
         ensurePopupStyles();
         const bridge = galleryBridge();
-        if (!bridge) return;
+        if (!bridge) return false;
         const kinds = save.urls.map((url) => detectKind(url));
         const downloadable = kinds.some((k) => k === "image" || k === "video");
         const singleTitle = save.urls.length === 1 ? fileNameFromUrl(save.urls[0], "") : "";
 
-        const overlay = document.createElement("div");
-        overlay.className = "remcord-gal-overlay";
-        overlay.style.colorScheme = scheme;
+        const popupOverlay = document.createElement("div");
+        overlay = popupOverlay;
+        popupOverlay.className = "remcord-gal-overlay";
+        popupOverlay.style.colorScheme = scheme;
         for (const [name, value] of themeVars) {
             try {
-                overlay.style.setProperty(name, value);
+                popupOverlay.style.setProperty(name, value);
             } catch {}
         }
         const dialog = document.createElement("div");
@@ -631,12 +671,14 @@ function openSavePopup(save: PendingSave, anchor: Element): void {
         none.textContent = "No collection";
         colSelect.appendChild(none);
         void collectionOptions().then((names) => {
-            for (const name of names.slice(0, 512)) {
-                const opt = document.createElement("option");
-                opt.value = name;
-                opt.textContent = name;
-                colSelect.appendChild(opt);
-            }
+            try {
+                for (const name of names.slice(0, 512)) {
+                    const opt = document.createElement("option");
+                    opt.value = name;
+                    opt.textContent = name;
+                    colSelect.appendChild(opt);
+                }
+            } catch {}
         });
 
         const noteLabel = document.createElement("label");
@@ -673,72 +715,118 @@ function openSavePopup(save: PendingSave, anchor: Element): void {
         actions.append(cancelBtn);
 
         dialog.append(heading, sub, titleLabel, titleInput, colLabel, colSelect, noteLabel, noteInput, actions);
-        overlay.appendChild(dialog);
-        // Attach to the menu's layer: inside Discord's themed subtree so
-        // every `var(--…)` above resolves to the active theme (stock or
-        // custom). `document.body` is outside that subtree and would render
-        // the popup in fallback colors. The menu itself may be removed by
-        // the close below, so the layer (its parent) owns the overlay.
-        document.body.appendChild(overlay); // body: immune to portal clipping
+        popupOverlay.appendChild(dialog);
+        // Attach to body so Discord's menu teardown cannot remove the dialog;
+        // copied/derived variables make styling independent of ancestry.
+        document.body.appendChild(popupOverlay);
         markPopup(true);
-        // Close only after attaching: the menu unmounts but the layer (and
-        // the overlay with it) survives.
+        // Close only after attaching so this overlay survives menu teardown.
         closeMenu();
         titleInput.focus();
 
         const close = () => {
-            markPopup(false);
-            overlay.remove();
-        };
-        overlay.addEventListener("mousedown", (e) => {
-            if (e.target === overlay) close();
-        });
-        overlay.addEventListener("keydown", (e) => {
-            if (e.key === "Escape") {
-                e.stopPropagation();
-                close();
+            try {
+                markPopup(false);
+                popupOverlay.remove();
+            } catch {
+                markPopup(false);
+                try {
+                    popupOverlay.style.display = "none";
+                } catch {}
             }
+        };
+        popupOverlay.addEventListener("mousedown", (e) => {
+            try {
+                if (e.target === popupOverlay) close();
+            } catch {}
         });
-        cancelBtn.addEventListener("click", close);
+        popupOverlay.addEventListener("keydown", (e) => {
+            try {
+                if (e.key === "Escape") {
+                    e.stopPropagation();
+                    close();
+                }
+            } catch {}
+        });
+        cancelBtn.addEventListener("click", () => {
+            try {
+                close();
+            } catch {}
+        });
 
         saveBtn.addEventListener("click", () => {
-            const title = titleInput.value.trim();
-            const note = noteInput.value.trim();
-            const categories = colSelect.value ? [colSelect.value] : [];
-            saveBtn.textContent = "Saving…";
-            saveBtn.setAttribute("disabled", "");
-            void Promise.all(
-                save.urls.map((url) => bridge.addUrl(url, { ...save.meta, title, note, categories })),
-            ).then(
-                () => {
-                    close();
-                    showToast({
-                        title:
-                            save.urls.length === 1 ? "Saved to Gallery" : `Saved ${save.urls.length} items to Gallery`,
-                        duration: 2500,
-                    });
-                },
-                () => {
-                    saveBtn.textContent = "Save to Gallery";
-                    saveBtn.removeAttribute("disabled");
-                    showToast({ title: "Could not save to Gallery", duration: 3000 });
-                },
-            );
+            try {
+                const title = titleInput.value.trim();
+                const note = noteInput.value.trim();
+                const categories = colSelect.value ? [colSelect.value] : [];
+                saveBtn.textContent = "Saving…";
+                saveBtn.setAttribute("disabled", "");
+                void Promise.all(
+                    save.urls.map((url) => bridge.addUrl(url, { ...save.meta, title, note, categories })),
+                ).then(
+                    () => {
+                        try {
+                            close();
+                            showToast({
+                                title:
+                                    save.urls.length === 1
+                                        ? "Saved to Gallery"
+                                        : `Saved ${save.urls.length} items to Gallery`,
+                                duration: 2500,
+                            });
+                        } catch {}
+                    },
+                    () => {
+                        try {
+                            saveBtn.textContent = "Save to Gallery";
+                            saveBtn.removeAttribute("disabled");
+                            showToast({ title: "Could not save to Gallery", duration: 3000 });
+                        } catch {
+                            try {
+                                saveUrls(save.urls, save.meta);
+                            } catch {}
+                        }
+                    },
+                );
+            } catch {
+                try {
+                    saveUrls(save.urls, save.meta);
+                } catch {}
+            }
         });
 
         copyBtn.addEventListener("click", () => {
-            void copyText(save.urls.join("\n")).then((ok) => {
-                close();
-                showToast({ title: ok ? "Link copied" : "Could not copy the link", duration: 2500 });
-            });
+            try {
+                void copyText(save.urls.join("\n")).then((ok) => {
+                    try {
+                        close();
+                        showToast({ title: ok ? "Link copied" : "Could not copy the link", duration: 2500 });
+                    } catch {}
+                });
+            } catch {
+                try {
+                    copyFallback(save);
+                } catch {}
+            }
         });
 
         downloadBtn?.addEventListener("click", () => {
-            close();
-            downloadAll(save.urls);
+            try {
+                close();
+                downloadAll(save.urls);
+            } catch {
+                try {
+                    downloadFallback(save);
+                } catch {}
+            }
         });
+        return true;
     } catch {
-        /* never break Discord menus */
+        try {
+            overlay?.remove();
+        } catch {}
+        markPopup(false);
+        return false;
     }
 }
 
@@ -822,7 +910,7 @@ function onDocMenuAction(event: Event): void {
             if (!save) return;
             clearPending();
             try {
-                openSavePopup(save, item);
+                if (!openSavePopup(save, item)) saveUrls(save.urls, save.meta);
             } catch {
                 saveUrls(save.urls, save.meta);
             }
@@ -836,7 +924,7 @@ function onDocMenuAction(event: Event): void {
             event.preventDefault();
             clearPending();
             try {
-                openSavePopup(save, item);
+                if (!openSavePopup(save, item)) copyFallback(save);
             } catch {
                 copyFallback(save);
             }
@@ -845,7 +933,7 @@ function onDocMenuAction(event: Event): void {
             event.preventDefault();
             clearPending();
             try {
-                openSavePopup(save, item);
+                if (!openSavePopup(save, item)) downloadFallback(save);
             } catch {
                 downloadFallback(save);
             }

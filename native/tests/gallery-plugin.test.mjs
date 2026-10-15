@@ -246,6 +246,32 @@ class FakeElement {
     click() {
         this._clicked = true;
     }
+    getContext(type) {
+        if (this.tagName !== "CANVAS" || type !== "2d") return null;
+        let fillStyle = "";
+        return {
+            get fillStyle() {
+                return fillStyle;
+            },
+            set fillStyle(value) {
+                fillStyle = String(value);
+            },
+            clearRect() {},
+            fillRect() {},
+            getImageData() {
+                // WebView2's browser-native color parser converts modern
+                // CSS Color values to sRGB pixels. These values mirror the
+                // production probe's exact Discord Oklab surface/text pair.
+                const colors = {
+                    "oklab(0.174112 -0.00520672 -0.0129313)": [11, 17, 22, 255],
+                    "oklab(0.752989 -0.03581 -0.107396)": [120, 179, 245, 255],
+                    "oklab(1 0 0)": [255, 255, 255, 255],
+                    "oklab(0 0 0)": [0, 0, 0, 255],
+                };
+                return { data: new Uint8ClampedArray(colors[fillStyle] ?? [0, 0, 0, 0]) };
+            },
+        };
+    }
 }
 
 class FakeDocument extends FakeElement {
@@ -287,6 +313,7 @@ class FakeDocument extends FakeElement {
         return found ?? null;
     }
     querySelector(selector) {
+        if (matchesSelector(this.documentElement, selector)) return this.documentElement;
         return this.documentElement.querySelector(selector);
     }
     dispatchEvent(event) {
@@ -300,7 +327,10 @@ class FakeDocument extends FakeElement {
 // Harness: one fresh runtime per test.
 // ---------------------------------------------------------------------------
 
-function createHarness() {
+function createHarness({ modernDiscordTheme = false, modernLightTheme = false, rawCustomCss = false } = {}) {
+    const modernTheme = modernDiscordTheme || modernLightTheme || rawCustomCss;
+    const modernSurface = modernLightTheme ? "oklab(1 0 0)" : "oklab(0.174112 -0.00520672 -0.0129313)";
+    const modernForeground = modernLightTheme ? "oklab(0 0 0)" : "oklab(0.752989 -0.03581 -0.107396)";
     const toasts = [];
     const clipboard = [];
     const opened = [];
@@ -308,6 +338,30 @@ function createHarness() {
     const addedUrls = [];
     const document = new FakeDocument();
     const menuCallbacks = [];
+    const modernVars = Object.assign(
+        Object.fromEntries(Array.from({ length: 511 }, (_, index) => [`--discord-custom-${index}`, `custom-${index}`])),
+        {
+            // These aliases exist in the live computed style, but the
+            // legacy primary token does not. Their fixture values prove the
+            // derived surface palette replaces an incoherent old palette.
+            "--background-secondary-alt": "legacy-secondary",
+            "--text-muted": "legacy-muted",
+            "--input-background-default": "legacy-input-background",
+            "--input-text-default": "legacy-input-text",
+            "--input-border-default": "legacy-input-border",
+            "--border-subtle": "legacy-border",
+            "--brand-500": "#5865f2",
+            "--background-secondary": "legacy-background-secondary",
+            "--shadow-high": "legacy-shadow",
+            "--font-primary": "legacy-font",
+        },
+    );
+    const legacyVars = {
+        "--background-primary": "#313338",
+        "--text-normal": "#dbdee1",
+        "--brand-500": "#5865f2",
+        "--custom-accent": "#ff73fa",
+    };
     const window = {
         remcord: {
             gallery: {
@@ -361,12 +415,7 @@ function createHarness() {
             // Production-faithful: theme variables resolve only inside the
             // themed subtree, while every rendered surface still paints its
             // own background/foreground colors (the menu layer included).
-            const vars = {
-                "--background-primary": "#313338",
-                "--text-normal": "#dbdee1",
-                "--brand-500": "#5865f2",
-                "--custom-accent": "#ff73fa",
-            };
+            const vars = modernTheme ? modernVars : legacyVars;
             const classesOf = (node) => String(node.className ?? "").split(" ");
             let themed = false;
             let inMenu = false;
@@ -381,8 +430,25 @@ function createHarness() {
                 node = node.parentNode;
             }
             const names = themed ? Object.keys(vars) : [];
-            const background = themed ? "rgb(49, 51, 56)" : inMenu ? "rgb(24, 25, 28)" : "rgba(0, 0, 0, 0)";
-            const foreground = themed || inMenu ? "rgb(219, 222, 225)" : "";
+            const isAppMount = el.getAttribute?.("id") === "app-mount";
+            const background = modernTheme
+                ? isAppMount
+                    ? modernSurface
+                    : "rgba(0, 0, 0, 0)"
+                : themed
+                  ? "rgb(49, 51, 56)"
+                  : inMenu
+                    ? "rgb(24, 25, 28)"
+                    : "rgba(0, 0, 0, 0)";
+            const foreground = modernTheme
+                ? inMenu
+                    ? modernForeground
+                    : isAppMount
+                      ? modernSurface
+                      : ""
+                : themed || inMenu
+                  ? "rgb(219, 222, 225)"
+                  : "";
             const style = {
                 length: names.length,
                 getPropertyValue: (name) => {
@@ -412,10 +478,23 @@ function createHarness() {
     vm.runInContext(wrapped, context);
     const hooks = vm.runInContext("globalThis.__hooks", context);
     // Production-faithful tree: Discord's themed container lives under body
-    // while menu layers portal outside it.
-    const themed = document.createElement("div");
-    themed.className = "theme-dark";
-    document.body.appendChild(themed);
+    // while menu layers portal outside it. The modern Discord test instead
+    // places its theme classes on <html> and renders the app surface in the
+    // #app-mount portal host.
+    if (modernTheme) {
+        document.documentElement.className = rawCustomCss
+            ? "platform-web custom-theme-background"
+            : modernLightTheme
+              ? "platform-web theme-light"
+              : "platform-web theme-dark theme-darker custom-theme-background";
+        const appMount = document.createElement("div");
+        appMount.id = "app-mount";
+        document.body.appendChild(appMount);
+    } else {
+        const themed = document.createElement("div");
+        themed.className = "theme-dark";
+        document.body.appendChild(themed);
+    }
     return { document, window, shelter, hooks, toasts, clipboard, opened, fetched, addedUrls, menuCallbacks, context };
 }
 
@@ -555,6 +634,63 @@ test("popup derives its palette when no variables resolve anywhere", () => {
     assert.equal(overlay.style.colorScheme, "dark");
 });
 
+test("popup samples Discord's modern Oklab surface when legacy theme tokens are absent", () => {
+    // Exact production shape observed in WebView2: Discord puts theme-dark
+    // on <html>, exposes thousands of enumerable custom properties, but no
+    // --background-primary; app-mount paints an opaque Oklab surface and the
+    // clicked menu item paints its text in Oklab too. Before browser-native
+    // CSS color parsing, sampleSurface returned null and the dialog was
+    // white with low-contrast inputs.
+    const harness = createHarness({ modernDiscordTheme: true });
+    harness.hooks.onLoad();
+    assert.ok(harness.document.querySelector(".theme-dark"));
+    assert.ok(harness.document.getElementById("app-mount"));
+    rightClickImage(harness, "https://cdn.discordapp.com/attachments/1/2/photo.png");
+    const { menu } = renderMenu(harness);
+    findItem(menu, "Save to Gallery").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    const overlay = overlayOf(harness);
+    assert.ok(overlay, "the popup must open for the live Discord theme shape");
+    assert.equal(overlay.style.getPropertyValue("--background-primary"), "rgb(11, 17, 22)");
+    assert.equal(overlay.style.getPropertyValue("--text-normal"), "rgb(120, 179, 245)");
+    assert.equal(overlay.style.getPropertyValue("--background-secondary-alt"), "rgb(24, 36, 49)");
+    assert.equal(overlay.style.getPropertyValue("--input-background-default"), "rgb(19, 28, 38)");
+    assert.equal(overlay.style.getPropertyValue("--brand-500"), "#5865f2");
+    assert.equal(
+        Object.keys(overlay.style).filter((name) => name.startsWith("--")).length,
+        524,
+        "the 521 enumerated/backfilled variables must remain copied alongside three derived values",
+    );
+    assert.equal(overlay.style.colorScheme, "dark");
+});
+
+test("popup derives a light color scheme from the rendered Oklab surface", () => {
+    const harness = createHarness({ modernLightTheme: true });
+    harness.hooks.onLoad();
+    rightClickImage(harness, "https://cdn.discordapp.com/attachments/1/2/photo.png");
+    const { menu } = renderMenu(harness);
+    findItem(menu, "Save to Gallery").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    const overlay = overlayOf(harness);
+    assert.ok(overlay);
+    assert.equal(overlay.style.getPropertyValue("--background-primary"), "rgb(255, 255, 255)");
+    assert.equal(overlay.style.getPropertyValue("--text-normal"), "rgb(0, 0, 0)");
+    assert.equal(overlay.style.getPropertyValue("--input-background-default"), "rgb(237, 237, 237)");
+    assert.equal(overlay.style.colorScheme, "light");
+});
+
+test("popup derives colors from raw custom CSS with no theme variables", () => {
+    const harness = createHarness({ rawCustomCss: true });
+    harness.hooks.onLoad();
+    assert.equal(harness.document.querySelector(".theme-dark, .theme-light"), null);
+    rightClickImage(harness, "https://cdn.discordapp.com/attachments/1/2/photo.png");
+    const { menu } = renderMenu(harness);
+    findItem(menu, "Save to Gallery").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    const overlay = overlayOf(harness);
+    assert.ok(overlay);
+    assert.equal(overlay.style.getPropertyValue("--background-primary"), "rgb(11, 17, 22)");
+    assert.equal(overlay.style.getPropertyValue("--text-normal"), "rgb(120, 179, 245)");
+    assert.equal(overlay.style.colorScheme, "dark");
+});
+
 test("native Copy Link opens the popup instead of copying silently", () => {
     const harness = createHarness();
     harness.hooks.onLoad();
@@ -589,6 +725,44 @@ test("native Save Image opens the popup with Download", () => {
     const overlay = overlayOf(harness);
     assert.ok(overlay, "Save Image must open the popup");
     assert.ok(popupButtons(overlay).includes("Download"), "media popup must offer Download");
+});
+
+test("popup DOM failure falls back to save, clipboard, and download actions", async () => {
+    const saveHarness = createHarness();
+    saveHarness.hooks.onLoad();
+    rightClickImage(saveHarness, "https://cdn.discordapp.com/attachments/1/2/save.png");
+    const saveMenu = renderMenu(saveHarness).menu;
+    saveHarness.document.createElement = () => {
+        throw new Error("simulated popup DOM failure");
+    };
+    findItem(saveMenu, "Save to Gallery").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    await tick();
+    assert.equal(saveHarness.addedUrls.length, 1, "Save must use the direct bridge fallback");
+
+    const copyHarness = createHarness();
+    copyHarness.hooks.onLoad();
+    const copyUrl = "https://cdn.discordapp.com/attachments/1/2/copy.png";
+    rightClickImage(copyHarness, copyUrl);
+    const copyMenu = renderMenu(copyHarness).menu;
+    copyHarness.document.createElement = () => {
+        throw new Error("simulated popup DOM failure");
+    };
+    findItem(copyMenu, "Copy Link").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    await tick();
+    assert.deepEqual(copyHarness.clipboard, [copyUrl], "Copy must use the clipboard fallback");
+
+    const downloadHarness = createHarness();
+    downloadHarness.hooks.onLoad();
+    const downloadUrl = "https://cdn.discordapp.com/attachments/1/2/download.png";
+    rightClickImage(downloadHarness, downloadUrl);
+    const downloadMenu = renderMenu(downloadHarness).menu;
+    downloadHarness.document.createElement = () => {
+        throw new Error("simulated popup DOM failure");
+    };
+    findItem(downloadMenu, "Save Image").dispatchEvent(new FakeEvent("click", { bubbles: true }));
+    await tick();
+    await tick();
+    assert.deepEqual(downloadHarness.opened[0], [downloadUrl, "_blank", "noopener"]);
 });
 
 test("unrelated entries keep native behavior", () => {
